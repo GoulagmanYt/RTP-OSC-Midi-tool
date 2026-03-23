@@ -564,11 +564,13 @@ impl AudioEngine {
             let vst_path = runtime.vst_path.clone();
             let editor_window_arc = runtime.editor_window.clone();
             let is_vst3 = matches!(*plugin.lock(), PluginBackend::Vst3 { .. });
+            let is_sforzando = is_sforzando_vst3(&vst_path);
             background_log(
                 "debug",
                 format!(
-                    "audio.stop: runtime captured (vst3={}, path={})",
+                    "audio.stop: runtime captured (vst3={}, sforzando={}, path={})",
                     is_vst3,
+                    is_sforzando,
                     vst_path.display()
                 ),
             );
@@ -623,7 +625,7 @@ impl AudioEngine {
             background_log("debug", "audio.stop: runtime dropped");
             save_vst_state(&plugin, &vst_path);
             background_log("debug", "audio.stop: save_vst_state done");
-            if is_vst3 {
+            if is_vst3 && !is_sforzando {
                 if let Some(handle) = app_handle_for_drop {
                     let (tx, rx) = mpsc::channel();
                     let plugin_for_main_drop = plugin.clone();
@@ -645,8 +647,19 @@ impl AudioEngine {
                     }
                 }
             }
-            drop(plugin);
-            background_log("debug", "audio.stop: plugin Arc dropped (local)");
+            if is_sforzando {
+                // sforzando VST3 crashes in plugin_free() on some teardown paths.
+                // Leak this instance instead of dropping it to keep the host stable.
+                background_log(
+                    "warn",
+                    "Leaking sforzando VST3 instance on stop to avoid plugin_free crash",
+                );
+                std::mem::forget(plugin);
+                background_log("debug", "audio.stop: plugin Arc leaked (sforzando workaround)");
+            } else {
+                drop(plugin);
+                background_log("debug", "audio.stop: plugin Arc dropped (local)");
+            }
         }
         background_log("debug", "audio.stop: end");
     }
