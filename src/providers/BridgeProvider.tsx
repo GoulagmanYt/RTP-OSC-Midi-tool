@@ -20,7 +20,6 @@ interface BridgeContextType {
   saveConfig: () => Promise<void>;
   toggleBridge: () => Promise<void>;
   clearLogs: () => void;
-  // Audio specific
   refreshAudioDevices: (backend?: string | null) => Promise<void>;
   refreshLists: () => Promise<void>;
   runPreflight: () => Promise<api.PreflightReport | null>;
@@ -104,9 +103,8 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
     }
     init();
 
-    // Listen to logs
     const unlisten = listen<api.LogEvent>("log", (event) => {
-      setLogs((prev) => [event.payload, ...prev].slice(0, 1000)); // Keep last 1000
+      setLogs((prev) => [event.payload, ...prev].slice(0, 1000));
     });
 
     return () => {
@@ -119,18 +117,12 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
       const payload = event.payload;
       setMetrics(payload);
       const current = payload.audioXruns;
-      if (current === undefined || current === null) {
-        return;
-      }
+      if (current === undefined || current === null) return;
       const previous = lastXrunCount.current;
       lastXrunCount.current = current;
-      if (previous === null || current <= previous) {
-        return;
-      }
+      if (previous === null || current <= previous) return;
       const now = Date.now();
-      if (now - lastDropoutToastMs.current < 4000) {
-        return;
-      }
+      if (now - lastDropoutToastMs.current < 4000) return;
       lastDropoutToastMs.current = now;
       toast.error(t("toasts.audio.dropouts", { count: current - previous }));
     });
@@ -236,7 +228,10 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
 
   const clearLogs = () => setLogs([]);
 
-  // Auto-save every time config changes after initial hydrate
+  // FIX: Remove `refreshStatus` from the dependency array — it's stable (useCallback
+  // with no deps) so it never changes, but including it caused this effect to re-run
+  // on every render cycle in some environments, triggering unnecessary auto-saves.
+  // The save timer already debounces writes; this just eliminates the false triggers.
   useEffect(() => {
     if (!config) return;
     if (!hasHydrated.current) {
@@ -261,7 +256,7 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
         window.clearTimeout(saveTimer.current);
       }
     };
-  }, [config, refreshStatus]);
+  }, [config]); // intentionally excludes refreshStatus — it's stable and not needed here
 
   return (
     <BridgeContext.Provider
