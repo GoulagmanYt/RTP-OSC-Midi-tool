@@ -24,7 +24,8 @@ import {
   VstParameter,
   VstPluginEntry,
 } from "../api";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
 import { useI18n } from "../providers/LanguageProvider";
 
@@ -32,14 +33,30 @@ export default function AudioPage() {
   const { config, status, updateConfig, saveConfig: persistConfig, audioBackends, audioDevices, refreshAudioDevices, refreshStatus } =
     useBridge();
   const { t } = useI18n();
+
+  // FIX: Track VST UI open state and sync it via the "vst_editor_hidden" Tauri event
+  // emitted by the WM_CLOSE handler when the user closes the VST window via its X button.
   const [vstUiOpen, setVstUiOpen] = useState(false);
   const [vstParameterDialogOpen, setVstParameterDialogOpen] = useState(false);
   const [vstPlugins, setVstPlugins] = useState<VstPluginEntry[]>([]);
   const [vstPluginsLoading, setVstPluginsLoading] = useState(false);
   const [vstParams, setVstParams] = useState<VstParameter[]>([]);
   const [vstParamsLoading, setVstParamsLoading] = useState(false);
+
+  // Subscribe to the backend "vst_editor_hidden" event so the button label stays
+  // in sync when the user closes the VST window via its own title bar X button.
+  useEffect(() => {
+    const unlisten = listen("vst_editor_hidden", () => {
+      setVstUiOpen(false);
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, []);
+
   const bridgeRunning = Boolean(status?.running);
   const isVst3 = (config?.vstPath || "").toLowerCase().endsWith(".vst3");
+
   const quickPresets = useMemo(
     () => [
       {
@@ -69,6 +86,7 @@ export default function AudioPage() {
     ],
     [t]
   );
+
   const activeSampleRate = status?.audioSampleRate ?? config?.audioSampleRate ?? null;
   const activeBufferSize = status?.audioBufferSize ?? config?.audioBufferSize ?? null;
   const requestedBufferSize = status?.audioRequestedBufferSize ?? config?.audioBufferSize ?? null;
@@ -77,20 +95,24 @@ export default function AudioPage() {
     status?.audioBufferMismatch ??
     (activeBufferSize && requestedBufferSize ? activeBufferSize !== requestedBufferSize : null);
   const vstMidiCompatible = status?.vstMidiCompatible ?? null;
+
   const selectedVstPlugin = useMemo(
     () => vstPlugins.find((plugin) => plugin.path === (config?.vstPath || "")) ?? null,
     [config?.vstPath, vstPlugins]
   );
+
   const canOpenSelectedVstUi =
     Boolean(config?.audioEnabled) &&
     bridgeRunning &&
     Boolean(selectedVstPlugin?.supported) &&
     Boolean(selectedVstPlugin?.hasEditor);
+
   const canOpenVstParameterFallback =
     Boolean(config?.audioEnabled) &&
     bridgeRunning &&
     isVst3 &&
     Boolean(selectedVstPlugin?.supported);
+
   const currentLatencyMs = useMemo(() => {
     if (status?.audioLatencyMs !== undefined && status?.audioLatencyMs !== null) {
       return status.audioLatencyMs;
@@ -199,7 +221,7 @@ export default function AudioPage() {
         }
       }
     },
-    [config, refreshStatus, reloadVst, status?.audioRunning, t, updateConfig]
+    [config, refreshStatus, status?.audioRunning, t, updateConfig]
   );
 
   const handleSelectVst = async (path: string) => {
@@ -302,7 +324,7 @@ export default function AudioPage() {
                 <CardDescription>{t("audio.description")}</CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
-                
+
                 <div className="flex items-center justify-between">
                     <Label className="flex flex-col gap-1">
                         <span>{t("audio.enableEngine")}</span>
@@ -360,8 +382,8 @@ export default function AudioPage() {
 
                     <div className="space-y-2">
                         <Label>{t("audio.deviceLabel")}</Label>
-                        <Select 
-                            value={config?.audioDevice || ""} 
+                        <Select
+                            value={config?.audioDevice || ""}
                             onValueChange={(v) => updateConfig({ audioDevice: v })}
                             disabled={!config?.audioBackend}
                         >
@@ -378,8 +400,8 @@ export default function AudioPage() {
                 <div className="grid gap-4 md:grid-cols-3">
                      <div className="space-y-2">
                         <Label>{t("audio.sampleRate")}</Label>
-                         <Select 
-                            value={config?.audioSampleRate?.toString()} 
+                         <Select
+                            value={config?.audioSampleRate?.toString()}
                             onValueChange={(v) => updateConfig({ audioSampleRate: parseInt(v) })}
                         >
                             <SelectTrigger><SelectValue /></SelectTrigger>
@@ -394,8 +416,8 @@ export default function AudioPage() {
                      </div>
                      <div className="space-y-2">
                         <Label>{t("audio.bufferSize")}</Label>
-                         <Select 
-                            value={config?.audioBufferSize?.toString()} 
+                         <Select
+                            value={config?.audioBufferSize?.toString()}
                             onValueChange={(v) => updateConfig({ audioBufferSize: parseInt(v) })}
                         >
                             <SelectTrigger><SelectValue /></SelectTrigger>
@@ -415,17 +437,18 @@ export default function AudioPage() {
                             unit: t("units.db"),
                           })}
                          </Label>
-                         <Input 
+                         <Input
                             type="range"
-                            min={-60} 
-                            max={12} 
-                            step={1} 
+                            min={-60}
+                            max={12}
+                            step={1}
                             value={config?.audioGainDb || 0}
                             onChange={(e) => handleGainChange(Number(e.target.value))}
                             className="w-full"
                          />
                      </div>
                 </div>
+
                 <div className="flex items-center justify-between">
                   <Label className="flex flex-col gap-1">
                     <span>{t("audio.limiter")}</span>
@@ -433,6 +456,7 @@ export default function AudioPage() {
                   </Label>
                   <Switch checked={config?.audioLimiterEnabled} onCheckedChange={handleLimiterToggle} />
                 </div>
+
                 <div className="flex items-center justify-between text-xs text-muted-foreground">
                   <span>{t("audio.estimatedLatency")}</span>
                   <span className="text-foreground font-semibold">
@@ -447,7 +471,7 @@ export default function AudioPage() {
                   </span>
                 </div>
                 <div className="flex items-center justify-between text-xs text-muted-foreground">
-                  <span>Buffer demande</span>
+                  <span>Buffer demandé</span>
                   <span className="text-foreground font-semibold">
                     {requestedBufferSize ? `${requestedBufferSize} ${t("units.samples")}` : "--"}
                   </span>
@@ -470,7 +494,7 @@ export default function AudioPage() {
                 </div>
                 {bufferMismatch && (
                   <p className="text-xs text-amber-600">
-                    Le driver audio impose une taille de buffer differente de la valeur demandee.
+                    Le driver audio impose une taille de buffer différente de la valeur demandée.
                   </p>
                 )}
                 <div className="flex items-center justify-between text-xs text-muted-foreground">
@@ -637,12 +661,11 @@ export default function AudioPage() {
 
             </CardContent>
         </Card>
+
       <Dialog
         open={vstParameterDialogOpen && isVst3}
         onOpenChange={(open) => {
-          if (!open) {
-            setVstParameterDialogOpen(false);
-          }
+          if (!open) setVstParameterDialogOpen(false);
         }}
       >
         <DialogContent className="max-w-2xl">
