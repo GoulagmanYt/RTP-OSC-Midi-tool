@@ -87,6 +87,17 @@ fn log_file_path() -> Result<PathBuf, String> {
     Ok(config_dir_path()?.join("app.log"))
 }
 
+fn configure_vst3_native_trace_file() {
+    if let Ok(config_dir) = config_dir_path() {
+        let _ = fs::create_dir_all(&config_dir);
+        let trace_path = config_dir.join("vst3_native.log");
+        std::env::set_var(
+            "RACK_VST3_TRACE_FILE",
+            trace_path.to_string_lossy().to_string(),
+        );
+    }
+}
+
 fn read_log_tail(max_bytes: usize) -> String {
     let Ok(path) = log_file_path() else {
         return String::new();
@@ -748,6 +759,7 @@ fn set_round_corners_webview(window: &WebviewWindow) {
 }
 
 fn main() {
+    configure_vst3_native_trace_file();
     std::panic::set_hook(Box::new(|info| {
         let msg = match info.payload().downcast_ref::<&str>() {
             Some(s) => *s,

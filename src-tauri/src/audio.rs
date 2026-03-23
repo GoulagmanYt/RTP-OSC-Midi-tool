@@ -549,6 +549,10 @@ impl AudioEngine {
     }
 
     pub fn stop(&self, app_handle: Option<tauri::AppHandle>) {
+        background_log(
+            "debug",
+            format!("audio.stop: begin (thread={:?})", std::thread::current().id()),
+        );
         let runtime = self.runtime.lock().take();
         *self.midi_tx.lock() = None;
         self.midi_emergency_reset_requested
@@ -558,6 +562,15 @@ impl AudioEngine {
             let plugin = runtime.plugin.clone();
             let vst_path = runtime.vst_path.clone();
             let editor_window_arc = runtime.editor_window.clone();
+            let is_vst3 = matches!(*plugin.lock(), PluginBackend::Vst3 { .. });
+            background_log(
+                "debug",
+                format!(
+                    "audio.stop: runtime captured (vst3={}, path={})",
+                    is_vst3,
+                    vst_path.display()
+                ),
+            );
 
             if let Some(handle) = app_handle {
                 let (tx, rx) = mpsc::channel();
@@ -604,9 +617,15 @@ impl AudioEngine {
             }
 
             reset_all_notes(plugin.clone());
+            background_log("debug", "audio.stop: reset_all_notes done");
             drop(runtime);
+            background_log("debug", "audio.stop: runtime dropped");
             save_vst_state(&plugin, &vst_path);
+            background_log("debug", "audio.stop: save_vst_state done");
+            drop(plugin);
+            background_log("debug", "audio.stop: plugin Arc dropped");
         }
+        background_log("debug", "audio.stop: end");
     }
 
     pub fn list_backends(&self) -> Vec<String> {
