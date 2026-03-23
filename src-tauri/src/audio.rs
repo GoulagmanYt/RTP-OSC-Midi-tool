@@ -2,7 +2,7 @@
 
 use std::{
     collections::VecDeque,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicU32, Ordering},
         mpsc, Arc,
@@ -44,23 +44,24 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{
     AvSetMmThreadCharacteristicsW, GetCurrentProcess, GetCurrentThread, ProcessPowerThrottling,
     SetPriorityClass, SetProcessInformation, SetThreadInformation, SetThreadPriority,
-    ThreadPowerThrottling, ABOVE_NORMAL_PRIORITY_CLASS,
-    PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+    ThreadPowerThrottling, ABOVE_NORMAL_PRIORITY_CLASS, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
     PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION,
     PROCESS_POWER_THROTTLING_STATE, THREAD_POWER_THROTTLING_CURRENT_VERSION,
     THREAD_POWER_THROTTLING_EXECUTION_SPEED, THREAD_POWER_THROTTLING_STATE,
     THREAD_PRIORITY_HIGHEST,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetForegroundWindow, GetWindowLongPtrW,
-    IsWindowVisible, KillTimer, RegisterClassW, SetForegroundWindow, SetTimer, SetWindowLongPtrW,
-    ShowWindow, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, GWLP_USERDATA, HCURSOR,
-    HICON, SW_HIDE, SW_SHOW, WM_CLOSE, WM_CREATE, WM_DESTROY, WM_TIMER, WNDCLASSW,
-    WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowLongPtrW, IsWindowVisible, KillTimer,
+    RegisterClassW, SetForegroundWindow, SetTimer, SetWindowLongPtrW, ShowWindow, CREATESTRUCTW,
+    CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, GWLP_USERDATA, HCURSOR, HICON, SW_HIDE, SW_SHOW,
+    WM_CLOSE, WM_CREATE, WM_DESTROY, WM_TIMER, WNDCLASSW, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 
 use crate::logger::{background_log, FrontendLogger};
-use crate::plugin_probe::{detect_vst3_channels, ensure_supported_plugin_in_app};
+use crate::plugin_probe::{
+    detect_vst3_channels, ensure_supported_plugin_in_app, select_vst3_plugin_info_for_path,
+    vst3_scan_root_for_path,
+};
 use crate::types::VstParameter;
 use crate::vst_scan::{is_vst2_path, is_vst3_path};
 
@@ -315,7 +316,10 @@ impl AudioCallbackState {
     // FIX #2: Emergency reset must clear pending_midi to prevent re-triggering notes
     // that caused the overflow in the first place.
     fn drain_midi(&mut self) {
-        if self.emergency_reset_requested.swap(false, Ordering::Relaxed) {
+        if self
+            .emergency_reset_requested
+            .swap(false, Ordering::Relaxed)
+        {
             self.needs_emergency_reset = true;
             // Clear the pending queue so stuck notes don't immediately re-trigger
             // after the reset messages are sent to the plugin.
@@ -392,6 +396,8 @@ impl AudioCallbackState {
 struct WindowData {
     state: std::sync::Weak<Mutex<Option<EditorWindow>>>,
     app_handle: Option<tauri::AppHandle>,
+    plugin: Option<Arc<Mutex<PluginBackend>>>,
+    vst_path: Option<PathBuf>,
 }
 
 unsafe extern "system" fn vst_window_proc(
@@ -438,6 +444,13 @@ unsafe extern "system" fn vst_window_proc(
             // vstUiOpen state without polling.
             let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const WindowData;
             if !ptr.is_null() {
+                // Persist state when closing via the window title bar (X),
+                // matching the behavior of the explicit "Hide UI" action.
+                if let (Some(plugin), Some(vst_path)) =
+                    ((*ptr).plugin.as_ref(), (*ptr).vst_path.as_ref())
+                {
+                    save_vst_state(plugin, vst_path);
+                }
                 if let Some(handle) = &(*ptr).app_handle {
                     use tauri::Emitter;
                     let _ = handle.emit("vst_editor_hidden", ());
@@ -671,7 +684,8 @@ impl AudioEngine {
                 // but no ASIO host is available — keeps the app functional.
                 if !asio_available {
                     logger.warn(
-                        "ASIO requested but no ASIO host found. Falling back to WASAPI.".to_string(),
+                        "ASIO requested but no ASIO host found. Falling back to WASAPI."
+                            .to_string(),
                     );
                     push_wasapi(&mut candidates);
                 }
@@ -802,7 +816,8 @@ impl AudioEngine {
                     if err_str.contains("no longer available") || err_str.contains("unplugged") {
                         logger.warn(format!(
                             "Device '{}' reported unavailable (attempt {}). Retrying…",
-                            dev_name, attempt + 1
+                            dev_name,
+                            attempt + 1
                         ));
                     } else if err_str.contains("0x8889000A") || err_str.contains("exclusive") {
                         logger.warn(format!(
@@ -822,20 +837,14 @@ impl AudioEngine {
             }
         }
 
-        let (
-            stream,
-            plugin,
-            midi_tx,
-            active_sample_rate,
-            stream_buffer_size,
-            vst_midi_compatible,
-        ) = stream_opt.ok_or_else(|| {
-            let final_err = last_err.unwrap_or_else(|| {
-                AudioError::Message("All audio backends failed to initialise.".into())
-            });
-            logger.error(format!("Audio initialisation failed: {}", final_err));
-            final_err
-        })?;
+        let (stream, plugin, midi_tx, active_sample_rate, stream_buffer_size, vst_midi_compatible) =
+            stream_opt.ok_or_else(|| {
+                let final_err = last_err.unwrap_or_else(|| {
+                    AudioError::Message("All audio backends failed to initialise.".into())
+                });
+                logger.error(format!("Audio initialisation failed: {}", final_err));
+                final_err
+            })?;
 
         let active_backend = selected_backend.unwrap_or_else(|| "unknown".to_string());
         let active_device = selected_device.unwrap_or_else(|| "unknown".to_string());
@@ -935,12 +944,16 @@ impl AudioEngine {
 
     // FIX #9: Pass AppHandle into WindowData so WM_CLOSE can emit vst_editor_hidden.
     pub fn open_vst_ui(&self, app_handle: tauri::AppHandle) -> Result<(), AudioError> {
-        let (plugin_arc, editor_window_arc) = {
+        let (plugin_arc, editor_window_arc, vst_path) = {
             let mut guard = self.runtime.lock();
             let Some(runtime) = guard.as_mut() else {
                 return Err(AudioError::Message("Audio not started".into()));
             };
-            (runtime.plugin.clone(), runtime.editor_window.clone())
+            (
+                runtime.plugin.clone(),
+                runtime.editor_window.clone(),
+                runtime.vst_path.clone(),
+            )
         };
 
         let weak_editor_window = Arc::downgrade(&editor_window_arc);
@@ -981,6 +994,8 @@ impl AudioEngine {
                             let window_data = WindowData {
                                 state: weak_editor_window,
                                 app_handle: Some(app_handle_clone),
+                                plugin: Some(plugin_arc.clone()),
+                                vst_path: Some(vst_path.clone()),
                             };
 
                             let hwnd =
@@ -989,7 +1004,8 @@ impl AudioEngine {
 
                             let hwnd_ptr = hwnd.0 as *mut std::ffi::c_void;
                             if editor.open(hwnd_ptr) {
-                                *editor_window_arc.lock() = Some(EditorWindow::Vst2 { editor, hwnd });
+                                *editor_window_arc.lock() =
+                                    Some(EditorWindow::Vst2 { editor, hwnd });
                                 Ok(())
                             } else {
                                 unsafe {
@@ -1005,13 +1021,22 @@ impl AudioEngine {
                             let (width, height) = gui.size().map_err(|e| {
                                 AudioError::Message(format!("Failed to get VST3 editor size: {e}"))
                             })?;
-                            let win_width = if width > 0.0 { width.round() as i32 + 16 } else { 800 };
-                            let win_height =
-                                if height > 0.0 { height.round() as i32 + 39 } else { 600 };
+                            let win_width = if width > 0.0 {
+                                width.round() as i32 + 16
+                            } else {
+                                800
+                            };
+                            let win_height = if height > 0.0 {
+                                height.round() as i32 + 39
+                            } else {
+                                600
+                            };
 
                             let window_data = WindowData {
                                 state: weak_editor_window,
                                 app_handle: Some(app_handle_clone),
+                                plugin: Some(plugin_arc.clone()),
+                                vst_path: Some(vst_path.clone()),
                             };
 
                             let hwnd = create_vst_window(
@@ -1163,7 +1188,11 @@ impl AudioEngine {
     pub fn current_buffer_size(&self) -> Option<u32> {
         self.runtime.lock().as_ref().and_then(|r| {
             let frames = r.block_size_frames.load(Ordering::Relaxed);
-            if frames == 0 { None } else { Some(frames) }
+            if frames == 0 {
+                None
+            } else {
+                Some(frames)
+            }
         })
     }
 
@@ -1175,7 +1204,10 @@ impl AudioEngine {
     }
 
     pub fn stream_buffer_size(&self) -> Option<u32> {
-        self.runtime.lock().as_ref().and_then(|r| r.stream_buffer_size)
+        self.runtime
+            .lock()
+            .as_ref()
+            .and_then(|r| r.stream_buffer_size)
     }
 
     pub fn buffer_size_mismatch(&self) -> Option<bool> {
@@ -1190,10 +1222,7 @@ impl AudioEngine {
     }
 
     pub fn vst_midi_compatible(&self) -> Option<bool> {
-        self.runtime
-            .lock()
-            .as_ref()
-            .map(|r| r.vst_midi_compatible)
+        self.runtime.lock().as_ref().map(|r| r.vst_midi_compatible)
     }
 
     pub fn xrun_count(&self) -> Option<u32> {
@@ -1602,7 +1631,11 @@ fn select_output_config(
         .iter()
         .min_by_key(|cfg| {
             let (_, distance) = pick_sample_rate(cfg, requested_rate);
-            let format_score = if cfg.sample_format() == SampleFormat::F32 { 0 } else { 1 };
+            let format_score = if cfg.sample_format() == SampleFormat::F32 {
+                0
+            } else {
+                1
+            };
             let channel_score = if cfg.channels() == 2 { 0 } else { 1 };
             (distance, format_score, channel_score)
         })
@@ -1768,7 +1801,12 @@ fn build_stream(
 
             instance.resume();
 
-            (PluginBackend::Vst2 { instance }, plugin_inputs, plugin_outputs, vst2_receives_midi)
+            (
+                PluginBackend::Vst2 { instance },
+                plugin_inputs,
+                plugin_outputs,
+                vst2_receives_midi,
+            )
         };
 
     let plugin = Arc::new(Mutex::new(plugin_backend));
@@ -1888,7 +1926,8 @@ fn build_stream(
 
     let mut fixed_error: Option<AudioError> = None;
     let mut stream_result: Option<(Stream, Producer<MidiPacket>, Option<u32>)> = None;
-    let fallback_candidates = buffer_fallback_candidates(&supported_buffer_size, target_buffer_size);
+    let fallback_candidates =
+        buffer_fallback_candidates(&supported_buffer_size, target_buffer_size);
 
     for candidate in fallback_candidates {
         config.buffer_size = BufferSize::Fixed(candidate);
@@ -1963,7 +2002,9 @@ fn max_plugin_block_size(supported: &cpal::SupportedBufferSize, requested: u32) 
 }
 
 fn buffer_fallback_candidates(supported: &cpal::SupportedBufferSize, preferred: u32) -> Vec<u32> {
-    let common_sizes = [64u32, 96, 128, 192, 256, 384, 480, 512, 768, 1024, 1536, 2048];
+    let common_sizes = [
+        64u32, 96, 128, 192, 256, 384, 480, 512, 768, 1024, 1536, 2048,
+    ];
     let mut extras: Vec<u32> = common_sizes
         .into_iter()
         .filter(|size| match supported {
@@ -1990,16 +2031,16 @@ fn load_vst3_plugin(
 ) -> Result<(rack::vst3::Vst3Plugin, usize, usize), AudioError> {
     let scanner = Vst3Scanner::new()
         .map_err(|e| AudioError::Message(format!("Failed to initialise VST3 scanner: {}", e)))?;
-    let parent = vst_path.parent().unwrap_or_else(|| Path::new("."));
+    let scan_root = vst3_scan_root_for_path(vst_path);
     let plugins = scanner
-        .scan_path(parent)
+        .scan_path(&scan_root)
         .map_err(|e| AudioError::Message(format!("Failed to scan VST3 plugins: {}", e)))?;
-    let target = vst_path.canonicalize().unwrap_or_else(|_| vst_path.clone());
-
-    let info = plugins
-        .into_iter()
-        .find(|p| p.path.canonicalize().unwrap_or_else(|_| p.path.clone()) == target)
-        .ok_or_else(|| AudioError::Message(format!("VST3 plugin not found at {:?}", vst_path)))?;
+    let info = select_vst3_plugin_info_for_path(&plugins, vst_path).ok_or_else(|| {
+        AudioError::Message(format!(
+            "VST3 plugin info not found for {:?} (scan root: {:?})",
+            vst_path, scan_root
+        ))
+    })?;
 
     let mut plugin = scanner
         .load(&info)
@@ -2824,15 +2865,26 @@ mod tests {
         );
         // Pre-fill pending MIDI with note-on events
         for note in 0..10u8 {
-            state.pending_midi.push_back(MidiPacket { data: [0x90, note, 100], len: 3, timestamp_ms: 0 });
+            state.pending_midi.push_back(MidiPacket {
+                data: [0x90, note, 100],
+                len: 3,
+                timestamp_ms: 0,
+            });
         }
         assert_eq!(state.pending_midi.len(), 10);
 
         // drain_midi should clear pending_midi when emergency_reset_requested is set
         state.drain_midi();
 
-        assert!(state.needs_emergency_reset, "emergency reset flag should be set");
-        assert_eq!(state.pending_midi.len(), 0, "pending MIDI must be cleared on emergency reset");
+        assert!(
+            state.needs_emergency_reset,
+            "emergency reset flag should be set"
+        );
+        assert_eq!(
+            state.pending_midi.len(),
+            0,
+            "pending MIDI must be cleared on emergency reset"
+        );
     }
 
     #[test]
@@ -2957,14 +3009,7 @@ mod tests {
         let meter_right = AtomicU32::new(0);
         let mut out = vec![0.0f32; 4];
 
-        replay_last_output_or_silence(
-            &mut out,
-            2,
-            0.0f32,
-            &mut state,
-            &meter_left,
-            &meter_right,
-        );
+        replay_last_output_or_silence(&mut out, 2, 0.0f32, &mut state, &meter_left, &meter_right);
 
         assert_eq!(out, vec![0.25, -0.5, 0.1, -0.2]);
         assert_eq!(f32::from_bits(meter_left.load(Ordering::Relaxed)), 0.25);
@@ -2990,14 +3035,7 @@ mod tests {
         let meter_right = AtomicU32::new(0);
         let mut out = vec![1.0f32; 4];
 
-        replay_last_output_or_silence(
-            &mut out,
-            2,
-            0.0f32,
-            &mut state,
-            &meter_left,
-            &meter_right,
-        );
+        replay_last_output_or_silence(&mut out, 2, 0.0f32, &mut state, &meter_left, &meter_right);
 
         assert_eq!(out, vec![0.0, 0.0, 0.0, 0.0]);
         assert_eq!(f32::from_bits(meter_left.load(Ordering::Relaxed)), 0.0);
@@ -3048,13 +3086,15 @@ mod tests {
                 )
             })
             .expect("VST3 smoke: plugin info not found");
-        let mut plugin = scanner.load(&info).expect("VST3 smoke: failed to load plugin");
+        let mut plugin = scanner
+            .load(&info)
+            .expect("VST3 smoke: failed to load plugin");
         plugin
             .initialize(48_000.0, 128)
             .expect("VST3 smoke: initialize failed");
 
-        let (input_channels, output_channels) =
-            detect_vst3_channels(&mut plugin, &info, 128).expect("VST3 smoke: channel probe failed");
+        let (input_channels, output_channels) = detect_vst3_channels(&mut plugin, &info, 128)
+            .expect("VST3 smoke: channel probe failed");
         eprintln!(
             "VST3 optional smoke channels: inputs={}, outputs={}",
             input_channels, output_channels

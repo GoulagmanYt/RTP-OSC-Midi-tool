@@ -7,9 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use rack::vst3::Vst3Scanner;
-use rack::{
-    PluginInfo as RackPluginInfo, PluginScanner as RackPluginScanner, PluginType,
-};
+use rack::{PluginInfo as RackPluginInfo, PluginScanner as RackPluginScanner, PluginType};
 use vst::api::Supported;
 use vst::buffer::AudioBuffer;
 use vst::host::{Host, PluginInstance, PluginLoader};
@@ -21,7 +19,8 @@ pub const DEFAULT_VST3_PLUGIN_DIR: &str = "C:\\Program Files\\Common Files\\VST3
 pub const DEFAULT_VST2_PLUGIN_DIR: &str = "C:\\Program Files\\VSTPlugins";
 pub const STEINBERG_VST2_PLUGIN_DIR: &str = "C:\\Program Files\\Steinberg\\VstPlugins";
 pub const COMMON_VST2_PLUGIN_DIR: &str = "C:\\Program Files\\Common Files\\VST2";
-pub const COMMON_STEINBERG_VST2_PLUGIN_DIR: &str = "C:\\Program Files\\Common Files\\Steinberg\\VST2";
+pub const COMMON_STEINBERG_VST2_PLUGIN_DIR: &str =
+    "C:\\Program Files\\Common Files\\Steinberg\\VST2";
 pub const DEFAULT_VST3_PLUGIN_DIR_X86: &str = "C:\\Program Files (x86)\\Common Files\\VST3";
 pub const DEFAULT_VST2_PLUGIN_DIR_X86: &str = "C:\\Program Files (x86)\\VSTPlugins";
 pub const STEINBERG_VST2_PLUGIN_DIR_X86: &str = "C:\\Program Files (x86)\\Steinberg\\VstPlugins";
@@ -82,7 +81,10 @@ pub fn scan_vst_plugins_in_roots(roots: &[PathBuf]) -> Vec<VstPluginEntry> {
         for path in scan_plugin_candidates(root) {
             let key = normalize_path(&path);
             if seen_paths.insert(key) {
-                entries.push(probe_plugin(&path));
+                let entry = probe_plugin(&path);
+                if is_listable_instrument_entry(&entry) {
+                    entries.push(entry);
+                }
             }
         }
     }
@@ -94,6 +96,10 @@ pub fn scan_vst_plugins_in_roots(roots: &[PathBuf]) -> Vec<VstPluginEntry> {
             .then_with(|| a.path.to_lowercase().cmp(&b.path.to_lowercase()))
     });
     entries
+}
+
+fn is_listable_instrument_entry(entry: &VstPluginEntry) -> bool {
+    entry.kind == "instrument"
 }
 
 pub fn ensure_supported_plugin_in_app(path: &Path) -> Result<VstPluginEntry, String> {
@@ -140,7 +146,10 @@ pub fn detect_vst3_channels(
     Ok((input_channels, output_channels))
 }
 
-pub fn smoke_vst2_instance(instance: &mut PluginInstance, frames: usize) -> Result<(usize, usize), String> {
+pub fn smoke_vst2_instance(
+    instance: &mut PluginInstance,
+    frames: usize,
+) -> Result<(usize, usize), String> {
     instance.init();
     instance.set_sample_rate(VST2_PROBE_SAMPLE_RATE);
     instance.set_block_size(frames as i64);
@@ -259,7 +268,11 @@ fn probe_vst2_plugin(path: &Path) -> VstPluginEntry {
 
     if plugin_kind != "instrument" {
         return VstPluginEntry {
-            name: if info.name.is_empty() { name } else { info.name.clone() },
+            name: if info.name.is_empty() {
+                name
+            } else {
+                info.name.clone()
+            },
             path: path.to_string_lossy().to_string(),
             format,
             kind: plugin_kind,
@@ -274,7 +287,11 @@ fn probe_vst2_plugin(path: &Path) -> VstPluginEntry {
 
     if !midi_compatible {
         return VstPluginEntry {
-            name: if info.name.is_empty() { name } else { info.name.clone() },
+            name: if info.name.is_empty() {
+                name
+            } else {
+                info.name.clone()
+            },
             path: path.to_string_lossy().to_string(),
             format,
             kind: plugin_kind,
@@ -292,7 +309,11 @@ fn probe_vst2_plugin(path: &Path) -> VstPluginEntry {
     let smoke = smoke_vst2_instance(&mut instance, VST_PROBE_BLOCK_SIZE);
     match smoke {
         Ok((inputs, outputs)) => VstPluginEntry {
-            name: if info.name.is_empty() { name } else { info.name.clone() },
+            name: if info.name.is_empty() {
+                name
+            } else {
+                info.name.clone()
+            },
             path: path.to_string_lossy().to_string(),
             format,
             kind: plugin_kind,
@@ -304,7 +325,11 @@ fn probe_vst2_plugin(path: &Path) -> VstPluginEntry {
             channel_layout: Some(format!("{inputs} in / {outputs} out")),
         },
         Err(err) => VstPluginEntry {
-            name: if info.name.is_empty() { name } else { info.name.clone() },
+            name: if info.name.is_empty() {
+                name
+            } else {
+                info.name.clone()
+            },
             path: path.to_string_lossy().to_string(),
             format,
             kind: plugin_kind,
@@ -350,7 +375,12 @@ fn probe_vst3_plugin(path: &Path) -> VstPluginEntry {
     };
     probe_trace("probe_vst3_plugin: scanner created");
 
-    let plugins = match scanner.scan_path(path) {
+    let scan_root = vst3_scan_root_for_path(path);
+    probe_trace(format!(
+        "probe_vst3_plugin: scan root {}",
+        scan_root.display()
+    ));
+    let plugins = match scanner.scan_path(&scan_root) {
         Ok(plugins) => plugins,
         Err(err) => {
             return unsupported_entry(
@@ -363,7 +393,10 @@ fn probe_vst3_plugin(path: &Path) -> VstPluginEntry {
             )
         }
     };
-    probe_trace(format!("probe_vst3_plugin: scan_path returned {}", plugins.len()));
+    probe_trace(format!(
+        "probe_vst3_plugin: scan_path returned {}",
+        plugins.len()
+    ));
     for plugin in &plugins {
         probe_trace(format!(
             "probe_vst3_plugin: candidate {} {:?} {}",
@@ -373,13 +406,7 @@ fn probe_vst3_plugin(path: &Path) -> VstPluginEntry {
         ));
     }
 
-    let target = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let info = match plugins
-        .iter()
-        .find(|plugin| matches_vst3_bundle_path(&target, &plugin.path))
-        .cloned()
-        .or_else(|| plugins.first().cloned())
-    {
+    let info = match select_vst3_plugin_info_for_path(&plugins, path) {
         Some(info) => info,
         None => {
             return unsupported_entry(
@@ -388,7 +415,7 @@ fn probe_vst3_plugin(path: &Path) -> VstPluginEntry {
                 format,
                 "other".to_string(),
                 architecture,
-                "VST3 plugin info not found".to_string(),
+                "VST3 plugin info not found for requested bundle".to_string(),
             )
         }
     };
@@ -502,14 +529,67 @@ fn normalize_path(path: &Path) -> String {
         .to_lowercase()
 }
 
-fn matches_vst3_bundle_path(target: &Path, candidate: &Path) -> bool {
-    let target = target.canonicalize().unwrap_or_else(|_| target.to_path_buf());
+pub fn vst3_scan_root_for_path(path: &Path) -> PathBuf {
+    if is_vst3_path(path) {
+        return path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| path.to_path_buf());
+    }
+    if path.is_file() {
+        return path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| path.to_path_buf());
+    }
+    path.to_path_buf()
+}
+
+pub fn select_vst3_plugin_info_for_path(
+    plugins: &[RackPluginInfo],
+    target_path: &Path,
+) -> Option<RackPluginInfo> {
+    let target = target_path
+        .canonicalize()
+        .unwrap_or_else(|_| target_path.to_path_buf());
+
+    plugins
+        .iter()
+        .filter_map(|plugin| {
+            vst3_path_match_score(&target, &plugin.path).map(|path_score| {
+                (
+                    path_score,
+                    vst3_plugin_type_rank(plugin.plugin_type),
+                    plugin.name.to_lowercase(),
+                    plugin.clone(),
+                )
+            })
+        })
+        .min_by(|left, right| {
+            left.0
+                .cmp(&right.0)
+                .then_with(|| left.1.cmp(&right.1))
+                .then_with(|| left.2.cmp(&right.2))
+        })
+        .map(|(_, _, _, plugin)| plugin)
+}
+
+fn vst3_path_match_score(target: &Path, candidate: &Path) -> Option<u8> {
+    let target = target
+        .canonicalize()
+        .unwrap_or_else(|_| target.to_path_buf());
     let candidate = candidate
         .canonicalize()
         .unwrap_or_else(|_| candidate.to_path_buf());
 
-    if candidate == target || candidate.starts_with(&target) || target.starts_with(&candidate) {
-        return true;
+    if candidate == target {
+        return Some(0);
+    }
+    if candidate.starts_with(&target) {
+        return Some(1);
+    }
+    if target.starts_with(&candidate) {
+        return Some(2);
     }
 
     let target_name = target.file_name().and_then(|value| value.to_str());
@@ -519,10 +599,28 @@ fn matches_vst3_bundle_path(target: &Path, candidate: &Path) -> bool {
         .map(|(left, right)| left.eq_ignore_ascii_case(right))
         .unwrap_or(false)
     {
-        return true;
+        return Some(3);
     }
 
-    normalize_path(&candidate).contains(&normalize_path(&target))
+    let normalized_target = normalize_path(&target);
+    let normalized_candidate = normalize_path(&candidate);
+    if normalized_candidate.contains(&normalized_target)
+        || normalized_target.contains(&normalized_candidate)
+    {
+        return Some(4);
+    }
+
+    None
+}
+
+fn vst3_plugin_type_rank(plugin_type: PluginType) -> u8 {
+    match plugin_type {
+        PluginType::Instrument => 0,
+        PluginType::Effect => 1,
+        PluginType::Analyzer => 2,
+        PluginType::Spatial => 3,
+        _ => 4,
+    }
 }
 
 fn detect_plugin_architecture(path: &Path) -> String {
@@ -694,8 +792,36 @@ mod tests {
         fs::create_dir_all(binary.parent().expect("binary dir")).expect("mkdirs");
         fs::write(&binary, b"dummy").expect("write");
 
-        assert!(matches_vst3_bundle_path(&bundle, &binary));
-        assert!(matches_vst3_bundle_path(&binary, &bundle));
+        assert!(vst3_path_match_score(&bundle, &binary).is_some());
+        assert!(vst3_path_match_score(&binary, &bundle).is_some());
+    }
+
+    #[test]
+    fn select_vst3_plugin_info_prefers_instrument_for_same_bundle() {
+        let dir = tempdir().expect("temp dir");
+        let bundle = dir.path().join("TestPiano.vst3");
+        fs::create_dir_all(&bundle).expect("bundle dir");
+
+        let effect = RackPluginInfo::new(
+            "TestPiano FX".to_string(),
+            "Vendor".to_string(),
+            1,
+            PluginType::Effect,
+            bundle.clone(),
+            "FXUID".to_string(),
+        );
+        let instrument = RackPluginInfo::new(
+            "TestPiano Instrument".to_string(),
+            "Vendor".to_string(),
+            1,
+            PluginType::Instrument,
+            bundle.clone(),
+            "INSUID".to_string(),
+        );
+
+        let selected =
+            select_vst3_plugin_info_for_path(&[effect, instrument], &bundle).expect("selection");
+        assert_eq!(selected.plugin_type, PluginType::Instrument);
     }
 
     #[test]

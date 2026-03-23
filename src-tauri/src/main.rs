@@ -31,9 +31,9 @@ use midir::{MidiInput, MidiOutput};
 use parking_lot::Mutex;
 use rtp::RtpDiscoveryManager;
 use serde::Serialize;
+use tauri::path::BaseDirectory;
 #[cfg(target_os = "windows")]
 use tauri::WindowEvent;
-use tauri::path::BaseDirectory;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow, Window};
 use types::{
     BridgeStatus, PreflightReport, RtpParticipantInfo, RtpSessionInfo, VstParameter, VstPluginEntry,
@@ -106,10 +106,23 @@ fn vst_cache_path() -> Result<PathBuf, String> {
     Ok(config_dir_path()?.join("vst_cache.json"))
 }
 
+fn is_instrument_entry(entry: &VstPluginEntry) -> bool {
+    entry.kind == "instrument"
+}
+
+fn retain_instrument_entries(entries: Vec<VstPluginEntry>) -> Vec<VstPluginEntry> {
+    entries
+        .into_iter()
+        .filter(is_instrument_entry)
+        .collect::<Vec<_>>()
+}
+
 fn load_vst_cache_from_disk() -> Option<Vec<VstPluginEntry>> {
     let path = vst_cache_path().ok()?;
     let raw = fs::read_to_string(path).ok()?;
-    serde_json::from_str(&raw).ok()
+    serde_json::from_str::<Vec<VstPluginEntry>>(&raw)
+        .ok()
+        .map(retain_instrument_entries)
 }
 
 fn save_vst_cache_to_disk(entries: &[VstPluginEntry]) {
@@ -357,17 +370,27 @@ fn list_audio_devices(backend: Option<String>, state: State<AppState>) -> Vec<St
 
 #[tauri::command]
 fn list_vst_plugins(state: State<AppState>) -> Vec<VstPluginEntry> {
-    state.vst_cache.lock().clone().unwrap_or_default()
+    state
+        .vst_cache
+        .lock()
+        .clone()
+        .map(retain_instrument_entries)
+        .unwrap_or_default()
 }
 
 #[tauri::command]
 fn refresh_vst_plugins(state: State<AppState>) -> Vec<VstPluginEntry> {
     let roots = default_vst_scan_roots();
     if roots.is_empty() {
-        return state.vst_cache.lock().clone().unwrap_or_default();
+        return state
+            .vst_cache
+            .lock()
+            .clone()
+            .map(retain_instrument_entries)
+            .unwrap_or_default();
     }
 
-    let plugins = scan_vst_plugins_in_roots(&roots);
+    let plugins = retain_instrument_entries(scan_vst_plugins_in_roots(&roots));
     *state.vst_cache.lock() = Some(plugins.clone());
     save_vst_cache_to_disk(&plugins);
     plugins
