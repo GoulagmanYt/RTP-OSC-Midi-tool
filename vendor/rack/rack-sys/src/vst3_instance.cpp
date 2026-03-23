@@ -1324,33 +1324,81 @@ int rack_vst3_plugin_set_state(RackVST3Plugin* plugin, const uint8_t* data, size
 
     std::lock_guard<std::mutex> state_lock(plugin->state_mutex);
 
-    // Create memory stream from data (IPtr provides RAII cleanup)
-    IPtr<MemoryStream> stream(new MemoryStream(data, size), false);
+    const bool has_separate_controller =
+        plugin->controller
+        && reinterpret_cast<void*>(plugin->controller.get())
+            != reinterpret_cast<void*>(plugin->component.get());
 
-    // Read component state size marker first (written at position 0 during serialization)
+    auto apply_legacy_sequence = [&]() -> int {
+        IPtr<MemoryStream> legacy_stream(new MemoryStream(data, size), false);
+        tresult result = plugin->component->setState(legacy_stream);
+        if (result != kResultOk) {
+            return (result == kResultFalse || result == kNotImplemented)
+                ? RACK_VST3_ERROR_NOT_SUPPORTED
+                : RACK_VST3_ERROR_GENERIC;
+        }
+
+        if (has_separate_controller) {
+            result = plugin->controller->setState(legacy_stream);
+            if (result != kResultOk && result != kResultFalse && result != kNotImplemented) {
+                return RACK_VST3_ERROR_GENERIC;
+            }
+        }
+        return RACK_VST3_OK;
+    };
+
+    // Serialized layout (current host format):
+    // [u32 component_size][component_state][controller_state]
+    // Keep a legacy fallback for older/raw states without a valid size marker.
+    IPtr<MemoryStream> stream(new MemoryStream(data, size), false);
     uint32_t component_state_size = 0;
     int32 bytes_read = 0;
-    tresult result = stream->read(&component_state_size, sizeof(component_state_size), &bytes_read);
-
+    tresult result =
+        stream->read(&component_state_size, sizeof(component_state_size), &bytes_read);
     if (result != kResultOk || bytes_read != sizeof(component_state_size)) {
-        return RACK_VST3_ERROR_GENERIC;
+        return apply_legacy_sequence();
     }
 
-    // Set component state (reads from current position, right after size marker)
-    result = plugin->component->setState(stream);
+    const size_t payload_size = size - sizeof(uint32_t);
+    if (static_cast<size_t>(component_state_size) > payload_size) {
+        // Not in host format: try legacy/raw restore behavior.
+        return apply_legacy_sequence();
+    }
+
+    const uint8_t* component_data = data + sizeof(uint32_t);
+    const size_t component_size = static_cast<size_t>(component_state_size);
+    const uint8_t* controller_data = component_data + component_size;
+    const size_t controller_size = payload_size - component_size;
+
+    // 1) component->setState(component_state)
+    IPtr<MemoryStream> component_stream(new MemoryStream(component_data, component_size), false);
+    result = plugin->component->setState(component_stream);
     if (result != kResultOk) {
         return (result == kResultFalse || result == kNotImplemented)
             ? RACK_VST3_ERROR_NOT_SUPPORTED
             : RACK_VST3_ERROR_GENERIC;
     }
 
-    // Set controller state if separate controller
-    if (plugin->controller && reinterpret_cast<void*>(plugin->controller.get()) != reinterpret_cast<void*>(plugin->component.get())) {
-        // Stream is now positioned right after component state
-        // Controller state follows immediately
-        result = plugin->controller->setState(stream);
+    if (has_separate_controller) {
+        // 2) controller->setComponentState(component_state)
+        // This synchronization step is required by the VST3 persistence sequence.
+        IPtr<MemoryStream> component_for_controller(
+            new MemoryStream(component_data, component_size),
+            false);
+        result = plugin->controller->setComponentState(component_for_controller);
         if (result != kResultOk && result != kResultFalse && result != kNotImplemented) {
             return RACK_VST3_ERROR_GENERIC;
+        }
+
+        // 3) controller->setState(controller_state)
+        if (controller_size > 0) {
+            IPtr<MemoryStream> controller_stream(
+                new MemoryStream(controller_data, controller_size),
+                false);
+            result = plugin->controller->setState(controller_stream);
+            if (result != kResultOk && result != kResultFalse && result != kNotImplemented) {
+                return RACK_VST3_ERROR_GENERIC;
+            }
         }
     }
 

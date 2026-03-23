@@ -99,7 +99,7 @@ pub fn scan_vst_plugins_in_roots(roots: &[PathBuf]) -> Vec<VstPluginEntry> {
 }
 
 fn is_listable_instrument_entry(entry: &VstPluginEntry) -> bool {
-    entry.kind == "instrument"
+    entry.kind == "instrument" && entry.supported
 }
 
 pub fn ensure_supported_plugin_in_app(path: &Path) -> Result<VstPluginEntry, String> {

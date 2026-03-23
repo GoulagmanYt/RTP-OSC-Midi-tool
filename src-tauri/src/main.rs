@@ -107,7 +107,7 @@ fn vst_cache_path() -> Result<PathBuf, String> {
 }
 
 fn is_instrument_entry(entry: &VstPluginEntry) -> bool {
-    entry.kind == "instrument"
+    entry.kind == "instrument" && entry.supported
 }
 
 fn retain_instrument_entries(entries: Vec<VstPluginEntry>) -> Vec<VstPluginEntry> {
