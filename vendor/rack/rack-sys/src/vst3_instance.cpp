@@ -24,10 +24,6 @@
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
-#include <fstream>
-#include <chrono>
-#include <thread>
-#include <iomanip>
 #include <mutex>
 #include <algorithm>
 
@@ -39,29 +35,7 @@ using namespace Steinberg::Vst;
 // VST3 module loading/unloading is not guaranteed to be thread-safe
 static std::mutex g_vst3_lifecycle_mutex;
 
-static void trace_vst3_step(const char* scope, const char* step) {
-    const char* trace_path = std::getenv("RACK_VST3_TRACE_FILE");
-    if (!trace_path || !*trace_path) {
-        return;
-    }
-
-    try {
-        std::ofstream out(trace_path, std::ios::app);
-        if (!out.is_open()) {
-            return;
-        }
-        using namespace std::chrono;
-        const auto now = system_clock::now();
-        const auto ms = duration_cast<milliseconds>(now.time_since_epoch()).count();
-        out << "[" << ms << "] [tid=" << std::this_thread::get_id() << "] "
-            << scope << ": " << step << "\n";
-    } catch (...) {
-        // Never let tracing interfere with plugin lifecycle.
-    }
-}
-
 static void trace_free_step(const char* step) {
-    trace_vst3_step("plugin_free", step);
     if (std::getenv("RACK_VST3_TRACE_FREE")) {
         std::fprintf(stderr, "rack_vst3_plugin_free: %s\n", step);
         std::fflush(stderr);
@@ -1234,7 +1208,6 @@ int rack_vst3_plugin_get_state_size(RackVST3Plugin* plugin) {
         return 0;
     }
 
-    trace_vst3_step("get_state_size", "begin");
     std::lock_guard<std::mutex> state_lock(plugin->state_mutex);
 
     // VST3 doesn't provide a query method for state size
@@ -1272,13 +1245,11 @@ int rack_vst3_plugin_get_state_size(RackVST3Plugin* plugin) {
     }
 
     if (component_end_pos <= component_start_pos && stream->getSize() <= sizeof(uint32_t)) {
-        trace_vst3_step("get_state_size", "not_supported");
         return RACK_VST3_ERROR_NOT_SUPPORTED;
     }
 
     // Return actual state size
     // This avoids the retry pattern - user gets correct size on first call
-    trace_vst3_step("get_state_size", "ok");
     return static_cast<int>(stream->getSize());
 }
 
@@ -1287,7 +1258,6 @@ int rack_vst3_plugin_get_state(RackVST3Plugin* plugin, uint8_t* data, size_t* si
         return RACK_VST3_ERROR_INVALID_PARAM;
     }
 
-    trace_vst3_step("get_state", "begin");
     std::lock_guard<std::mutex> state_lock(plugin->state_mutex);
 
     if (*size == 0) {
@@ -1309,7 +1279,6 @@ int rack_vst3_plugin_get_state(RackVST3Plugin* plugin, uint8_t* data, size_t* si
     // Get component state
     tresult result = plugin->component->getState(stream);
     if (result != kResultOk) {
-        trace_vst3_step("get_state", "component_getState_failed");
         return (result == kResultFalse || result == kNotImplemented)
             ? RACK_VST3_ERROR_NOT_SUPPORTED
             : RACK_VST3_ERROR_GENERIC;
@@ -1331,7 +1300,6 @@ int rack_vst3_plugin_get_state(RackVST3Plugin* plugin, uint8_t* data, size_t* si
     if (plugin->controller && reinterpret_cast<void*>(plugin->controller.get()) != reinterpret_cast<void*>(plugin->component.get())) {
         result = plugin->controller->getState(stream);
         if (result != kResultOk && result != kResultFalse && result != kNotImplemented) {
-            trace_vst3_step("get_state", "controller_getState_failed");
             return RACK_VST3_ERROR_GENERIC;
         }
     }
@@ -1343,7 +1311,6 @@ int rack_vst3_plugin_get_state(RackVST3Plugin* plugin, uint8_t* data, size_t* si
     size_t state_size = stream->getSize();
     if (state_size > *size) {
         *size = state_size;  // Return required size for caller to retry
-        trace_vst3_step("get_state", "buffer_too_small");
         return RACK_VST3_ERROR_INVALID_PARAM;
     }
 
@@ -1351,7 +1318,6 @@ int rack_vst3_plugin_get_state(RackVST3Plugin* plugin, uint8_t* data, size_t* si
     *size = state_size;
     // IPtr automatically releases stream on scope exit
 
-    trace_vst3_step("get_state", "ok");
     return RACK_VST3_OK;
 }
 

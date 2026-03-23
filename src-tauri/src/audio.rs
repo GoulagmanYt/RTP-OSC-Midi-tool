@@ -549,10 +549,6 @@ impl AudioEngine {
     }
 
     pub fn stop(&self, app_handle: Option<tauri::AppHandle>) {
-        background_log(
-            "debug",
-            format!("audio.stop: begin (thread={:?})", std::thread::current().id()),
-        );
         let app_handle_for_drop = app_handle.clone();
         let runtime = self.runtime.lock().take();
         *self.midi_tx.lock() = None;
@@ -565,15 +561,6 @@ impl AudioEngine {
             let editor_window_arc = runtime.editor_window.clone();
             let is_vst3 = matches!(*plugin.lock(), PluginBackend::Vst3 { .. });
             let is_sforzando = is_sforzando_vst3(&vst_path);
-            background_log(
-                "debug",
-                format!(
-                    "audio.stop: runtime captured (vst3={}, sforzando={}, path={})",
-                    is_vst3,
-                    is_sforzando,
-                    vst_path.display()
-                ),
-            );
 
             if let Some(handle) = app_handle {
                 let (tx, rx) = mpsc::channel();
@@ -620,11 +607,8 @@ impl AudioEngine {
             }
 
             reset_all_notes(plugin.clone());
-            background_log("debug", "audio.stop: reset_all_notes done");
             drop(runtime);
-            background_log("debug", "audio.stop: runtime dropped");
             save_vst_state(&plugin, &vst_path);
-            background_log("debug", "audio.stop: save_vst_state done");
             if is_vst3 && !is_sforzando {
                 if let Some(handle) = app_handle_for_drop {
                     let (tx, rx) = mpsc::channel();
@@ -639,8 +623,6 @@ impl AudioEngine {
                                 "warn",
                                 "Timed out waiting for VST3 drop on main thread",
                             );
-                        } else {
-                            background_log("debug", "audio.stop: VST3 main-thread drop done");
                         }
                     } else {
                         background_log("warn", "Failed to schedule VST3 drop on main thread");
@@ -655,13 +637,10 @@ impl AudioEngine {
                     "Leaking sforzando VST3 instance on stop to avoid plugin_free crash",
                 );
                 std::mem::forget(plugin);
-                background_log("debug", "audio.stop: plugin Arc leaked (sforzando workaround)");
             } else {
                 drop(plugin);
-                background_log("debug", "audio.stop: plugin Arc dropped (local)");
             }
         }
-        background_log("debug", "audio.stop: end");
     }
 
     pub fn list_backends(&self) -> Vec<String> {
@@ -1526,10 +1505,6 @@ fn apply_vst2_parameters(instance: &mut PluginInstance, values: &[f32]) {
 // AudioEngine::stop(), so blocking here is safe and avoids silent save failures.
 fn save_vst_state(plugin: &Arc<Mutex<PluginBackend>>, vst_path: &PathBuf) {
     if is_sforzando_vst3(vst_path) {
-        background_log(
-            "debug",
-            "Skipping host VST3 state save for sforzando (plugin-specific stability workaround)",
-        );
         return;
     }
 
@@ -1620,7 +1595,6 @@ fn save_vst_state(plugin: &Arc<Mutex<PluginBackend>>, vst_path: &PathBuf) {
 
 fn load_vst_state(plugin: &Arc<Mutex<PluginBackend>>, vst_path: &PathBuf, logger: &FrontendLogger) {
     if is_sforzando_vst3(vst_path) {
-        logger.debug("Skipping host VST3 state load for sforzando");
         return;
     }
 
