@@ -2,7 +2,7 @@
 
 use std::{
     collections::VecDeque,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU32, Ordering},
         mpsc, Arc,
@@ -553,6 +553,7 @@ impl AudioEngine {
             "debug",
             format!("audio.stop: begin (thread={:?})", std::thread::current().id()),
         );
+        let app_handle_for_drop = app_handle.clone();
         let runtime = self.runtime.lock().take();
         *self.midi_tx.lock() = None;
         self.midi_emergency_reset_requested
@@ -622,8 +623,30 @@ impl AudioEngine {
             background_log("debug", "audio.stop: runtime dropped");
             save_vst_state(&plugin, &vst_path);
             background_log("debug", "audio.stop: save_vst_state done");
+            if is_vst3 {
+                if let Some(handle) = app_handle_for_drop {
+                    let (tx, rx) = mpsc::channel();
+                    let plugin_for_main_drop = plugin.clone();
+                    let scheduled = handle.run_on_main_thread(move || {
+                        drop(plugin_for_main_drop);
+                        let _ = tx.send(());
+                    });
+                    if scheduled.is_ok() {
+                        if rx.recv_timeout(Duration::from_secs(2)).is_err() {
+                            background_log(
+                                "warn",
+                                "Timed out waiting for VST3 drop on main thread",
+                            );
+                        } else {
+                            background_log("debug", "audio.stop: VST3 main-thread drop done");
+                        }
+                    } else {
+                        background_log("warn", "Failed to schedule VST3 drop on main thread");
+                    }
+                }
+            }
             drop(plugin);
-            background_log("debug", "audio.stop: plugin Arc dropped");
+            background_log("debug", "audio.stop: plugin Arc dropped (local)");
         }
         background_log("debug", "audio.stop: end");
     }
@@ -1489,6 +1512,14 @@ fn apply_vst2_parameters(instance: &mut PluginInstance, values: &[f32]) {
 // saved. The audio stream has been stopped before save_vst_state is called from
 // AudioEngine::stop(), so blocking here is safe and avoids silent save failures.
 fn save_vst_state(plugin: &Arc<Mutex<PluginBackend>>, vst_path: &PathBuf) {
+    if is_sforzando_vst3(vst_path) {
+        background_log(
+            "debug",
+            "Skipping host VST3 state save for sforzando (plugin-specific stability workaround)",
+        );
+        return;
+    }
+
     let Some(state_path) = state_path_for_plugin(vst_path) else {
         background_log("warn", "Could not determine VST state path");
         return;
@@ -1575,6 +1606,11 @@ fn save_vst_state(plugin: &Arc<Mutex<PluginBackend>>, vst_path: &PathBuf) {
 }
 
 fn load_vst_state(plugin: &Arc<Mutex<PluginBackend>>, vst_path: &PathBuf, logger: &FrontendLogger) {
+    if is_sforzando_vst3(vst_path) {
+        logger.debug("Skipping host VST3 state load for sforzando");
+        return;
+    }
+
     let Some(state_path) = state_path_for_plugin(vst_path) else {
         logger.warn("Could not determine VST state path");
         return;
@@ -2815,6 +2851,11 @@ fn timestamp_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+fn is_sforzando_vst3(vst_path: &Path) -> bool {
+    let path = vst_path.to_string_lossy().to_lowercase();
+    path.ends_with("sforzando.vst3") || path.contains("\\sforzando.vst3")
 }
 
 fn db_to_linear(db: f32) -> f32 {
