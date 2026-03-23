@@ -555,12 +555,13 @@ impl AudioEngine {
             .store(false, Ordering::Relaxed);
 
         if let Some(runtime) = runtime {
-            save_vst_state(&runtime.plugin, &runtime.vst_path);
-
+            let plugin = runtime.plugin.clone();
+            let vst_path = runtime.vst_path.clone();
             let editor_window_arc = runtime.editor_window.clone();
 
             if let Some(handle) = app_handle {
-                let _ = handle.run_on_main_thread(move || {
+                let (tx, rx) = mpsc::channel();
+                let scheduled = handle.run_on_main_thread(move || {
                     if let Some(mut editor_win) = editor_window_arc.lock().take() {
                         match &mut editor_win {
                             EditorWindow::Vst2 { editor, hwnd } => {
@@ -577,7 +578,22 @@ impl AudioEngine {
                             }
                         }
                     }
+                    let _ = tx.send(());
                 });
+
+                if scheduled.is_ok() {
+                    if rx.recv_timeout(Duration::from_secs(2)).is_err() {
+                        background_log(
+                            "warn",
+                            "Timed out waiting for VST editor to close on main thread",
+                        );
+                    }
+                } else if let Some(_editor_win) = runtime.editor_window.lock().take() {
+                    background_log(
+                        "warn",
+                        "Failed to schedule VST editor close on main thread; forcing local drop",
+                    );
+                }
             } else {
                 if let Some(_editor_win) = editor_window_arc.lock().take() {
                     background_log(
@@ -587,8 +603,9 @@ impl AudioEngine {
                 }
             }
 
-            reset_all_notes(runtime.plugin.clone());
+            reset_all_notes(plugin.clone());
             drop(runtime);
+            save_vst_state(&plugin, &vst_path);
         }
     }
 
