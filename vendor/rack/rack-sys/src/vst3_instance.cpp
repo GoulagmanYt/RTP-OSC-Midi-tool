@@ -571,6 +571,10 @@ void rack_vst3_plugin_free(RackVST3Plugin* plugin) {
     }
 
     std::lock_guard<std::mutex> lock(g_vst3_lifecycle_mutex);
+    // Serialize teardown against process()/state/UI calls.
+    // process() uses try_lock on state_mutex; taking the same mutex here
+    // guarantees we don't free or mutate plugin internals concurrently.
+    std::lock_guard<std::mutex> state_lock(plugin->state_mutex);
     trace_free_step("begin");
 
     // Stop processing before deactivating/terminating the plugin.

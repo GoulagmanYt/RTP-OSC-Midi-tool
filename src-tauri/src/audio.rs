@@ -2172,7 +2172,8 @@ fn audio_callback<T: Sample + FromSample<f32>>(
     let mut plugin = match plugin.try_lock() {
         Some(p) => p,
         None => {
-            state.xruns.fetch_add(1, Ordering::Relaxed);
+            // Contention while opening/closing UI or saving state is expected.
+            // Keep a dedicated lock-miss metric, but don't report it as an xrun.
             state.audio_lock_miss_count.fetch_add(1, Ordering::Relaxed);
             replay_last_output_or_silence(
                 data,
