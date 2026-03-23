@@ -1,0 +1,40 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:1420"
+  },
+  "bundle": {
+    "icon": [
+      "icons/icon.ico",
+      "icons/icon.png"
+    ],
+    "targets": [
+      "msi",
+      "app"
+    ]
+  },
+  "productName": "OSCMidi",
+  "mainBinaryName": "OSCMidi",
+  "version": "0.1.0",
+  "identifier": "com.oscmidi.desktop",
+  "plugins": {},
+  "app": {
+    "windows": [
+      {
+        "title": "OSC MIDI Bridge",
+        "decorations": false,
+        "transparent": true,
+        "width": 1280,
+        "height": 900,
+        "minWidth": 1240,
+        "minHeight": 860,
+        "resizable": true,
+        "center": true,
+        "useHttpsScheme": true
+      }
+    ]
+  }
+}

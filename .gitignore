@@ -1,0 +1,7 @@
+node_modules
+dist
+build_logs
+.cargo-target
+src-tauri/target
+.venv
+vendor/rack/rack-sys/external

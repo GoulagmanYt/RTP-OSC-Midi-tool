@@ -1,0 +1,186 @@
+﻿[
+    {
+        "mode":  "--vst3",
+        "path":  "C:\\Program Files\\Common Files\\VST3\\sforzando.vst3",
+        "status":  "ok",
+        "exitCode":  0,
+        "stdout":  "VST3 smoke ok: C:\\Program Files\\Common Files\\VST3\\sforzando.vst3 (inputs=0, outputs=2)\n",
+        "stderr":  null
+    },
+    {
+        "mode":  "--vst2",
+        "path":  "C:\\Program Files\\VSTPlugins\\Bitsonic\\Keyzone\\Keyzone.dll",
+        "status":  "fail",
+        "exitCode":  1,
+        "stdout":  null,
+        "stderr":  "VST2 smoke: failed to load plugin: Could not open the requested path\n"
+    },
+    {
+        "mode":  "--vst2",
+        "path":  "C:\\Program Files\\VSTPlugins\\Bitsonic\\Keyzone Classic.dll",
+        "status":  "ok",
+        "exitCode":  0,
+        "stdout":  "VST2 smoke ok: C:\\Program Files\\VSTPlugins\\Bitsonic\\Keyzone Classic.dll\n",
+        "stderr":  null
+    },
+    {
+        "mode":  "--vst2",
+        "path":  "C:\\Program Files\\VSTPlugins\\Plogue Art et Technologie, Inc\\sforzando VST_x64.dll",
+        "status":  "ok",
+        "exitCode":  0,
+        "stdout":  "VST2 smoke ok: C:\\Program Files\\VSTPlugins\\Plogue Art et Technologie, Inc\\sforzando VST_x64.dll\n",
+        "stderr":  null
+    },
+    {
+        "mode":  "--vst2",
+        "path":  "C:\\Program Files\\VSTPlugins\\Plogue Art et Technologie, Inc\\sforzando VST_x86.dll",
+        "status":  "fail",
+        "exitCode":  1,
+        "stdout":  null,
+        "stderr":  "VST2 smoke: failed to load plugin: Could not open the requested path\n"
+    },
+    {
+        "mode":  "--vst2",
+        "path":  "C:\\Program Files\\VSTPlugins\\ReaPlugs\\reacomp-standalone.dll",
+        "status":  "fail",
+        "exitCode":  1,
+        "stdout":  null,
+        "stderr":  "VST2 smoke: failed to instantiate plugin: The plugin API version is not compatible with this library\n"
+    },
+    {
+        "mode":  "--vst2",
+        "path":  "C:\\Program Files\\VSTPlugins\\ReaPlugs\\reacontrolmidi-standalone.dll",
+        "status":  "ok",
+        "exitCode":  0,
+        "stdout":  "VST2 smoke ok: C:\\Program Files\\VSTPlugins\\ReaPlugs\\reacontrolmidi-standalone.dll\n",
+        "stderr":  null
+    },
+    {
+        "mode":  "--vst2",
+        "path":  "C:\\Program Files\\VSTPlugins\\ReaPlugs\\readelay-standalone.dll",
+        "status":  "fail",
+        "exitCode":  1,
+        "stdout":  null,
+        "stderr":  "VST2 smoke: failed to instantiate plugin: The plugin API version is not compatible with this library\n"
+    },
+    {
+        "mode":  "--vst2",
+        "path":  "C:\\Program Files\\VSTPlugins\\ReaPlugs\\reaeq-standalone.dll",
+        "status":  "fail",
+        "exitCode":  1,
+        "stdout":  null,
+        "stderr":  "VST2 smoke: failed to instantiate plugin: The plugin API version is not compatible with this library\n"
+    },
+    {
+        "mode":  "--vst2",
+        "path":  "C:\\Program Files\\VSTPlugins\\ReaPlugs\\reafir_standalone.dll",
+        "status":  "fail",
+        "exitCode":  1,
+        "stdout":  null,
+        "stderr":  "VST2 smoke: failed to instantiate plugin: The plugin API version is not compatible with this library\n"
+    },
+    {
+        "mode":  "--vst2",
+        "path":  "C:\\Program Files\\VSTPlugins\\ReaPlugs\\reagate-standalone.dll",
+        "status":  "fail",
+        "exitCode":  1,
+        "stdout":  null,
+        "stderr":  "VST2 smoke: failed to instantiate plugin: The plugin API version is not compatible with this library\n"
+    },
+    {
+        "mode":  "--vst2",
+        "path":  "C:\\Program Files\\VSTPlugins\\ReaPlugs\\reajs.dll",
+        "status":  "ok",
+        "exitCode":  0,
+        "stdout":  "VST2 smoke ok: C:\\Program Files\\VSTPlugins\\ReaPlugs\\reajs.dll\n",
+        "stderr":  null
+    },
+    {
+        "mode":  "--vst2",
+        "path":  "C:\\Program Files\\VSTPlugins\\ReaPlugs\\reastream-standalone.dll",
+        "status":  "fail",
+        "exitCode":  1,
+        "stdout":  null,
+        "stderr":  "VST2 smoke: failed to instantiate plugin: The plugin API version is not compatible with this library\n"
+    },
+    {
+        "mode":  "--vst2",
+        "path":  "C:\\Program Files\\VSTPlugins\\ReaPlugs\\reaxcomp-standalone.dll",
+        "status":  "fail",
+        "exitCode":  1,
+        "stdout":  null,
+        "stderr":  "VST2 smoke: failed to instantiate plugin: The plugin API version is not compatible with this library\n"
+    },
+    {
+        "mode":  "--vst2",
+        "path":  "C:\\Program Files\\VSTPlugins\\win-rnnoise\\win-rnnoise\\ladspa\\Release\\rnnoise_ladspa.dll",
+        "status":  "fail",
+        "exitCode":  1,
+        "stdout":  null,
+        "stderr":  "VST2 smoke: failed to load plugin: The given path does not contain a VST2.4 compatible library\n"
+    },
+    {
+        "mode":  "--vst2",
+        "path":  "C:\\Program Files\\VSTPlugins\\win-rnnoise\\win-rnnoise\\rnnoise_mono.lv2\\rnnoise_mono.dll",
+        "status":  "fail",
+        "exitCode":  1,
+        "stdout":  null,
+        "stderr":  "VST2 smoke: failed to load plugin: The given path does not contain a VST2.4 compatible library\n"
+    },
+    {
+        "mode":  "--vst2",
+        "path":  "C:\\Program Files\\VSTPlugins\\win-rnnoise\\win-rnnoise\\rnnoise_stereo.lv2\\rnnoise_stereo.dll",
+        "status":  "fail",
+        "exitCode":  1,
+        "stdout":  null,
+        "stderr":  "VST2 smoke: failed to load plugin: The given path does not contain a VST2.4 compatible library\n"
+    },
+    {
+        "mode":  "--vst2",
+        "path":  "C:\\Program Files\\VSTPlugins\\win-rnnoise\\win-rnnoise\\vst\\rnnoise_mono.dll",
+        "status":  "ok",
+        "exitCode":  0,
+        "stdout":  "VST2 smoke ok: C:\\Program Files\\VSTPlugins\\win-rnnoise\\win-rnnoise\\vst\\rnnoise_mono.dll\n",
+        "stderr":  null
+    },
+    {
+        "mode":  "--vst2",
+        "path":  "C:\\Program Files\\VSTPlugins\\win-rnnoise\\win-rnnoise\\vst\\rnnoise_stereo.dll",
+        "status":  "ok",
+        "exitCode":  0,
+        "stdout":  "VST2 smoke ok: C:\\Program Files\\VSTPlugins\\win-rnnoise\\win-rnnoise\\vst\\rnnoise_stereo.dll\n",
+        "stderr":  null
+    },
+    {
+        "mode":  "--vst2",
+        "path":  "C:\\Program Files\\VSTPlugins\\Iowa Piano - 64.dll",
+        "status":  "ok",
+        "exitCode":  0,
+        "stdout":  "VST2 smoke ok: C:\\Program Files\\VSTPlugins\\Iowa Piano - 64.dll\n",
+        "stderr":  null
+    },
+    {
+        "mode":  "--vst2",
+        "path":  "C:\\Program Files\\VSTPlugins\\MSoundFactory.dll",
+        "status":  "ok",
+        "exitCode":  0,
+        "stdout":  "VST2 smoke ok: C:\\Program Files\\VSTPlugins\\MSoundFactory.dll\n",
+        "stderr":  null
+    },
+    {
+        "mode":  "--vst2",
+        "path":  "C:\\Program Files\\VSTPlugins\\MSoundFactory6out.dll",
+        "status":  "ok",
+        "exitCode":  0,
+        "stdout":  "VST2 smoke ok: C:\\Program Files\\VSTPlugins\\MSoundFactory6out.dll\n",
+        "stderr":  null
+    },
+    {
+        "mode":  "--vst2",
+        "path":  "C:\\Program Files (x86)\\VSTPlugins\\Bitsonic\\Keyzone\\Keyzone.dll",
+        "status":  "fail",
+        "exitCode":  1,
+        "stdout":  null,
+        "stderr":  "VST2 smoke: failed to load plugin: Could not open the requested path\n"
+    }
+]

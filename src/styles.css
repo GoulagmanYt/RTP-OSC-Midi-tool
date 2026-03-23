@@ -1,0 +1,301 @@
+@import "tailwindcss";
+
+@plugin "tailwindcss-animate";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  --background: 0 0% 100%;
+  --foreground: 240 10% 3.9%;
+  --card: 0 0% 100%;
+  --card-foreground: 240 10% 3.9%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 240 10% 3.9%;
+  --primary: 240 5.9% 10%;
+  --primary-foreground: 0 0% 98%;
+  --secondary: 240 4.8% 95.9%;
+  --secondary-foreground: 240 5.9% 10%;
+  --muted: 240 4.8% 95.9%;
+  --muted-foreground: 240 3.8% 46.1%;
+  --accent: 240 4.8% 95.9%;
+  --accent-foreground: 240 5.9% 10%;
+  --destructive: 0 84.2% 60.2%;
+  --destructive-foreground: 0 0% 98%;
+  --border: 240 5.9% 90%;
+  --input: 240 5.9% 90%;
+  --ring: 240 5.9% 10%;
+  --radius: 0.75rem;
+  --ui-scale: 1;
+  --page-padding: 24px;
+  --sidebar-width: 16rem;
+  --surface-opacity: 0.5;
+  --panel-opacity: 0.2;
+  --card-opacity: 1;
+  --aurora-opacity: 0.75;
+  --grain-opacity: 0.16;
+}
+
+.dark {
+  --background: 240 10% 3.9%;
+  --foreground: 0 0% 98%;
+  --card: 240 10% 3.9%;
+  --card-foreground: 0 0% 98%;
+  --popover: 240 10% 3.9%;
+  --popover-foreground: 0 0% 98%;
+  --primary: 0 0% 98%;
+  --primary-foreground: 240 5.9% 10%;
+  --secondary: 240 3.7% 15.9%;
+  --secondary-foreground: 0 0% 98%;
+  --muted: 240 3.7% 15.9%;
+  --muted-foreground: 240 5% 64.9%;
+  --accent: 240 3.7% 15.9%;
+  --accent-foreground: 0 0% 98%;
+  --destructive: 0 62.8% 30.6%;
+  --destructive-foreground: 0 0% 98%;
+  --border: 240 3.7% 15.9%;
+  --input: 240 3.7% 15.9%;
+  --ring: 240 4.9% 83.9%;
+}
+
+@theme {
+  --color-border: hsl(var(--border));
+  --color-input: hsl(var(--input));
+  --color-ring: hsl(var(--ring));
+  --color-background: hsl(var(--background));
+  --color-foreground: hsl(var(--foreground));
+
+  --color-primary: hsl(var(--primary));
+  --color-primary-foreground: hsl(var(--primary-foreground));
+
+  --color-secondary: hsl(var(--secondary));
+  --color-secondary-foreground: hsl(var(--secondary-foreground));
+
+  --color-destructive: hsl(var(--destructive));
+  --color-destructive-foreground: hsl(var(--destructive-foreground));
+
+  --color-muted: hsl(var(--muted));
+  --color-muted-foreground: hsl(var(--muted-foreground));
+
+  --color-accent: hsl(var(--accent));
+  --color-accent-foreground: hsl(var(--accent-foreground));
+
+  --color-popover: hsl(var(--popover));
+  --color-popover-foreground: hsl(var(--popover-foreground));
+
+  --color-card: hsl(var(--card));
+  --color-card-foreground: hsl(var(--card-foreground));
+
+  --radius-lg: var(--radius);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-sm: calc(var(--radius) - 4px);
+
+  --animate-accordion-down: accordion-down 0.2s ease-out;
+  --animate-accordion-up: accordion-up 0.2s ease-out;
+
+  @keyframes accordion-down {
+    from { height: 0; }
+    to { height: var(--radix-accordion-content-height); }
+  }
+  @keyframes accordion-up {
+    from { height: var(--radix-accordion-content-height); }
+    to { height: 0; }
+  }
+}
+
+/*
+  The directives below are not needed if we use @theme above, 
+  BUT we still need to apply base styles.
+  In v4, @import "tailwindcss" includes base.
+*/
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  html {
+    font-size: calc(16px * var(--ui-scale));
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+/* Custom scrollbar for Webkit */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  @apply bg-muted-foreground/20 rounded-full hover:bg-muted-foreground/40;
+}
+
+@layer components {
+  .page-shell {
+    position: relative;
+    isolation: isolate;
+  }
+
+  .sidebar {
+    width: var(--sidebar-width);
+  }
+
+  .glass-surface {
+    background-color: hsl(var(--background) / var(--surface-opacity));
+  }
+
+  .glass-panel {
+    background-color: hsl(var(--background) / var(--panel-opacity));
+  }
+
+  .aurora {
+    position: absolute;
+    width: 36rem;
+    height: 36rem;
+    filter: blur(64px);
+    opacity: var(--aurora-opacity);
+    mix-blend-mode: screen;
+    background: radial-gradient(circle at 30% 30%, hsl(var(--primary) / 0.22), transparent 55%);
+    animation: aurora-shift 22s ease-in-out infinite alternate;
+  }
+
+  .aurora--alt {
+    background: radial-gradient(circle at 70% 40%, hsl(var(--accent) / 0.16), transparent 55%);
+    opacity: calc(var(--aurora-opacity) * 0.7);
+    animation-delay: -8s;
+  }
+
+  .aurora--muted {
+    width: 28rem;
+    height: 28rem;
+    opacity: calc(var(--aurora-opacity) * 0.5);
+    background: radial-gradient(circle at 40% 60%, hsl(var(--muted-foreground) / 0.25), transparent 60%);
+    animation-delay: -4s;
+  }
+
+  .grain {
+    position: absolute;
+    inset: 0;
+    opacity: var(--grain-opacity);
+    background-image: radial-gradient(circle at 1px 1px, rgba(255, 255, 255, 0.22) 1px, transparent 0);
+    background-size: 24px 24px;
+    mix-blend-mode: soft-light;
+    pointer-events: none;
+    animation: grain-shift 18s linear infinite;
+  }
+
+  .page-body {
+    padding: var(--page-padding);
+    animation: fade-up 0.45s ease;
+  }
+
+  .card-surface {
+    position: relative;
+    min-width: 0;
+    overflow: hidden;
+    background-color: hsl(var(--card) / var(--card-opacity));
+    transition: transform 240ms ease, box-shadow 240ms ease, border-color 240ms ease, background-color 240ms ease;
+    animation: float-in 0.45s ease var(--card-delay, 0ms) both;
+    will-change: transform, box-shadow;
+  }
+
+  .card-surface > * {
+    min-width: 0;
+  }
+
+  .card-surface::after {
+    content: "";
+    position: absolute;
+    inset: -1px;
+    border-radius: inherit;
+    background: radial-gradient(circle at 20% 20%, hsl(var(--primary) / 0.22), transparent 45%);
+    opacity: 0;
+    transition: opacity 0.3s ease;
+    pointer-events: none;
+  }
+
+  .card-surface:hover {
+    transform: translateY(-4px);
+    box-shadow: 0 22px 64px -38px rgba(0, 0, 0, 0.6), 0 12px 30px -22px rgba(0, 0, 0, 0.35);
+    border-color: hsl(var(--primary) / 0.3);
+  }
+
+  .card-surface:hover::after {
+    opacity: 0.85;
+  }
+
+  .nav-pill {
+    position: relative;
+    overflow: hidden;
+  }
+
+  .nav-pill::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(120deg, hsl(var(--primary) / 0.12), transparent 60%);
+    opacity: 0;
+    transform: translateX(-10%);
+    transition: opacity 240ms ease, transform 240ms ease;
+  }
+
+  .nav-pill:hover::before,
+  .nav-pill:focus-visible::before {
+    opacity: 1;
+    transform: translateX(0);
+  }
+
+  .reduce-motion .aurora,
+  .reduce-motion .grain,
+  .reduce-motion .page-body,
+  .reduce-motion .card-surface {
+    animation: none !important;
+  }
+
+  .reduce-motion .card-surface,
+  .reduce-motion .nav-pill::before {
+    transition: none !important;
+  }
+}
+
+@keyframes aurora-shift {
+  from {
+    transform: translate3d(-6%, -4%, 0) rotate(-4deg);
+  }
+  to {
+    transform: translate3d(10%, 8%, 0) rotate(6deg);
+  }
+}
+
+@keyframes grain-shift {
+  from {
+    transform: translate3d(0, 0, 0);
+  }
+  to {
+    transform: translate3d(-40%, -30%, 0);
+  }
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes float-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
