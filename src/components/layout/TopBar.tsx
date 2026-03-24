@@ -5,7 +5,12 @@ import { useBridge } from "../../providers/BridgeProvider";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import Pastille from "../../assets/pastille-96.jpg";
 import { useI18n } from "../../providers/LanguageProvider";
-const appWindow = getCurrentWebviewWindow()
+
+let _appWindow: ReturnType<typeof getCurrentWebviewWindow> | null = null;
+function getAppWindow() {
+  if (!_appWindow) _appWindow = getCurrentWebviewWindow();
+  return _appWindow;
+}
 
 export function TopBar({ onOpenCommand }: { onOpenCommand: () => void }) {
   const location = useLocation();
@@ -61,17 +66,17 @@ export function TopBar({ onOpenCommand }: { onOpenCommand: () => void }) {
           <div className="flex gap-2">
             <button 
               aria-label={t("window.close")}
-              onClick={() => appWindow.close()}
+              onClick={() => getAppWindow().close()}
               className="w-3 h-3 rounded-full bg-red-500 hover:bg-red-600 transition-colors" 
             />
             <button 
               aria-label={t("window.minimize")}
-              onClick={() => appWindow.minimize()}
+              onClick={() => getAppWindow().minimize()}
               className="w-3 h-3 rounded-full bg-yellow-500 hover:bg-yellow-600 transition-colors" 
             />
             <button 
               aria-label={t("window.maximize")}
-              onClick={() => appWindow.toggleMaximize()}
+              onClick={() => getAppWindow().toggleMaximize()}
               className="w-3 h-3 rounded-full bg-green-500 hover:bg-green-600 transition-colors" 
             />
          </div>

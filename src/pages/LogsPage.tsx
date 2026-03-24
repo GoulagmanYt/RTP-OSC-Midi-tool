@@ -1,4 +1,3 @@
-import { useRef } from "react";
 import { useBridge } from "../providers/BridgeProvider";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
@@ -8,7 +7,6 @@ import { useI18n } from "../providers/LanguageProvider";
 
 export default function LogsPage() {
   const { logs, clearLogs } = useBridge();
-  const bottomRef = useRef<HTMLDivElement>(null);
   const { t } = useI18n();
 
   return (
@@ -45,7 +43,6 @@ export default function LogsPage() {
                       </span>
                   </div>
               ))}
-              <div ref={bottomRef} />
           </div>
       </div>
     </div>

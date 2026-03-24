@@ -142,7 +142,7 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
     };
   }, [t]);
 
-  const updateConfig = async (newConfig: Partial<api.Config>) => {
+  const updateConfig = useCallback(async (newConfig: Partial<api.Config>) => {
     if (!config) return;
     const updated = { ...config, ...newConfig };
     const changed = (Object.keys(newConfig) as (keyof api.Config)[]).some(
@@ -150,7 +150,7 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
     );
     if (!changed) return;
     setConfig(updated);
-  };
+  }, [config]);
 
   const reloadConfig = useCallback(async () => {
     try {
@@ -178,16 +178,16 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
     }
   }, [config, t]);
 
-  const saveConfig = async () => {
+  const saveConfig = useCallback(async () => {
     if (!config) return;
     try {
       await api.saveConfig(config);
     } catch (e) {
       console.error("Failed to save config", e);
     }
-  };
+  }, [config]);
 
-  const toggleBridge = async () => {
+  const toggleBridge = useCallback(async () => {
     if (!config || !status) return;
     try {
       if (status.running) {
@@ -234,9 +234,9 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
       toast.error(t("toasts.bridge.bridgeActionFailed"));
       await refreshStatus();
     }
-  };
+  }, [config, status, runPreflight, t, refreshStatus]);
 
-  const clearLogs = () => setLogs([]);
+  const clearLogs = useCallback(() => setLogs([]), []);
 
   // FIX: Remove `refreshStatus` from the dependency array — it's stable (useCallback
   // with no deps) so it never changes, but including it caused this effect to re-run

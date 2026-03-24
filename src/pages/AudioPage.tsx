@@ -330,7 +330,7 @@ export default function AudioPage() {
                         <span>{t("audio.enableEngine")}</span>
                         <span className="font-normal text-muted-foreground text-xs">{t("audio.enableEngineHint")}</span>
                     </Label>
-                    <Switch checked={config?.audioEnabled} onCheckedChange={handleAudioToggle} />
+                    <Switch checked={config?.audioEnabled ?? false} onCheckedChange={handleAudioToggle} />
                 </div>
 
                 <div className="space-y-2">
@@ -454,7 +454,7 @@ export default function AudioPage() {
                     <span>{t("audio.limiter")}</span>
                     <span className="font-normal text-muted-foreground text-xs">{t("audio.limiterHint")}</span>
                   </Label>
-                  <Switch checked={config?.audioLimiterEnabled} onCheckedChange={handleLimiterToggle} />
+                  <Switch checked={config?.audioLimiterEnabled ?? false} onCheckedChange={handleLimiterToggle} />
                 </div>
 
                 <div className="flex items-center justify-between text-xs text-muted-foreground">
@@ -471,30 +471,30 @@ export default function AudioPage() {
                   </span>
                 </div>
                 <div className="flex items-center justify-between text-xs text-muted-foreground">
-                  <span>Buffer demandé</span>
+                  <span>{t("audio.requestedBuffer")}</span>
                   <span className="text-foreground font-semibold">
                     {requestedBufferSize ? `${requestedBufferSize} ${t("units.samples")}` : "--"}
                   </span>
                 </div>
                 <div className="flex items-center justify-between text-xs text-muted-foreground">
-                  <span>Buffer stream</span>
+                  <span>{t("audio.streamBuffer")}</span>
                   <span className="text-foreground font-semibold">
                     {streamBufferSize ? `${streamBufferSize} ${t("units.samples")}` : t("common.auto")}
                   </span>
                 </div>
                 <div className="flex items-center justify-between text-xs text-muted-foreground">
-                  <span>Compat MIDI VST</span>
+                  <span>{t("audio.vstMidiCompat")}</span>
                   <span className="text-foreground font-semibold">
                     {vstMidiCompatible === null
                       ? "--"
                       : vstMidiCompatible
                       ? "OK"
-                      : "Non compatible"}
+                      : t("audio.vstMidiIncompatible")}
                   </span>
                 </div>
                 {bufferMismatch && (
                   <p className="text-xs text-amber-600">
-                    Le driver audio impose une taille de buffer différente de la valeur demandée.
+                    {t("audio.bufferMismatchWarning")}
                   </p>
                 )}
                 <div className="flex items-center justify-between text-xs text-muted-foreground">

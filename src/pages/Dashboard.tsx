@@ -59,6 +59,7 @@ export default function Dashboard() {
   const { t } = useI18n();
   const [lastDropoutAt, setLastDropoutAt] = useState<number | null>(null);
   const lastXrun = useRef<number | null>(null);
+  const [now, setNow] = useState(() => Date.now());
 
   const rtpPort = status?.rtpBoundPort ?? config?.rtpPort;
   const audioBackend = status?.audioBackend || config?.audioBackend || t("common.auto");
@@ -84,7 +85,7 @@ export default function Dashboard() {
   const audioPeakR = metrics?.audioPeakR ?? null;
   const midiRate = metrics ? metrics.midiMessagesPerSec : null;
   const oscRate = metrics ? metrics.oscMessagesPerSec : null;
-  const dropoutsActive = lastDropoutAt !== null && Date.now() - lastDropoutAt < 30_000;
+  const dropoutsActive = lastDropoutAt !== null && now - lastDropoutAt < 30_000;
   const latencyBadge: "secondary" | "warning" | "success" =
     latencyMs === null ? "secondary" : latencyMs > 40 ? "warning" : "success";
   const latencyDisplay = latencyMs !== null ? Number(latencyMs.toFixed(1)) : null;
@@ -105,6 +106,12 @@ export default function Dashboard() {
       setLastDropoutAt(Date.now());
     }
   }, [metrics?.audioXruns]);
+
+  useEffect(() => {
+    if (lastDropoutAt === null) return;
+    const id = window.setInterval(() => setNow(Date.now()), 5000);
+    return () => window.clearInterval(id);
+  }, [lastDropoutAt]);
 
   const logPreview = logs.slice(0, 3);
 
@@ -375,19 +382,19 @@ export default function Dashboard() {
               <span className="font-medium">{sampleRate ? `${sampleRate} ${t("units.hz")}` : "--"}</span>
             </div>
             <div className="flex items-center justify-between">
-              <span>Buffer demande</span>
+              <span>{t("dashboard.bufferRequested")}</span>
               <span className="font-medium">
                 {requestedBufferSamples ? `${requestedBufferSamples} ${t("units.samples")}` : "--"}
               </span>
             </div>
             <div className="flex items-center justify-between">
-              <span>Buffer stream</span>
+              <span>{t("dashboard.bufferStream")}</span>
               <span className="font-medium">
                 {streamBufferSamples ? `${streamBufferSamples} ${t("units.samples")}` : t("common.auto")}
               </span>
             </div>
             <div className="flex items-center justify-between">
-              <span>MIDI VST</span>
+              <span>{t("dashboard.midiVstCompat")}</span>
               <span className="font-medium">
                 {vstMidiCompatible === null
                   ? "--"
@@ -398,7 +405,7 @@ export default function Dashboard() {
             </div>
             {bufferMismatch && (
               <p className="text-xs text-amber-600">
-                Le driver impose un buffer actif different de la valeur demandee.
+                {t("dashboard.bufferMismatchWarning")}
               </p>
             )}
             <div className="flex items-center justify-between">

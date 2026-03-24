@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { refreshRtpSessions, RtpParticipantInfo, RtpSessionInfo } from "../api";
 import { RTP_VIRTUAL_INPUT } from "../constants";
@@ -21,18 +21,18 @@ export default function RtpPage() {
   const { t } = useI18n();
   const remoteEnabled = config?.rtpRemoteEnabled ?? false;
   const remotes = config?.rtpRemotes ?? [];
+  const remotesRef = useRef(remotes);
+  remotesRef.current = remotes;
 
-  const refreshSessions = async () => {
+  const refreshSessions = useCallback(async () => {
     setDiscovering(true);
     try {
       await refreshRtpSessions();
     } catch (e) {
       console.error("Failed to list RTP sessions", e);
       setDiscovering(false);
-    } finally {
-      // setDiscovering(false) handled by event listener on success
     }
-  };
+  }, []);
   
   useEffect(() => {
     const unlistenSessions = listen<RtpSessionInfo[]>("rtp_sessions", (event) => {
@@ -64,9 +64,11 @@ export default function RtpPage() {
   }, [status?.rtpActive, remoteEnabled, config?.midiIn]);
 
   useEffect(() => {
-    if (!remoteEnabled || remotes.length === 0 || sessions.length === 0) return;
+    if (!remoteEnabled || sessions.length === 0) return;
+    const currentRemotes = remotesRef.current;
+    if (currentRemotes.length === 0) return;
     let changed = false;
-    const next = remotes.map((remote) => {
+    const next = currentRemotes.map((remote) => {
       if (!remote.autoConnect || !remote.name) return remote;
       const match = sessions.find(
         (session) => session.name.toLowerCase() === remote.name.toLowerCase()
@@ -82,7 +84,7 @@ export default function RtpPage() {
     if (changed) {
       updateConfig({ rtpRemotes: next });
     }
-  }, [remoteEnabled, remotes, sessions, updateConfig]);
+  }, [remoteEnabled, sessions, updateConfig]);
 
   const handleSave = async () => {
     setBusy(true);
