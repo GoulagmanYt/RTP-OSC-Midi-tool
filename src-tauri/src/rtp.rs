@@ -35,7 +35,6 @@ pub struct RtpRemoteTarget {
 
 struct RemoteTargetState {
     target: RtpRemoteTarget,
-    addr_string: String,
     backoff: Duration,
     next_attempt: Instant,
 }
@@ -58,21 +57,36 @@ impl RtpServer {
     ) -> Result<Self, String> {
         let (stop_tx, mut stop_rx) = oneshot::channel();
 
+        if port == u16::MAX {
+            return Err("Port RTP invalide: 65535 reserve".to_string());
+        }
+
         // Démarre la session synchronement pour connaître le port réellement lié (utile
         // pour éviter de s'auto-désactiver lors du test des ports).
         let (session, bound_port) = async_runtime::block_on(async {
             let ssrc = (Uuid::new_v4().as_u128() & 0xFFFF_FFFF) as u32;
-            let try_ports = [port, port + 2, port + 4];
+            let try_ports = [0u16, 2, 4]
+                .into_iter()
+                .filter_map(|offset| port.checked_add(offset))
+                .filter(|candidate| *candidate < u16::MAX)
+                .collect::<SmallVec<[u16; 3]>>();
+            if try_ports.is_empty() {
+                return Err("Impossible de demarrer RTP-MIDI (port invalide)".to_string());
+            }
             for p in try_ports {
                 match RtpMidiSession::start(p, &name, ssrc, InviteResponder::Accept).await {
                     Ok(session) => return Ok((session, p)),
                     Err(err) => {
                         if err.kind() == std::io::ErrorKind::AddrInUse {
-                            logger.warn(format!(
-                                "Port RTP {p} occupé, tentative sur {}/{}",
-                                p + 2,
-                                p + 3
-                            ));
+                            if let (Some(next_ctrl), Some(next_data)) =
+                                (p.checked_add(2), p.checked_add(3))
+                            {
+                                logger.warn(format!(
+                                    "Port RTP {p} occupé, tentative sur {next_ctrl}/{next_data}"
+                                ));
+                            } else {
+                                logger.warn(format!("Port RTP {p} occupé, autre tentative"));
+                            }
                             continue;
                         } else {
                             logger.error(format!("Erreur RTP-MIDI: {err}"));
@@ -171,10 +185,8 @@ impl RtpServer {
                 let mut remote_states = remote_targets
                     .into_iter()
                     .map(|target| {
-                        let addr_string = target.addr.to_string();
                         RemoteTargetState {
                             target,
-                            addr_string,
                             backoff: Duration::from_secs(1),
                             next_attempt: Instant::now(),
                         }
@@ -190,7 +202,7 @@ impl RtpServer {
                     for state in remote_states.iter_mut() {
                         if connected_addrs
                             .iter()
-                            .any(|addr| addr == &state.addr_string)
+                            .any(|addr| participant_matches_target(addr, &state.target.addr))
                         {
                             state.backoff = Duration::from_secs(1);
                             state.next_attempt = now + state.backoff;
@@ -539,6 +551,26 @@ fn midi_to_bytes(message: RtMidiMessage) -> SmallVec<[u8; 32]> {
     }
 }
 
+fn participant_matches_target(participant_addr: &str, target: &SocketAddr) -> bool {
+    if participant_addr == target.to_string() {
+        return true;
+    }
+
+    let Ok(participant) = participant_addr.parse::<SocketAddr>() else {
+        return false;
+    };
+    if participant.ip() != target.ip() {
+        return false;
+    }
+
+    participant.port() == target.port()
+        || target
+            .port()
+            .checked_add(1)
+            .map(|data_port| participant.port() == data_port)
+            .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -608,5 +640,20 @@ mod tests {
         drop(s1);
         drop(s2);
         assert!(ports_available(base).unwrap());
+    }
+
+    #[test]
+    fn participant_match_accepts_control_and_data_ports_for_same_host() {
+        let target: SocketAddr = "192.168.1.50:5004".parse().expect("target parse");
+        assert!(participant_matches_target("192.168.1.50:5004", &target));
+        assert!(participant_matches_target("192.168.1.50:5005", &target));
+        assert!(!participant_matches_target("192.168.1.50:5006", &target));
+        assert!(!participant_matches_target("192.168.1.51:5004", &target));
+    }
+
+    #[test]
+    fn participant_match_rejects_invalid_socket_addr_text() {
+        let target: SocketAddr = "127.0.0.1:5004".parse().expect("target parse");
+        assert!(!participant_matches_target("not-an-addr", &target));
     }
 }

@@ -95,6 +95,16 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
         } catch (e) {
           console.warn("Preflight check failed at init", e);
         }
+
+        // Honor persisted auto-start preference after initial state hydration.
+        if (c.autoStart) {
+          try {
+            const bootStatus = await api.startBridge(c);
+            setStatus(bootStatus);
+          } catch (e) {
+            console.error("Auto-start bridge failed", e);
+          }
+        }
       } catch (e) {
         console.error("Initialization failed", e);
       } finally {

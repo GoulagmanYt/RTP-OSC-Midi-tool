@@ -1,5 +1,6 @@
 use crate::midi::{NOTE_MAX, NOTE_MIN};
 use rosc::{encoder, OscMessage, OscPacket, OscType};
+use std::io::ErrorKind;
 use std::net::{SocketAddr, UdpSocket};
 use std::thread;
 use std::time::Duration;
@@ -22,8 +23,8 @@ impl OscClient {
             .map_err(|e| e.to_string())?;
         let socket = UdpSocket::bind("0.0.0.0:0").map_err(|e| e.to_string())?;
         socket
-            .set_nonblocking(true)
-            .map_err(|e| format!("socket non-blocking: {e}"))?;
+            .set_write_timeout(Some(Duration::from_millis(25)))
+            .map_err(|e| format!("socket write timeout: {e}"))?;
         Ok(Self { socket, target })
     }
 
@@ -53,10 +54,25 @@ impl OscClient {
 
     fn send_packet(&self, packet: OscPacket) -> Result<(), String> {
         let data = encoder::encode(&packet).map_err(|e| e.to_string())?;
-        self.socket
-            .send_to(&data, self.target)
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+        let mut last_retry_error: Option<std::io::Error> = None;
+        for _ in 0..3 {
+            match self.socket.send_to(&data, self.target) {
+                Ok(_) => return Ok(()),
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted
+                    ) =>
+                {
+                    last_retry_error = Some(err);
+                    thread::sleep(Duration::from_millis(1));
+                }
+                Err(err) => return Err(err.to_string()),
+            }
+        }
+        Err(last_retry_error
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "OSC send failed after retries".to_string()))
     }
 }
 

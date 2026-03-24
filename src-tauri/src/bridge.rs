@@ -558,21 +558,7 @@ fn resolve_remote_targets(config: &Config, logger: &FrontendLogger) -> Vec<RtpRe
             continue;
         }
 
-        let resolved_addr = if let Ok(ip) = host.parse::<IpAddr>() {
-            Some(SocketAddr::new(ip, entry.port))
-        } else {
-            let addr = format!("{host}:{}", entry.port);
-            match addr.to_socket_addrs() {
-                Ok(mut iter) => iter.next().or_else(|| {
-                    logger.warn(format!("RTP-MIDI remote host unresolved: {host}"));
-                    None
-                }),
-                Err(err) => {
-                    logger.warn(format!("RTP-MIDI remote host invalid: {host} ({err})"));
-                    None
-                }
-            }
-        };
+        let resolved_addr = resolve_remote_socket_addr(host, entry.port, logger);
 
         let Some(addr) = resolved_addr else {
             continue;
@@ -590,6 +576,42 @@ fn resolve_remote_targets(config: &Config, logger: &FrontendLogger) -> Vec<RtpRe
         });
     }
     resolved
+}
+
+fn resolve_remote_socket_addr(
+    host: &str,
+    port: u16,
+    logger: &FrontendLogger,
+) -> Option<SocketAddr> {
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return Some(SocketAddr::new(ip, port));
+    }
+
+    let addr = format!("{host}:{port}");
+    match addr.to_socket_addrs() {
+        Ok(iter) => {
+            let mut addresses: Vec<SocketAddr> = iter.collect();
+            addresses.sort_by(|a, b| socket_addr_sort_key(a).cmp(&socket_addr_sort_key(b)));
+            addresses.dedup();
+            let selected = addresses.first().copied();
+            if selected.is_none() {
+                logger.warn(format!("RTP-MIDI remote host unresolved: {host}"));
+            }
+            selected
+        }
+        Err(err) => {
+            logger.warn(format!("RTP-MIDI remote host invalid: {host} ({err})"));
+            None
+        }
+    }
+}
+
+fn socket_addr_sort_key(addr: &SocketAddr) -> (u8, IpAddr, u16) {
+    let family_rank = match addr.ip() {
+        IpAddr::V4(_) => 0u8,
+        IpAddr::V6(_) => 1u8,
+    };
+    (family_rank, addr.ip(), addr.port())
 }
 fn watch_midi_input(
     shared_config: Arc<Mutex<Config>>,

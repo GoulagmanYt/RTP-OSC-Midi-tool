@@ -4,7 +4,7 @@ use std::{
     collections::VecDeque,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         mpsc, Arc,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -108,6 +108,10 @@ pub struct AudioEngine {
     last_vst: Arc<Mutex<Option<PathBuf>>>,
     midi_tx: Arc<Mutex<Option<Producer<MidiPacket>>>>,
     midi_emergency_reset_requested: Arc<AtomicBool>,
+    midi_push_log_last_ms: Arc<AtomicU64>,
+    midi_push_log_accumulator: Arc<AtomicU32>,
+    midi_drop_log_last_ms: Arc<AtomicU64>,
+    midi_drop_log_accumulator: Arc<AtomicU32>,
 }
 
 unsafe impl Send for AudioEngine {}
@@ -163,8 +167,8 @@ unsafe impl Sync for EditorWindow {}
 unsafe impl Send for AudioRuntime {}
 unsafe impl Sync for AudioRuntime {}
 
-const MIDI_RING_CAPACITY: usize = 4096;
-const MAX_PENDING_MIDI: usize = 4096;
+const MIDI_RING_CAPACITY: usize = 16384;
+const MAX_PENDING_MIDI: usize = 8192;
 const MIDI_EVENT_BATCH_CAPACITY: usize = 512;
 const RESET_CONTROLLERS: [u8; 4] = [64, 120, 121, 123];
 const VST_EDITOR_IDLE_TIMER_MS: u32 = 50;
@@ -537,6 +541,10 @@ impl AudioEngine {
             last_vst: Arc::new(Mutex::new(None)),
             midi_tx: Arc::new(Mutex::new(None)),
             midi_emergency_reset_requested: Arc::new(AtomicBool::new(false)),
+            midi_push_log_last_ms: Arc::new(AtomicU64::new(0)),
+            midi_push_log_accumulator: Arc::new(AtomicU32::new(0)),
+            midi_drop_log_last_ms: Arc::new(AtomicU64::new(0)),
+            midi_drop_log_accumulator: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -946,14 +954,33 @@ impl AudioEngine {
 
         if pushed {
             if crate::logger::should_log_debug() {
-                background_log(
-                    "debug",
-                    format!(
-                        "MIDI -> Ring Buffer: {:02X?} ({} bytes)",
-                        &bytes[..bytes.len().min(3)],
-                        bytes.len()
-                    ),
-                );
+                let pushed_now = self
+                    .midi_push_log_accumulator
+                    .fetch_add(1, Ordering::Relaxed)
+                    + 1;
+                let now_ms = timestamp_ms();
+                let last_ms = self.midi_push_log_last_ms.load(Ordering::Relaxed);
+                if now_ms.saturating_sub(last_ms) >= 1000
+                    && self
+                        .midi_push_log_last_ms
+                        .compare_exchange(last_ms, now_ms, Ordering::Relaxed, Ordering::Relaxed)
+                        .is_ok()
+                {
+                    let pushed_since_last = if pushed_now > 1 {
+                        self.midi_push_log_accumulator.swap(0, Ordering::Relaxed)
+                    } else {
+                        self.midi_push_log_accumulator.store(0, Ordering::Relaxed);
+                        pushed_now
+                    };
+                    background_log(
+                        "debug",
+                        format!(
+                            "MIDI -> Ring Buffer throughput: {} msg/s (latest={:02X?})",
+                            pushed_since_last,
+                            &bytes[..bytes.len().min(3)]
+                        ),
+                    );
+                }
             }
             return;
         }
@@ -966,13 +993,33 @@ impl AudioEngine {
                 .store(true, Ordering::Relaxed);
         }
         if crate::logger::should_log_debug() {
-            background_log(
-                "warn",
-                format!(
-                    "MIDI dropped before audio callback (ring full): {:02X?}",
-                    &bytes[..bytes.len().min(3)]
-                ),
-            );
+            let dropped = self
+                .midi_drop_log_accumulator
+                .fetch_add(1, Ordering::Relaxed)
+                + 1;
+            let now_ms = timestamp_ms();
+            let last_ms = self.midi_drop_log_last_ms.load(Ordering::Relaxed);
+            if now_ms.saturating_sub(last_ms) >= 1000
+                && self
+                    .midi_drop_log_last_ms
+                    .compare_exchange(last_ms, now_ms, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+            {
+                let dropped_since_last = if dropped > 1 {
+                    self.midi_drop_log_accumulator.swap(0, Ordering::Relaxed)
+                } else {
+                    self.midi_drop_log_accumulator.store(0, Ordering::Relaxed);
+                    dropped
+                };
+                background_log(
+                    "warn",
+                    format!(
+                        "MIDI dropped before audio callback (ring full): {} drops in ~1s (latest={:02X?})",
+                        dropped_since_last,
+                        &bytes[..bytes.len().min(3)]
+                    ),
+                );
+            }
         }
     }
 
