@@ -272,8 +272,8 @@ impl BridgeHandle {
         };
 
         let stop = Arc::new(AtomicBool::new(false));
-        let (midi_tx, midi_rx) = unbounded::<MidiFrame>();
-        let shared_config = Arc::new(Mutex::new(config.clone()));
+        use crossbeam_channel::bounded;
+        let (midi_tx, midi_rx) = bounded::<MidiFrame>(2048);let shared_config = Arc::new(Mutex::new(config.clone()));
         let config_rev = Arc::new(AtomicU64::new(1));
         let activity_tracker = Arc::new(Mutex::new(MidiActivityTracker::default()));
         let osc_counter = Arc::new(AtomicU32::new(0));
@@ -674,7 +674,7 @@ fn watch_midi_input(
                 }
             }
         }
-        thread::sleep(Duration::from_millis(700));
+        thread::sleep(Duration::from_millis(200));
     }
 }
 
@@ -754,7 +754,7 @@ fn processing_loop(
             current_target = (snapshot.osc_target_ip.clone(), snapshot.osc_target_port);
         }
 
-        match midi_rx.recv_timeout(Duration::from_millis(50)) {
+        match midi_rx.recv_timeout(Duration::from_millis(10)) {
             Ok(frame) => {
                 record_activity(&activity, &frame);
                 handle_midi_frame(
@@ -768,10 +768,7 @@ fn processing_loop(
                     &mut sustain_pressed_state,
                 )
             }
-            Err(RecvTimeoutError::Timeout) => {
-                thread::sleep(Duration::from_millis(2));
-                continue;
-            }
+            Err(RecvTimeoutError::Timeout) => continue,
             Err(_) => break,
         }
     }

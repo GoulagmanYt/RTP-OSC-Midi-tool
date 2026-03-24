@@ -8,6 +8,14 @@ default-run = "OSCMidi"
 name = "OSCMidi"
 path = "src/main.rs"
 
+[[bin]]
+name = "rtp_probe"
+path = "src/bin/rtp_probe.rs"
+
+[[bin]]
+name = "vst_smoke"
+path = "src/bin/vst_smoke.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -55,3 +63,15 @@ rack = { path = "../vendor/rack" }
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-global-shortcut = "2"
+
+# AJOUTER un profil dédié audio pour les release
+[profile.release]
+opt-level = 3
+lto = "thin"        # thin LTO : meilleure perf sans exploser le temps de compile
+codegen-units = 1
+panic = "abort"     # évite les unwinding overhead dans les chemins critiques
+
+# AJOUTER un profil dev optimisé pour les tests audio (le debug natif est trop lent pour l'audio)
+[profile.dev-audio]
+inherits = "dev"
+opt-level = 2       # O2 en dev pour que le callback audio ne dropouts pas

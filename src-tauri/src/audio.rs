@@ -364,35 +364,31 @@ impl AudioCallbackState {
         self.midi_drop_count.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn drop_oldest_note_on(&mut self) -> bool {
-        if let Some((idx, _)) = self
-            .pending_midi
-            .iter()
-            .enumerate()
-            .find(|(_, msg)| msg.is_note_on())
-        {
-            let _ = self.pending_midi.remove(idx);
-            return true;
-        }
-        false
+fn drop_oldest_note_on(&mut self) -> bool {
+    let pos = self.pending_midi.iter().position(|m| m.is_note_on());
+    if let Some(idx) = pos {
+        // swap_remove_front: met l'élément idx à la place du front, pop front
+        // Mais VecDeque n'a pas swap_remove, on utilise rotate
+        self.pending_midi.swap(0, idx); // swap avec front
+        self.pending_midi.pop_front();  // pop front — O(1)
+        return true;
     }
+    false
+}
 
-    fn drop_oldest_non_critical(&mut self) -> bool {
-        if let Some((idx, _)) = self
-            .pending_midi
-            .iter()
-            .enumerate()
-            .find(|(_, msg)| !msg.is_critical_release())
-        {
-            let _ = self.pending_midi.remove(idx);
-            return true;
-        }
-        false
+fn drop_oldest_non_critical(&mut self) -> bool {
+    let pos = self.pending_midi.iter().position(|m| !m.is_critical_release());
+    if let Some(idx) = pos {
+        self.pending_midi.swap(0, idx);
+        self.pending_midi.pop_front();
+        return true;
     }
+    false
+}
 
-    fn record_error(&mut self) {
-        self.error_count = self.error_count.wrapping_add(1);
-    }
+fn record_error(&mut self) {
+    self.error_count = self.error_count.wrapping_add(1);
+}
 }
 
 // FIX #3: Store AppHandle so the WM_CLOSE handler can notify the frontend when
@@ -2679,9 +2675,7 @@ fn apply_audio_thread_priority(_state: &mut AudioCallbackState) {}
 #[cfg(target_os = "windows")]
 fn apply_audio_process_tuning(logger: &FrontendLogger) {
     static PROCESS_TUNING_APPLIED: AtomicBool = AtomicBool::new(false);
-    if PROCESS_TUNING_APPLIED.swap(true, Ordering::Relaxed) {
-        return;
-    }
+    if PROCESS_TUNING_APPLIED.swap(true, Ordering::Relaxed) { return; }
 
     unsafe {
         if SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS).is_err() {

@@ -133,10 +133,7 @@ impl RtpServer {
                         rtp_logger.info(format!("RTP MIDI: {:02X?}", bytes.as_slice()));
                     }
                     if let Some(tx) = midi_sink.lock().as_ref().cloned() {
-                        let _ = tx.send(MidiFrame {
-                            data: bytes,
-                            source: rtp_source.clone(),
-                        });
+                        let _ = tx.try_send(MidiFrame { data: bytes, source: rtp_source.clone() });
                     }
                 })
                 .await;
@@ -380,9 +377,10 @@ fn emit_sessions(app_handle: &tauri::AppHandle, sessions: &[RtpSessionInfo]) {
     let _ = app_handle.emit(RTP_SESSIONS_EVENT, sessions);
 }
 
-const DISCOVERY_TIMEOUT: Duration = Duration::from_millis(900);
-const DISCOVERY_TTL: Duration = Duration::from_secs(6);
-const DISCOVERY_INTERVAL: Duration = Duration::from_secs(2);
+const DISCOVERY_TIMEOUT: Duration = Duration::from_millis(500);
+const DISCOVERY_TTL: Duration = Duration::from_secs(30);  // cache 30s
+const DISCOVERY_INTERVAL: Duration = Duration::from_secs(10); // scan toutes les 10s
+const DISCOVERY_INTERVAL_IDLE: Duration = Duration::from_secs(30); // si aucun participant
 
 #[derive(Default)]
 struct RtpDiscoveryCache {
@@ -432,28 +430,40 @@ impl RtpDiscoveryManager {
         let (stop_tx, mut stop_rx) = oneshot::channel();
         *self.stop_tx.lock() = Some(stop_tx);
         let cache = self.cache.clone();
+        // Dans RtpDiscoveryManager::start() — boucle améliorée ✅
         *task_guard = Some(async_runtime::spawn(async move {
             let initial = cache.lock().sessions.clone();
             emit_sessions(&app_handle, &initial);
             let mut ticker = interval(DISCOVERY_INTERVAL);
+            let mut idle_streak = 0u32;
             loop {
                 tokio::select! {
                     _ = &mut stop_rx => break,
                     _ = ticker.tick() => {
                         let should_refresh = { cache.lock().is_stale() };
-                        if !should_refresh {
-                            continue;
-                        }
+                        if !should_refresh { continue; }
+
                         let handle = async_runtime::spawn_blocking(|| discover_sessions(DISCOVERY_TIMEOUT));
                         match handle.await {
                             Ok(Ok(sessions)) => {
                                 let changed = { cache.lock().update(sessions.clone()) };
                                 if changed {
+                                 idle_streak = 0;
                                     emit_sessions(&app_handle, &sessions);
+                                } else {
+                                    idle_streak += 1;
                                 }
+                                // Ralentir si rien ne change
+                                let next = if idle_streak > 3 {
+                                    DISCOVERY_INTERVAL_IDLE
+                                } else {
+                                    DISCOVERY_INTERVAL
+                                };
+                                ticker = interval(next);
+                                ticker.tick().await; // consume immediate first tick
                             }
-                            Ok(Err(err)) => background_log("warn", format!("RTP discovery failed: {err}")),
-                            Err(err) => background_log("warn", format!("RTP discovery task failed: {err}")),
+                            Ok(Err(err)) => background_log("warn", format!("RTP discovery: {err}")),
+                            Err(err) => background_log("warn", format!("RTP discovery task: {err}")),
                         }
                     }
                 }
@@ -555,20 +565,17 @@ fn participant_matches_target(participant_addr: &str, target: &SocketAddr) -> bo
     if participant_addr == target.to_string() {
         return true;
     }
-
     let Ok(participant) = participant_addr.parse::<SocketAddr>() else {
         return false;
     };
     if participant.ip() != target.ip() {
         return false;
     }
-
-    participant.port() == target.port()
-        || target
-            .port()
-            .checked_add(1)
-            .map(|data_port| participant.port() == data_port)
-            .unwrap_or(false)
+    let tp = target.port();
+    let pp = participant.port();
+    pp == tp
+        || tp.checked_add(1).map_or(false, |dp| pp == dp)
+        || tp.checked_sub(1).map_or(false, |cp| pp == cp)
 }
 
 #[cfg(test)]
