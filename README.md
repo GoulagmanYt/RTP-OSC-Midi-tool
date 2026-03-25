@@ -1,162 +1,156 @@
 # OSCMidi
 
-Bridge desktop (Tauri + React + Rust) pour router du MIDI entre:
-- RTP-MIDI (session reseau)
-- peripheriques MIDI locaux
-- plugins VST2/VST3 instruments
-- sortie OSC
+Desktop bridge (Tauri + React + Rust) to route MIDI between:
+- RTP-MIDI sessions (network)
+- local MIDI devices
+- VST2/VST3 instrument plugins
+- OSC output
 
-L'application cible principalement Windows (ASIO/WASAPI, VST2/VST3, UI Tauri).
+Primary target is Windows (ASIO/WASAPI, VST2/VST3, Tauri desktop app).
 
-## Fonctionnalites principales
+## Features
 
-- Bridge RTP-MIDI local avec decouverte/reconnexion.
-- Mapping MIDI/OSC (routing, filtres de canaux, profils).
-- Moteur audio bas-latence avec backend auto, ASIO ou WASAPI.
-- Chargement VST2/VST3 avec UI plugin (quand disponible).
-- Scan des plugins et cache local.
-- Filtrage strict des plugins instruments:
-  - les effets/non compatibles sont ignores et non affiches dans la liste app.
-- Sauvegarde de config YAML + etat runtime + logs.
-- Export de diagnostics.
+- RTP-MIDI bridge with discovery and reconnection.
+- MIDI routing profiles (channel filters, note/CC/program mapping).
+- Low-latency audio engine with auto backend selection, ASIO or WASAPI.
+- VST2/VST3 instrument hosting, including plugin editor window when available.
+- Plugin scanning and local cache.
+- Strict instrument filtering (effects/non-compatible plugins are hidden).
+- YAML config persistence, runtime state persistence, and diagnostics export.
 
-## Etat actuel des plugins
-
-- Les plugins VST3 non instruments sont filtres.
-- Cas specifique `sforzando.vst3`:
-  - workaround actif pour eviter un crash de teardown du plugin lors du `Stop Bridge`.
-  - le host n'applique pas de restauration d'etat VST3 interne pour sforzando
-    (sforzando garde son propre etat via ses fichiers ARIA, ex `default.ariax`).
-
-## Stack technique
+## Project Stack
 
 - Frontend: React 19, TypeScript, Vite 8, Tailwind.
 - Desktop shell: Tauri v2.
 - Backend: Rust.
 - Audio/MIDI:
-  - `cpal` (ASIO/WASAPI),
-  - `midir`,
-  - RTP-MIDI (`rtpmidi`, `mdns-sd`),
-  - VST2 (`vst`),
-  - VST3 via `rack` (vendor patch local dans `vendor/rack`).
+  - `cpal` (ASIO/WASAPI)
+  - `midir`
+  - RTP-MIDI (`rtpmidi`, `mdns-sd`)
+  - VST2 (`vst`)
+  - VST3 via patched Rack host (`vendor/rack`)
 
-## Prerequis (Windows)
+## Requirements (Windows)
 
-- Node.js 20+ (npm inclus)
-- Rust toolchain stable (`rustup`, `cargo`)
+- Node.js 20+ (npm included)
+- Rust stable toolchain (`rustup`, `cargo`)
 - Visual Studio Build Tools C++ (MSVC)
-- ASIO SDK local (deja reference dans `.cargo/config.toml`)
+- Local ASIO SDK (already wired in `.cargo/config.toml`)
 
-## Lancement dev
+## Quick Start
 
-Depuis la racine du repo:
+From repository root:
 
 ```bash
 npm install
 npm run tauri:dev
 ```
 
-## Build release
+## Build
 
-### Methode recommandee (script Windows)
+### Recommended (full Windows script)
 
 ```bat
 build_windows.bat
 ```
 
-Sortie principale:
+Main output executable:
 - `D:\PROGRAMMATION\oscMIDI\.cargo-target\release\OSCMidi.exe`
 
-Logs build:
-- `build_logs\build-*-OK.log` / `build_logs\build-*-FAIL.log`
-
-### Methode manuelle
+### Manual build
 
 ```bash
 npm run build
 npm run tauri:build
 ```
 
-## Architecture du projet
+## Verification Commands
+
+```bash
+# Frontend type-check
+npm run lint
+
+# Frontend production build
+npm run build
+
+# Rust tests (debug)
+cd src-tauri
+cargo test
+
+# Rust tests (release)
+cargo test --release
+
+# Static analysis
+cargo clippy --all-targets --all-features
+```
+
+## Project Layout
 
 ```text
 oscMIDI/
-  src/                     # Frontend React
-  src-tauri/               # Backend Rust + Tauri commands
-  vendor/rack/             # Fork patch local pour VST3
-  scripts/                 # Scripts utilitaires
-  build_windows.bat        # Build complet Windows
+  src/                     # React frontend
+  src-tauri/               # Rust backend + Tauri commands
+  vendor/rack/             # Local VST3 hosting patch
+  scripts/                 # Utility scripts
+  build_windows.bat        # Full Windows release build
 ```
 
-Points backend importants:
-- `src-tauri/src/main.rs`: commandes Tauri exposees au frontend.
-- `src-tauri/src/audio.rs`: moteur audio, lifecycle VST, UI plugin.
-- `src-tauri/src/plugin_probe.rs`: scan/probe plugins + filtre instrument.
-- `vendor/rack/rack-sys/src/vst3_instance.cpp`: lifecycle VST3 natif.
+Key backend files:
+- `src-tauri/src/main.rs`: Tauri command entry points.
+- `src-tauri/src/bridge.rs`: MIDI routing pipeline.
+- `src-tauri/src/audio.rs`: audio engine + plugin lifecycle/editor handling.
+- `src-tauri/src/plugin_probe.rs`: plugin scanning/probing and compatibility filtering.
+- `src-tauri/src/rtp.rs`: RTP-MIDI server and discovery manager.
 
-## Donnees utilisateur / chemins
+## Runtime Data Paths
 
 - Config:
   - `%APPDATA%\OSCMIDI\OSCMIDI\config\config.yaml`
-- Log app:
+- App log:
   - `%APPDATA%\OSCMIDI\OSCMIDI\config\app.log`
-- Etat plugins:
+- Plugin state:
   - `%APPDATA%\OSCMIDI\OSCMIDI\config\vst_state\`
+
+## Plugin Notes
+
+- Non-instrument VST3 plugins are intentionally filtered out.
+- `sforzando.vst3` has a dedicated teardown workaround to avoid plugin unload crashes.
+- Internal VST3 state restore is not applied for sforzando; it keeps state through ARIA files (for example `default.ariax`).
 
 ## Troubleshooting
 
-### 1) `ERR_CONNECTION_REFUSED` (localhost)
+### `ERR_CONNECTION_REFUSED` on localhost
 
-Cause typique: executable dev lance a la place d'un vrai build release.
+Typical cause: launching an old dev binary instead of the latest release build.
 
-Correction:
-1. Fermer toutes les instances `OSCMidi.exe`.
-2. Rebuild:
-   - `npm run tauri:build` ou `build_windows.bat`
-3. Lancer uniquement:
-   - `.cargo-target\\release\\OSCMidi.exe`
+Fix:
+1. Close all `OSCMidi.exe` instances.
+2. Rebuild with `npm run tauri:build` (or `build_windows.bat`).
+3. Launch only `.cargo-target\release\OSCMidi.exe`.
 
-### 2) Un plugin n'apparait pas dans la liste
+### A plugin does not appear in the list
 
-L'app n'affiche que les plugins instruments supportes.
-Un effet VST2/VST3 (ex noise reduction) est volontairement masque.
+Only supported instrument plugins are shown. Effects are hidden by design.
 
-### 3) Message xruns / dropouts
+### XRuns / dropouts
 
-- Augmenter le buffer (`256` -> `480` -> `512`)
-- Verifier le backend (ASIO en priorite)
-- Fermer les apps audio concurrentes
-- Verifier que le plugin choisi est bien instrument et stable
+- Increase audio buffer (`256` -> `480` -> `512`).
+- Prefer ASIO backend when available.
+- Close competing real-time audio applications.
+- Test with a known stable instrument plugin.
 
-### 4) sforzando VST3 et banques SFZ
+### sforzando VST3 SFZ banks not loading
 
-- Verifier les chemins de banques dans la config sforzando/ARIA (`default.ariax`).
-- Eviter des references vers `Downloads` si les banques sont installees ailleurs.
+- Check ARIA/sforzando paths (`default.ariax`).
+- Avoid stale absolute paths (for example old `Downloads` paths).
 
-## Commandes utiles
+## Contributing
 
-```bash
-# Typecheck frontend
-npm run lint
+1. Branch from `main`.
+2. Make focused commits with clear messages.
+3. Run local verification before opening a PR.
+4. Include test/build evidence in the PR description.
 
-# Build frontend uniquement
-npm run build
+## License
 
-# Build app desktop
-npm run tauri:build
-
-# Verifier backend Rust
-cd src-tauri
-cargo check --bin OSCMidi
-```
-
-## Contrib
-
-1. Branch depuis `main`
-2. Commit clair (scope + action)
-3. Build/verification locale avant PR
-4. Inclure logs/tests minimaux dans la PR
-
-## Licence
-
-Aucune licence explicite n'est definie dans le repo pour le moment.
+No explicit license file is currently present in this repository.
