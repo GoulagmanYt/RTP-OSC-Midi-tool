@@ -2427,8 +2427,8 @@ fn audio_callback<T: Sample + FromSample<f32>>(
         if device_channels >= 2 {
             frame[1] = T::from_sample(r);
             state.last_output[base + 1] = r;
-            for ch in 2..device_channels {
-                frame[ch] = silence;
+            for (ch, frame_sample) in frame.iter_mut().enumerate().take(device_channels).skip(2) {
+                *frame_sample = silence;
                 state.last_output[base + ch] = 0.0;
             }
         }
@@ -2638,13 +2638,7 @@ fn process_vst3_plugin(
 
 fn limit_sample(sample: f32) -> f32 {
     const LIMIT: f32 = 0.98;
-    if sample > LIMIT {
-        LIMIT
-    } else if sample < -LIMIT {
-        -LIMIT
-    } else {
-        sample
-    }
+    sample.clamp(-LIMIT, LIMIT)
 }
 
 #[cfg(target_os = "windows")]
@@ -2762,14 +2756,14 @@ fn select_device(host: &cpal::Host, preferred: Option<&str>) -> Option<Device> {
     // FIX #14: Use exact-match first, then substring, to avoid selecting the
     // wrong device when multiple devices share a common prefix (e.g. "ASIO").
     if let Some(name) = preferred {
-        if let Some(dev) = outputs.find(|d| d.name().ok().map_or(false, |n| n == name)) {
+        if let Some(dev) = outputs.find(|d| d.name().ok().is_some_and(|n| n == name)) {
             return Some(dev);
         }
         let mut outputs2 = match host.output_devices() {
             Ok(d) => d,
             Err(_) => return None,
         };
-        if let Some(dev) = outputs2.find(|d| d.name().ok().map_or(false, |n| n.contains(name))) {
+        if let Some(dev) = outputs2.find(|d| d.name().ok().is_some_and(|n| n.contains(name))) {
             return Some(dev);
         }
     }
@@ -2784,7 +2778,7 @@ fn select_device(host: &cpal::Host, preferred: Option<&str>) -> Option<Device> {
         devices
             .iter()
             .find(|dev| {
-                dev.name().ok().map_or(false, |n| {
+                dev.name().ok().is_some_and(|n| {
                     let lower = n.to_lowercase();
                     keywords.iter().any(|k| lower.contains(k))
                 })

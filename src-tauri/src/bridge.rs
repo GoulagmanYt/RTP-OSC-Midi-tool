@@ -591,7 +591,7 @@ fn resolve_remote_socket_addr(
     match addr.to_socket_addrs() {
         Ok(iter) => {
             let mut addresses: Vec<SocketAddr> = iter.collect();
-            addresses.sort_by(|a, b| socket_addr_sort_key(a).cmp(&socket_addr_sort_key(b)));
+            addresses.sort_by_key(socket_addr_sort_key);
             addresses.dedup();
             let selected = addresses.first().copied();
             if selected.is_none() {

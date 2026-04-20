@@ -574,8 +574,8 @@ fn participant_matches_target(participant_addr: &str, target: &SocketAddr) -> bo
     let tp = target.port();
     let pp = participant.port();
     pp == tp
-        || tp.checked_add(1).map_or(false, |dp| pp == dp)
-        || tp.checked_sub(1).map_or(false, |cp| pp == cp)
+        || (tp.checked_add(1) == Some(pp))
+        || (tp.checked_sub(1) == Some(pp))
 }
 
 #[cfg(test)]

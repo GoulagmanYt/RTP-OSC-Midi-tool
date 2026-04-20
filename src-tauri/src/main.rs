@@ -216,7 +216,7 @@ fn save_config(window: Window, config: Config, state: State<AppState>) -> Result
     set_log_all_to_file(config.log_all_to_file);
     set_logs_enabled(config.logs_enabled);
     state.config_store.save(&config)?;
-    sync_rtp_discovery(&config, &state, &window.app_handle());
+    sync_rtp_discovery(&config, &state, window.app_handle());
     let logger = FrontendLogger::new(window, state.dev_logging.clone());
     state.bridge.sync_rtp(&config, &logger, false)?;
     state.bridge.update_config(config, &logger)
@@ -710,7 +710,7 @@ fn reset_config_defaults(window: Window, state: State<AppState>) -> Result<Confi
     set_log_all_to_file(cfg.log_all_to_file);
     set_logs_enabled(cfg.logs_enabled);
     let _ = state.config_store.save(&cfg);
-    sync_rtp_discovery(&cfg, &state, &window.app_handle());
+    sync_rtp_discovery(&cfg, &state, window.app_handle());
     let logger = FrontendLogger::new(window, state.dev_logging.clone());
     state.bridge.sync_rtp(&cfg, &logger, true)?;
     state.bridge.update_config(cfg.clone(), &logger)?;
