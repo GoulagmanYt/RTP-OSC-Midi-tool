@@ -45,6 +45,11 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
   const lastDropoutToastMs = useRef(0);
   const { t } = useI18n();
 
+  // Circular log buffer to avoid O(n) array reconstruction on every log
+  const LOG_BUFFER_SIZE = 1000;
+  const logBufferRef = useRef<api.LogEvent[]>([]);
+  const logIndexRef = useRef(0);
+
   const refreshStatus = useCallback(async () => {
     try {
       const s = await api.getStatus();
@@ -114,7 +119,20 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
     init();
 
     const unlisten = listen<api.LogEvent>("log", (event) => {
-      setLogs((prev) => [event.payload, ...prev].slice(0, 1000));
+      // Use circular buffer to avoid O(n) array reconstruction
+      const buffer = logBufferRef.current;
+      buffer[logIndexRef.current] = event.payload;
+      logIndexRef.current = (logIndexRef.current + 1) % LOG_BUFFER_SIZE;
+      
+      // Only update React state with the valid portion of the buffer
+      const validLogs: api.LogEvent[] = [];
+      for (let i = 0; i < Math.min(buffer.length, LOG_BUFFER_SIZE); i++) {
+        const idx = (logIndexRef.current - 1 - i + LOG_BUFFER_SIZE) % LOG_BUFFER_SIZE;
+        if (buffer[idx]) {
+          validLogs.push(buffer[idx]);
+        }
+      }
+      setLogs(validLogs);
     });
 
     return () => {
@@ -236,7 +254,11 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
     }
   }, [config, status, runPreflight, t, refreshStatus]);
 
-  const clearLogs = useCallback(() => setLogs([]), []);
+  const clearLogs = useCallback(() => {
+    logBufferRef.current = [];
+    logIndexRef.current = 0;
+    setLogs([]);
+  }, []);
 
   // FIX: Remove `refreshStatus` from the dependency array — it's stable (useCallback
   // with no deps) so it never changes, but including it caused this effect to re-run

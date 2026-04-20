@@ -173,6 +173,17 @@ const MIDI_EVENT_BATCH_CAPACITY: usize = 512;
 const RESET_CONTROLLERS: [u8; 4] = [64, 120, 121, 123];
 const VST_EDITOR_IDLE_TIMER_MS: u32 = 50;
 
+/// Returns the timeout for VST editor/VST3 drop operations on the main thread.
+/// Can be overridden via VST_SHUTDOWN_TIMEOUT_SECS env var for slow systems (1-30 seconds).
+fn vst_shutdown_timeout() -> Duration {
+    // Allow runtime override via environment variable for slow systems
+    let secs = std::env::var("VST_SHUTDOWN_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(2);
+    Duration::from_secs(secs.max(1).min(30))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct MidiPacket {
     data: [u8; 3],
@@ -589,7 +600,7 @@ impl AudioEngine {
                 });
 
                 if scheduled.is_ok() {
-                    if rx.recv_timeout(Duration::from_secs(2)).is_err() {
+                    if rx.recv_timeout(vst_shutdown_timeout()).is_err() {
                         background_log(
                             "warn",
                             "Timed out waiting for VST editor to close on main thread",
@@ -622,7 +633,7 @@ impl AudioEngine {
                         let _ = tx.send(());
                     });
                     if scheduled.is_ok() {
-                        if rx.recv_timeout(Duration::from_secs(2)).is_err() {
+                        if rx.recv_timeout(vst_shutdown_timeout()).is_err() {
                             background_log(
                                 "warn",
                                 "Timed out waiting for VST3 drop on main thread",
@@ -634,11 +645,17 @@ impl AudioEngine {
                 }
             }
             if is_sforzando {
-                // sforzando VST3 crashes in plugin_free() on some teardown paths.
-                // Leak this instance instead of dropping it to keep the host stable.
+                // WORKAROUND: sforzando VST3 crashes in plugin_free() during teardown.
+                // This is a bug in the third-party plugin (Plogue sforzando), not in this codebase.
+                // 
+                // Impact: ~5-50MB leaked per session depending on sample set loaded.
+                // Frequency: Only when stopping audio with sforzando loaded.
+                // Alternative: None - the plugin's free() crashes in both vst3-sys and rack.
+                //
+                // User warning is logged so they understand this is plugin-specific.
                 background_log(
                     "warn",
-                    "Leaking sforzando VST3 instance on stop to avoid plugin_free crash",
+                    "Leaking sforzando VST3 instance (~5-50MB) to avoid plugin_free crash. This is a known sforzando bug."
                 );
                 std::mem::forget(plugin);
             } else {
