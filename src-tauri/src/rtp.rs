@@ -133,7 +133,7 @@ impl RtpServer {
                         rtp_logger.info(format!("RTP MIDI: {:02X?}", bytes.as_slice()));
                     }
                     if let Some(tx) = midi_sink.lock().as_ref().cloned() {
-                        let _ = tx.try_send(MidiFrame { data: bytes, source: rtp_source.clone() });
+                        let _ = tx.try_send(MidiFrame { data: bytes.to_vec(), source: rtp_source.to_string() });
                     }
                 })
                 .await;
@@ -383,6 +383,7 @@ const DISCOVERY_INTERVAL: Duration = Duration::from_secs(10); // scan toutes les
 const DISCOVERY_INTERVAL_IDLE: Duration = Duration::from_secs(30); // si aucun participant
 
 #[derive(Default)]
+#[derive(Debug)]
 struct RtpDiscoveryCache {
     sessions: Vec<RtpSessionInfo>,
     updated_at: Option<Instant>,
@@ -403,10 +404,21 @@ impl RtpDiscoveryCache {
     }
 }
 
+#[derive(Debug)]
 pub struct RtpDiscoveryManager {
     cache: Arc<Mutex<RtpDiscoveryCache>>,
     task: Mutex<Option<JoinHandle<()>>>,
     stop_tx: Mutex<Option<oneshot::Sender<()>>>,
+}
+
+impl Clone for RtpDiscoveryManager {
+    fn clone(&self) -> Self {
+        Self {
+            cache: self.cache.clone(),
+            task: Mutex::new(None),
+            stop_tx: Mutex::new(None),
+        }
+    }
 }
 
 impl RtpDiscoveryManager {

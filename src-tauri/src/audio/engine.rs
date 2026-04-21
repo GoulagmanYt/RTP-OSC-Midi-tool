@@ -124,6 +124,20 @@ trait PluginBackend: Send + Sync {
     fn supports_midi(&self) -> bool;
 }
 
+impl std::fmt::Debug for AudioEngine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AudioEngine")
+            .field("plugin", &"<PluginBackend>")
+            .field("window_manager", &"<VstWindowManager>")
+            .field("state_manager", &"<PluginStateManager>")
+            .field("midi_tx", &"<MidiProducer>")
+            .field("midi_rx", &"<MidiConsumer>")
+            .field("realtime_metrics", &"<RealtimeMetrics>")
+            .field("config", &"<AudioStreamConfig>")
+            .finish()
+    }
+}
+
 impl AudioEngine {
     /// Crée un nouveau moteur audio
     pub fn new() -> Self {

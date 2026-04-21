@@ -55,7 +55,7 @@ impl ActivityTracker {
     /// Enregistre une trame MIDI
     pub fn record_frame(&self, frame: &MidiFrame) {
         let mut guard = self.stats.lock();
-        let entry = guard.entry(frame.source.clone()).or_default();
+        let entry = guard.entry(frame.source.clone().into()).or_default();
         
         entry.messages = entry.messages.saturating_add(1);
         entry.last_seen_ms = Some(now_ms());
@@ -329,7 +329,7 @@ mod tests {
         // Créer une trame MIDI de test
         let frame = MidiFrame {
             source: "test_source".into(),
-            data: smallvec::SmallVec::from_slice(&[0x90, 60, 100]), // Note On canal 0, note 60, velocity 100
+            data: Vec::from([0x90, 60, 100]), // Note On canal 0, note 60, velocity 100
         };
         
         // Enregistrer la trame
@@ -354,7 +354,7 @@ mod tests {
         for i in 0..5 {
             let frame = MidiFrame {
                 source: "test".into(),
-                data: smallvec::SmallVec::from_slice(&[0x90, 60 + i, 100]),
+                data: Vec::from([0x90, 60 + i, 100]),
             };
             tracker.record_frame(&frame);
         }
@@ -376,7 +376,7 @@ mod tests {
         // Ajouter des messages
         let frame = MidiFrame {
             source: "test".into(),
-            data: smallvec::SmallVec::from_slice(&[0x90, 60, 100]),
+            data: Vec::from([0x90, 60, 100]),
         };
         
         tracker.record_frame(&frame);
@@ -401,7 +401,7 @@ mod tests {
         for source in ["source1", "source2", "source3"] {
             let frame = MidiFrame {
                 source: source.into(),
-                data: smallvec::SmallVec::from_slice(&[0x90, 60, 100]),
+                data: Vec::from([0x90, 60, 100]),
             };
             tracker.record_frame(&frame);
         }

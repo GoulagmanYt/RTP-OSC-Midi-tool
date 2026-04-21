@@ -33,6 +33,7 @@ use tauri::Emitter;
 use tauri::Window;
 
 /// Handle principal du bridge
+#[derive(Clone)]
 pub struct BridgeHandle {
     inner: Arc<Mutex<Option<BridgeRuntime>>>,
     rtp_server: Arc<Mutex<Option<RtpServer>>>,

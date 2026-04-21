@@ -4,6 +4,7 @@
 pub mod audio;
 pub mod bridge;
 pub mod config;
+pub mod error;
 pub mod logger;
 pub mod midi;
 pub mod osc;
@@ -16,6 +17,7 @@ pub mod vst_scan;
 pub use audio::{AudioEngine, AudioStreamConfig, ConfigError};
 pub use bridge::BridgeHandle;
 pub use config::{Config, ConfigStore};
+pub use error::{AppError, AudioError, BridgeError, ConfigError as AppConfigError, TauriError};
 pub use midi::MidiFrame;
 pub use types::{
     BridgeStatus, BridgeMetrics, MidiActivityInfo, 

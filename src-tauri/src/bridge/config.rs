@@ -281,7 +281,7 @@ mod tests {
         // Test de filtrage par canal
         let mut frame = crate::midi::MidiFrame {
             source: "test".into(),
-            data: smallvec::SmallVec::from_slice(&[0x90, 60, 100]), // Note On canal 0
+            data: Vec::from([0x90, 60, 100]), // Note On canal 0
         };
         
         assert!(!runtime.apply_to_frame(&mut frame)); // Rejeté (mauvais canal)

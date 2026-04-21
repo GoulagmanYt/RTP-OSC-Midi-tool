@@ -1,13 +1,13 @@
-use smallvec::SmallVec;
 use std::sync::Arc;
+use serde::{Deserialize, Serialize};
 
 pub const NOTE_MIN: u8 = 21;
 pub const NOTE_MAX: u8 = 108;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MidiFrame {
-    pub data: SmallVec<[u8; 32]>,
-    pub source: Arc<str>,
+    pub data: Vec<u8>,
+    pub source: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,8 +126,8 @@ mod tests {
                 let status = if i % 2 == 0 { 0x90 } else { 0x80 };
                 let velocity = if status == 0x90 { 100 } else { 0 };
                 tx.send(MidiFrame {
-                    data: SmallVec::from_slice(&[status, note, velocity]),
-                    source: Arc::from("stress"),
+                    data: Vec::from([status, note, velocity]),
+                    source: "stress".to_string(),
                 })
                 .expect("producer send");
             }

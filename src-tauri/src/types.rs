@@ -20,7 +20,8 @@ impl LogEvent {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Statut du bridge
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct BridgeStatus {
     pub running: bool,
