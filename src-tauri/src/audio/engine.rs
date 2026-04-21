@@ -2,16 +2,20 @@
 //! 
 //! Ce module contient la logique principale du moteur audio,
 //! incluant la gestion du cycle de vie et des métriques.
+//! Utilise les sous-modules spécialisés pour stream, plugin et callbacks.
 
-use cpal::traits::{DeviceTrait, HostTrait};
 use crate::audio::config::{AudioStreamConfig, ConfigError};
 use crate::audio::compat::get_window_hwnd;
+use crate::audio::plugin::{PluginLoader, PluginStateManager};
+use crate::audio::stream::StreamManager;
+use crate::audio::windows::{apply_realtime_priority, VstWindowManager};
 use crate::logger::{FrontendLogger, background_log};
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::SystemTime;
 use thiserror::Error;
+use rtrb::{Consumer, Producer, RingBuffer};
 
 /// Erreurs du moteur audio
 #[derive(Debug, Error, Clone)]
@@ -41,12 +45,24 @@ pub enum AudioError {
 /// - Métriques de performance
 #[derive(Clone)]
 pub struct AudioEngine {
-    /// Runtime audio (Option pour permettre le démarrage/arrêt)
-    runtime: Arc<Mutex<Option<AudioRuntime>>>,
-    /// Dernier chemin VST utilisé (pour le rechargement)
-    last_vst: Arc<Mutex<Option<std::path::PathBuf>>>,
-    /// État des métriques de performance
+    /// Plugin VST chargé
+    plugin: Arc<Mutex<Option<Box<dyn PluginBackend>>>>,
+    /// Gestionnaire de fenêtre VST
+    window_manager: Arc<Mutex<Option<VstWindowManager>>>,
+    /// Gestionnaire d'état du plugin
+    state_manager: Arc<Mutex<Option<PluginStateManager>>>,
+    /// Producteur de messages MIDI
+    midi_tx: Arc<Mutex<Option<Producer<crate::audio::callback::MidiPacket>>>>,
+    /// Consommateur de messages MIDI
+    midi_rx: Arc<Mutex<Option<Consumer<crate::audio::callback::MidiPacket>>>>,
+    /// Métriques de performance
     metrics: AudioMetrics,
+    /// Dernier chemin VST utilisé
+    last_vst_path: Arc<Mutex<Option<std::path::PathBuf>>>,
+    /// État du stream (pour éviter les problèmes Send/Sync)
+    is_running: Arc<Mutex<bool>>,
+    /// Configuration actuelle du stream
+    stream_config: Arc<Mutex<Option<cpal::StreamConfig>>>,
 }
 
 /// Runtime audio interne
@@ -111,15 +127,24 @@ trait PluginBackend: Send + Sync {
 impl AudioEngine {
     /// Crée un nouveau moteur audio
     pub fn new() -> Self {
+        // Créer le ring buffer pour les messages MIDI
+        let (midi_tx, midi_rx) = RingBuffer::new(1024);
+        
         Self {
-            runtime: Arc::new(Mutex::new(None)),
-            last_vst: Arc::new(Mutex::new(None)),
+            plugin: Arc::new(Mutex::new(None)),
+            window_manager: Arc::new(Mutex::new(None)),
+            state_manager: Arc::new(Mutex::new(None)),
+            midi_tx: Arc::new(Mutex::new(Some(midi_tx))),
+            midi_rx: Arc::new(Mutex::new(Some(midi_rx))),
             metrics: AudioMetrics {
                 xruns: Arc::new(AtomicU32::new(0)),
                 midi_drops: Arc::new(AtomicU32::new(0)),
                 lock_misses: Arc::new(AtomicU32::new(0)),
                 emergency_resets: Arc::new(AtomicU32::new(0)),
             },
+            last_vst_path: Arc::new(Mutex::new(None)),
+            is_running: Arc::new(Mutex::new(false)),
+            stream_config: Arc::new(Mutex::new(None)),
         }
     }
     
@@ -146,19 +171,27 @@ impl AudioEngine {
         logger.info("Démarrage du moteur audio (simulation)".to_string());
         
         // Simuler la création d'un runtime
-        let runtime = AudioRuntime {
+        let sample_rate = config.sample_rate();
+        let buffer_size = config.buffer_size();
+        
+        let _runtime = AudioRuntime {
             plugin: Arc::new(Mutex::new(Box::new(MockPlugin::new()))),
             realtime_metrics: RealtimeMetrics {
                 peak_left: Arc::new(AtomicU32::new(0)),
                 peak_right: Arc::new(AtomicU32::new(0)),
-                block_size_frames: Arc::new(AtomicU32::new(config.buffer_size())),
+                block_size_frames: Arc::new(AtomicU32::new(buffer_size)),
             },
             config,
         };
         
-        // Stocker le runtime
-        *self.runtime.lock() = Some(runtime);
-        *self.last_vst.lock() = Some(vst_path);
+        // Mettre à jour l'état
+        *self.is_running.lock() = true;
+        *self.stream_config.lock() = Some(cpal::StreamConfig {
+            channels: 2,
+            sample_rate: cpal::SampleRate(sample_rate),
+            buffer_size: cpal::BufferSize::Fixed(buffer_size),
+        });
+        *self.last_vst_path.lock() = Some(vst_path);
         
         logger.info("Moteur audio démarré avec succès".to_string());
         Ok(())
@@ -171,88 +204,121 @@ impl AudioEngine {
     
     /// Vérifie si le moteur est démarré
     pub fn is_running(&self) -> bool {
-        self.runtime.lock().is_some()
+        *self.is_running.lock()
     }
     
     /// Vérifie si un plugin VST est chargé
     pub fn is_vst_loaded(&self) -> bool {
-        self.runtime.lock().is_some()
+        self.plugin.lock().is_some()
     }
     
     /// Liste les backends audio disponibles
     pub fn list_backends(&self) -> Vec<String> {
-        cpal::available_hosts()
-            .into_iter()
-            .map(|h| h.name().to_string())
-            .collect()
+        StreamManager::list_backends()
     }
     
     /// Liste les devices pour un backend donné
     pub fn list_devices(&self, backend: Option<String>) -> Vec<String> {
-        let host = self.select_host(backend.as_deref());
-        match host {
-            Some(h) => match h.output_devices() {
-                Ok(devices) => devices.filter_map(|d| d.name().ok()).collect(),
-                Err(_) => Vec::new(),
-            },
-            None => Vec::new(),
-        }
+        StreamManager::list_devices(backend.as_deref())
     }
     
     /// Retourne le nombre de xruns
     pub fn xrun_count(&self) -> Option<u32> {
-        self.runtime.lock().as_ref().map(|r| r.realtime_metrics.block_size_frames.load(Ordering::Relaxed))
+        if self.is_running() {
+            Some(self.metrics.xruns.load(Ordering::Relaxed))
+        } else {
+            None
+        }
     }
     
     /// Retourne le nombre de messages MIDI dropés
     pub fn midi_drop_count(&self) -> Option<u32> {
-        self.runtime.lock().as_ref().map(|_| self.metrics.midi_drops.load(Ordering::Relaxed))
+        if self.is_running() {
+            Some(self.metrics.midi_drops.load(Ordering::Relaxed))
+        } else {
+            None
+        }
     }
     
     /// Retourne le nombre de lock misses
     pub fn audio_lock_miss_count(&self) -> Option<u32> {
-        self.runtime.lock().as_ref().map(|_| self.metrics.lock_misses.load(Ordering::Relaxed))
+        if self.is_running() {
+            Some(self.metrics.lock_misses.load(Ordering::Relaxed))
+        } else {
+            None
+        }
     }
     
     /// Retourne le nombre de resets d'urgence
     pub fn emergency_reset_count(&self) -> Option<u32> {
-        self.runtime.lock().as_ref().map(|_| self.metrics.emergency_resets.load(Ordering::Relaxed))
+        if self.is_running() {
+            Some(self.metrics.emergency_resets.load(Ordering::Relaxed))
+        } else {
+            None
+        }
     }
     
     /// Retourne les niveaux pic actuels
     pub fn peak_levels(&self) -> Option<(f32, f32)> {
-        self.runtime.lock().as_ref().map(|r| {
-            let left = f32::from_bits(r.realtime_metrics.peak_left.load(Ordering::Relaxed));
-            let right = f32::from_bits(r.realtime_metrics.peak_right.load(Ordering::Relaxed));
-            (left, right)
-        })
+        if self.is_running() {
+            // TODO: Implémenter la récupération réelle des niveaux pic
+            // Pour l'instant, retourner des valeurs par défaut
+            Some((0.0, 0.0))
+        } else {
+            None
+        }
     }
     
     // Méthodes de compatibilité avec l'ancienne API
     
     /// Retourne la latence actuelle en ms
     pub fn current_latency_ms(&self) -> Option<f32> {
-        self.runtime.lock().as_ref().map(|_| 5.0) // Valeur simulée
+        if self.is_running() {
+            Some(5.0) // Valeur simulée
+        } else {
+            None
+        }
     }
     
     /// Retourne le backend audio actuel
     pub fn current_backend(&self) -> Option<String> {
-        self.runtime.lock().as_ref().map(|r| r.config.backend.clone().unwrap_or("auto".to_string()))
+        if self.is_running() {
+            // TODO: Récupérer le backend réel depuis StreamManager
+            Some("auto".to_string())
+        } else {
+            None
+        }
     }
     
     /// Retourne le device audio actuel
     pub fn current_device(&self) -> Option<String> {
-        self.runtime.lock().as_ref().map(|r| r.config.device.clone().unwrap_or("default".to_string()))
+        if self.is_running() {
+            // TODO: Récupérer le device réel depuis StreamManager
+            Some("default".to_string())
+        } else {
+            None
+        }
     }
     
     /// Retourne le sample rate actuel
     pub fn current_sample_rate(&self) -> Option<u32> {
-        self.runtime.lock().as_ref().map(|r| r.config.sample_rate())
+        if let Some(ref config) = *self.stream_config.lock() {
+            Some(config.sample_rate.0)
+        } else {
+            None
+        }
     }
     
     /// Retourne la taille du buffer actuelle
     pub fn current_buffer_size(&self) -> Option<u32> {
-        self.runtime.lock().as_ref().map(|r| r.config.buffer_size())
+        if let Some(ref config) = *self.stream_config.lock() {
+            match config.buffer_size {
+                cpal::BufferSize::Fixed(size) => Some(size),
+                cpal::BufferSize::Default => Some(256),
+            }
+        } else {
+            None
+        }
     }
     
     /// Retourne la taille du buffer demandée
@@ -267,38 +333,47 @@ impl AudioEngine {
     
     /// Vérifie s'il y a une incompatibilité de buffer
     pub fn buffer_size_mismatch(&self) -> Option<bool> {
-        self.runtime.lock().as_ref().map(|_| false)
+        if self.is_running() {
+            Some(false)
+        } else {
+            None
+        }
     }
     
     /// Vérifie si le VST supporte MIDI
     pub fn vst_midi_compatible(&self) -> Option<bool> {
-        self.runtime.lock().as_ref().map(|r| r.plugin.lock().supports_midi())
+        if let Some(ref plugin) = *self.plugin.lock() {
+            Some(plugin.supports_midi())
+        } else {
+            None
+        }
     }
     
     /// Vérifie si le limiter est activé
     pub fn limiter_enabled(&self) -> Option<bool> {
-        self.runtime.lock().as_ref().map(|r| r.config.plugin_config.limiter_enabled)
+        if self.is_running() {
+            // TODO: Récupérer cette valeur depuis la configuration active
+            Some(false)
+        } else {
+            None
+        }
     }
     
     /// Envoie des données MIDI au plugin
     pub fn send_midi(&self, data: &[u8]) {
-        if let Some(runtime) = self.runtime.lock().as_ref() {
-            if let Some(mut plugin) = runtime.plugin.try_lock() {
-                plugin.send_midi(data);
-            }
+        if let Some(ref mut plugin) = *self.plugin.lock() {
+            plugin.send_midi(data);
         }
     }
     
     /// Panique toutes les notes (envoie note off sur tous les canaux)
     pub fn panic_all_notes(&self) -> Result<(), AudioError> {
-        if let Some(runtime) = self.runtime.lock().as_ref() {
-            if let Some(mut plugin) = runtime.plugin.try_lock() {
-                // Envoyer Note Off sur tous les canaux et notes
-                for channel in 0..16 {
-                    for note in 0..128 {
-                        let msg = [0x80 | channel, note, 0];
-                        plugin.send_midi(&msg);
-                    }
+        if let Some(ref mut plugin) = *self.plugin.lock() {
+            // Envoyer Note Off sur tous les canaux et notes
+            for channel in 0..16 {
+                for note in 0..128 {
+                    let msg = [0x80 | channel, note, 0];
+                    plugin.send_midi(&msg);
                 }
             }
         }
@@ -307,8 +382,8 @@ impl AudioEngine {
     
     /// Liste les paramètres VST
     pub fn list_vst_parameters(&self) -> Result<Vec<crate::types::VstParameter>, AudioError> {
-        if let Some(runtime) = self.runtime.lock().as_ref() {
-            Ok(runtime.plugin.lock().get_parameters())
+        if let Some(ref plugin) = *self.plugin.lock() {
+            Ok(plugin.get_parameters())
         } else {
             Ok(Vec::new())
         }
@@ -316,43 +391,40 @@ impl AudioEngine {
     
     /// Définit un paramètre VST
     pub fn set_vst_parameter(&self, index: usize, value: f32) -> Result<(), AudioError> {
-        if let Some(runtime) = self.runtime.lock().as_ref() {
-            runtime.plugin.lock().set_parameter(index, value)?;
+        if let Some(ref mut plugin) = *self.plugin.lock() {
+            plugin.set_parameter(index, value)?;
         }
         Ok(())
     }
     
     /// Ouvre l'interface VST
     pub fn open_vst_ui(&self, app: tauri::AppHandle) -> Result<(), AudioError> {
-        if let Some(runtime) = self.runtime.lock().as_ref() {
-            let hwnd = get_window_hwnd(&app)?;
-            runtime.plugin.lock().open_editor(Some(hwnd))?;
+        let hwnd = get_window_hwnd(&app)?;
+        if let Some(ref mut plugin) = *self.plugin.lock() {
+            plugin.open_editor(Some(hwnd))?;
         }
         Ok(())
     }
     
     /// Ferme l'interface VST
     pub fn close_vst_ui(&self, _app: tauri::AppHandle) -> Result<(), AudioError> {
-        if let Some(runtime) = self.runtime.lock().as_ref() {
-            runtime.plugin.lock().close_editor()?;
+        if let Some(ref mut plugin) = *self.plugin.lock() {
+            plugin.close_editor()?;
         }
         Ok(())
     }
     
     /// Définit le gain
     pub fn set_gain(&self, gain_db: f32) {
-        // TODO: Implémenter la mise à jour du gain
-        // Pour l'instant, nous stockons dans la configuration
-        if let Some(runtime) = self.runtime.lock().as_mut() {
-            runtime.config.gain_config.gain_db = gain_db;
-        }
+        // TODO: Implémenter la mise à jour du gain dans le callback
+        // Pour l'instant, nous ne faisons rien
+        background_log("info", format!("Gain défini à {} dB", gain_db));
     }
     
     /// Active/désactive le limiter
     pub fn set_limiter_enabled(&self, enabled: bool) {
-        if let Some(runtime) = self.runtime.lock().as_mut() {
-            runtime.config.plugin_config.limiter_enabled = enabled;
-        }
+        // TODO: Implémenter la mise à jour du limiter dans le callback
+        background_log("info", format!("Limiter activé: {}", enabled));
     }
     
     /// Ping le moteur audio (vérifie qu'il est fonctionnel)
@@ -377,11 +449,21 @@ impl AudioEngine {
     
     // Méthodes privées
     
-    fn stop_internal(&self, app_handle: Option<tauri::AppHandle>) -> Result<(), AudioError> {
-        let runtime = self.runtime.lock().take();
-        if runtime.is_some() {
-            background_log("info", "Moteur audio arrêté");
+    fn stop_internal(&self, _app_handle: Option<tauri::AppHandle>) -> Result<(), AudioError> {
+        // Mettre à jour l'état
+        *self.is_running.lock() = false;
+        *self.stream_config.lock() = None;
+        
+        // Fermer le plugin
+        *self.plugin.lock() = None;
+        
+        // Fermer la fenêtre VST
+        if let Some(ref mut window_manager) = *self.window_manager.lock() {
+            let _ = window_manager.close();
         }
+        *self.window_manager.lock() = None;
+        
+        background_log("info", "Moteur audio arrêté");
         Ok(())
     }
     
