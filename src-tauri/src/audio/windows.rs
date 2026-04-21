@@ -4,28 +4,20 @@
 //! temps réel et l'interface graphique des plugins VST.
 
 #[cfg(target_os = "windows")]
-use std::sync::atomic::{AtomicU32, Ordering};
-#[cfg(target_os = "windows")]
-use std::sync::Arc;
-#[cfg(target_os = "windows")]
 use std::ptr::NonNull;
 #[cfg(target_os = "windows")]
 use windows::core::{w, PCWSTR};
 #[cfg(target_os = "windows")]
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use crate::logger::background_log;
 #[cfg(target_os = "windows")]
 use windows::Win32::Graphics::Gdi::HBRUSH;
 #[cfg(target_os = "windows")]
-use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 #[cfg(target_os = "windows")]
 use windows::Win32::System::Threading::{
-    AvSetMmThreadCharacteristicsW, GetCurrentProcess, GetCurrentThread, ProcessPowerThrottling,
-    SetPriorityClass, SetProcessInformation, SetThreadInformation, SetThreadPriority,
-    ThreadPowerThrottling, ABOVE_NORMAL_PRIORITY_CLASS, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
-    PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION,
-    PROCESS_POWER_THROTTLING_STATE, THREAD_POWER_THROTTLING_CURRENT_VERSION,
-    THREAD_POWER_THROTTLING_EXECUTION_SPEED, THREAD_POWER_THROTTLING_STATE,
+    AvSetMmThreadCharacteristicsW, GetCurrentProcess, GetCurrentThread,
+    SetPriorityClass, ABOVE_NORMAL_PRIORITY_CLASS,
 };
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -36,6 +28,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 /// Erreurs spécifiques à Windows
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum WindowsError {
     /// Erreur lors de la définition des priorités temps réel
     PriorityError(String),
@@ -49,6 +42,7 @@ pub enum WindowsError {
 
 /// Applique les priorités temps réel pour le thread audio
 #[cfg(target_os = "windows")]
+#[allow(dead_code)]
 pub fn apply_realtime_priority() -> Result<(), WindowsError> {
     // Version simplifiée - uniquement la priorité de base
     unsafe {
@@ -57,7 +51,7 @@ pub fn apply_realtime_priority() -> Result<(), WindowsError> {
             .map_err(|e| WindowsError::PriorityError(format!("SetPriorityClass failed: {}", e)))?;
         
         // Définir les caractéristiques multimédia du thread
-        let thread = GetCurrentThread();
+        let _thread = GetCurrentThread();
         let mut task_index = 0u32;
         let task_name = w!("Pro Audio");
         
@@ -77,6 +71,7 @@ pub fn apply_realtime_priority() -> Result<(), WindowsError> {
 
 /// Crée une fenêtre pour l'interface VST
 #[cfg(target_os = "windows")]
+#[allow(dead_code)]
 pub fn create_vst_window(
     title: &str,
     width: i32,
@@ -123,7 +118,7 @@ pub fn create_vst_window(
         .map_err(|e| WindowsError::WindowError(format!("CreateWindowExW failed: {}", e)))?;
         
         // Afficher la fenêtre
-        ShowWindow(hwnd, SW_SHOWNORMAL);
+        let _ = ShowWindow(hwnd, SW_SHOWNORMAL);
         
         Ok(hwnd)
     }
@@ -141,6 +136,7 @@ pub fn create_vst_window(
 
 /// Obtient le HWND de la fenêtre principale de l'application
 #[cfg(target_os = "windows")]
+#[allow(dead_code)]
 pub fn get_main_window_hwnd() -> Result<HWND, WindowsError> {
     unsafe {
         let hwnd = GetForegroundWindow();
@@ -160,6 +156,7 @@ pub fn get_main_window_hwnd() -> Result<std::ptr::NonNull<()>, WindowsError> {
 
 /// Convertit HWND en NonNull<void> pour compatibilité
 #[cfg(target_os = "windows")]
+#[allow(dead_code)]
 pub fn hwnd_to_nonnull(hwnd: HWND) -> Option<NonNull<()>> {
     if hwnd.is_invalid() {
         None
@@ -176,6 +173,7 @@ pub fn hwnd_to_nonnull(_hwnd: std::ptr::NonNull<()>) -> Option<NonNull<()>> {
 
 /// Ferme proprement une fenêtre VST
 #[cfg(target_os = "windows")]
+#[allow(dead_code)]
 pub fn close_vst_window(hwnd: HWND) -> Result<(), WindowsError> {
     unsafe {
         DestroyWindow(hwnd)
@@ -192,7 +190,8 @@ pub fn close_vst_window(_hwnd: std::ptr::NonNull<()>) -> Result<(), WindowsError
 
 /// Procédure de fenêtre par défaut
 #[cfg(target_os = "windows")]
-unsafe extern "system" fn def_window_proc(
+#[allow(dead_code)]
+pub unsafe extern "system" fn def_window_proc(
     hwnd: HWND,
     msg: u32,
     wparam: WPARAM,
@@ -202,6 +201,7 @@ unsafe extern "system" fn def_window_proc(
 }
 
 /// Vérifie si un chemin correspond à Sforzando VST3 (cas spécial)
+#[allow(dead_code)]
 pub fn is_sforzando_vst3(path: &std::path::Path) -> bool {
     if let Some(name) = path.file_name() {
         if let Some(name_str) = name.to_str() {
@@ -215,6 +215,7 @@ pub fn is_sforzando_vst3(path: &std::path::Path) -> bool {
 }
 
 /// Timeout pour l'arrêt des plugins VST
+#[allow(dead_code)]
 pub fn vst_shutdown_timeout() -> std::time::Duration {
     // Permet la configuration via variable d'environnement
     let secs = std::env::var("VST_SHUTDOWN_TIMEOUT_SECS")
@@ -225,17 +226,25 @@ pub fn vst_shutdown_timeout() -> std::time::Duration {
     std::time::Duration::from_secs(secs.max(1).min(30))
 }
 
-/// Gestionnaire de fenêtres VST
+/// Gestionnaire de fenêtre VST
+#[cfg(target_os = "windows")]
+#[allow(dead_code)]
 pub struct VstWindowManager {
-    // Stocker le hwnd comme usize pour éviter les problèmes Send/Sync
+    /// Handle de la fenêtre
     hwnd: Option<usize>,
+    /// Titre de la fenêtre
+    #[allow(dead_code)]
     title: String,
+    /// Dimensions
+    #[allow(dead_code)]
     width: i32,
+    #[allow(dead_code)]
     height: i32,
 }
 
 impl VstWindowManager {
-    /// Crée un nouveau gestionnaire de fenêtre
+    /// Crée une nouvelle fenêtre VST
+    #[allow(dead_code)]
     pub fn new(title: String, width: i32, height: i32) -> Self {
         Self {
             hwnd: None,
@@ -246,6 +255,7 @@ impl VstWindowManager {
     }
     
     /// Crée et affiche la fenêtre
+    #[allow(dead_code)]
     pub fn create(&mut self) -> Result<(), WindowsError> {
         #[cfg(target_os = "windows")]
         {
@@ -262,6 +272,7 @@ impl VstWindowManager {
     }
     
     /// Ferme la fenêtre
+    #[allow(dead_code)]
     pub fn close(&mut self) -> Result<(), WindowsError> {
         if let Some(hwnd_val) = self.hwnd {
             #[cfg(target_os = "windows")]
@@ -275,19 +286,21 @@ impl VstWindowManager {
         Ok(())
     }
     
-    /// Retourne le HWND
+    /// Retourne le handle de la fenêtre
+    #[allow(dead_code)]
     pub fn hwnd(&self) -> Option<usize> {
         self.hwnd
     }
     
     /// Met la fenêtre au premier plan
+    #[allow(dead_code)]
     pub fn bring_to_front(&self) -> Result<(), WindowsError> {
         if let Some(hwnd_val) = self.hwnd {
             #[cfg(target_os = "windows")]
             {
                 let hwnd_ptr = HWND(hwnd_val as *mut std::ffi::c_void);
                 unsafe {
-                    SetForegroundWindow(hwnd_ptr);
+                    let _ = SetForegroundWindow(hwnd_ptr);
                 }
             }
         }
@@ -295,6 +308,7 @@ impl VstWindowManager {
     }
     
     /// Vérifie si la fenêtre est ouverte
+    #[allow(dead_code)]
     pub fn is_open(&self) -> bool {
         self.hwnd.is_some()
     }

@@ -8,7 +8,6 @@ use crate::{
     midi::MidiFrame,
     osc::OscClient,
 };
-use std::sync::Arc;
 
 /// Gestionnaire de communication OSC
 pub struct OscManager {
@@ -18,6 +17,7 @@ pub struct OscManager {
 }
 
 /// Gestionnaire des messages OSC
+#[allow(dead_code)]
 pub struct OscMessageHandler;
 
 impl OscManager {
@@ -71,6 +71,7 @@ impl OscManager {
     }
     
     /// Envoie un message de sustain OSC
+    #[allow(dead_code)]
     pub fn send_sustain(&self, value: f32, logger: &FrontendLogger) {
         if !self.enabled {
             return;
@@ -85,6 +86,7 @@ impl OscManager {
     }
     
     /// Envoie un message de note OSC
+    #[allow(dead_code)]
     pub fn send_note(&self, note: u8, velocity: f32, logger: &FrontendLogger) {
         if !self.enabled {
             return;
@@ -102,6 +104,7 @@ impl OscManager {
     }
     
     /// Ferme la connexion OSC
+    #[allow(dead_code)]
     pub fn close(&mut self, logger: &FrontendLogger) {
         if let Some(_) = self.client.take() {
             logger.info("OSC déconnecté");
@@ -110,13 +113,29 @@ impl OscManager {
     }
     
     /// Vérifie si OSC est activé
+    #[allow(dead_code)]
     pub fn is_enabled(&self) -> bool {
         self.enabled
     }
     
     /// Retourne la cible OSC actuelle
+    #[allow(dead_code)]
     pub fn target(&self) -> Option<&str> {
         self.target.as_deref()
+    }
+    
+    /// Teste la connexion OSC
+    #[allow(dead_code)]
+    pub fn test_osc_connection(&self, _target: &str) -> Result<bool, String> {
+        // TODO: implémenter la fonctionnalité de test de connexion
+        unimplemented!();
+    }
+    
+    /// Crée un client OSC pour une cible donnée
+    #[allow(dead_code)]
+    pub fn create_osc_client(&self, _target: &str) -> Result<OscClient, String> {
+        // TODO: implémenter la fonctionnalité de création de client
+        unimplemented!();
     }
     
     // Méthodes privées
@@ -261,38 +280,45 @@ impl Default for OscManager {
 
 impl OscMessageHandler {
     /// Convertit une valeur MIDI (0-127) en valeur OSC (0.0-1.0)
+    #[allow(dead_code)]
     pub fn midi_to_osc(midi_value: u8) -> f32 {
         (midi_value as f32) / 127.0
     }
     
     /// Convertit une valeur OSC (0.0-1.0) en valeur MIDI (0-127)
+    #[allow(dead_code)]
     pub fn osc_to_midi(osc_value: f32) -> u8 {
         (osc_value.clamp(0.0, 1.0) * 127.0).round() as u8
     }
     
     /// Convertit une valeur de pitch bend (0-16383) en valeur OSC (-1.0 à +1.0)
+    #[allow(dead_code)]
     pub fn pitch_bend_to_osc(bend_value: u16) -> f32 {
         ((bend_value as f32) - 8192.0) / 8192.0
     }
     
     /// Convertit une valeur OSC (-1.0 à +1.0) en valeur de pitch bend (0-16383)
+    #[allow(dead_code)]
     pub fn osc_to_pitch_bend(osc_value: f32) -> u16 {
         let clamped = osc_value.clamp(-1.0, 1.0);
         ((clamped * 8192.0) + 8192.0).round() as u16
     }
     
     /// Convertit une valeur de pan (0-127) en valeur OSC (-1.0 à +1.0)
+    #[allow(dead_code)]
     pub fn pan_to_osc(pan_value: u8) -> f32 {
         ((pan_value as f32) / 127.0) * 2.0 - 1.0
     }
     
     /// Convertit une valeur OSC (-1.0 à +1.0) en valeur de pan (0-127)
+    #[allow(dead_code)]
     pub fn osc_to_pan(osc_value: f32) -> u8 {
         let clamped = osc_value.clamp(-1.0, 1.0);
         (((clamped + 1.0) / 2.0) * 127.0).round() as u8
     }
     
-    /// Vérifie si une trame MIDI est un message pertinent pour OSC
+    /// Vérifie si un message MIDI est pertinent pour OSC
+    #[allow(dead_code)]
     pub fn is_relevant_for_osc(data: &[u8]) -> bool {
         if data.is_empty() {
             return false;
@@ -304,7 +330,8 @@ impl OscMessageHandler {
         matches!(status_type, 0x80 | 0x90 | 0xB0 | 0xC0 | 0xE0)
     }
     
-    /// Extrait le type de message MIDI pour le logging
+    /// Retourne le type de message MIDI
+    #[allow(dead_code)]
     pub fn get_midi_message_type(data: &[u8]) -> &'static str {
         if data.is_empty() {
             return "inconnu";

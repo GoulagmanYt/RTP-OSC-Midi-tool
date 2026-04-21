@@ -25,6 +25,7 @@ use crate::{
 };
 
 const RTP_PARTICIPANTS_EVENT: &str = "rtp_participants";
+#[allow(dead_code)]
 const RTP_SESSIONS_EVENT: &str = "rtp_sessions";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,9 +41,13 @@ struct RemoteTargetState {
 }
 
 pub struct RtpServer {
+    #[allow(dead_code)]
     stop_tx: Option<oneshot::Sender<()>>,
+    #[allow(dead_code)]
     handle: JoinHandle<()>,
+    #[allow(dead_code)]
     bound_port: u16,
+    #[allow(dead_code)]
     participants: Arc<Mutex<Vec<RtpParticipantInfo>>>,
 }
 
@@ -256,6 +261,7 @@ impl RtpServer {
         })
     }
 
+    #[allow(dead_code)]
     pub async fn stop(self) {
         if let Some(stop_tx) = self.stop_tx {
             let _ = stop_tx.send(());
@@ -263,15 +269,18 @@ impl RtpServer {
         let _ = self.handle.await;
     }
 
+    #[allow(dead_code)]
     pub fn bound_port(&self) -> u16 {
         self.bound_port
     }
 
+    #[allow(dead_code)]
     pub fn participants(&self) -> Vec<RtpParticipantInfo> {
         self.participants.lock().clone()
     }
 }
 
+#[allow(dead_code)]
 pub fn ports_available(port: u16) -> Result<bool, String> {
     if port == u16::MAX {
         return Ok(false);
@@ -303,6 +312,7 @@ pub fn ports_available(port: u16) -> Result<bool, String> {
     Ok(true)
 }
 
+#[allow(dead_code)]
 pub fn discover_sessions(timeout: Duration) -> Result<Vec<RtpSessionInfo>, String> {
     let mdns = ServiceDaemon::new().map_err(|e| e.to_string())?;
     let receiver = mdns
@@ -368,34 +378,43 @@ pub fn discover_sessions(timeout: Duration) -> Result<Vec<RtpSessionInfo>, Strin
     Ok(list)
 }
 
+#[allow(dead_code)]
 fn emit_participants(logger: &FrontendLogger, participants: &Arc<Mutex<Vec<RtpParticipantInfo>>>) {
     let snapshot = participants.lock().clone();
     let _ = logger.app_handle().emit(RTP_PARTICIPANTS_EVENT, snapshot);
 }
 
+#[allow(dead_code)]
 fn emit_sessions(app_handle: &tauri::AppHandle, sessions: &[RtpSessionInfo]) {
     let _ = app_handle.emit(RTP_SESSIONS_EVENT, sessions);
 }
 
+#[allow(dead_code)]
 const DISCOVERY_TIMEOUT: Duration = Duration::from_millis(500);
+#[allow(dead_code)]
 const DISCOVERY_TTL: Duration = Duration::from_secs(30);  // cache 30s
+#[allow(dead_code)]
 const DISCOVERY_INTERVAL: Duration = Duration::from_secs(10); // scan toutes les 10s
+#[allow(dead_code)]
 const DISCOVERY_INTERVAL_IDLE: Duration = Duration::from_secs(30); // si aucun participant
 
 #[derive(Default)]
 #[derive(Debug)]
 struct RtpDiscoveryCache {
     sessions: Vec<RtpSessionInfo>,
+    #[allow(dead_code)]
     updated_at: Option<Instant>,
 }
 
 impl RtpDiscoveryCache {
+    #[allow(dead_code)]
     fn is_stale(&self) -> bool {
         self.updated_at
             .map(|ts| ts.elapsed() >= DISCOVERY_TTL)
             .unwrap_or(true)
     }
 
+    #[allow(dead_code)]
     fn update(&mut self, sessions: Vec<RtpSessionInfo>) -> bool {
         let changed = self.sessions != sessions;
         self.sessions = sessions;
@@ -407,7 +426,9 @@ impl RtpDiscoveryCache {
 #[derive(Debug)]
 pub struct RtpDiscoveryManager {
     cache: Arc<Mutex<RtpDiscoveryCache>>,
+    #[allow(dead_code)]
     task: Mutex<Option<JoinHandle<()>>>,
+    #[allow(dead_code)]
     stop_tx: Mutex<Option<oneshot::Sender<()>>>,
 }
 
@@ -434,6 +455,7 @@ impl RtpDiscoveryManager {
         self.cache.lock().sessions.clone()
     }
 
+    #[allow(dead_code)]
     pub fn start(&self, app_handle: tauri::AppHandle) {
         let mut task_guard = self.task.lock();
         if task_guard.is_some() {
@@ -483,6 +505,7 @@ impl RtpDiscoveryManager {
         }));
     }
 
+    #[allow(dead_code)]
     pub fn stop(&self) {
         if let Some(stop_tx) = self.stop_tx.lock().take() {
             let _ = stop_tx.send(());
@@ -492,6 +515,7 @@ impl RtpDiscoveryManager {
         }
     }
 
+    #[allow(dead_code)]
     pub fn refresh_now(
         &self,
         app_handle: &tauri::AppHandle,

@@ -165,6 +165,7 @@ pub fn background_log(level: &str, message: impl Into<String>) {
     }
 }
 
+#[allow(dead_code)]
 pub fn clear_log_file() -> Result<(), String> {
     let path = log_file_path().ok_or_else(|| "Log file path unavailable".to_string())?;
     if let Some(parent) = path.parent() {

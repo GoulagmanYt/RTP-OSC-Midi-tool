@@ -17,9 +17,5 @@ pub mod stream;
 pub mod windows;
 
 // Réexporter les types publics pour faciliter l'utilisation
-pub use compat::{AudioSettings, settings_to_config};
-pub use config::{AudioStreamConfig, ConfigError, db_to_linear, linear_to_db};
+pub use compat::AudioSettings;
 pub use engine::AudioEngine;
-pub use plugin::{PluginBackend, PluginLoader, PluginStateManager, MockPlugin};
-pub use stream::{StreamManager, StreamError};
-pub use windows::{apply_realtime_priority, VstWindowManager, WindowsError};

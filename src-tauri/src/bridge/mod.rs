@@ -14,9 +14,4 @@ pub mod activity;
 pub mod runtime;
 
 // Réexporter les types publics pour faciliter l'utilisation
-pub use config::{BridgeConfig, ConfigSnapshot};
-pub use midi::{MidiManager, MidiPortSelector};
-pub use osc::{OscManager, OscMessageHandler};
-pub use rtp_bridge::{RtpManager, RtpTargetResolver};
-pub use activity::{ActivityTracker, MidiActivityInfo};
-pub use runtime::{BridgeHandle, BridgeRuntime};
+pub use runtime::BridgeHandle;

@@ -6,14 +6,13 @@
 
 use crate::audio::config::{AudioStreamConfig, ConfigError};
 use crate::audio::compat::get_window_hwnd;
-use crate::audio::plugin::{PluginLoader, PluginStateManager};
+use crate::audio::plugin::PluginStateManager;
 use crate::audio::stream::StreamManager;
-use crate::audio::windows::{apply_realtime_priority, VstWindowManager};
+use crate::audio::windows::VstWindowManager;
 use crate::logger::{FrontendLogger, background_log};
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use std::time::SystemTime;
 use thiserror::Error;
 use rtrb::{Consumer, Producer, RingBuffer};
 
@@ -50,12 +49,16 @@ pub struct AudioEngine {
     /// Gestionnaire de fenêtre VST
     window_manager: Arc<Mutex<Option<VstWindowManager>>>,
     /// Gestionnaire d'état du plugin
+    #[allow(dead_code)]
     state_manager: Arc<Mutex<Option<PluginStateManager>>>,
     /// Producteur de messages MIDI
+    #[allow(dead_code)]
     midi_tx: Arc<Mutex<Option<Producer<crate::audio::callback::MidiPacket>>>>,
     /// Consommateur de messages MIDI
+    #[allow(dead_code)]
     midi_rx: Arc<Mutex<Option<Consumer<crate::audio::callback::MidiPacket>>>>,
     /// Métriques de performance
+    #[allow(dead_code)]
     metrics: AudioMetrics,
     /// Dernier chemin VST utilisé
     last_vst_path: Arc<Mutex<Option<std::path::PathBuf>>>,
@@ -70,10 +73,13 @@ pub struct AudioEngine {
 /// Contient l'état actuel du moteur audio quand il est démarré.
 struct AudioRuntime {
     /// Plugin VST chargé
+    #[allow(dead_code)]
     plugin: Arc<Mutex<Box<dyn PluginBackend>>>,
     /// Métriques en temps réel
+    #[allow(dead_code)]
     realtime_metrics: RealtimeMetrics,
     /// Configuration utilisée
+    #[allow(dead_code)]
     config: AudioStreamConfig,
 }
 
@@ -81,47 +87,65 @@ struct AudioRuntime {
 #[derive(Clone)]
 struct AudioMetrics {
     /// Nombre de xruns (buffer underruns/overruns)
+    #[allow(dead_code)]
     xruns: Arc<AtomicU32>,
     /// Nombre de messages MIDI dropés
+    #[allow(dead_code)]
     midi_drops: Arc<AtomicU32>,
     /// Nombre de lock misses sur le mutex audio
+    #[allow(dead_code)]
     lock_misses: Arc<AtomicU32>,
     /// Nombre de resets d'urgence
+    #[allow(dead_code)]
     emergency_resets: Arc<AtomicU32>,
 }
 
 /// Métriques en temps réel (accessibles uniquement depuis le callback)
 struct RealtimeMetrics {
     /// Niveau pic canal gauche
+    #[allow(dead_code)]
     peak_left: Arc<AtomicU32>,
     /// Niveau pic canal droit
+    #[allow(dead_code)]
     peak_right: Arc<AtomicU32>,
     /// Taille du bloc actuel
+    #[allow(dead_code)]
     block_size_frames: Arc<AtomicU32>,
 }
 
 /// Interface pour les plugins VST (unifie VST2 et VST3)
 trait PluginBackend: Send + Sync {
     /// Traite les samples audio
+    #[allow(dead_code)]
     fn process(&mut self, inputs: &[&[f32]], outputs: &mut [&mut [f32]], frames: usize);
     
     /// Envoie un message MIDI
+    #[allow(dead_code)]
     fn send_midi(&mut self, data: &[u8]);
     
     /// Définit un paramètre
+    #[allow(dead_code)]
     fn set_parameter(&mut self, index: usize, value: f32) -> Result<(), AudioError>;
     
     /// Retourne les paramètres
+    #[allow(dead_code)]
     fn get_parameters(&self) -> Vec<crate::types::VstParameter>;
     
     /// Ouvre l'interface graphique
+    #[allow(dead_code)]
     fn open_editor(&mut self, parent: Option<std::ptr::NonNull<()>>) -> Result<(), AudioError>;
     
     /// Ferme l'interface graphique
+    #[allow(dead_code)]
     fn close_editor(&mut self) -> Result<(), AudioError>;
     
     /// Vérifie si le plugin supporte MIDI
+    #[allow(dead_code)]
     fn supports_midi(&self) -> bool;
+    
+    /// Retourne si l'éditeur est ouvert
+    #[allow(dead_code)]
+    fn is_editor_open(&self) -> bool;
 }
 
 impl std::fmt::Debug for AudioEngine {
@@ -232,11 +256,13 @@ impl AudioEngine {
     }
     
     /// Liste les devices pour un backend donné
+    #[allow(dead_code)]
     pub fn list_devices(&self, backend: Option<String>) -> Vec<String> {
         StreamManager::list_devices(backend.as_deref())
     }
     
     /// Retourne le nombre de xruns
+    #[allow(dead_code)]
     pub fn xrun_count(&self) -> Option<u32> {
         if self.is_running() {
             Some(self.metrics.xruns.load(Ordering::Relaxed))
@@ -246,6 +272,7 @@ impl AudioEngine {
     }
     
     /// Retourne le nombre de messages MIDI dropés
+    #[allow(dead_code)]
     pub fn midi_drop_count(&self) -> Option<u32> {
         if self.is_running() {
             Some(self.metrics.midi_drops.load(Ordering::Relaxed))
@@ -255,6 +282,7 @@ impl AudioEngine {
     }
     
     /// Retourne le nombre de lock misses
+    #[allow(dead_code)]
     pub fn audio_lock_miss_count(&self) -> Option<u32> {
         if self.is_running() {
             Some(self.metrics.lock_misses.load(Ordering::Relaxed))
@@ -264,6 +292,7 @@ impl AudioEngine {
     }
     
     /// Retourne le nombre de resets d'urgence
+    #[allow(dead_code)]
     pub fn emergency_reset_count(&self) -> Option<u32> {
         if self.is_running() {
             Some(self.metrics.emergency_resets.load(Ordering::Relaxed))
@@ -273,6 +302,7 @@ impl AudioEngine {
     }
     
     /// Retourne les niveaux pic actuels
+    #[allow(dead_code)]
     pub fn peak_levels(&self) -> Option<(f32, f32)> {
         if self.is_running() {
             // TODO: Implémenter la récupération réelle des niveaux pic
@@ -286,6 +316,7 @@ impl AudioEngine {
     // Méthodes de compatibilité avec l'ancienne API
     
     /// Retourne la latence actuelle en ms
+    #[allow(dead_code)]
     pub fn current_latency_ms(&self) -> Option<f32> {
         if self.is_running() {
             Some(5.0) // Valeur simulée
@@ -295,6 +326,7 @@ impl AudioEngine {
     }
     
     /// Retourne le backend audio actuel
+    #[allow(dead_code)]
     pub fn current_backend(&self) -> Option<String> {
         if self.is_running() {
             // TODO: Récupérer le backend réel depuis StreamManager
@@ -305,6 +337,7 @@ impl AudioEngine {
     }
     
     /// Retourne le device audio actuel
+    #[allow(dead_code)]
     pub fn current_device(&self) -> Option<String> {
         if self.is_running() {
             // TODO: Récupérer le device réel depuis StreamManager
@@ -315,6 +348,7 @@ impl AudioEngine {
     }
     
     /// Retourne le sample rate actuel
+    #[allow(dead_code)]
     pub fn current_sample_rate(&self) -> Option<u32> {
         if let Some(ref config) = *self.stream_config.lock() {
             Some(config.sample_rate.0)
@@ -324,6 +358,7 @@ impl AudioEngine {
     }
     
     /// Retourne la taille du buffer actuelle
+    #[allow(dead_code)]
     pub fn current_buffer_size(&self) -> Option<u32> {
         if let Some(ref config) = *self.stream_config.lock() {
             match config.buffer_size {
@@ -336,16 +371,19 @@ impl AudioEngine {
     }
     
     /// Retourne la taille du buffer demandée
+    #[allow(dead_code)]
     pub fn requested_buffer_size(&self) -> Option<u32> {
         self.current_buffer_size()
     }
     
     /// Retourne la taille du buffer du stream
+    #[allow(dead_code)]
     pub fn stream_buffer_size(&self) -> Option<u32> {
         self.current_buffer_size()
     }
     
     /// Vérifie s'il y a une incompatibilité de buffer
+    #[allow(dead_code)]
     pub fn buffer_size_mismatch(&self) -> Option<bool> {
         if self.is_running() {
             Some(false)
@@ -355,6 +393,7 @@ impl AudioEngine {
     }
     
     /// Vérifie si le VST supporte MIDI
+    #[allow(dead_code)]
     pub fn vst_midi_compatible(&self) -> Option<bool> {
         if let Some(ref plugin) = *self.plugin.lock() {
             Some(plugin.supports_midi())
@@ -364,6 +403,7 @@ impl AudioEngine {
     }
     
     /// Vérifie si le limiter est activé
+    #[allow(dead_code)]
     pub fn limiter_enabled(&self) -> Option<bool> {
         if self.is_running() {
             // TODO: Récupérer cette valeur depuis la configuration active
@@ -374,6 +414,7 @@ impl AudioEngine {
     }
     
     /// Envoie des données MIDI au plugin
+    #[allow(dead_code)]
     pub fn send_midi(&self, data: &[u8]) {
         if let Some(ref mut plugin) = *self.plugin.lock() {
             plugin.send_midi(data);
@@ -381,6 +422,7 @@ impl AudioEngine {
     }
     
     /// Panique toutes les notes (envoie note off sur tous les canaux)
+    #[allow(dead_code)]
     pub fn panic_all_notes(&self) -> Result<(), AudioError> {
         if let Some(ref mut plugin) = *self.plugin.lock() {
             // Envoyer Note Off sur tous les canaux et notes
@@ -395,6 +437,7 @@ impl AudioEngine {
     }
     
     /// Liste les paramètres VST
+    #[allow(dead_code)]
     pub fn list_vst_parameters(&self) -> Result<Vec<crate::types::VstParameter>, AudioError> {
         if let Some(ref plugin) = *self.plugin.lock() {
             Ok(plugin.get_parameters())
@@ -404,6 +447,7 @@ impl AudioEngine {
     }
     
     /// Définit un paramètre VST
+    #[allow(dead_code)]
     pub fn set_vst_parameter(&self, index: usize, value: f32) -> Result<(), AudioError> {
         if let Some(ref mut plugin) = *self.plugin.lock() {
             plugin.set_parameter(index, value)?;
@@ -412,6 +456,7 @@ impl AudioEngine {
     }
     
     /// Ouvre l'interface VST
+    #[allow(dead_code)]
     pub fn open_vst_ui(&self, app: tauri::AppHandle) -> Result<(), AudioError> {
         let hwnd = get_window_hwnd(&app)?;
         if let Some(ref mut plugin) = *self.plugin.lock() {
@@ -421,6 +466,7 @@ impl AudioEngine {
     }
     
     /// Ferme l'interface VST
+    #[allow(dead_code)]
     pub fn close_vst_ui(&self, _app: tauri::AppHandle) -> Result<(), AudioError> {
         if let Some(ref mut plugin) = *self.plugin.lock() {
             plugin.close_editor()?;
@@ -429,6 +475,7 @@ impl AudioEngine {
     }
     
     /// Définit le gain
+    #[allow(dead_code)]
     pub fn set_gain(&self, gain_db: f32) {
         // TODO: Implémenter la mise à jour du gain dans le callback
         // Pour l'instant, nous ne faisons rien
@@ -436,12 +483,14 @@ impl AudioEngine {
     }
     
     /// Active/désactive le limiter
+    #[allow(dead_code)]
     pub fn set_limiter_enabled(&self, enabled: bool) {
         // TODO: Implémenter la mise à jour du limiter dans le callback
         background_log("info", format!("Limiter activé: {}", enabled));
     }
     
     /// Ping le moteur audio (vérifie qu'il est fonctionnel)
+    #[allow(dead_code)]
     pub fn ping(&self) -> Result<(), AudioError> {
         if self.is_running() {
             Ok(())
@@ -451,6 +500,7 @@ impl AudioEngine {
     }
     
     /// Recharge le moteur audio avec de nouvelles settings
+    #[allow(dead_code)]
     pub fn reload(
         &self,
         settings: crate::audio::compat::AudioSettings,
@@ -497,6 +547,9 @@ impl AudioEngine {
         }
     }
     
+    // Méthodes privées
+    
+    #[allow(dead_code)]
     fn select_host(&self, backend: Option<&str>) -> Option<cpal::Host> {
         match backend {
             Some("asio") => cpal::host_from_id(cpal::HostId::Asio).ok(),
@@ -509,6 +562,7 @@ impl AudioEngine {
         }
     }
     
+    #[allow(dead_code)]
     fn create_mock_stream(&self) -> Result<cpal::Stream, AudioError> {
         // TODO: Implémenter la création réelle du stream
         // Pour l'instant, nous retournons une erreur
@@ -556,6 +610,10 @@ impl PluginBackend for MockPlugin {
     
     fn supports_midi(&self) -> bool {
         self.supports_midi
+    }
+    
+    fn is_editor_open(&self) -> bool {
+        false
     }
 }
 

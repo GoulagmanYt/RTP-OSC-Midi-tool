@@ -3,15 +3,12 @@
 use std::sync::Arc;
 use parking_lot::Mutex;
 
-use crate::audio::AudioEngine;
 use crate::bridge::BridgeHandle;
-use crate::config::{Config, ConfigStore, RTP_VIRTUAL_INPUT, VST_INTERNAL_OUTPUT};
+use crate::config::{Config, RTP_VIRTUAL_INPUT, VST_INTERNAL_OUTPUT};
 use crate::error::{AppError, ConfigError as AppConfigError, TauriError, BridgeError};
 use crate::logger::{FrontendLogger, set_log_all_to_file, set_logs_enabled};
-use crate::midi::MidiFrame;
-use crate::rtp::RtpDiscoveryManager;
 use crate::types::{
-    BridgeStatus, PreflightReport, RtpParticipantInfo, RtpSessionInfo, VstParameter, VstPluginEntry,
+    BridgeStatus, PreflightReport, RtpParticipantInfo, VstPluginEntry,
 };
 
 use tauri::{AppHandle, Manager, State, Window};
@@ -38,13 +35,13 @@ pub fn get_config(app: AppHandle, state: State<AppState>) -> Config {
 
 /// Sauvegarde la configuration
 #[::tauri::command]
-pub fn save_config(window: Window, config: Config, state: State<AppState>) -> Result<(), String> {
+pub fn save_config(window: Window, config: Config, state: State<AppState>) -> Result<(), AppError> {
     sync_runtime_logging(&config, &state.dev_logging);
     set_log_all_to_file(config.log_all_to_file);
     set_logs_enabled(config.logs_enabled);
     state.config_store.save(&config)?;
     sync_rtp_discovery(&config, &state, window.app_handle());
-    let logger = FrontendLogger::new(window, state.dev_logging.clone());
+    let _logger = FrontendLogger::new(window, state.dev_logging.clone());
     // TODO: Implémenter sync_rtp et update_config dans BridgeHandle
     Ok(())
 }
@@ -78,7 +75,7 @@ pub fn list_midi_outputs() -> Result<Vec<String>, String> {
 /// Démarre le bridge MIDI
 #[::tauri::command]
 pub fn start_bridge(
-    app: AppHandle,
+    _app: AppHandle,
     window: Window,
     state: State<AppState>,
 ) -> Result<(), AppError> {
@@ -148,11 +145,12 @@ pub fn get_bridge_metrics(state: State<AppState>) -> Option<crate::types::Bridge
 pub fn send_midi_frame(
     frame: crate::midi::MidiFrame,
     state: State<AppState>,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     if let Some(bridge) = state.bridge_handle() {
-        bridge.send_midi_frame(frame)
+        bridge.send_midi_frame(frame).map_err(|e| BridgeError::Communication(e))?;
+    Ok(())
     } else {
-        Err("Bridge not started".to_string())
+        Err(BridgeError::NotStarted.into())
     }
 }
 
@@ -178,8 +176,8 @@ pub fn export_app_diagnostics(state: State<'_, AppState>) -> Result<String, Stri
 
 /// Commande pour obtenir les chemins de l'application
 #[::tauri::command]
-pub fn get_app_paths() -> Result<super::super::AppPaths, String> {
-    super::super::AppPaths::new()
+pub fn get_app_paths() -> Result<crate::types::AppPaths, String> {
+    crate::types::AppPaths::new()
 }
 
 /// Importe une configuration depuis un fichier
@@ -207,7 +205,7 @@ pub async fn import_config(
     
     // Sauvegarder la configuration importée
     state.config_store.save(&config)
-        .map_err(|e: std::io::Error| AppConfigError::WriteError(e.to_string()))?;
+        .map_err(|e| AppConfigError::WriteError(e.to_string()))?;
     
     // Synchroniser avec l'état actuel
     sync_runtime_logging(&config, &state.dev_logging);
@@ -223,12 +221,12 @@ pub async fn import_config(
 pub async fn export_config(
     window: Window,
     state: State<'_, AppState>,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     use tauri_plugin_dialog::DialogExt;
     
     let config = state.config_store.load();
     let content = serde_json::to_string_pretty(&config)
-        .map_err(|e| format!("Failed to serialize config: {}", e))?;
+        .map_err(|e| AppConfigError::ParseError(e.to_string()))?;
     
     let file_path = window.dialog()
         .file()
@@ -236,10 +234,10 @@ pub async fn export_config(
         .set_file_name("config.json")
         .set_title("Export Configuration")
         .blocking_save_file()
-        .ok_or("No file selected")?;
+        .ok_or(TauriError::Dialog("No file selected".to_string()))?;
     
-    std::fs::write(file_path.as_path().ok_or("Invalid file path")?, content)
-        .map_err(|e| format!("Failed to write file: {}", e))?;
+    std::fs::write(file_path.as_path().ok_or(TauriError::Dialog("Invalid file path".to_string()))?, content)
+        .map_err(|e| AppConfigError::WriteError(e.to_string()))?;
     
     Ok(())
 }
@@ -258,7 +256,7 @@ pub fn scan_vst_plugins(
     window: Window,
     state: State<AppState>,
 ) -> Result<Vec<VstPluginEntry>, String> {
-    let logger = FrontendLogger::new(window, state.dev_logging.clone());
+    let _logger = FrontendLogger::new(window, state.dev_logging.clone());
     
     // Convertir les chemins en PathBuf
     let path_roots: Vec<std::path::PathBuf> = roots.into_iter()
@@ -281,14 +279,15 @@ pub fn load_vst_cache() -> Option<Vec<VstPluginEntry>> {
 
 /// Ouvre un dossier dans l'explorateur
 #[::tauri::command]
-pub fn open_folder(path: String) -> Result<(), String> {
-    crate::tauri::utils::open_folder_in_explorer(std::path::Path::new(&path))
+pub fn open_folder(path: String) -> Result<(), AppError> {
+    crate::tauri::utils::open_folder_in_explorer(std::path::Path::new(&path)).map_err(|e| TauriError::Window(e.to_string()))?;
+    Ok(())
 }
 
 /// Génère un rapport de pré-vol
 #[::tauri::command]
 pub fn generate_preflight_report(state: State<'_, AppState>) -> PreflightReport {
-    let config = state.config_store.load();
+    let _config = state.config_store.load();
     
     PreflightReport {
         midi_in_ok: true, // Simplifié pour l'instant

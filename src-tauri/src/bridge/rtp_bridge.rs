@@ -10,10 +10,7 @@ use crate::{
     rtp::{RtpRemoteTarget, RtpServer},
     types::RtpParticipantInfo,
 };
-use std::{
-    net::{IpAddr, SocketAddr, ToSocketAddrs},
-    sync::Arc,
-};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 
 /// Gestionnaire de communication RTP
 pub struct RtpManager {
@@ -26,6 +23,8 @@ pub struct RtpManager {
 }
 
 /// Résolveur de cibles RTP
+#[derive(Debug)]
+#[allow(dead_code)]
 pub struct RtpTargetResolver;
 
 impl RtpManager {
@@ -93,12 +92,12 @@ impl RtpManager {
     }
     
     /// Envoie une trame MIDI via RTP
-    pub fn send_midi_frame(&self, frame: &MidiFrame, logger: &FrontendLogger) {
+    pub fn send_midi_frame(&self, _frame: &MidiFrame, _logger: &FrontendLogger) {
         if !self.enabled {
             return;
         }
         
-        let Some(ref server) = self.server else {
+        let Some(ref _server) = self.server else {
             return;
         };
         
@@ -108,13 +107,14 @@ impl RtpManager {
                 // TODO: Implémenter l'envoi vers les cibles distantes
                 // Pour l'instant, nous simulons l'envoi
                 if self.log_enabled {
-                    logger.debug(format!("Envoi RTP vers {} (simulé)", target.name));
+                    log::debug!("Envoi RTP vers {} (simulé)", target.name);
                 }
             }
         }
     }
     
     /// Retourne les informations sur les participants actifs
+    #[allow(dead_code)]
     pub fn get_participants(&self) -> Vec<RtpParticipantInfo> {
         if let Some(ref server) = self.server {
             server.participants().clone()
@@ -124,26 +124,31 @@ impl RtpManager {
     }
     
     /// Retourne le port actuellement utilisé
+    #[allow(dead_code)]
     pub fn bound_port(&self) -> Option<u16> {
         self.server.as_ref().map(|s| s.bound_port())
     }
     
     /// Retourne le nombre de cibles distantes
+    #[allow(dead_code)]
     pub fn remote_target_count(&self) -> usize {
         self.remote_targets.len()
     }
     
     /// Vérifie si RTP est activé
+    #[allow(dead_code)]
     pub fn is_enabled(&self) -> bool {
         self.enabled
     }
     
     /// Vérifie si les cibles distantes sont activées
+    #[allow(dead_code)]
     pub fn is_remote_enabled(&self) -> bool {
         self.remote_enabled
     }
     
     /// Ferme le serveur RTP
+    #[allow(dead_code)]
     pub fn close(&mut self, logger: &FrontendLogger) {
         if let Some(_) = self.server.take() {
             logger.info("RTP serveur arrêté");
@@ -152,6 +157,7 @@ impl RtpManager {
     }
     
     /// Met à jour les cibles distantes
+    #[allow(dead_code)]
     pub fn update_remote_targets(&mut self, targets: Vec<RtpRemoteTarget>, logger: &FrontendLogger) {
         self.remote_targets = targets.clone();
         if self.remote_enabled {
@@ -168,6 +174,7 @@ impl Default for RtpManager {
 
 impl RtpTargetResolver {
     /// Résout les cibles RTP depuis la configuration
+    #[allow(dead_code)]
     pub fn resolve_targets(config: &Config, logger: &FrontendLogger) -> Vec<RtpRemoteTarget> {
         if !config.rtp_remote_enabled {
             return Vec::new();
@@ -199,13 +206,17 @@ impl RtpTargetResolver {
         resolved
     }
     
+    /// Résout des cibles RTP depuis une chaîne
+    #[allow(dead_code)]
+    pub fn resolve_targets_str(_targets_str: &str) -> Result<Vec<RtpRemoteTarget>, String> {
+        // TODO: Implémenter la résolution de cibles depuis une chaîne
+        unimplemented!()
+    }
+    
     /// Résout une adresse socket
-    pub fn resolve_socket_addr(
-        host: &str,
-        port: u16,
-        logger: &FrontendLogger,
-    ) -> Option<SocketAddr> {
-        let addr_str = format!("{}:{}", host, port);
+    #[allow(dead_code)]
+    pub fn resolve_socket_addr(addr_str: &str, logger: &FrontendLogger) -> Result<SocketAddr, String> {
+        let addr_str = format!("{}", addr_str);
         
         match addr_str.to_socket_addrs() {
             Ok(addrs) => {
@@ -214,19 +225,20 @@ impl RtpTargetResolver {
                     // Préférer les adresses IPv4 si disponibles
                     addr.is_ipv4() || addrs_vec.len() == 1
                 }) {
-                    Some(*addr)
+                    Ok(*addr)
                 } else {
-                    addrs_vec.first().copied()
+                    Err("Aucune adresse valide trouvée".to_string())
                 }
             }
             Err(e) => {
                 logger.error(format!("Erreur résolution {}: {}", addr_str, e));
-                None
+                Err(format!("Erreur de résolution: {}", e))
             }
         }
     }
     
     /// Clé de tri pour les adresses socket (IPv4 d'abord)
+    #[allow(dead_code)]
     fn socket_addr_sort_key(addr: &SocketAddr) -> (u8, IpAddr, u16) {
         let family_rank = match addr.ip() {
             IpAddr::V4(_) => 0u8,
@@ -236,6 +248,7 @@ impl RtpTargetResolver {
     }
     
     /// Valide une configuration de cible RTP
+    #[allow(dead_code)]
     pub fn validate_target(target: &RtpRemoteTarget) -> Result<(), String> {
         if target.name.is_empty() {
             return Err("Le nom de la cible RTP ne peut pas être vide".to_string());
@@ -249,6 +262,7 @@ impl RtpTargetResolver {
     }
     
     /// Crée une cible RTP avec validation
+    #[allow(dead_code)]
     pub fn create_target(name: String, addr: SocketAddr) -> Result<RtpRemoteTarget, String> {
         let target = RtpRemoteTarget { name, addr };
         
@@ -257,14 +271,16 @@ impl RtpTargetResolver {
     }
     
     /// Teste la connectivité vers une cible RTP
-    pub fn test_connectivity(target: &RtpRemoteTarget, timeout_ms: u64) -> bool {
+    #[allow(dead_code)]
+    pub fn test_connectivity(_target: &RtpRemoteTarget, _timeout_ms: u64) -> bool {
         // Pour l'instant, on fait juste une résolution d'adresse
         // Dans une implémentation complète, on pourrait faire un ping ou une connexion test
-        std::thread::sleep(std::time::Duration::from_millis(timeout_ms));
+        std::thread::sleep(std::time::Duration::from_millis(_timeout_ms));
         true // Simulation de succès
     }
     
     /// Retourne des statistiques sur les cibles RTP
+    #[allow(dead_code)]
     pub fn get_target_stats(targets: &[RtpRemoteTarget]) -> RtpTargetStats {
         let mut ipv4_count = 0;
         let mut ipv6_count = 0;
@@ -288,6 +304,7 @@ impl RtpTargetResolver {
 
 /// Statistiques sur les cibles RTP
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct RtpTargetStats {
     pub total: usize,
     pub resolved: usize,
@@ -297,6 +314,7 @@ pub struct RtpTargetStats {
 
 impl RtpTargetStats {
     /// Retourne le taux de résolution (0.0 à 1.0)
+    #[allow(dead_code)]
     pub fn resolution_rate(&self) -> f32 {
         if self.total == 0 {
             0.0
@@ -306,6 +324,7 @@ impl RtpTargetStats {
     }
     
     /// Retourne une description textuelle
+    #[allow(dead_code)]
     pub fn description(&self) -> String {
         format!(
             "{}/{} cibles résolues (IPv4: {}, IPv6: {})",

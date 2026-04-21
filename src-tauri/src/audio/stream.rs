@@ -5,20 +5,20 @@
 
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
-    BufferSize, Device, FromSample, Sample, SampleFormat, SampleRate, SizedSample,
+    BufferSize, Device, SampleFormat, SampleRate,
     Stream, StreamConfig, SupportedStreamConfigRange, SupportedBufferSize,
 };
 use parking_lot::Mutex;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 use thiserror::Error;
 
 use crate::audio::config::AudioStreamConfig;
 use crate::audio::callback::AudioCallbackState;
-use crate::audio::windows::apply_realtime_priority;
 
 /// Erreurs liées aux streams audio
 #[derive(Debug, Error, Clone)]
+#[allow(dead_code)]
 pub enum StreamError {
     #[error("Device audio non trouvé: {0}")]
     DeviceNotFound(String),
@@ -29,17 +29,26 @@ pub enum StreamError {
     #[error("Erreur lors de la création du stream: {0}")]
     CreationFailed(String),
     
-    #[error("Backend audio non disponible")]
+    #[error("Backend non disponible")]
     BackendUnavailable,
+}
+
+impl From<cpal::BuildStreamError> for StreamError {
+    fn from(err: cpal::BuildStreamError) -> Self {
+        StreamError::CreationFailed(err.to_string())
+    }
 }
 
 /// Gestionnaire de stream audio
 pub struct StreamManager {
     /// Stream actif (stocké dans un Arc<Mutex<Option>> pour éviter les problèmes Send)
+    #[allow(dead_code)]
     stream: Arc<Mutex<Option<Stream>>>,
     /// Device utilisé
+    #[allow(dead_code)]
     device: Option<Device>,
     /// Configuration effective
+    #[allow(dead_code)]
     active_config: Option<StreamConfig>,
 }
 
@@ -54,6 +63,7 @@ impl StreamManager {
     }
     
     /// Crée un stream audio avec la configuration spécifiée
+    #[allow(dead_code)]
     pub fn create_stream(
         &mut self,
         config: &AudioStreamConfig,
@@ -89,6 +99,7 @@ impl StreamManager {
     }
     
     /// Démarre le stream audio
+    #[allow(dead_code)]
     pub fn start(&mut self) -> Result<(), StreamError> {
         if let Some(ref stream) = *self.stream.lock() {
             stream.play()
@@ -98,6 +109,7 @@ impl StreamManager {
     }
     
     /// Arrête et détruit le stream
+    #[allow(dead_code)]
     pub fn stop(&mut self) -> Result<(), StreamError> {
         *self.stream.lock() = None;
         self.device = None;
@@ -106,16 +118,19 @@ impl StreamManager {
     }
     
     /// Vérifie si un stream est actif
+    #[allow(dead_code)]
     pub fn is_active(&self) -> bool {
         self.stream.lock().is_some()
     }
     
     /// Retourne la configuration actuelle
+    #[allow(dead_code)]
     pub fn active_config(&self) -> Option<&StreamConfig> {
         self.active_config.as_ref()
     }
     
     /// Liste les backends disponibles
+    #[allow(dead_code)]
     pub fn list_backends() -> Vec<String> {
         cpal::available_hosts()
             .into_iter()
@@ -124,6 +139,7 @@ impl StreamManager {
     }
     
     /// Liste les devices pour un backend donné
+    #[allow(dead_code)]
     pub fn list_devices(backend: Option<&str>) -> Vec<String> {
         let host = Self::select_host(backend);
         match host {
@@ -138,6 +154,7 @@ impl StreamManager {
     // Méthodes privées
     
     /// Sélectionne un host CPAL
+    #[allow(dead_code)]
     fn select_host(backend: Option<&str>) -> Option<cpal::Host> {
         match backend {
             Some("asio") => cpal::host_from_id(cpal::HostId::Asio).ok(),
@@ -151,6 +168,7 @@ impl StreamManager {
     }
     
     /// Sélectionne un device audio
+    #[allow(dead_code)]
     fn select_device(
         &self,
         backend: &Option<String>,
@@ -181,6 +199,7 @@ impl StreamManager {
     }
     
     /// Sélectionne la configuration de sortie supportée
+    #[allow(dead_code)]
     fn select_output_config(
         &self,
         device: &Device,
@@ -204,6 +223,7 @@ impl StreamManager {
     }
     
     /// Choisit le meilleur sample rate
+    #[allow(dead_code)]
     fn pick_sample_rate(&self, cfg: &SupportedStreamConfigRange, requested: u32) -> (u32, u32) {
         let min = cfg.min_sample_rate().0;
         let max = cfg.max_sample_rate().0;
@@ -218,6 +238,7 @@ impl StreamManager {
     }
     
     /// Construit le stream audio interne
+    #[allow(dead_code)]
     fn build_stream_internal(
         &self,
         device: &Device,
@@ -226,8 +247,8 @@ impl StreamManager {
         _callback_state: AudioCallbackState,
         _gain_bits: Arc<AtomicU32>,
         supported_config: &SupportedStreamConfigRange,
-    ) -> Result<Stream, StreamError> {
-        let err_fn = |err| eprintln!("an error occurred on stream: {}", err);
+    ) -> Result<cpal::Stream, cpal::BuildStreamError> {
+        let err_fn = |err: cpal::StreamError| eprintln!("an error occurred on stream: {}", err);
         
         let sample_format = supported_config.sample_format();
         let config = cpal::StreamConfig {
@@ -271,38 +292,42 @@ impl StreamManager {
                 err_fn,
                 None,
             ),
-            _ => return Err(StreamError::UnsupportedConfig),
+            _ => return Err(cpal::BuildStreamError::DeviceNotAvailable),
         }
-        .map_err(|e| StreamError::CreationFailed(e.to_string()))
     }
+}
     
-    /// Choisit la taille du buffer
+impl StreamManager {
+    /// Choisi la taille de buffer optimale
+    #[allow(dead_code)]
     fn choose_buffer_size(&self, supported: &SupportedBufferSize, requested: u32) -> u32 {
         match supported {
             SupportedBufferSize::Range { min, max } => requested.max(*min).min(*max),
             SupportedBufferSize::Unknown => requested,
         }
     }
-    
-    /// Calcule la taille maximale pour les plugins
+
+    /// Retourne la taille de bloc maximale pour les plugins
+    #[allow(dead_code)]
     fn max_plugin_block_size(&self, supported: &SupportedBufferSize, requested: u32) -> u32 {
         match supported {
             SupportedBufferSize::Range { min, max } => requested.max(*min).max(*max),
             SupportedBufferSize::Unknown => requested.max(2048),
         }
     }
-    
-    /// Génère les candidats de fallback pour la taille du buffer
+
+    /// Retourne les candidats de taille de buffer par ordre de préférence
+    #[allow(dead_code)]
     fn buffer_fallback_candidates(&self, supported: &SupportedBufferSize, preferred: u32) -> Vec<u32> {
-        let common_sizes = [
-            64u32, 96, 128, 192, 256, 384, 480, 512, 768, 1024, 1536, 2048,
-        ];
-        
-        let mut candidates = Vec::new();
-        
-        // Ajouter les tailles communes dans l'ordre de préférence
-        for &size in &common_sizes {
-            if size == preferred {
+    let common_sizes = [
+        64u32, 96, 128, 192, 256, 384, 480, 512, 768, 1024, 1536, 2048,
+    ];
+
+    let mut candidates = Vec::new();
+
+    // Ajouter les tailles communes dans l'ordre de préférence
+    for &size in &common_sizes {
+        if size == preferred {
                 continue; // Déjà traité
             }
             if self.choose_buffer_size(supported, size) == size {

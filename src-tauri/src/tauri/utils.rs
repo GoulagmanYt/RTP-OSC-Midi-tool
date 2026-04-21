@@ -8,12 +8,8 @@ use std::{
 
 use crate::config::Config;
 use directories::ProjectDirs;
-use crate::logger::set_log_all_to_file;
-use crate::logger::set_logs_enabled;
 use crate::rtp::RtpDiscoveryManager;
-use tauri::{AppHandle, State, Window};
-use crate::types::RtpParticipantInfo;
-use crate::vst_scan::{default_vst_scan_roots, scan_vst_plugins_in_roots};
+use tauri::AppHandle;
 use crate::types::VstPluginEntry;
 
 use crate::tauri::state::AppState;
@@ -103,7 +99,7 @@ pub fn sync_runtime_logging(config: &Config, dev_logging: &std::sync::atomic::At
 }
 
 /// Synchronise la découverte RTP avec la configuration
-pub fn sync_rtp_discovery(config: &Config, state: &AppState, app: &AppHandle) {
+pub fn sync_rtp_discovery(config: &Config, state: &AppState, _app: &AppHandle) {
     if config.rtp_remote_enabled {
         if let Some(_) = state.rtp_manager() {
             // Déjà initialisé

@@ -4,11 +4,11 @@
 //! de l'application, remplaçant progressivement l'utilisation de `String`
 //! comme type d'erreur générique.
 
-use std::fmt;
+use serde::Serialize;
 use thiserror::Error;
 
 /// Erreur principale de l'application
-#[derive(Error, Debug, Clone)]
+#[derive(Error, Debug, Clone, Serialize)]
 pub enum AppError {
     /// Erreur liée au moteur audio
     #[error("Erreur audio: {0}")]
@@ -32,7 +32,7 @@ pub enum AppError {
 }
 
 /// Erreurs spécifiques au moteur audio
-#[derive(Error, Debug, Clone)]
+#[derive(Error, Debug, Clone, Serialize)]
 pub enum AudioError {
     #[error("Plugin VST non trouvé: {0}")]
     PluginNotFound(String),
@@ -57,7 +57,7 @@ pub enum AudioError {
 }
 
 /// Erreurs spécifiques au bridge MIDI/RTP
-#[derive(Error, Debug, Clone)]
+#[derive(Error, Debug, Clone, Serialize)]
 pub enum BridgeError {
     #[error("Erreur MIDI: {0}")]
     Midi(String),
@@ -82,7 +82,7 @@ pub enum BridgeError {
 }
 
 /// Erreurs spécifiques à la configuration
-#[derive(Error, Debug, Clone)]
+#[derive(Error, Debug, Clone, Serialize)]
 pub enum ConfigError {
     #[error("Fichier de configuration non trouvé")]
     FileNotFound,
@@ -104,7 +104,7 @@ pub enum ConfigError {
 }
 
 /// Erreurs spécifiques à l'interface Tauri
-#[derive(Error, Debug, Clone)]
+#[derive(Error, Debug, Clone, Serialize)]
 pub enum TauriError {
     #[error("Erreur de commande: {0}")]
     Command(String),

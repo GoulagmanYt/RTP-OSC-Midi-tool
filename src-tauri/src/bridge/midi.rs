@@ -6,17 +6,14 @@
 use crate::{
     config::{Config, VST_INTERNAL_OUTPUT, VST_INTERNAL_OUTPUT_LEGACY},
     logger::FrontendLogger,
-    midi::{parse_note, parse_sustain, MidiFrame, MidiKind},
+    midi::{parse_note, parse_sustain, MidiFrame},
 };
-use midir::{
-    Ignore, MidiInput, MidiInputConnection, MidiInputPort, MidiOutput, MidiOutputConnection,
-    MidiOutputPort,
-};
+use midir::{MidiInput, MidiOutput, MidiInputConnection, MidiOutputConnection};
 use parking_lot::Mutex;
-use smallvec::SmallVec;
 use std::sync::Arc;
 
 /// Gestionnaire de ports MIDI
+#[allow(dead_code)]
 pub struct MidiManager {
     input: Option<MidiInput>,
     output: Option<MidiOutput>,
@@ -27,10 +24,12 @@ pub struct MidiManager {
 }
 
 /// Sélecteur de ports MIDI
+#[allow(dead_code)]
 pub struct MidiPortSelector;
 
 impl MidiManager {
     /// Crée un nouveau gestionnaire MIDI
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             input: MidiInput::new("OSCMIDI Input").ok(),
@@ -43,6 +42,7 @@ impl MidiManager {
     }
     
     /// Liste les ports d'entrée disponibles
+    #[allow(dead_code)]
     pub fn list_input_ports(&self) -> Vec<String> {
         if let Some(ref input) = self.input {
             // Pour l'instant, nous retournons des noms génériques
@@ -55,6 +55,7 @@ impl MidiManager {
     }
     
     /// Liste les ports de sortie disponibles
+    #[allow(dead_code)]
     pub fn list_output_ports(&self) -> Vec<String> {
         if let Some(ref output) = self.output {
             // Pour l'instant, nous retournons des noms génériques
@@ -69,8 +70,8 @@ impl MidiManager {
     /// Ouvre un port d'entrée MIDI
     pub fn open_input(
         &mut self,
-        config: &Config,
-        midi_tx: crossbeam_channel::Sender<MidiFrame>,
+        __config: &Config,
+        _midi_tx: crossbeam_channel::Sender<MidiFrame>,
         logger: &FrontendLogger,
     ) -> Result<(), String> {
         // Pour l'instant, nous utilisons une approche simplifiée
@@ -84,7 +85,7 @@ impl MidiManager {
     /// Ouvre un port de sortie MIDI
     pub fn open_output(
         &mut self,
-        config: &Config,
+        _config: &Config,
         logger: &FrontendLogger,
     ) -> Result<(), String> {
         // Pour l'instant, nous utilisons une approche simplifiée
@@ -95,7 +96,8 @@ impl MidiManager {
         Ok(())
     }
     
-    /// Ferme tous les ports MIDI
+    /// Ferme toutes les connexions MIDI
+    #[allow(dead_code)]
     pub fn close_all(&mut self) {
         if let Some(conn) = self.input_connection.take() {
             drop(conn);
@@ -109,6 +111,7 @@ impl MidiManager {
     }
     
     /// Envoie des données MIDI sur la sortie
+    #[allow(dead_code)]
     pub fn send(&mut self, data: &[u8]) -> Result<(), String> {
         if let Some(ref mut conn) = self.output_connection {
             conn.send(data).map_err(|e| format!("Erreur envoi MIDI: {}", e))
@@ -118,16 +121,19 @@ impl MidiManager {
     }
     
     /// Retourne le port d'entrée actuellement connecté
+    #[allow(dead_code)]
     pub fn current_input(&self) -> Option<String> {
         self.current_input.lock().clone()
     }
     
     /// Retourne le port de sortie actuellement connecté
+    #[allow(dead_code)]
     pub fn current_output(&self) -> Option<String> {
         self.current_output.lock().clone()
     }
     
     /// Réinitialise la sortie MIDI (envoie des messages de reset)
+    #[allow(dead_code)]
     pub fn reset_output(&mut self, logger: &FrontendLogger) {
         if let Some(ref mut conn) = self.output_connection {
             for ch in 0u8..16 {
@@ -141,14 +147,30 @@ impl MidiManager {
         }
     }
     
+    /// Sélectionne un port d'entrée
+    #[allow(dead_code)]
+    pub fn select_input_port(&mut self, _port_name: &str) -> Result<(), String> {
+        // TODO: implémenter la sélection du port d'entrée
+        Ok(())
+    }
+    
+    /// Sélectionne un port de sortie
+    #[allow(dead_code)]
+    pub fn select_output_port(&mut self, _port_name: &str) -> Result<(), String> {
+        // TODO: implémenter la sélection du port de sortie
+        Ok(())
+    }
+    
     // Méthodes privées
     
     /// Retourne le port d'entrée initialement connecté selon la config
+    #[allow(dead_code)]
     fn initial_connected_input(config: &Config) -> Option<String> {
         config.midi_in.as_ref().cloned()
     }
     
     /// Retourne le port de sortie initialement connecté selon la config
+    #[allow(dead_code)]
     fn initial_connected_output(config: &Config) -> Option<String> {
         config.midi_out.as_ref().and_then(|name| {
             if name == VST_INTERNAL_OUTPUT || name == VST_INTERNAL_OUTPUT_LEGACY {
@@ -157,28 +179,6 @@ impl MidiManager {
                 Some(name.clone())
             }
         })
-    }
-    
-    /// Sélectionne un port d'entrée MIDI
-    fn select_input_port<'a>(
-        input: &'a MidiInput,
-        ports: &'a [MidiInputPort],
-        preferred: Option<&String>,
-    ) -> Option<&'a MidiInputPort> {
-        // Pour l'instant, nous utilisons une sélection simple
-        // L'implémentation complète nécessiterait d'accéder aux noms des ports
-        ports.first()
-    }
-    
-    /// Sélectionne un port de sortie MIDI
-    fn select_output_port<'a>(
-        output: &'a MidiOutput,
-        ports: &'a [MidiOutputPort],
-        preferred: Option<&String>,
-    ) -> Option<&'a MidiOutputPort> {
-        // Pour l'instant, nous utilisons une sélection simple
-        // L'implémentation complète nécessiterait d'accéder aux noms des ports
-        ports.first()
     }
 }
 
@@ -190,11 +190,13 @@ impl Default for MidiManager {
 
 impl MidiPortSelector {
     /// Vérifie si une trame MIDI est un message de sustain
+    #[allow(dead_code)]
     pub fn is_sustain_message(data: &[u8]) -> bool {
         parse_sustain(data).is_some()
     }
     
     /// Extrait les informations d'une note MIDI
+    #[allow(dead_code)]
     pub fn extract_note_info(data: &[u8]) -> Option<(u8, u8, u8)> {
         parse_note(data).map(|note| {
             let velocity = if matches!(note.kind, crate::midi::MidiKind::NoteOn) { 127 } else { 0 };
@@ -203,26 +205,37 @@ impl MidiPortSelector {
     }
     
     /// Crée un message Note On
+    #[allow(dead_code)]
     pub fn create_note_on(channel: u8, note: u8, velocity: u8) -> Vec<u8> {
         vec![0x90 | (channel & 0x0F), note, velocity]
     }
     
     /// Crée un message Note Off
+    #[allow(dead_code)]
     pub fn create_note_off(channel: u8, note: u8, velocity: u8) -> Vec<u8> {
         vec![0x80 | (channel & 0x0F), note, velocity]
     }
     
     /// Crée un message CC
+    #[allow(dead_code)]
     pub fn create_cc(channel: u8, cc: u8, value: u8) -> Vec<u8> {
         vec![0xB0 | (channel & 0x0F), cc, value]
     }
     
+    /// Crée un message de sustain
+    #[allow(dead_code)]
+    pub fn create_sustain_message(channel: u8, pressed: bool) -> Vec<u8> {
+        vec![0xB0 | (channel & 0x0F), 64, if pressed { 127 } else { 0 }]
+    }
+    
     /// Crée un message Program Change
+    #[allow(dead_code)]
     pub fn create_program_change(channel: u8, program: u8) -> Vec<u8> {
         vec![0xC0 | (channel & 0x0F), program]
     }
     
     /// Crée un message Pitch Bend
+    #[allow(dead_code)]
     pub fn create_pitch_bend(channel: u8, lsb: u8, msb: u8) -> Vec<u8> {
         vec![0xE0 | (channel & 0x0F), lsb, msb]
     }

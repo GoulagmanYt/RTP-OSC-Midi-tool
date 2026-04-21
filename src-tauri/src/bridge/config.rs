@@ -5,18 +5,20 @@
 
 use crate::{
     config::{
-        Config, RoutingAssignment, RoutingMapping, RoutingProfile,
+        Config, RoutingMapping, RoutingProfile,
     },
-    logger::FrontendLogger,
     rtp::RtpRemoteTarget,
 };
 use std::collections::HashMap;
 
 /// Configuration du bridge pour le runtime
-#[derive(Clone)]
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct BridgeConfig {
     /// Configuration MIDI
+    #[allow(dead_code)]
     pub midi_in: Option<String>,
+    #[allow(dead_code)]
     pub midi_out: Option<String>,
     /// Configuration RTP
     pub rtp_enabled: bool,
@@ -28,13 +30,16 @@ pub struct BridgeConfig {
     pub osc_enabled: bool,
     pub osc_target: Option<String>,
     /// Profils de routage
+    #[allow(dead_code)]
     pub routing_profiles: Vec<RoutingProfileRuntime>,
     /// Assignations de routage par source
+    #[allow(dead_code)]
     pub routing_assignments: HashMap<String, usize>,
 }
 
 /// Profil de routage au runtime
-#[derive(Clone)]
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct RoutingProfileRuntime {
     pub id: String,
     pub channel_filter: Option<u8>,
@@ -45,8 +50,9 @@ pub struct RoutingProfileRuntime {
     pub enabled: bool,
 }
 
-/// Snapshot de configuration pour le traitement
-#[derive(Clone)]
+/// Snapshot de configuration pour sauvegarde
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ConfigSnapshot {
     pub midi_in: Option<String>,
     pub midi_out: Option<String>,
@@ -99,6 +105,7 @@ impl RoutingProfileRuntime {
     }
     
     /// Applique le profil de routage à une trame MIDI
+    #[allow(dead_code)]
     pub fn apply_to_frame(&self, frame: &mut crate::midi::MidiFrame) -> bool {
         let Some(status) = frame.data.first().copied() else {
             return true;
@@ -125,7 +132,8 @@ impl RoutingProfileRuntime {
     }
     
     /// Vérifie si le canal correspond au filtre
-    fn filter_channel(&self, channel: u8) -> bool {
+    #[allow(dead_code)]
+    pub fn filter_channel(&self, channel: u8) -> bool {
         if let Some(filter) = self.channel_filter {
             channel == filter
         } else {
@@ -159,7 +167,8 @@ impl RoutingProfileRuntime {
     }
     
     /// Applique les mappings CC si nécessaire
-    fn apply_cc_mapping(&self, status_type: u8, data: &mut [u8]) {
+    #[allow(dead_code)]
+    pub fn apply_cc_mapping(&self, status_type: u8, data: &mut [u8]) {
         if status_type != 0xB0 {
             return;
         }
@@ -174,7 +183,8 @@ impl RoutingProfileRuntime {
     }
     
     /// Applique les mappings de programme si nécessaire
-    fn apply_program_mapping(&self, status_type: u8, data: &mut [u8]) {
+    #[allow(dead_code)]
+    pub fn apply_program_mapping(&self, status_type: u8, data: &mut [u8]) {
         if status_type != 0xC0 {
             return;
         }
@@ -186,6 +196,73 @@ impl RoutingProfileRuntime {
         if *program < 128 {
             data[1] = self.program_map[*program as usize];
         }
+    }
+}
+
+impl BridgeConfig {
+    /// Applique la configuration à un frame MIDI
+    #[allow(dead_code)]
+    pub fn apply_to_frame(&self, frame: &mut crate::midi::MidiFrame) -> bool {
+        let Some(status) = frame.data.first().copied() else {
+            return true;
+        };
+        
+        let channel = status & 0x0F;
+        let status_type = status & 0xF0;
+        
+        // Filtrage par canal
+        if !self.filter_channel(channel) {
+            return false;
+        }
+        
+        // Filtrage par note
+        if !self.filter_note_range(status_type, &frame.data) {
+            return false;
+        }
+        
+        // Appliquer les mappings
+        self.apply_cc_mapping(status_type, &mut frame.data);
+        self.apply_program_mapping(status_type, &mut frame.data);
+        
+        true
+    }
+    
+    /// Vérifie si le canal correspond au filtre
+    #[allow(dead_code)]
+    pub fn filter_channel(&self, _channel: u8) -> bool {
+        // Pour l'instant, pas de filtrage de canal au niveau BridgeConfig
+        true
+    }
+    
+    /// Vérifie si la note est dans la plage autorisée
+    #[allow(dead_code)]
+    pub fn filter_note_range(&self, status_type: u8, _data: &[u8]) -> bool {
+        if !matches!(status_type, 0x80 | 0x90) {
+            return true; // Pas un message de note
+        }
+        
+        // Pour l'instant, pas de filtrage de note au niveau BridgeConfig
+        true
+    }
+    
+    /// Applique les mappings CC si nécessaire
+    #[allow(dead_code)]
+    pub fn apply_cc_mapping(&self, status_type: u8, _data: &mut [u8]) {
+        if status_type != 0xB0 {
+            return;
+        }
+        
+        // Pour l'instant, pas de mapping CC au niveau BridgeConfig
+    }
+    
+    /// Applique les mappings de programme si nécessaire
+    #[allow(dead_code)]
+    pub fn apply_program_mapping(&self, status_type: u8, _data: &mut [u8]) {
+        if status_type != 0xC0 {
+            return;
+        }
+        
+        // Pour l'instant, pas de mapping de programme au niveau BridgeConfig
     }
 }
 

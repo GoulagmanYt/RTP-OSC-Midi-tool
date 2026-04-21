@@ -200,6 +200,7 @@ impl ConfigStore {
         fs::write(&self.path, raw).map_err(|e| e.to_string())
     }
 
+    #[allow(dead_code)]
     pub fn reset_to_default(&self) -> Result<Config, String> {
         let cfg = Config::default();
         self.save(&cfg)?;

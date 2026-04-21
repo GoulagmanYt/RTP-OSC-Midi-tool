@@ -5,7 +5,6 @@ use std::sync::Arc;
 use crate::audio::AudioEngine;
 use crate::bridge::BridgeHandle;
 use crate::config::ConfigStore;
-use crate::logger::FrontendLogger;
 use crate::rtp::RtpDiscoveryManager;
 use parking_lot::Mutex;
 use std::sync::atomic::AtomicBool;

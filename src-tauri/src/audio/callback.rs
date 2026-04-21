@@ -4,32 +4,27 @@
 //! incluant le traitement MIDI, les plugins VST et la gestion des métriques.
 
 use cpal::{OutputCallbackInfo, Sample, FromSample, SizedSample};
-use parking_lot::Mutex;
-use rack::prelude::{
-    MidiEvent as RackMidiEvent, MidiEventKind as RackMidiEventKind,
-};
+use rack::prelude::MidiEvent as RackMidiEvent;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use vst::{
-    api::{MidiEventFlags, Supported},
-    buffer::AudioBuffer,
-    host::PluginInstance,
-    plugin::CanDo,
-};
+use vst::host::PluginInstance;
 use crate::audio::plugin::PluginBackend;
 
 /// Paquet MIDI avec timestamp
 #[derive(Debug, Clone)]
 pub struct MidiPacket {
     /// Données MIDI (max 3 octets pour channel voice)
+    #[allow(dead_code)]
     pub data: [u8; 3],
     /// Timestamp en millisecondes
+    #[allow(dead_code)]
     pub timestamp_ms: u64,
 }
 
 impl MidiPacket {
     /// Crée un paquet depuis des octets
+    #[allow(dead_code)]
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
         if bytes.is_empty() {
             return None;
@@ -48,17 +43,20 @@ impl MidiPacket {
     }
     
     /// Vérifie si c'est un Note On
+    #[allow(dead_code)]
     pub fn is_note_on(&self) -> bool {
         self.data.len() >= 3 && (self.data[0] & 0xF0) == 0x90 && self.data[2] > 0
     }
     
     /// Vérifie si c'est un Note Off
+    #[allow(dead_code)]
     pub fn is_note_off(&self) -> bool {
         self.data.len() >= 3 && ((self.data[0] & 0xF0) == 0x80 || 
             ((self.data[0] & 0xF0) == 0x90 && self.data[2] == 0))
     }
     
     /// Vérifie si c'est un message critique (Note Off)
+    #[allow(dead_code)]
     pub fn is_critical_release(&self) -> bool {
         self.is_note_off()
     }
@@ -69,20 +67,27 @@ pub struct AudioCallbackState {
     /// File des messages MIDI en attente
     pending_midi: VecDeque<MidiPacket>,
     /// Récepteur pour les messages MIDI entrants
+    #[allow(dead_code)]
     midi_rx: rtrb::Consumer<MidiPacket>,
     /// Compteur de messages MIDI dropés
+    #[allow(dead_code)]
     midi_drop_count: Arc<AtomicU32>,
     /// Compteur de lock misses sur le mutex audio
+    #[allow(dead_code)]
     audio_lock_miss_count: Arc<AtomicU32>,
     /// Compteur de resets d'urgence
+    #[allow(dead_code)]
     emergency_reset_count: Arc<AtomicU32>,
     /// Dernière sortie audio (pour replay en cas de lock miss)
+    #[allow(dead_code)]
     last_output: Vec<f32>,
     /// Flag indiquant qu'un reset d'urgence est nécessaire
     needs_emergency_reset: bool,
     /// Nombre d'entrées du plugin
+    #[allow(dead_code)]
     plugin_inputs: usize,
     /// Nombre de sorties du plugin  
+    #[allow(dead_code)]
     plugin_outputs: usize,
     /// Compteur d'erreurs
     error_count: u64,
@@ -92,6 +97,7 @@ unsafe impl Send for AudioCallbackState {}
 
 impl AudioCallbackState {
     /// Crée un nouvel état de callback
+    #[allow(dead_code)]
     pub fn new(
         midi_rx: rtrb::Consumer<MidiPacket>,
         plugin_inputs: usize,
@@ -115,6 +121,7 @@ impl AudioCallbackState {
     }
     
     /// Traite les messages MIDI entrants
+    #[allow(dead_code)]
     pub fn process_incoming_midi(&mut self) {
         while let Ok(packet) = self.midi_rx.pop() {
             if self.pending_midi.len() >= 256 {
@@ -142,6 +149,7 @@ impl AudioCallbackState {
     }
     
     /// Applique les messages MIDI au plugin
+    #[allow(dead_code)]
     pub fn apply_midi_to_plugin(&mut self, plugin: &mut dyn PluginBackend) {
         while let Some(msg) = self.pending_midi.pop_front() {
             plugin.send_midi(&msg.data[..msg.data.len()]);
@@ -149,12 +157,14 @@ impl AudioCallbackState {
     }
     
     /// Gère un lock miss sur le mutex du plugin
+    #[allow(dead_code)]
     pub fn handle_plugin_lock_miss(&mut self) {
         self.audio_lock_miss_count.fetch_add(1, Ordering::Relaxed);
         self.record_error();
     }
     
     /// Effectue un reset d'urgence
+    #[allow(dead_code)]
     pub fn emergency_reset(&mut self) {
         self.pending_midi.clear();
         self.needs_emergency_reset = false;
@@ -162,23 +172,51 @@ impl AudioCallbackState {
     }
     
     /// Vérifie si un reset d'urgence est nécessaire
+    #[allow(dead_code)]
     pub fn needs_emergency_reset(&self) -> bool {
         self.needs_emergency_reset
     }
     
     /// Met à jour la dernière sortie audio
+    #[allow(dead_code)]
     pub fn update_last_output(&mut self, output: &[f32]) {
         self.last_output = output.to_vec();
     }
     
     /// Retourne une copie de la dernière sortie
+    #[allow(dead_code)]
     pub fn last_output(&self) -> &[f32] {
         &self.last_output
+    }
+    
+    /// Vide la file des messages MIDI
+    #[allow(dead_code)]
+    pub fn clear(&mut self) {
+        self.pending_midi.clear();
+    }
+    
+    /// Retourne le nombre d'erreurs
+    #[allow(dead_code)]
+    pub fn error_count(&self) -> u64 {
+        self.error_count
+    }
+    
+    /// Ajoute un message MIDI à la file
+    #[allow(dead_code)]
+    pub fn add_midi_message(&mut self, packet: MidiPacket) {
+        self.pending_midi.push_back(packet);
+    }
+    
+    /// Retourne le nombre de messages en attente
+    #[allow(dead_code)]
+    pub fn pending_count(&self) -> usize {
+        self.pending_midi.len()
     }
     
     // Méthodes privées
     
     /// Supprime le plus ancien Note On
+    #[allow(dead_code)]
     fn drop_oldest_note_on(&mut self) -> bool {
         let pos = self.pending_midi.iter().position(|m| m.is_note_on());
         if let Some(idx) = pos {
@@ -200,25 +238,33 @@ impl AudioCallbackState {
     }
     
     /// Enregistre une erreur
+    #[allow(dead_code)]
     fn record_error(&mut self) {
+        self.error_count = self.error_count.wrapping_add(1);
+    }
+    
+    /// Enregistre un xrun
+    #[allow(dead_code)]
+    fn record_xrun(&mut self) {
         self.error_count = self.error_count.wrapping_add(1);
     }
 }
 
 /// Callback audio principal pour f32
+#[allow(dead_code)]
 pub fn audio_callback_f32<T>(
     data: &mut [T],
     _info: &OutputCallbackInfo,
-    mut callback_state: AudioCallbackState,
+    mut _callback_state: AudioCallbackState,
     gain_bits: Arc<AtomicU32>,
 ) where
     T: Sample + FromSample<f32> + SizedSample,
 {
     // Traiter les messages MIDI entrants
-    callback_state.process_incoming_midi();
+    _callback_state.process_incoming_midi();
     
     // Récupérer le gain
-    let gain = f32::from_bits(gain_bits.load(Ordering::Relaxed));
+    let _gain = f32::from_bits(gain_bits.load(Ordering::Relaxed));
     
     // TODO: Appliquer le traitement audio avec plugin
     // Pour l'instant, on génère du silence
@@ -231,16 +277,17 @@ pub fn audio_callback_f32<T>(
 }
 
 /// Callback audio pour i16
+#[allow(dead_code)]
 pub fn audio_callback_i16<T>(
     data: &mut [T],
     _info: &OutputCallbackInfo,
-    callback_state: AudioCallbackState,
+    _callback_state: AudioCallbackState,
     gain_bits: Arc<AtomicU32>,
 ) where
     T: Sample + FromSample<i16> + SizedSample,
 {
     // Implémentation similaire à audio_callback_f32 mais pour i16
-    let gain = f32::from_bits(gain_bits.load(Ordering::Relaxed));
+    let _gain = f32::from_bits(gain_bits.load(Ordering::Relaxed));
     let silence = T::from_sample(0i16);
     
     for sample in data.iter_mut() {
@@ -249,16 +296,17 @@ pub fn audio_callback_i16<T>(
 }
 
 /// Callback audio pour u16
+#[allow(dead_code)]
 pub fn audio_callback_u16<T>(
     data: &mut [T],
     _info: &OutputCallbackInfo,
-    callback_state: AudioCallbackState,
+    _callback_state: AudioCallbackState,
     gain_bits: Arc<AtomicU32>,
 ) where
     T: Sample + FromSample<u16> + SizedSample,
 {
     // Implémentation similaire à audio_callback_f32 mais pour u16
-    let gain = f32::from_bits(gain_bits.load(Ordering::Relaxed));
+    let _gain = f32::from_bits(gain_bits.load(Ordering::Relaxed));
     let silence = T::from_sample(0u16);
     
     for sample in data.iter_mut() {
@@ -267,6 +315,7 @@ pub fn audio_callback_u16<T>(
 }
 
 /// Convertit les données MIDI vers le format Rack
+#[allow(dead_code)]
 pub fn midi_to_rack_event(_data: [u8; 3]) -> Option<RackMidiEvent> {
     // TODO: Implémenter la conversion réelle vers Rack MIDI
     // Pour l'instant, retourner None pour éviter les erreurs de structure
@@ -274,6 +323,7 @@ pub fn midi_to_rack_event(_data: [u8; 3]) -> Option<RackMidiEvent> {
 }
 
 /// Traite les messages MIDI en attente pour un plugin VST2
+#[allow(dead_code)]
 pub fn process_pending_vst2_midi(state: &mut AudioCallbackState, _instance: &mut PluginInstance) {
     // TODO: Implémenter le traitement MIDI VST2 réel
     // Pour l'instant, juste consommer les messages

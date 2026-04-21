@@ -9,8 +9,10 @@ use thiserror::Error;
 #[derive(Debug, Clone)]
 pub struct AudioStreamConfig {
     /// Backend audio (ASIO, WASAPI, etc.)
+    #[allow(dead_code)]
     pub backend: Option<String>,
     /// Nom du device audio
+    #[allow(dead_code)]
     pub device: Option<String>,
     /// Configuration CPAL du stream
     pub cpal_config: StreamConfig,
@@ -109,16 +111,19 @@ impl AudioStreamConfig {
     }
     
     /// Convertit la configuration en configuration CPAL
+    #[allow(dead_code)]
     pub fn to_cpal_config(&self) -> &StreamConfig {
         &self.cpal_config
     }
     
     /// Retourne le sample rate
+    #[allow(dead_code)]
     pub fn sample_rate(&self) -> u32 {
         self.cpal_config.sample_rate.0
     }
     
     /// Retourne la taille du buffer
+    #[allow(dead_code)]
     pub fn buffer_size(&self) -> u32 {
         match self.cpal_config.buffer_size {
             BufferSize::Fixed(size) => size,
@@ -127,17 +132,20 @@ impl AudioStreamConfig {
     }
     
     /// Retourne le nombre de canaux
+    #[allow(dead_code)]
     pub fn channels(&self) -> u16 {
         self.cpal_config.channels
     }
     
     /// Retourne le gain linéaire (converti depuis dB)
+    #[allow(dead_code)]
     pub fn gain_linear(&self) -> f32 {
         db_to_linear(self.gain_config.gain_db)
     }
 }
 
 /// Convertit les décibels en valeur linéaire
+#[allow(dead_code)]
 pub fn db_to_linear(db: f32) -> f32 {
     if db <= -60.0 {
         0.0
@@ -147,6 +155,7 @@ pub fn db_to_linear(db: f32) -> f32 {
 }
 
 /// Convertit la valeur linéaire en décibels
+#[allow(dead_code)]
 pub fn linear_to_db(linear: f32) -> f32 {
     if linear <= 0.0 {
         -60.0

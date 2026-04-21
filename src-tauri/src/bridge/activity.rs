@@ -16,6 +16,7 @@ use std::{
 
 /// Informations d'activité MIDI pour le frontend
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct MidiActivityInfo {
     pub source: String,
     pub messages_per_sec: u32,
@@ -26,13 +27,14 @@ pub struct MidiActivityInfo {
 
 /// État d'activité pour une source MIDI
 #[derive(Clone, Default)]
+#[allow(dead_code)]
 pub struct MidiActivityState {
     pub messages: u32,
     pub last_note: Option<u8>,
     pub last_channel: Option<u8>,
-    pub last_seen_ms: Option<u64>,
     pub notes_per_second: f32,
     pub last_velocity: Option<u8>,
+    pub last_seen_ms: Option<u64>,
 }
 
 /// Suivi d'activité MIDI
@@ -89,6 +91,7 @@ impl ActivityTracker {
     }
     
     /// Crée un snapshot des activités et réinitialise les compteurs
+    #[allow(dead_code)]
     pub fn snapshot_and_reset(&mut self) -> Vec<MidiActivityInfo> {
         let now = now_ms();
         let mut snapshot = Vec::new();
@@ -130,6 +133,7 @@ impl ActivityTracker {
     }
     
     /// Retourne les informations d'activité actuelles sans réinitialiser
+    #[allow(dead_code)]
     pub fn current_snapshot(&self) -> Vec<MidiActivityInfo> {
         let guard = self.stats.lock();
         guard.iter()
@@ -144,6 +148,7 @@ impl ActivityTracker {
     }
     
     /// Retourne l'historique des notes récentes
+    #[allow(dead_code)]
     pub fn get_note_history(&self, limit: Option<usize>) -> Vec<MidiNoteEvent> {
         let history = self.note_history.lock();
         if let Some(limit) = limit {
@@ -155,26 +160,30 @@ impl ActivityTracker {
     }
     
     /// Retourne les statistiques d'activité pour une source spécifique
+    #[allow(dead_code)]
     pub fn get_source_stats(&self, source: &str) -> Option<MidiActivityState> {
         let guard = self.stats.lock();
         guard.get(source).cloned()
     }
     
     /// Retourne le nombre de sources actives
+    #[allow(dead_code)]
     pub fn active_source_count(&self) -> usize {
         let guard = self.stats.lock();
         guard.len()
     }
     
     /// Retourne le nombre total de messages par seconde
-    pub fn total_messages_per_sec(&self) -> f32 {
+    #[allow(dead_code)]
+    pub fn total_messages_per_sec(&self) -> u32 {
         let guard = self.stats.lock();
         guard.values()
-            .map(|state| state.messages as f32)
+            .map(|state| state.messages)
             .sum()
     }
     
     /// Efface toutes les statistiques
+    #[allow(dead_code)]
     pub fn clear_all(&mut self) {
         let mut guard = self.stats.lock();
         guard.clear();
@@ -183,13 +192,15 @@ impl ActivityTracker {
         history.clear();
     }
     
-    /// Efface les statistiques pour une source spécifique
+    /// Efface les statistiques d'une source spécifique
+    #[allow(dead_code)]
     pub fn clear_source(&mut self, source: &str) {
         let mut guard = self.stats.lock();
         guard.remove(source);
     }
     
     /// Définit la taille maximale de l'historique des notes
+    #[allow(dead_code)]
     pub fn set_max_note_history(&mut self, max_size: usize) {
         self.max_note_history = max_size;
         
@@ -202,6 +213,7 @@ impl ActivityTracker {
     }
     
     /// Retourne des métriques agrégées
+    #[allow(dead_code)]
     pub fn get_aggregated_metrics(&self) -> ActivityMetrics {
         let guard = self.stats.lock();
         let mut total_messages = 0u32;
@@ -238,6 +250,7 @@ impl ActivityTracker {
     }
     
     /// Compte les messages et les sources actives/récentes
+    #[allow(dead_code)]
     fn count_message_sources(&self) -> (u32, usize, usize) {
         let guard = self.stats.lock();
         let mut total_messages = 0u32;
@@ -258,6 +271,7 @@ impl ActivityTracker {
     }
     
     /// Vérifie si une source est récente (vue dans la dernière minute)
+    #[allow(dead_code)]
     fn is_recent_source(&self, state: &MidiActivityState, now: u64) -> bool {
         state.last_seen_ms
             .map(|last_seen| now.saturating_sub(last_seen) < 60_000)
@@ -265,6 +279,7 @@ impl ActivityTracker {
     }
     
     /// Compte le nombre total de notes dans l'historique
+    #[allow(dead_code)]
     fn count_total_notes(&self) -> usize {
         let history = self.note_history.lock();
         history.len()
@@ -273,6 +288,7 @@ impl ActivityTracker {
 
 /// Métriques d'activité agrégées
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ActivityMetrics {
     pub total_messages: u32,
     pub active_sources: usize,
@@ -282,7 +298,8 @@ pub struct ActivityMetrics {
 }
 
 impl ActivityMetrics {
-    /// Retourne une description textuelle
+    /// Retourne une description textuelle des métriques
+    #[allow(dead_code)]
     pub fn description(&self) -> String {
         format!(
             "{} msg/s, {} sources actives ({} récentes), {} notes totales",
@@ -294,11 +311,13 @@ impl ActivityMetrics {
     }
     
     /// Vérifie si l'activité est élevée
+    #[allow(dead_code)]
     pub fn is_high_activity(&self) -> bool {
         self.messages_per_sec > 100.0 || self.active_sources > 5
     }
     
     /// Vérifie si l'activité est faible
+    #[allow(dead_code)]
     pub fn is_low_activity(&self) -> bool {
         self.messages_per_sec < 1.0 && self.recent_sources == 0
     }

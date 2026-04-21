@@ -4,6 +4,7 @@
 mod audio;
 mod bridge;
 mod config;
+mod error;
 mod logger;
 mod midi;
 mod osc;
@@ -14,13 +15,13 @@ mod types;
 mod vst_scan;
 
 use serde::Serialize;
-use ::tauri::{AppHandle, Emitter, Manager, State, Window};
+use ::tauri::{Emitter, Manager};
 
 use crate::tauri::{
     commands::*,
     state::AppState,
     utils::config_dir_path,
-    window::{handle_window_event, setup_main_window},
+    window::handle_window_event,
 };
 
 /// Chemins de l'application

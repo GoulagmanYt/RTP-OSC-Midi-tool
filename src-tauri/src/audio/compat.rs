@@ -9,6 +9,7 @@ use crate::audio::engine::AudioError;
 
 /// Ancienne structure AudioSettings pour compatibilité
 #[derive(Debug, Clone, serde::Deserialize)]
+#[allow(dead_code)]
 pub struct AudioSettings {
     pub enabled: bool,
     pub backend: Option<String>,
@@ -21,6 +22,7 @@ pub struct AudioSettings {
 }
 
 /// Convertit AudioSettings vers AudioStreamConfig
+#[allow(dead_code)]
 pub fn settings_to_config(settings: AudioSettings) -> AudioStreamConfig {
     AudioStreamConfig {
         backend: settings.backend,
@@ -44,6 +46,7 @@ pub fn settings_to_config(settings: AudioSettings) -> AudioStreamConfig {
 
 /// Obtient le HWND d'une fenêtre Tauri (Windows uniquement)
 #[cfg(target_os = "windows")]
+#[allow(dead_code)]
 pub fn get_window_hwnd(app: &tauri::AppHandle) -> Result<std::ptr::NonNull<()>, AudioError> {
     use tauri::Manager;
     
@@ -57,6 +60,7 @@ pub fn get_window_hwnd(app: &tauri::AppHandle) -> Result<std::ptr::NonNull<()>, 
 }
 
 #[cfg(not(target_os = "windows"))]
+#[allow(dead_code)]
 pub fn get_window_hwnd(_app: &tauri::AppHandle) -> Result<std::ptr::NonNull<()>, AudioError> {
     Err(AudioError::Message("Interface VST non supportée sur cette plateforme".to_string()))
 }

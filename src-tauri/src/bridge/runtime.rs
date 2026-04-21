@@ -7,21 +7,19 @@ use crate::{
     audio::AudioEngine,
     bridge::{
         activity::ActivityTracker,
-        config::{BridgeConfig, ConfigSnapshot},
+        config::BridgeConfig,
         midi::MidiManager,
         osc::OscManager,
         rtp_bridge::RtpManager,
     },
     config::Config,
-    logger::{FrontendLogger, logs_enabled, should_log_debug},
-    osc::OscClient,
+    logger::{FrontendLogger, should_log_debug},
     rtp::RtpServer,
-    types::{BridgeMetrics, BridgeStatus, MidiActivityInfo, RtpParticipantInfo},
+    types::{BridgeMetrics, BridgeStatus, RtpParticipantInfo},
 };
 use crossbeam_channel::{unbounded, Receiver, RecvTimeoutError, Sender};
 use parking_lot::Mutex;
 use std::{
-    collections::HashMap,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
@@ -29,8 +27,6 @@ use std::{
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tauri::Emitter;
-use tauri::Window;
 
 /// Handle principal du bridge
 #[derive(Clone)]
@@ -48,20 +44,30 @@ pub struct BridgeRuntime {
     processing: Option<thread::JoinHandle<()>>,
     midi_watcher: Option<thread::JoinHandle<()>>,
     activity_emitter: Option<thread::JoinHandle<()>>,
+    #[allow(dead_code)]
     config: Arc<Mutex<Config>>,
+    #[allow(dead_code)]
     config_rev: Arc<AtomicU64>,
+    #[allow(dead_code)]
     actual_midi_in: Arc<Mutex<Option<String>>>,
+    #[allow(dead_code)]
     actual_midi_out: Arc<Mutex<Option<String>>>,
 }
 
 /// Snapshot de configuration RTP
 #[derive(Clone)]
 struct RtpConfigSnapshot {
+    #[allow(dead_code)]
     name: String,
+    #[allow(dead_code)]
     requested_port: u16,
+    #[allow(dead_code)]
     bound_port: u16,
+    #[allow(dead_code)]
     remote_enabled: bool,
+    #[allow(dead_code)]
     remote_targets: Vec<crate::rtp::RtpRemoteTarget>,
+    #[allow(dead_code)]
     log_rtp: bool,
 }
 
@@ -217,6 +223,7 @@ impl BridgeHandle {
     }
     
     /// Vérifie si le bridge est en cours d'exécution
+    #[allow(dead_code)]
     pub fn is_running(&self) -> bool {
         self.inner.lock().as_ref().map_or(false, |r| !r.stop.load(Ordering::SeqCst))
     }
@@ -250,8 +257,8 @@ impl BridgeHandle {
     }
     
     /// Envoie une trame MIDI via le bridge
-    pub fn send_midi_frame(&self, frame: crate::midi::MidiFrame) -> Result<(), String> {
-        if let Some(ref runtime) = *self.inner.lock() {
+    pub fn send_midi_frame(&self, _frame: crate::midi::MidiFrame) -> Result<(), String> {
+        if let Some(ref _runtime) = *self.inner.lock() {
             // Implémentation à compléter
             Ok(())
         } else {
@@ -276,6 +283,7 @@ impl BridgeHandle {
     }
     
     /// Retourne les informations sur les participants RTP
+    #[allow(dead_code)]
     pub fn get_rtp_participants(&self) -> Vec<RtpParticipantInfo> {
         // Implémentation à compléter
         Vec::new()
@@ -354,7 +362,7 @@ impl BridgeHandle {
     ) {
         while !stop.load(Ordering::SeqCst) {
             // Vérifier les changements de configuration
-            let config_changed = config_rev.load(Ordering::SeqCst);
+            let _config_changed = config_rev.load(Ordering::SeqCst);
             
             // Traiter les messages MIDI
             match midi_rx.recv_timeout(Duration::from_millis(10)) {
@@ -382,11 +390,11 @@ impl BridgeHandle {
     
     /// Surveillance des entrées MIDI
     fn watch_midi_input(
-        shared_config: Arc<Mutex<Config>>,
-        config_rev: Arc<AtomicU64>,
-        midi_tx: Sender<crate::midi::MidiFrame>,
+        _shared_config: Arc<Mutex<Config>>,
+        _config_rev: Arc<AtomicU64>,
+        _midi_tx: Sender<crate::midi::MidiFrame>,
         stop: Arc<AtomicBool>,
-        logger: FrontendLogger,
+        _logger: FrontendLogger,
     ) {
         // Implémentation à compléter
         while !stop.load(Ordering::SeqCst) {
@@ -396,10 +404,10 @@ impl BridgeHandle {
     
     /// Émission des événements d'activité
     fn emit_activity_events(
-        rtp_rx: Receiver<crate::midi::MidiFrame>,
-        audio: Arc<AudioEngine>,
+        _rtp_rx: Receiver<crate::midi::MidiFrame>,
+        _audio: Arc<AudioEngine>,
         stop: Arc<AtomicBool>,
-        logger: FrontendLogger,
+        _logger: FrontendLogger,
     ) {
         // Implémentation à compléter
         while !stop.load(Ordering::SeqCst) {
@@ -409,7 +417,7 @@ impl BridgeHandle {
     
     /// Traite une trame MIDI
     fn handle_midi_frame(
-        config: &Config,
+        _config: &Config,
         manager: &mut BridgeManager,
         frame: &crate::midi::MidiFrame,
         logger: &FrontendLogger,
@@ -494,6 +502,7 @@ impl Default for BridgeHandle {
 }
 
 /// Fonction utilitaire pour obtenir le timestamp actuel
+#[allow(dead_code)]
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

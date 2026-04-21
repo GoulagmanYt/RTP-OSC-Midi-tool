@@ -6,7 +6,7 @@ use tauri::WindowEvent;
 use windows::Win32::{
     Foundation::HWND,
     Graphics::Dwm::{
-        DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWM_WINDOW_CORNER_PREFERENCE,
+        DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE,
     },
 };
 
@@ -36,6 +36,7 @@ pub fn setup_main_window(window: &tauri::Window) -> Result<(), Box<dyn std::erro
 
 /// Nettoie les effets de transparence
 #[cfg(target_os = "windows")]
+#[allow(dead_code)]
 pub fn cleanup_window_effects(window: &tauri::Window) -> Result<(), Box<dyn std::error::Error>> {
     clear_blur(&window)?;
     Ok(())

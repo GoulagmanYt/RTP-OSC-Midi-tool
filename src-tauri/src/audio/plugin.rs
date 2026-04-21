@@ -12,6 +12,7 @@ use crate::types::VstParameter;
 
 /// Erreurs liées aux plugins VST
 #[derive(Debug, Error, Clone)]
+#[allow(dead_code)]
 pub enum PluginError {
     #[error("Plugin non trouvé: {0}")]
     NotFound(String),
@@ -35,73 +36,97 @@ pub enum PluginError {
 /// Interface unifiée pour les plugins VST
 pub trait PluginBackend: Send + Sync {
     /// Traite les samples audio
+    #[allow(dead_code)]
     fn process(&mut self, inputs: &[&[f32]], outputs: &mut [&mut [f32]], frames: usize);
     
     /// Envoie un message MIDI
+    #[allow(dead_code)]
     fn send_midi(&mut self, data: &[u8]);
     
     /// Définit un paramètre
+    #[allow(dead_code)]
     fn set_parameter(&mut self, index: usize, value: f32) -> Result<(), PluginError>;
     
     /// Retourne la valeur d'un paramètre
+    #[allow(dead_code)]
     fn get_parameter(&self, index: usize) -> f32;
     
     /// Retourne tous les paramètres
+    #[allow(dead_code)]
     fn get_parameters(&self) -> Vec<VstParameter>;
     
     /// Retourne le nombre de paramètres
+    #[allow(dead_code)]
     fn parameter_count(&self) -> usize;
     
     /// Retourne le nom d'un paramètre
+    #[allow(dead_code)]
     fn get_parameter_name(&self, index: usize) -> String;
     
     /// Ouvre l'interface graphique
+    #[allow(dead_code)]
     fn open_editor(&mut self, parent: Option<std::ptr::NonNull<()>>) -> Result<(), PluginError>;
     
     /// Ferme l'interface graphique
+    #[allow(dead_code)]
     fn close_editor(&mut self) -> Result<(), PluginError>;
     
     /// Vérifie si l'interface est ouverte
+    #[allow(dead_code)]
     fn is_editor_open(&self) -> bool;
     
     /// Vérifie si le plugin supporte MIDI
+    #[allow(dead_code)]
     fn supports_midi(&self) -> bool;
     
     /// Retourne le nombre d'entrées audio
+    #[allow(dead_code)]
     fn input_count(&self) -> usize;
     
     /// Retourne le nombre de sorties audio
-    fn de_output_count(&self) -> usize;
+    #[allow(dead_code)]
+    fn output_count(&self) -> usize;
     
     /// Définit le sample rate
+    #[allow(dead_code)]
     fn set_sample_rate(&mut self, sample_rate: f32);
     
     /// Définit la taille du buffer
+    #[allow(dead_code)]
     fn set_buffer_size(&mut self, buffer_size: usize);
     
     /// Sauvegarde l'état du plugin
+    #[allow(dead_code)]
     fn save_state(&self) -> Result<Vec<u8>, PluginError>;
     
     /// Charge l'état du plugin
+    #[allow(dead_code)]
     fn load_state(&mut self, data: &[u8]) -> Result<(), PluginError>;
     
     /// Retourne le nom du plugin
+    #[allow(dead_code)]
     fn get_name(&self) -> String;
     
     /// Retourne la version du plugin
+    #[allow(dead_code)]
     fn get_version(&self) -> String;
     
     /// Retourne le vendeur du plugin
+    #[allow(dead_code)]
     fn get_vendor(&self) -> String;
     
     /// Suspend le traitement (pour économiser CPU)
+    #[allow(dead_code)]
     fn suspend(&mut self);
     
     /// Reprend le traitement
+    #[allow(dead_code)]
     fn resume(&mut self);
 }
 
-/// Implémentation mock pour les tests
+/// Plugin VST mock pour les tests
+#[derive(Debug)]
+#[allow(dead_code)]
 pub struct MockPlugin {
     name: String,
     supports_midi: bool,
@@ -113,6 +138,7 @@ pub struct MockPlugin {
 
 impl MockPlugin {
     /// Crée un nouveau plugin mock
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             name: "Mock Plugin".to_string(),
@@ -144,6 +170,7 @@ impl MockPlugin {
     }
     
     /// Crée un plugin mock avec configuration personnalisée
+    #[allow(dead_code)]
     pub fn with_config(name: String, supports_midi: bool, param_count: usize) -> Self {
         let mut parameters = Vec::new();
         for i in 0..param_count {
@@ -234,7 +261,7 @@ impl PluginBackend for MockPlugin {
         2 // Stéréo par défaut
     }
     
-    fn de_output_count(&self) -> usize {
+    fn output_count(&self) -> usize {
         2 // Stéréo par défaut
     }
     
@@ -290,6 +317,8 @@ impl PluginBackend for MockPlugin {
 }
 
 /// Chargeur de plugins VST
+#[derive(Debug)]
+#[allow(dead_code)]
 pub struct PluginLoader {
     sample_rate: f32,
     buffer_size: usize,
@@ -297,6 +326,7 @@ pub struct PluginLoader {
 
 impl PluginLoader {
     /// Crée un nouveau chargeur de plugins
+    #[allow(dead_code)]
     pub fn new(sample_rate: f32, buffer_size: usize) -> Self {
         Self {
             sample_rate,
@@ -305,6 +335,7 @@ impl PluginLoader {
     }
     
     /// Charge un plugin VST2
+    #[allow(dead_code)]
     pub fn load_vst2(&self, path: &Path) -> Result<Box<dyn PluginBackend>, PluginError> {
         // TODO: Implémenter le chargement VST2 réel
         // Pour l'instant, retourner un plugin mock
@@ -323,6 +354,7 @@ impl PluginLoader {
     }
     
     /// Charge un plugin VST3
+    #[allow(dead_code)]
     pub fn load_vst3(&self, path: &Path) -> Result<Box<dyn PluginBackend>, PluginError> {
         // TODO: Implémenter le chargement VST3 réel
         // Pour l'instant, retourner un plugin mock
@@ -341,6 +373,7 @@ impl PluginLoader {
     }
     
     /// Charge un plugin en détectant automatiquement le type
+    #[allow(dead_code)]
     pub fn load_auto(&self, path: &Path) -> Result<Box<dyn PluginBackend>, PluginError> {
         if let Some(extension) = path.extension() {
             match extension.to_str() {
@@ -365,14 +398,20 @@ impl PluginLoader {
     }
 }
 
-/// Gestionnaire d'état de plugin
+/// Gestionnaire d'état pour les plugins VST
+#[allow(dead_code)]
 pub struct PluginStateManager {
+    /// Plugin VST actuellement chargé
+    #[allow(dead_code)]
     plugin: Arc<Mutex<dyn PluginBackend>>,
+    /// Chemin vers le plugin VST
+    #[allow(dead_code)]
     plugin_path: PathBuf,
 }
 
 impl PluginStateManager {
     /// Crée un nouveau gestionnaire d'état
+    #[allow(dead_code)]
     pub fn new(plugin: Arc<Mutex<dyn PluginBackend>>, plugin_path: PathBuf) -> Self {
         Self {
             plugin,
@@ -381,6 +420,7 @@ impl PluginStateManager {
     }
     
     /// Sauvegarde l'état du plugin sur disque
+    #[allow(dead_code)]
     pub fn save_to_disk(&self) -> Result<(), PluginError> {
         let state = self.plugin.lock().save_state()?;
         let path = self.state_path_for_plugin()?;
@@ -400,6 +440,7 @@ impl PluginStateManager {
     }
     
     /// Charge l'état du plugin depuis disque
+    #[allow(dead_code)]
     pub fn load_from_disk(&self) -> Result<(), PluginError> {
         let path = self.state_path_for_plugin()?;
         
@@ -416,6 +457,7 @@ impl PluginStateManager {
     }
     
     /// Génère le chemin pour l'état du plugin
+    #[allow(dead_code)]
     fn state_path_for_plugin(&self) -> Result<PathBuf, PluginError> {
         let file_name = self.plugin_path
             .file_name()

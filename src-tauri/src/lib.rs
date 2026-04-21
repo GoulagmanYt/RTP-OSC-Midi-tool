@@ -10,11 +10,12 @@ pub mod midi;
 pub mod osc;
 pub mod plugin_probe;
 pub mod rtp;
+pub mod tauri;
 pub mod types;
 pub mod vst_scan;
 
 // Réexporter les types les plus courants pour faciliter l'utilisation
-pub use audio::{AudioEngine, AudioStreamConfig, ConfigError};
+pub use audio::AudioEngine;
 pub use bridge::BridgeHandle;
 pub use config::{Config, ConfigStore};
 pub use error::{AppError, AudioError, BridgeError, ConfigError as AppConfigError, TauriError};

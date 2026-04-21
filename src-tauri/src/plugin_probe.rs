@@ -98,10 +98,12 @@ pub fn scan_vst_plugins_in_roots(roots: &[PathBuf]) -> Vec<VstPluginEntry> {
     entries
 }
 
+#[allow(dead_code)]
 fn is_listable_instrument_entry(entry: &VstPluginEntry) -> bool {
     entry.kind == "instrument" && entry.supported
 }
 
+#[allow(dead_code)]
 pub fn ensure_supported_plugin_in_app(path: &Path) -> Result<VstPluginEntry, String> {
     let entry = probe_plugin(path);
     if entry.supported {
@@ -131,6 +133,7 @@ pub fn probe_plugin(path: &Path) -> VstPluginEntry {
     }
 }
 
+#[allow(dead_code)]
 pub fn detect_vst3_channels(
     plugin: &mut rack::vst3::Vst3Plugin,
     _info: &RackPluginInfo,

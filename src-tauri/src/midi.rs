@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 pub const NOTE_MIN: u8 = 21;
@@ -16,17 +15,22 @@ pub enum MidiKind {
     NoteOff,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct MidiNote {
     pub note: u8,
     pub channel: u8,
-    pub kind: MidiKind,
+    /// Index de la note (pour le tri)
+    #[allow(dead_code)]
     pub index: Option<u8>,
+    pub kind: MidiKind,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct MidiSustain {
+    #[allow(dead_code)]
     pub channel: u8,
+    #[allow(dead_code)]
     pub pressed: bool,
 }
 
@@ -61,6 +65,8 @@ pub fn parse_note(data: &[u8]) -> Option<MidiNote> {
     }
 }
 
+/// Parse un message MIDI de sustain
+#[allow(dead_code)]
 pub fn parse_sustain(data: &[u8]) -> Option<MidiSustain> {
     if data.len() < 3 {
         return None;
