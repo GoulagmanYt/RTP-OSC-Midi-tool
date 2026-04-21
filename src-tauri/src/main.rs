@@ -255,7 +255,7 @@ fn audio_settings_from_config(config: &Config) -> AudioSettings {
         buffer_size: config.audio_buffer_size,
         gain_db: config.audio_gain_db,
         limiter_enabled: config.audio_limiter_enabled,
-        vst_path: config.vst_path.clone(),
+        vst_path: config.vst_path.as_ref().map(|s| s.into()),
     }
 }
 
@@ -292,8 +292,9 @@ fn start_bridge(
     if config.audio_enabled {
         let logger = FrontendLogger::new(window, state.dev_logging.clone());
         let fallback_vst = fallback_vst_path(&app);
+        let audio_config = crate::audio::compat::settings_to_config(audio_settings_from_config(&config));
         if let Err(err) = state.audio.start(
-            audio_settings_from_config(&config),
+            audio_config,
             fallback_vst,
             logger.clone(),
         ) {
@@ -418,9 +419,10 @@ fn start_audio(
 ) -> Result<(), String> {
     let logger = FrontendLogger::new(window, state.dev_logging.clone());
     let fallback_vst = fallback_vst_path(&app);
+    let audio_config = crate::audio::compat::settings_to_config(settings);
     state
         .audio
-        .start(settings, fallback_vst, logger)
+        .start(audio_config, fallback_vst, logger)
         .map_err(|e| e.to_string())
 }
 
@@ -439,10 +441,11 @@ fn open_vst_ui(app: AppHandle, window: Window, state: State<AppState>) -> Result
 
     let logger = FrontendLogger::new(window, state.dev_logging.clone());
     if !state.audio.is_running() {
+        let audio_config = crate::audio::compat::settings_to_config(audio_settings_from_config(&cfg));
         state
             .audio
             .start(
-                audio_settings_from_config(&cfg),
+                audio_config,
                 fallback_vst_path(&app),
                 logger.clone(),
             )
@@ -478,10 +481,11 @@ fn ping_audio(app: AppHandle, window: Window, state: State<AppState>) -> Result<
     let logger = FrontendLogger::new(window, state.dev_logging.clone());
     if !state.audio.is_running() {
         let fallback_vst = fallback_vst_path(&app);
+        let audio_config = crate::audio::compat::settings_to_config(audio_settings_from_config(&cfg));
         state
             .audio
             .start(
-                audio_settings_from_config(&cfg),
+                audio_config,
                 fallback_vst,
                 logger.clone(),
             )
@@ -645,8 +649,9 @@ fn import_config(
 
     if cfg.audio_enabled {
         let fallback_vst = fallback_vst_path(&app);
+        let audio_config = crate::audio::compat::settings_to_config(audio_settings_from_config(&cfg));
         if let Err(err) = state.audio.start(
-            audio_settings_from_config(&cfg),
+            audio_config,
             fallback_vst,
             logger.clone(),
         ) {
