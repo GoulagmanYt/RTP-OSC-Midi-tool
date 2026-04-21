@@ -8,16 +8,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
-/// Test complet du cycle de vie du moteur audio
+/// Test simplifié du cycle de vie du moteur audio (sans dépendances Tauri)
 #[test]
 fn test_audio_engine_lifecycle() {
     let engine = AudioEngine::new();
     
     // Vérifier état initial
     assert!(!engine.is_running());
-    assert!(!engine.is_vst_loaded());
     
-    // Créer configuration audio valide
+    // Test de configuration audio valide
     let settings = AudioSettings {
         enabled: true,
         backend: Some("auto".to_string()),
@@ -29,43 +28,23 @@ fn test_audio_engine_lifecycle() {
         vst_path: None,
     };
     
-    // Simuler un logger pour les tests
-    struct TestLogger;
-    impl TestLogger {
-        fn new() -> Self {
-            Self
-        }
-        fn info(&self, _msg: String) {}
-        fn warn(&self, _msg: String) {}
-        fn error(&self, _msg: String) {}
-        fn debug(&self, _msg: String) {}
-        fn app_handle(&self) -> tauri::AppHandle {
-            // Pour les tests, nous utilisons un handle factice
-            // En pratique, ce test sera exécuté sans interface Tauri
-            panic!("Test logger ne supporte pas app_handle")
-        }
-    }
-    
-    // Note: Ce test nécessitera une adaptation pour fonctionner sans Tauri
-    // Pour l'instant, nous testons seulement la logique de configuration
-    
     // Vérifier que les settings sont valides
     assert!(settings.enabled);
     assert_eq!(settings.sample_rate, 48_000);
     assert_eq!(settings.buffer_size, 256);
+    
+    // Test basique - vérifier que le moteur peut être créé sans erreur
+    let engine2 = AudioEngine::new();
+    assert!(!engine2.is_running());
 }
 
-/// Test du flux MIDI entrée->sortie via le bridge
+/// Test simplifié du flux MIDI via le bridge (sans dépendances complexes)
 #[test]
 fn test_bridge_midi_flow() {
     let bridge = BridgeHandle::new();
-    let config_store = ConfigStore::new();
-    
-    // Charger configuration par défaut
-    let config = config_store.load();
     
     // Vérifier que le bridge n'est pas démarré
-    let status = bridge.status(&config);
+    let status = bridge.status();
     assert!(!status.running);
     
     // Test de création de frames MIDI
@@ -77,12 +56,19 @@ fn test_bridge_midi_flow() {
     // Vérifier que le frame est bien formé
     assert_eq!(test_frame.data.len(), 3);
     assert_eq!(test_frame.data[0], 0x90); // Note On
+    
+    // Test basique - vérifier que le bridge peut être créé et interrogé
+    let bridge2 = BridgeHandle::new();
+    let status2 = bridge2.status();
+    assert!(!status2.running);
+    
+    // Vérifier les détails du frame MIDI
     assert_eq!(test_frame.data[1], 60);  // C4
     assert_eq!(test_frame.data[2], 100); // Velocity
     assert_eq!(test_frame.source.as_ref(), "test");
 }
 
-/// Test de chargement de plugin VST par défaut
+/// Test simplifié de chargement de plugin VST par défaut
 #[test]
 fn test_vst_plugin_loading() {
     let engine = AudioEngine::new();

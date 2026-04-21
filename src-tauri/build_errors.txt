@@ -1,0 +1,382 @@
+   Compiling osc-midi-bridge v0.1.0 (D:\PROGRAMMATION\oscMIDI\src-tauri)
+error: expected `;`, found keyword `self`
+  --> src\bridge\osc.rs:67:10
+   |
+67 |         }
+   |          ^ help: add `;` here
+...
+70 |         self.process_midi_message(frame, client, logger);
+   |         ---- unexpected token
+
+error[E0432]: unresolved import `crate::config::RtpRemoteTarget`
+ --> src\bridge\config.rs:7:64
+  |
+7 |     Config, RoutingAssignment, RoutingMapping, RoutingProfile, RtpRemoteTarget,
+  |                                                                ^^^^^^^^^^^^^^^ no `RtpRemoteTarget` in `config`
+  |
+  = help: consider importing this struct instead:
+          crate::rtp::RtpRemoteTarget
+
+error[E0433]: failed to resolve: use of undeclared type `SmallVec`
+  --> src\bridge\midi.rs:95:27
+   |
+95 |                     data: SmallVec::from_slice(data),
+   |                           ^^^^^^^^ use of undeclared type `SmallVec`
+   |
+help: consider importing this struct
+   |
+ 6 + use smallvec::SmallVec;
+   |
+
+error[E0603]: struct import `MidiActivityInfo` is private
+  --> src\bridge\mod.rs:21:37
+   |
+21 | pub use activity::{ActivityTracker, MidiActivityInfo};
+   |                                     ^^^^^^^^^^^^^^^^ private struct import
+   |
+note: the struct import `MidiActivityInfo` is defined here...
+  --> src\bridge\activity.rs:8:13
+   |
+ 8 |     types::{MidiActivityInfo, MidiNoteEvent},
+   |             ^^^^^^^^^^^^^^^^
+note: ...and refers to the struct `MidiActivityInfo` which is defined here
+  --> src\types.rs:80:1
+   |
+80 | pub struct MidiActivityInfo {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^ you could import this directly
+help: import `MidiActivityInfo` directly
+   |
+21 | pub use activity::{ActivityTracker, types::MidiActivityInfo};
+   |                                     +++++++
+
+error[E0603]: struct `BridgeRuntime` is private
+  --> src\bridge\mod.rs:22:33
+   |
+22 | pub use runtime::{BridgeHandle, BridgeRuntime};
+   |                                 ^^^^^^^^^^^^^ private struct
+   |
+note: the struct `BridgeRuntime` is defined here
+  --> src\bridge\runtime.rs:44:1
+   |
+44 | struct BridgeRuntime {
+   | ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `parking_lot::Mutex`
+ --> src\audio\callback.rs:7:5
+  |
+7 | use parking_lot::Mutex;
+  |     ^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `MidiEventKind as RackMidiEventKind`
+ --> src\audio\callback.rs:9:33
+  |
+9 |     MidiEvent as RackMidiEvent, MidiEventKind as RackMidiEventKind,
+  |                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `MidiEventFlags`, `Supported`, `buffer::AudioBuffer`, and `plugin::CanDo`
+  --> src\audio\callback.rs:15:11
+   |
+15 |     api::{MidiEventFlags, Supported},
+   |           ^^^^^^^^^^^^^^  ^^^^^^^^^
+16 |     buffer::AudioBuffer,
+   |     ^^^^^^^^^^^^^^^^^^^
+17 |     host::PluginInstance,
+18 |     plugin::CanDo,
+   |     ^^^^^^^^^^^^^
+
+warning: unused import: `PluginLoader`
+ --> src\audio\engine.rs:9:28
+  |
+9 | use crate::audio::plugin::{PluginLoader, PluginStateManager};
+  |                            ^^^^^^^^^^^^
+
+warning: unused import: `apply_realtime_priority`
+  --> src\audio\engine.rs:11:29
+   |
+11 | use crate::audio::windows::{apply_realtime_priority, VstWindowManager};
+   |                             ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::time::SystemTime`
+  --> src\audio\engine.rs:16:5
+   |
+16 | use std::time::SystemTime;
+   |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `FromSample`, `Sample`, and `SizedSample`
+ --> src\audio\stream.rs:8:25
+  |
+8 |     BufferSize, Device, FromSample, Sample, SampleFormat, SampleRate, SizedSample,
+  |                         ^^^^^^^^^^  ^^^^^^                            ^^^^^^^^^^^
+
+warning: unused import: `Ordering`
+  --> src\audio\stream.rs:12:36
+   |
+12 | use std::sync::atomic::{AtomicU32, Ordering};
+   |                                    ^^^^^^^^
+
+warning: unused import: `crate::audio::windows::apply_realtime_priority`
+  --> src\audio\stream.rs:18:5
+   |
+18 | use crate::audio::windows::apply_realtime_priority;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `AtomicU32` and `Ordering`
+ --> src\audio\windows.rs:7:25
+  |
+7 | use std::sync::atomic::{AtomicU32, Ordering};
+  |                         ^^^^^^^^^  ^^^^^^^^
+
+warning: unused import: `std::sync::Arc`
+ --> src\audio\windows.rs:9:5
+  |
+9 | use std::sync::Arc;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused import: `HINSTANCE`
+  --> src\audio\windows.rs:15:34
+   |
+15 | use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+   |                                  ^^^^^^^^^
+
+warning: unused import: `GetProcAddress`
+  --> src\audio\windows.rs:20:63
+   |
+20 | use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+   |                                                               ^^^^^^^^^^^^^^
+
+warning: unused imports: `PROCESS_POWER_THROTTLING_CURRENT_VERSION`, `PROCESS_POWER_THROTTLING_EXECUTION_SPEED`, `PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION`, `PROCESS_POWER_THROTTLING_STATE`, `ProcessPowerThrottling`, `SetProcessInformation`, `SetThreadInformation`, `SetThreadPriority`, `THREAD_POWER_THROTTLING_CURRENT_VERSION`, `THREAD_POWER_THROTTLING_EXECUTION_SPEED`, `THREAD_POWER_THROTTLING_STATE`, and `ThreadPowerThrottling`
+  --> src\audio\windows.rs:23:73
+   |
+23 |     AvSetMmThreadCharacteristicsW, GetCurrentProcess, GetCurrentThread, ProcessPowerThrottling,
+   |                                                                         ^^^^^^^^^^^^^^^^^^^^^^
+24 |     SetPriorityClass, SetProcessInformation, SetThreadInformation, SetThreadPriority,
+   |                       ^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^
+25 |     ThreadPowerThrottling, ABOVE_NORMAL_PRIORITY_CLASS, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+   |     ^^^^^^^^^^^^^^^^^^^^^                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+26 |     PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+27 |     PROCESS_POWER_THROTTLING_STATE, THREAD_POWER_THROTTLING_CURRENT_VERSION,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+28 |     THREAD_POWER_THROTTLING_EXECUTION_SPEED, THREAD_POWER_THROTTLING_STATE,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `RoutingAssignment`
+ --> src\bridge\config.rs:7:13
+  |
+7 |     Config, RoutingAssignment, RoutingMapping, RoutingProfile, RtpRemoteTarget,
+  |             ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `MidiKind`
+ --> src\bridge\midi.rs:9:50
+  |
+9 |     midi::{parse_note, parse_sustain, MidiFrame, MidiKind},
+  |                                                  ^^^^^^^^
+
+warning: unused import: `Ignore`
+  --> src\bridge\midi.rs:12:5
+   |
+12 |     Ignore, MidiInput, MidiInputConnection, MidiInputPort, MidiOutput, MidiOutputConnection,
+   |     ^^^^^^
+
+warning: unused import: `std::sync::Arc`
+  --> src\bridge\osc.rs:11:5
+   |
+11 | use std::sync::Arc;
+   |     ^^^^^^^^^^^^^^
+
+warning: unused import: `sync::Arc`
+  --> src\bridge\rtp_bridge.rs:15:5
+   |
+15 |     sync::Arc,
+   |     ^^^^^^^^^
+
+warning: unused imports: `ConfigSnapshot`, `MidiActivityInfo`, `logs_enabled`, and `osc::OscClient`
+  --> src\bridge\runtime.rs:10:32
+   |
+10 |         config::{BridgeConfig, ConfigSnapshot},
+   |                                ^^^^^^^^^^^^^^
+...
+16 |     logger::{FrontendLogger, logs_enabled, should_log_debug},
+   |                              ^^^^^^^^^^^^
+17 |     osc::OscClient,
+   |     ^^^^^^^^^^^^^^
+18 |     rtp::RtpServer,
+19 |     types::{BridgeMetrics, BridgeStatus, MidiActivityInfo, RtpParticipantInfo},
+   |                                          ^^^^^^^^^^^^^^^^
+
+warning: unused import: `collections::HashMap`
+  --> src\bridge\runtime.rs:24:5
+   |
+24 |     collections::HashMap,
+   |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `tauri::Emitter`
+  --> src\bridge\runtime.rs:32:5
+   |
+32 | use tauri::Emitter;
+   |     ^^^^^^^^^^^^^^
+
+warning: unused import: `tauri::Window`
+  --> src\bridge\runtime.rs:33:5
+   |
+33 | use tauri::Window;
+   |     ^^^^^^^^^^^^^
+
+warning: unused variable: `gain`
+   --> src\audio\callback.rs:221:9
+    |
+221 |     let gain = f32::from_bits(gain_bits.load(Ordering::Relaxed));
+    |         ^^^^ help: if this is intentional, prefix it with an underscore: `_gain`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `callback_state`
+   --> src\audio\callback.rs:237:5
+    |
+237 |     callback_state: AudioCallbackState,
+    |     ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_callback_state`
+
+warning: unused variable: `gain`
+   --> src\audio\callback.rs:243:9
+    |
+243 |     let gain = f32::from_bits(gain_bits.load(Ordering::Relaxed));
+    |         ^^^^ help: if this is intentional, prefix it with an underscore: `_gain`
+
+warning: unused variable: `callback_state`
+   --> src\audio\callback.rs:255:5
+    |
+255 |     callback_state: AudioCallbackState,
+    |     ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_callback_state`
+
+warning: unused variable: `gain`
+   --> src\audio\callback.rs:261:9
+    |
+261 |     let gain = f32::from_bits(gain_bits.load(Ordering::Relaxed));
+    |         ^^^^ help: if this is intentional, prefix it with an underscore: `_gain`
+
+warning: unused variable: `thread`
+  --> src\audio\windows.rs:60:13
+   |
+60 |         let thread = GetCurrentThread();
+   |             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_thread`
+
+warning: unused variable: `config`
+   --> src\bridge\midi.rs:112:9
+    |
+112 |         config: &Config,
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_config`
+
+warning: unused variable: `input`
+   --> src\bridge\midi.rs:189:9
+    |
+189 |         input: &'a MidiInput,
+    |         ^^^^^ help: if this is intentional, prefix it with an underscore: `_input`
+
+warning: unused variable: `preferred`
+   --> src\bridge\midi.rs:191:9
+    |
+191 |         preferred: Option<&String>,
+    |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_preferred`
+
+warning: unused variable: `output`
+   --> src\bridge\midi.rs:200:9
+    |
+200 |         output: &'a MidiOutput,
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_output`
+
+warning: unused variable: `preferred`
+   --> src\bridge\midi.rs:202:9
+    |
+202 |         preferred: Option<&String>,
+    |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_preferred`
+
+warning: unused variable: `frame`
+  --> src\bridge\rtp_bridge.rs:96:35
+   |
+96 |     pub fn send_midi_frame(&self, frame: &MidiFrame, logger: &FrontendLogger) {
+   |                                   ^^^^^ help: if this is intentional, prefix it with an underscore: `_frame`
+
+warning: unused variable: `server`
+   --> src\bridge\rtp_bridge.rs:101:18
+    |
+101 |         let Some(ref server) = self.server else {
+    |                  ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_server`
+
+warning: unused variable: `target`
+   --> src\bridge\rtp_bridge.rs:260:30
+    |
+260 |     pub fn test_connectivity(target: &RtpRemoteTarget, timeout_ms: u64) -> bool {
+    |                              ^^^^^^ help: if this is intentional, prefix it with an underscore: `_target`
+
+warning: unused variable: `frame`
+   --> src\bridge\runtime.rs:252:35
+    |
+252 |     pub fn send_midi_frame(&self, frame: crate::midi::MidiFrame) -> Result<(), String> {
+    |                                   ^^^^^ help: if this is intentional, prefix it with an underscore: `_frame`
+
+warning: unused variable: `runtime`
+   --> src\bridge\runtime.rs:253:21
+    |
+253 |         if let Some(ref runtime) = *self.inner.lock() {
+    |                     ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_runtime`
+
+warning: unused variable: `config_changed`
+   --> src\bridge\runtime.rs:356:17
+    |
+356 |             let config_changed = config_rev.load(Ordering::SeqCst);
+    |                 ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_config_changed`
+
+warning: unused variable: `shared_config`
+   --> src\bridge\runtime.rs:384:9
+    |
+384 |         shared_config: Arc<Mutex<Config>>,
+    |         ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_shared_config`
+
+warning: unused variable: `config_rev`
+   --> src\bridge\runtime.rs:385:9
+    |
+385 |         config_rev: Arc<AtomicU64>,
+    |         ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_config_rev`
+
+warning: unused variable: `midi_tx`
+   --> src\bridge\runtime.rs:386:9
+    |
+386 |         midi_tx: Sender<crate::midi::MidiFrame>,
+    |         ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_midi_tx`
+
+warning: unused variable: `logger`
+   --> src\bridge\runtime.rs:388:9
+    |
+388 |         logger: FrontendLogger,
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_logger`
+
+warning: unused variable: `rtp_rx`
+   --> src\bridge\runtime.rs:398:9
+    |
+398 |         rtp_rx: Receiver<crate::midi::MidiFrame>,
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_rtp_rx`
+
+warning: unused variable: `audio`
+   --> src\bridge\runtime.rs:399:9
+    |
+399 |         audio: Arc<AudioEngine>,
+    |         ^^^^^ help: if this is intentional, prefix it with an underscore: `_audio`
+
+warning: unused variable: `logger`
+   --> src\bridge\runtime.rs:401:9
+    |
+401 |         logger: FrontendLogger,
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_logger`
+
+warning: unused variable: `config`
+   --> src\bridge\runtime.rs:411:9
+    |
+411 |         config: &Config,
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_config`
+
+Some errors have detailed explanations: E0432, E0433, E0603.
+For more information about an error, try `rustc --explain E0432`.
+warning: `osc-midi-bridge` (lib) generated 48 warnings
+error: could not compile `osc-midi-bridge` (lib) due to 5 previous errors; 48 warnings emitted

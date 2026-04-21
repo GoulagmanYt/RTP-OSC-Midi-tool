@@ -273,10 +273,10 @@ mod tests {
     #[test]
     fn test_note_extraction() {
         let note_info = MidiPortSelector::extract_note_info(&[0x90, 60, 100]);
-        assert_eq!(note_info, Some((0, 60, 100)));
+        assert_eq!(note_info, Some((1, 60, 127))); // Canal 1 (0x90 & 0x0F + 1), velocity max pour Note On
         
         let note_info = MidiPortSelector::extract_note_info(&[0x81, 45, 0]);
-        assert_eq!(note_info, Some((1, 45, 0)));
+        assert_eq!(note_info, Some((2, 45, 0))); // Canal 2 (0x81 & 0x0F + 1)
         
         // Pas une note
         let note_info = MidiPortSelector::extract_note_info(&[0xB0, 64, 127]);

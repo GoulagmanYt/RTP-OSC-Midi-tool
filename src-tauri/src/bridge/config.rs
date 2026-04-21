@@ -107,48 +107,85 @@ impl RoutingProfileRuntime {
         let channel = status & 0x0F;
         let status_type = status & 0xF0;
         
-        // Filtrer par canal si nécessaire
+        // Filtrage par canal
+        if !self.filter_channel(channel) {
+            return false;
+        }
+        
+        // Filtrage par note
+        if !self.filter_note_range(status_type, &frame.data) {
+            return false;
+        }
+        
+        // Appliquer les mappings
+        self.apply_cc_mapping(status_type, &mut frame.data);
+        self.apply_program_mapping(status_type, &mut frame.data);
+        
+        true
+    }
+    
+    /// Vérifie si le canal correspond au filtre
+    fn filter_channel(&self, channel: u8) -> bool {
         if let Some(filter) = self.channel_filter {
-            if channel != filter {
+            channel == filter
+        } else {
+            true
+        }
+    }
+    
+    /// Vérifie si la note est dans la plage autorisée
+    fn filter_note_range(&self, status_type: u8, data: &[u8]) -> bool {
+        if !matches!(status_type, 0x80 | 0x90) {
+            return true; // Pas un message de note
+        }
+        
+        let Some(note) = data.get(1) else {
+            return true;
+        };
+        
+        if let Some(min) = self.note_min {
+            if *note < min {
                 return false;
             }
         }
         
-        // Filtrer par note si nécessaire
-        if matches!(status_type, 0x80 | 0x90) {
-            if let Some(note) = frame.data.get(1) {
-                if let Some(min) = self.note_min {
-                    if *note < min {
-                        return false;
-                    }
-                }
-                if let Some(max) = self.note_max {
-                    if *note > max {
-                        return false;
-                    }
-                }
-            }
-        }
-        
-        // Appliquer les mappings CC
-        if status_type == 0xB0 {
-            if let Some(cc) = frame.data.get(1) {
-                if *cc < 128 {
-                    frame.data[1] = self.cc_map[*cc as usize];
-                }
-            }
-        }
-        
-        // Appliquer les mappings de programme
-        if status_type == 0xC0 {
-            if let Some(program) = frame.data.get(1) {
-                if *program < 128 {
-                    frame.data[1] = self.program_map[*program as usize];
-                }
+        if let Some(max) = self.note_max {
+            if *note > max {
+                return false;
             }
         }
         
         true
+    }
+    
+    /// Applique les mappings CC si nécessaire
+    fn apply_cc_mapping(&self, status_type: u8, data: &mut [u8]) {
+        if status_type != 0xB0 {
+            return;
+        }
+        
+        let Some(cc) = data.get(1) else {
+            return;
+        };
+        
+        if *cc < 128 {
+            data[1] = self.cc_map[*cc as usize];
+        }
+    }
+    
+    /// Applique les mappings de programme si nécessaire
+    fn apply_program_mapping(&self, status_type: u8, data: &mut [u8]) {
+        if status_type != 0xC0 {
+            return;
+        }
+        
+        let Some(program) = data.get(1) else {
+            return;
+        };
+        
+        if *program < 128 {
+            data[1] = self.program_map[*program as usize];
+        }
     }
 }
 
@@ -203,6 +240,7 @@ mod tests {
     fn test_routing_profile_creation() {
         let profile = RoutingProfile {
             id: "test".to_string(),
+            name: "Test Profile".to_string(),
             channel_filter: Some(1),
             note_min: Some(60),
             note_max: Some(72),
@@ -229,6 +267,7 @@ mod tests {
     fn test_routing_profile_filtering() {
         let profile = RoutingProfile {
             id: "test".to_string(),
+            name: "Test Profile".to_string(),
             channel_filter: Some(2),
             note_min: Some(60),
             note_max: Some(72),
@@ -242,8 +281,7 @@ mod tests {
         // Test de filtrage par canal
         let mut frame = crate::midi::MidiFrame {
             source: "test".into(),
-            timestamp_ms: 0,
-            data: vec![0x90, 60, 100], // Note On canal 0
+            data: smallvec::SmallVec::from_slice(&[0x90, 60, 100]), // Note On canal 0
         };
         
         assert!(!runtime.apply_to_frame(&mut frame)); // Rejeté (mauvais canal)
