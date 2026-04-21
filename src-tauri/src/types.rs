@@ -1,7 +1,5 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LogEvent {
@@ -21,31 +19,30 @@ impl LogEvent {
     }
 }
 
-/// Chemins de l'application
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppPaths {
-    pub config_dir: PathBuf,
-    pub data_dir: PathBuf,
-    pub cache_dir: PathBuf,
-    pub log_dir: PathBuf,
+    pub config_dir: String,
+    pub log_file: String,
+    pub log_dir: String,
 }
 
 impl AppPaths {
     pub fn new() -> Result<Self, String> {
-        let dirs = directories::ProjectDirs::from("com", "oscmidi", "OSCMidi")
-            .ok_or("Impossible de déterminer les répertoires de l'application")?;
-        
+        let dirs = directories::ProjectDirs::from("com", "OSCMIDI", "OSCMIDI")
+            .ok_or("Impossible de determiner le dossier de configuration")?;
+        let config_dir = dirs.config_dir().to_path_buf();
+        let log_dir = config_dir.join("logs");
+        let log_file = log_dir.join("app.log");
+
         Ok(Self {
-            config_dir: dirs.config_dir().to_path_buf(),
-            data_dir: dirs.data_dir().to_path_buf(),
-            cache_dir: dirs.cache_dir().to_path_buf(),
-            log_dir: dirs.data_dir().join("logs"),
+            config_dir: config_dir.to_string_lossy().to_string(),
+            log_file: log_file.to_string_lossy().to_string(),
+            log_dir: log_dir.to_string_lossy().to_string(),
         })
     }
 }
 
-/// Statut du bridge
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct BridgeStatus {

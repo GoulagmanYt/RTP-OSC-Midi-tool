@@ -145,16 +145,7 @@ impl From<AppError> for String {
 impl From<crate::audio::engine::AudioError> for AudioError {
     fn from(err: crate::audio::engine::AudioError) -> Self {
         match err {
-            crate::audio::engine::AudioError::Message(msg) => 
-                AudioError::StreamError(msg),
-            crate::audio::engine::AudioError::Config(config_err) => 
-                AudioError::InvalidConfig(config_err.to_string()),
-            crate::audio::engine::AudioError::AlreadyStarted => 
-                AudioError::StreamError("Le moteur audio est déjà démarré".to_string()),
-            crate::audio::engine::AudioError::NotStarted => 
-                AudioError::StreamError("Le moteur audio n'est pas démarré".to_string()),
-            crate::audio::engine::AudioError::PluginNotLoaded => 
-                AudioError::PluginNotLoaded,
+            crate::audio::engine::AudioError::Message(msg) => AudioError::StreamError(msg),
         }
     }
 }

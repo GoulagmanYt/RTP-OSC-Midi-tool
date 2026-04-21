@@ -220,6 +220,12 @@ impl ConfigStore {
     }
 }
 
+impl Default for ConfigStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 fn normalize_config(mut cfg: Config) -> (Config, bool) {
     let mut changed = false;
     if cfg.rtp_remotes.is_empty() && !cfg.rtp_remote_host.trim().is_empty() {

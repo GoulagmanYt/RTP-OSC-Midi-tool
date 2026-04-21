@@ -19,12 +19,12 @@ pub fn setup_main_window(window: &tauri::Window) -> Result<(), Box<dyn std::erro
     let hwnd = window.hwnd()?;
     
     // Appliquer l'effet de transparence (acrylic)
-    apply_acrylic(&window, Some((0, 0, 0, 0)))?;
+    apply_acrylic(window, Some((0, 0, 0, 0)))?;
     
     // Configurer les coins de la fenêtre
     unsafe {
         DwmSetWindowAttribute(
-            HWND(hwnd.0 as *mut std::ffi::c_void),
+            HWND(hwnd.0),
             DWMWA_WINDOW_CORNER_PREFERENCE,
             &2i32 as *const _ as *const std::ffi::c_void, // DWMWCP_DONOTROUND = 2
             std::mem::size_of::<i32>() as u32,
@@ -38,7 +38,7 @@ pub fn setup_main_window(window: &tauri::Window) -> Result<(), Box<dyn std::erro
 #[cfg(target_os = "windows")]
 #[allow(dead_code)]
 pub fn cleanup_window_effects(window: &tauri::Window) -> Result<(), Box<dyn std::error::Error>> {
-    clear_blur(&window)?;
+    clear_blur(window)?;
     Ok(())
 }
 

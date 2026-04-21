@@ -544,6 +544,12 @@ impl RtpDiscoveryManager {
     }
 }
 
+impl Default for RtpDiscoveryManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 fn midi_to_bytes(message: RtMidiMessage) -> SmallVec<[u8; 32]> {
     use RtMidiMessage::*;
     match message {

@@ -14,39 +14,13 @@ mod tauri;
 mod types;
 mod vst_scan;
 
-use serde::Serialize;
 use ::tauri::{Emitter, Manager};
 
 use crate::tauri::{
     commands::*,
     state::AppState,
-    utils::config_dir_path,
     window::handle_window_event,
 };
-
-/// Chemins de l'application
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AppPaths {
-    pub config_dir: String,
-    pub log_file: String,
-    pub log_dir: String,
-}
-
-impl AppPaths {
-    /// Crée les chemins de l'application
-    pub fn new() -> Result<Self, String> {
-        let config_dir = config_dir_path()?;
-        let log_dir = config_dir.join("logs");
-        let log_file = log_dir.join("app.log");
-        
-        Ok(Self {
-            config_dir: config_dir.to_string_lossy().to_string(),
-            log_file: log_file.to_string_lossy().to_string(),
-            log_dir: log_dir.to_string_lossy().to_string(),
-        })
-    }
-} // Ajout de l'accolade fermante manquante
 
 
 /// Fonction principale de l'application
@@ -107,27 +81,40 @@ fn main() {
             }
         })
         .invoke_handler(::tauri::generate_handler![
-            // Commandes du module tauri::commands
             get_config,
             save_config,
             list_midi_inputs,
             list_midi_outputs,
             start_bridge,
             stop_bridge,
-            get_bridge_status,
-            get_bridge_metrics,
-            send_midi_frame,
-            list_rtp_participants,
-            export_app_diagnostics,
-            import_config,
+            reset_keys,
+            panic_midi,
+            get_status,
+            restart_rtp,
+            preflight_check,
+            refresh_rtp_sessions,
+            ping_audio,
+            reload_vst,
+            reset_config_defaults,
             export_config,
-            list_vst_scan_roots,
-            scan_vst_plugins,
-            load_vst_cache,
-            open_folder,
-            generate_preflight_report,
-            // Commandes locales
-            get_app_paths
+            export_diagnostics,
+            import_config,
+            get_app_paths,
+            open_app_dir,
+            clear_log_file,
+            list_audio_backends,
+            list_audio_devices,
+            list_vst_plugins,
+            refresh_vst_plugins,
+            list_vst_parameters,
+            set_vst_parameter,
+            start_audio,
+            stop_audio,
+            open_vst_ui,
+            close_vst_ui,
+            set_master_gain,
+            set_audio_limiter,
+            send_test_midi
         ])
         .setup(|app| {
             let window = app.get_webview_window("main").unwrap();

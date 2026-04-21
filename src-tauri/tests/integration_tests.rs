@@ -1,8 +1,7 @@
 use osc_midi_bridge::audio::{AudioEngine, AudioSettings}; 
 use osc_midi_bridge::bridge::BridgeHandle;
-use osc_midi_bridge::config::ConfigStore;
+use osc_midi_bridge::config::Config;
 use osc_midi_bridge::midi::MidiFrame;
-use smallvec::SmallVec;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -42,15 +41,16 @@ fn test_audio_engine_lifecycle() {
 #[test]
 fn test_bridge_midi_flow() {
     let bridge = BridgeHandle::new();
+    let config = Config::default();
     
     // Vérifier que le bridge n'est pas démarré
-    let status = bridge.status();
+    let status = bridge.status(&config);
     assert!(!status.running);
     
     // Test de création de frames MIDI
     let test_frame = MidiFrame {
-        data: SmallVec::from_slice(&[0x90, 60, 100]), // Note On C4
-        source: Arc::from("test"),
+        data: vec![0x90, 60, 100], // Note On C4
+        source: "test".to_string(),
     };
     
     // Vérifier que le frame est bien formé
@@ -59,13 +59,13 @@ fn test_bridge_midi_flow() {
     
     // Test basique - vérifier que le bridge peut être créé et interrogé
     let bridge2 = BridgeHandle::new();
-    let status2 = bridge2.status();
+    let status2 = bridge2.status(&config);
     assert!(!status2.running);
     
     // Vérifier les détails du frame MIDI
     assert_eq!(test_frame.data[1], 60);  // C4
     assert_eq!(test_frame.data[2], 100); // Velocity
-    assert_eq!(test_frame.source.as_ref(), "test");
+    assert_eq!(test_frame.source.as_str(), "test");
 }
 
 /// Test simplifié de chargement de plugin VST par défaut
@@ -86,17 +86,15 @@ fn test_vst_plugin_loading() {
 /// Test de configuration et validation
 #[test]
 fn test_configuration_validation() {
-    let config_store = ConfigStore::new();
-    let mut config = config_store.load();
+    let config = Config {
+        audio_sample_rate: 44_100,
+        audio_buffer_size: 512,
+        audio_gain_db: -6.0,
+        ..Config::default()
+    };
     
-    // Modifier configuration de manière valide
-    config.audio_sample_rate = 44_100;
-    config.audio_buffer_size = 512;
-    config.audio_gain_db = -6.0;
-    
-    // Sauvegarder et recharger
-    config_store.save(&config).expect("Sauvegarde config réussie");
-    let reloaded = config_store.load();
+    let serialized = serde_yaml::to_string(&config).expect("serialization");
+    let reloaded: Config = serde_yaml::from_str(&serialized).expect("deserialization");
     
     // Vérifier la persistence
     assert_eq!(reloaded.audio_sample_rate, 44_100);
@@ -107,7 +105,7 @@ fn test_configuration_validation() {
 /// Test de résistance du bridge sous charge
 #[test]
 fn test_bridge_stress() {
-    let bridge = BridgeHandle::new();
+    let _bridge = BridgeHandle::new();
     let stop = Arc::new(AtomicBool::new(false));
     let _stop_clone = stop.clone();
     
@@ -119,8 +117,8 @@ fn test_bridge_stress() {
         while start.elapsed() < Duration::from_millis(100) {
             // Simuler injection MIDI (ne fera rien si bridge pas démarré)
             let _frame = MidiFrame {
-                data: SmallVec::from_slice(&[0x90, (count % 128) as u8, 100]),
-                source: Arc::from("stress_test"),
+                data: vec![0x90, (count % 128) as u8, 100],
+                source: "stress_test".to_string(),
             };
             
             // Le bridge devrait gérer cette frame même non démarré
@@ -196,4 +194,38 @@ fn test_type_compatibility() {
     let serialized = serde_json::to_string(&status).expect("Sérialisation BridgeStatus réussie");
     let _deserialized: BridgeStatus = serde_json::from_str(&serialized)
         .expect("Désérialisation BridgeStatus réussie");
+}
+
+#[test]
+fn test_runtime_no_longer_exports_refactor_only_commands() {
+    let main_rs = include_str!("../src/main.rs");
+
+    for forbidden in [
+        "get_bridge_status,",
+        "get_bridge_metrics,",
+        "send_midi_frame,",
+        "list_rtp_participants,",
+        "export_app_diagnostics,",
+        "list_vst_scan_roots,",
+        "scan_vst_plugins,",
+        "load_vst_cache,",
+        "open_folder,",
+        "generate_preflight_report,",
+    ] {
+        assert!(
+            !main_rs.contains(forbidden),
+            "commande refactor-only encore exportée: {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn test_audio_legacy_is_not_in_production_module_graph() {
+    let lib_rs = include_str!("../src/lib.rs");
+    let main_rs = include_str!("../src/main.rs");
+    let engine_rs = include_str!("../src/audio/engine.rs");
+
+    assert!(!lib_rs.contains("audio_legacy"));
+    assert!(!main_rs.contains("audio_legacy"));
+    assert!(!engine_rs.contains("audio_legacy"));
 }

@@ -5,9 +5,6 @@ use osc_midi_bridge::{
     config::ConfigStore,
     midi::MidiFrame,
 };
-use smallvec::SmallVec;
-use std::sync::Arc;
-use std::time::Duration;
 
 /// Benchmark du parsing de frames MIDI
 fn bench_midi_frame_parsing(c: &mut Criterion) {
@@ -18,8 +15,8 @@ fn bench_midi_frame_parsing(c: &mut Criterion) {
             let status = if velocity > 0 { 0x90 } else { 0x80 };
             
             MidiFrame {
-                data: SmallVec::from_slice(&[status, note, velocity]),
-                source: Arc::from("benchmark"),
+                data: vec![status, note, velocity],
+                source: "benchmark".to_string(),
             }
         })
         .collect();
@@ -32,8 +29,8 @@ fn bench_midi_frame_parsing(c: &mut Criterion) {
                 let status = if velocity > 0 { 0x90 } else { 0x80 };
                 
                 black_box(MidiFrame {
-                    data: SmallVec::from_slice(&[status, note, velocity]),
-                    source: Arc::from("benchmark"),
+                    data: vec![status, note, velocity],
+                    source: "benchmark".to_string(),
                 });
             }
         })
@@ -94,7 +91,8 @@ fn bench_bridge_operations(c: &mut Criterion) {
             let config = config_store.load();
             let mut modified = config.clone();
             modified.audio_sample_rate = 48_000;
-            black_box(config_store.save(&modified).unwrap());
+            config_store.save(&modified).unwrap();
+            black_box(());
             black_box(config_store.load());
         })
     });
