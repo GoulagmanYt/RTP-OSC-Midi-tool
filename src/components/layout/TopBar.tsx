@@ -43,16 +43,15 @@ export function TopBar({ onOpenCommand }: { onOpenCommand: () => void }) {
   };
 
   const toggleTheme = async () => {
-    const newTheme = config?.theme === "dark" ? "light" : "dark";
-    // We update config, but the actual theme switching logic (CSS class) 
-    // should be handled by a useEffect in App.tsx observing config.theme
+    const currentTheme = config?.ui.theme ?? "light";
+    const newTheme = currentTheme === "dark" ? "light" : "dark";
     const nextPalette =
       newTheme === "dark"
-        ? config?.themePalette === "contrast"
+        ? config?.ui.themePalette === "contrast"
           ? "contrast"
           : "dark"
         : "light";
-    await updateConfig({ theme: newTheme, themePalette: nextPalette });
+    await updateConfig({ ui: { theme: newTheme, themePalette: nextPalette } });
   };
 
   // Use a fixed, packaged image for the avatar.
@@ -93,7 +92,7 @@ export function TopBar({ onOpenCommand }: { onOpenCommand: () => void }) {
           <Search className="w-4 h-4 text-muted-foreground" />
         </Button>
         <Button variant="ghost" size="icon" className="h-8 w-8" onClick={toggleTheme}>
-          {config?.theme === "dark" ? (
+          {config?.ui.theme === "dark" ? (
              <Sun className="w-4 h-4 text-muted-foreground" />
           ) : (
              <Moon className="w-4 h-4 text-muted-foreground" />

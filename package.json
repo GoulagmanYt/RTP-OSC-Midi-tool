@@ -8,7 +8,9 @@
     "build": "node ./node_modules/vite/bin/vite.js build",
     "tauri:dev": "node ./node_modules/@tauri-apps/cli/tauri.js dev",
     "tauri:build": "node ./node_modules/@tauri-apps/cli/tauri.js build",
-    "lint": "node ./node_modules/typescript/bin/tsc --noEmit"
+    "lint": "node ./node_modules/eslint/bin/eslint.js src eslint.config.js vite.config.ts vitest.config.ts && node ./node_modules/typescript/bin/tsc --noEmit",
+    "lint:typecheck": "node ./node_modules/typescript/bin/tsc --noEmit",
+    "test": "node ./node_modules/vitest/vitest.mjs run"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.15",
@@ -38,16 +40,24 @@
     "tailwindcss-animate": "^1.0.7"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.1",
     "@tailwindcss/postcss": "^4.2.2",
+    "@testing-library/react": "^16.3.0",
     "@tauri-apps/cli": "^2.10.1",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.1",
     "autoprefixer": "^10.4.27",
     "esbuild": "^0.27.4",
+    "eslint": "^9.39.1",
+    "eslint-plugin-react-hooks": "^7.0.1",
+    "globals": "^16.4.0",
+    "jsdom": "^27.0.1",
     "postcss": "^8.5.8",
     "tailwindcss": "^4.2.2",
     "typescript": "^5.9.3",
-    "vite": "^8.0.0"
+    "typescript-eslint": "^8.46.2",
+    "vite": "^8.0.0",
+    "vitest": "^3.2.4"
   }
 }

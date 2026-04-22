@@ -43,7 +43,7 @@ export default function SettingsPage() {
       .catch((e) => console.error("Failed to load app paths", e));
   }, []);
 
-  const currentPalette = (config?.themePalette as PaletteChoice["id"]) || "light";
+  const currentPalette = (config?.ui.themePalette as PaletteChoice["id"]) || "light";
 
   const handleSave = async () => {
     setBusy(true);
@@ -86,8 +86,10 @@ export default function SettingsPage() {
   const handlePaletteChange = async (palette: PaletteChoice["id"]) => {
     const nextTheme = palette === "light" ? "light" : "dark";
     await updateConfig({
-      themePalette: palette,
-      theme: nextTheme,
+      ui: {
+        themePalette: palette,
+        theme: nextTheme,
+      },
     });
   };
 
@@ -211,7 +213,10 @@ export default function SettingsPage() {
               <Label>{t("settings.general.verbose")}</Label>
               <p className="text-xs text-muted-foreground">{t("settings.general.verboseHint")}</p>
             </div>
-            <Switch checked={config?.verbose || false} onCheckedChange={(checked) => updateConfig({ verbose: checked })} />
+            <Switch
+              checked={config?.logging.verbose || false}
+              onCheckedChange={(checked) => updateConfig({ logging: { verbose: checked } })}
+            />
           </div>
 
           <div className="border-t pt-4" />
@@ -221,7 +226,10 @@ export default function SettingsPage() {
               <Label>{t("settings.general.oscLogs")}</Label>
               <p className="text-xs text-muted-foreground">{t("settings.general.oscLogsHint")}</p>
             </div>
-            <Switch checked={config?.logOsc || false} onCheckedChange={(checked) => updateConfig({ logOsc: checked })} />
+            <Switch
+              checked={config?.osc.logMessages || false}
+              onCheckedChange={(checked) => updateConfig({ osc: { logMessages: checked } })}
+            />
           </div>
 
           <div className="border-t pt-4" />
@@ -232,8 +240,8 @@ export default function SettingsPage() {
               <p className="text-xs text-muted-foreground">{t("settings.general.logAllToFileHint")}</p>
             </div>
             <Switch
-              checked={config?.logAllToFile || false}
-              onCheckedChange={(checked) => updateConfig({ logAllToFile: checked })}
+              checked={config?.logging.logAllToFile || false}
+              onCheckedChange={(checked) => updateConfig({ logging: { logAllToFile: checked } })}
             />
           </div>
 
@@ -245,8 +253,8 @@ export default function SettingsPage() {
               <p className="text-xs text-muted-foreground">{t("settings.general.disableLogsHint")}</p>
             </div>
             <Switch
-              checked={!(config?.logsEnabled ?? true)}
-              onCheckedChange={(checked) => updateConfig({ logsEnabled: !checked })}
+              checked={!(config?.logging.enabled ?? true)}
+              onCheckedChange={(checked) => updateConfig({ logging: { enabled: !checked } })}
             />
           </div>
         </CardContent>

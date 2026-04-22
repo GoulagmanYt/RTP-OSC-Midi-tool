@@ -26,8 +26,8 @@ function AppContent() {
 
   useEffect(() => {
     if (!config) return;
-    const palette = config.themePalette || (config.theme === "dark" ? "dark" : "light");
-    const radius = config.cornerRadius ?? 12;
+    const palette = config.ui.themePalette || (config.ui.theme === "dark" ? "dark" : "light");
+    const radius = config.ui.cornerRadius ?? 12;
     applyTheme(palette, radius);
   }, [config]);
 

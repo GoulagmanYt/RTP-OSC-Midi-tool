@@ -24,7 +24,7 @@ export default function OscPage() {
   };
 
   const handleToggleOsc = async (checked: boolean) => {
-    await updateConfig({ oscEnabled: checked });
+    await updateConfig({ osc: { enabled: checked } });
   };
 
   return (
@@ -43,7 +43,7 @@ export default function OscPage() {
               <Label className="font-medium">{t("osc.enable")}</Label>
               <p className="text-xs text-muted-foreground">{t("osc.enableHint")}</p>
             </div>
-            <Switch checked={config?.oscEnabled ?? false} onCheckedChange={handleToggleOsc} />
+            <Switch checked={config?.osc.enabled ?? false} onCheckedChange={handleToggleOsc} />
           </div>
 
           <div className="space-y-4 p-4 rounded-lg bg-slate-50 dark:bg-slate-900/50 border border-slate-100 dark:border-slate-800">
@@ -57,8 +57,8 @@ export default function OscPage() {
                   id="osc-ip"
                   type="text"
                   placeholder="127.0.0.1"
-                  value={config?.oscTargetIp ?? ""}
-                  onChange={(e) => updateConfig({ oscTargetIp: e.target.value })}
+                  value={config?.osc.targetIp ?? ""}
+                  onChange={(e) => updateConfig({ osc: { targetIp: e.target.value } })}
                 />
               </div>
               <div className="space-y-2">
@@ -69,9 +69,9 @@ export default function OscPage() {
                   id="osc-port"
                   type="number"
                   placeholder="9000"
-                  value={config?.oscTargetPort ?? ""}
+                  value={config?.osc.targetPort ?? ""}
                   onChange={(e) =>
-                    updateConfig({ oscTargetPort: Number(e.target.value || 0) })
+                    updateConfig({ osc: { targetPort: Number(e.target.value || 0) } })
                   }
                 />
               </div>
@@ -84,15 +84,15 @@ export default function OscPage() {
               <div className="flex items-center justify-between">
                 <Label className="text-sm">{t("osc.logOsc")}</Label>
                 <Switch
-                  checked={config?.logOsc ?? false}
-                  onCheckedChange={(c) => updateConfig({ logOsc: c })}
+                  checked={config?.osc.logMessages ?? false}
+                  onCheckedChange={(c) => updateConfig({ osc: { logMessages: c } })}
                 />
               </div>
               <div className="flex items-center justify-between">
                 <Label className="text-sm">{t("osc.verbose")}</Label>
                 <Switch
-                  checked={config?.verbose ?? false}
-                  onCheckedChange={(c) => updateConfig({ verbose: c })}
+                  checked={config?.logging.verbose ?? false}
+                  onCheckedChange={(c) => updateConfig({ logging: { verbose: c } })}
                 />
               </div>
             </div>
@@ -102,7 +102,7 @@ export default function OscPage() {
             <Button
               variant="outline"
               disabled={busy}
-              onClick={() => updateConfig({ oscTargetIp: "127.0.0.1", oscTargetPort: 9000 })}
+              onClick={() => updateConfig({ osc: { targetIp: "127.0.0.1", targetPort: 9000 } })}
             >
               <RefreshCcw className="h-4 w-4 mr-2" />
               {t("common.default")}
@@ -126,24 +126,24 @@ export default function OscPage() {
             <div className="p-3 rounded-lg bg-slate-50 dark:bg-slate-900/50 border border-slate-100 dark:border-slate-800">
               <div className="flex items-center justify-between">
                 <span className="text-sm text-muted-foreground">{t("osc.statusLabel")}</span>
-                <Badge variant={config?.oscEnabled ? "success" : "secondary"}>
-                  {config?.oscEnabled ? t("common.enabled") : t("common.disabled")}
+                <Badge variant={config?.osc.enabled ? "success" : "secondary"}>
+                  {config?.osc.enabled ? t("common.enabled") : t("common.disabled")}
                 </Badge>
               </div>
               <div className="text-xs text-muted-foreground mt-2">
-                {config?.oscTargetIp}:{config?.oscTargetPort}
+                {config?.osc.targetIp}:{config?.osc.targetPort}
               </div>
             </div>
 
             <div className="p-3 rounded-lg bg-slate-50 dark:bg-slate-900/50 border border-slate-100 dark:border-slate-800">
               <div className="flex items-center justify-between">
                 <span className="text-sm text-muted-foreground">{t("osc.connected")}</span>
-                <Badge variant={config?.oscEnabled ? "success" : "secondary"}>
-                  {config?.oscEnabled ? t("common.yes") : t("common.no")}
+                <Badge variant={config?.osc.enabled ? "success" : "secondary"}>
+                  {config?.osc.enabled ? t("common.yes") : t("common.no")}
                 </Badge>
               </div>
               <div className="text-xs text-muted-foreground mt-2">
-                {config?.oscEnabled ? (
+                {config?.osc.enabled ? (
                   <div className="flex items-center gap-1">
                     <div className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
                     {t("osc.flowActive")}

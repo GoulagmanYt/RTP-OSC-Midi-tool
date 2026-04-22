@@ -14,6 +14,11 @@ export default defineConfig(() => ({
     target: ["es2021", "chrome107", "safari13"],
     minify: process.env.TAURI_DEBUG ? false : "esbuild",
     sourcemap: !!process.env.TAURI_DEBUG,
+    rolldownOptions: {
+      checks: {
+        pluginTimings: false,
+      },
+    },
     rollupOptions: {
       output: {
         manualChunks(id) {
