@@ -1,9 +1,6 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use osc_midi_bridge::{
-    audio::AudioEngine,
-    bridge::BridgeHandle,
-    config::ConfigStore,
-    midi::MidiFrame,
+    audio::AudioEngine, bridge::BridgeHandle, config::ConfigStore, midi::MidiFrame,
 };
 
 /// Benchmark du parsing de frames MIDI
@@ -13,7 +10,7 @@ fn bench_midi_frame_parsing(c: &mut Criterion) {
             let note = (i % 128) as u8;
             let velocity = if i % 2 == 0 { 100 } else { 0 };
             let status = if velocity > 0 { 0x90 } else { 0x80 };
-            
+
             MidiFrame {
                 data: vec![status, note, velocity],
                 source: "benchmark".to_string(),
@@ -27,7 +24,7 @@ fn bench_midi_frame_parsing(c: &mut Criterion) {
                 let note = (i % 128) as u8;
                 let velocity = if i % 2 == 0 { 100 } else { 0 };
                 let status = if velocity > 0 { 0x90 } else { 0x80 };
-                
+
                 black_box(MidiFrame {
                     data: vec![status, note, velocity],
                     source: "benchmark".to_string(),
@@ -48,7 +45,7 @@ fn bench_midi_frame_parsing(c: &mut Criterion) {
 /// Benchmark des opérations AudioEngine
 fn bench_audio_engine_operations(c: &mut Criterion) {
     let engine = AudioEngine::new();
-    
+
     c.bench_function("audio_engine_list_backends", |b| {
         b.iter(|| {
             black_box(engine.list_backends());
@@ -79,7 +76,7 @@ fn bench_bridge_operations(c: &mut Criterion) {
     let bridge = BridgeHandle::new();
     let config_store = ConfigStore::new();
     let config = config_store.load();
-    
+
     c.bench_function("bridge_status_check", |b| {
         b.iter(|| {
             black_box(bridge.status(&config));
@@ -90,7 +87,7 @@ fn bench_bridge_operations(c: &mut Criterion) {
         b.iter(|| {
             let config = config_store.load();
             let mut modified = config.clone();
-            modified.audio_sample_rate = 48_000;
+            modified.audio.sample_rate = 48_000;
             config_store.save(&modified).unwrap();
             black_box(());
             black_box(config_store.load());
@@ -101,11 +98,11 @@ fn bench_bridge_operations(c: &mut Criterion) {
 /// Benchmark de la sérialisation JSON
 fn bench_json_serialization(c: &mut Criterion) {
     use osc_midi_bridge::types::BridgeStatus;
-    
+
     let status = BridgeStatus {
         running: true,
-        midi_in: Some("Test MIDI".to_string()),
-        midi_out: Some("Test Output".to_string()),
+        midi_input: Some("Test MIDI".to_string()),
+        midi_output: Some("Test Output".to_string()),
         osc_target: "127.0.0.1:9000".to_string(),
         rtp_active: true,
         rtp_bound_port: Some(5004),
@@ -142,7 +139,7 @@ fn bench_json_serialization(c: &mut Criterion) {
 /// Benchmark du traitement MIDI
 fn bench_midi_processing(c: &mut Criterion) {
     use osc_midi_bridge::midi::{parse_note, parse_sustain};
-    
+
     let note_messages: Vec<Vec<u8>> = (0..1000)
         .map(|i| {
             let note = (i % 128) as u8;

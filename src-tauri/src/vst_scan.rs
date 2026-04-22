@@ -1,6 +1,4 @@
-pub use crate::plugin_probe::{
-    default_vst_scan_roots, scan_vst_plugins_in_roots,
-};
+pub use crate::plugin_probe::{default_vst_scan_roots, scan_vst_plugins_in_roots};
 
 pub fn is_vst2_path(path: &std::path::Path) -> bool {
     path.extension()

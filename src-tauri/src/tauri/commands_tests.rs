@@ -23,11 +23,20 @@ fn list_midi_outputs_contains_vst_output() {
 #[test]
 fn open_app_dir_rejects_unknown_target() {
     let err = open_app_dir("unknown".to_string()).expect_err("should fail");
-    assert!(err.contains("Dossier inconnu"));
+    assert_eq!(err.code, "paths.unknown-target");
+    assert_eq!(err.domain, "paths");
 }
 
 #[test]
 fn wrappers_return_serializable_json() {
     let app_paths = serde_json::to_string(&get_app_paths().expect("paths")).expect("json");
     assert!(app_paths.contains("configDir"));
+}
+
+#[test]
+fn command_error_is_serializable() {
+    let err = open_app_dir("unknown".to_string()).expect_err("should fail");
+    let json = serde_json::to_string(&err).expect("json");
+    assert!(json.contains("\"code\":\"paths.unknown-target\""));
+    assert!(json.contains("\"domain\":\"paths\""));
 }

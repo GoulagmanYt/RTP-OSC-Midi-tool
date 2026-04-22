@@ -1,6 +1,7 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod application;
 mod audio;
 mod bridge;
 mod config;
@@ -16,12 +17,7 @@ mod vst_scan;
 
 use ::tauri::{Emitter, Manager};
 
-use crate::tauri::{
-    commands::*,
-    state::AppState,
-    window::handle_window_event,
-};
-
+use crate::tauri::{commands::*, state::AppState, window::handle_window_event};
 
 /// Fonction principale de l'application
 fn main() {
@@ -118,7 +114,7 @@ fn main() {
         ])
         .setup(|app| {
             let window = app.get_webview_window("main").unwrap();
-            
+
             // Configuration de la fenêtre principale
             #[cfg(target_os = "windows")]
             {
@@ -130,7 +126,7 @@ fn main() {
                 // Pour l'instant, nous sautons cette configuration
             }
             window
-                .emit("log", types::LogEvent::new("info", "Interface ready"))
+                .emit("log:entry", types::LogEvent::new("info", "Interface ready"))
                 .ok();
             Ok(())
         })

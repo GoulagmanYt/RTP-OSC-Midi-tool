@@ -107,12 +107,12 @@ pub fn open_folder_in_explorer(path: &Path) -> Result<(), String> {
 }
 
 pub fn sync_runtime_logging(config: &Config, dev_logging: &Arc<std::sync::atomic::AtomicBool>) {
-    dev_logging.store(config.verbose, std::sync::atomic::Ordering::Relaxed);
-    crate::logger::set_global_dev_mode(config.verbose);
+    dev_logging.store(config.logging.verbose, std::sync::atomic::Ordering::Relaxed);
+    crate::logger::set_global_dev_mode(config.logging.verbose);
 }
 
 pub fn sync_rtp_discovery(config: &Config, state: &AppState, app: &AppHandle) {
-    if config.rtp_remote_enabled {
+    if config.rtp.remote_enabled {
         state.rtp_discovery.start(app.clone());
     } else {
         state.rtp_discovery.stop();
@@ -121,14 +121,14 @@ pub fn sync_rtp_discovery(config: &Config, state: &AppState, app: &AppHandle) {
 
 pub fn audio_settings_from_config(config: &Config) -> crate::audio::AudioSettings {
     crate::audio::AudioSettings {
-        enabled: config.audio_enabled,
-        backend: config.audio_backend.clone(),
-        device: config.audio_device.clone(),
-        sample_rate: config.audio_sample_rate,
-        buffer_size: config.audio_buffer_size,
-        gain_db: config.audio_gain_db,
-        limiter_enabled: config.audio_limiter_enabled,
-        vst_path: config.vst_path.clone(),
+        enabled: config.audio.enabled,
+        backend: config.audio.backend.clone(),
+        device: config.audio.device.clone(),
+        sample_rate: config.audio.sample_rate,
+        buffer_size: config.audio.buffer_size,
+        gain_db: config.audio.gain_db,
+        limiter_enabled: config.audio.limiter_enabled,
+        vst_path: config.audio.vst_path.clone(),
     }
 }
 
@@ -139,12 +139,10 @@ pub fn fallback_vst_path(app: &AppHandle) -> Option<PathBuf> {
         .ok()
         .or_else(|| {
             resolver
-                .resolve("Bitsonic/Keyzone Classic.dll", tauri::path::BaseDirectory::Resource)
+                .resolve(
+                    "Bitsonic/Keyzone Classic.dll",
+                    tauri::path::BaseDirectory::Resource,
+                )
                 .ok()
         })
-}
-
-#[allow(dead_code)]
-pub fn export_diagnostics(_state: &AppState) -> Result<String, String> {
-    Err("Use export_diagnostics(path) command".to_string())
 }

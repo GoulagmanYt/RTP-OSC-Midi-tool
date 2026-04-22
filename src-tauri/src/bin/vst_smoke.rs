@@ -24,14 +24,12 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use rack::vst3::Vst3Scanner;
 use rack::{
     prelude::{PluginScanner as RackPluginScanner, PluginType as RackPluginType},
     PluginInstance as RackPluginInstance,
 };
-use rack::vst3::Vst3Scanner;
-use vst::{
-    host::{Host, PluginLoader},
-};
+use vst::host::{Host, PluginLoader};
 
 struct SimpleHost;
 
@@ -98,7 +96,7 @@ fn smoke_vst2(path: &Path) -> Result<(), String> {
     let mut instance = loader
         .instance()
         .map_err(|e| format!("VST2 smoke: failed to instantiate plugin: {e}"))?;
-    plugin_probe::smoke_vst2_instance(&mut instance, 128)?;
+    plugin_probe::plugin_probe_vst2::smoke_vst2_instance(&mut instance, 128)?;
     println!("VST2 smoke ok: {}", path.display());
     Ok(())
 }
@@ -123,8 +121,8 @@ fn smoke_vst3(path: &Path) -> Result<(), String> {
     }
 
     trace("vst_smoke: create VST3 scanner");
-    let scanner = Vst3Scanner::new()
-        .map_err(|e| format!("VST3 smoke: failed to create scanner: {e}"))?;
+    let scanner =
+        Vst3Scanner::new().map_err(|e| format!("VST3 smoke: failed to create scanner: {e}"))?;
     trace("vst_smoke: scan VST3 path");
     let plugins = scanner
         .scan_path(path)

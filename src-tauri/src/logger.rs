@@ -24,9 +24,7 @@ static LOGS_ENABLED: AtomicBool = AtomicBool::new(true);
 fn refresh_log_level() {
     if !LOGS_ENABLED.load(Ordering::Relaxed) {
         log::set_max_level(log::LevelFilter::Off);
-    } else if GLOBAL_DEV_MODE.load(Ordering::Relaxed)
-        || LOG_ALL_TO_FILE.load(Ordering::Relaxed)
-    {
+    } else if GLOBAL_DEV_MODE.load(Ordering::Relaxed) || LOG_ALL_TO_FILE.load(Ordering::Relaxed) {
         log::set_max_level(log::LevelFilter::Debug);
     } else {
         log::set_max_level(log::LevelFilter::Info);
@@ -109,7 +107,7 @@ impl FrontendLogger {
         }
 
         if level != "debug" || dev {
-            let _ = self.window.emit("log", event);
+            let _ = self.window.emit("log:entry", event);
         }
 
         // Write to file only if dev mode is enabled OR log_all is enabled OR if it's an error/warn
@@ -165,7 +163,6 @@ pub fn background_log(level: &str, message: impl Into<String>) {
     }
 }
 
-#[allow(dead_code)]
 pub fn clear_log_file() -> Result<(), String> {
     let path = log_file_path().ok_or_else(|| "Log file path unavailable".to_string())?;
     if let Some(parent) = path.parent() {

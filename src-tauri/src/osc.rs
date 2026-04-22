@@ -6,10 +6,8 @@ use std::thread;
 use std::time::Duration;
 
 pub const PARAMETER_PATH: &str = "/avatar/parameters/";
-#[allow(dead_code)]
 pub const SUSTAIN_PARAM: &str = "/avatar/parameters/sustain";
 
-#[allow(dead_code)]
 pub fn parameter_name(index: u8) -> String {
     format!("{PARAMETER_PATH}{index}")
 }
@@ -39,7 +37,6 @@ impl OscClient {
         }))
     }
 
-    #[allow(dead_code)]
     pub fn send_reset_all(&self) -> Result<(), String> {
         // Send K1 then set all keys to zero with a short pacing delay.
         let _ = self.send_packet(OscPacket::Message(OscMessage {

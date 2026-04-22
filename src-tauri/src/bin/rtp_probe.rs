@@ -148,9 +148,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 counters.total.fetch_add(1, Ordering::Relaxed);
                 match message {
                     RtMidiMessage::NoteOn(..) => counters.note_on.fetch_add(1, Ordering::Relaxed),
-                    RtMidiMessage::NoteOff(..) => {
-                        counters.note_off.fetch_add(1, Ordering::Relaxed)
-                    }
+                    RtMidiMessage::NoteOff(..) => counters.note_off.fetch_add(1, Ordering::Relaxed),
                     RtMidiMessage::ControlChange(..) => {
                         counters.control_change.fetch_add(1, Ordering::Relaxed)
                     }

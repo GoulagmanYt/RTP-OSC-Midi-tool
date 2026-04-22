@@ -3,10 +3,7 @@
 use std::sync::{atomic::AtomicBool, Arc};
 
 use crate::{
-    audio::AudioEngine,
-    bridge::BridgeHandle,
-    config::ConfigStore,
-    rtp::RtpDiscoveryManager,
+    audio::AudioEngine, bridge::BridgeHandle, config::ConfigStore, rtp::RtpDiscoveryManager,
     types::VstPluginEntry,
 };
 use parking_lot::Mutex;

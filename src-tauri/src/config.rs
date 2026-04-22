@@ -1,9 +1,8 @@
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
-use std::fs;
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 
-use crate::types::BridgeStatus;
+use crate::types::RuntimeStatus;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -12,7 +11,7 @@ pub enum Theme {
     Dark,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RtpRemoteEntry {
     pub id: String,
@@ -22,14 +21,14 @@ pub struct RtpRemoteEntry {
     pub auto_connect: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RoutingMapping {
     pub from: u8,
     pub to: u8,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RoutingProfile {
     pub id: String,
@@ -42,43 +41,140 @@ pub struct RoutingProfile {
     pub program_map: Vec<RoutingMapping>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RoutingAssignment {
     pub source: String,
     pub profile_id: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
-pub struct Config {
-    pub osc_target_ip: String,
-    pub osc_target_port: u16,
-    pub osc_enabled: bool,
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AvatarConfig {
+    pub path: Option<String>,
+    pub offset_x: f32,
+    pub offset_y: f32,
+    pub scale: f32,
+}
+
+impl Default for AvatarConfig {
+    fn default() -> Self {
+        Self {
+            path: None,
+            offset_x: 50.0,
+            offset_y: 50.0,
+            scale: 1.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MidiConfig {
+    pub input_device: Option<String>,
+    pub output_device: Option<String>,
     pub channel_filter: Option<u8>,
-    pub midi_in: Option<String>,
-    pub midi_out: Option<String>,
-    pub midi_thru: bool,
-    pub verbose: bool,
-    pub log_osc: bool,
-    pub log_rtp: bool,
-    pub live_logs: bool,
-    pub rtp_enabled: bool,
-    pub rtp_session_name: String,
-    pub rtp_port: u16,
-    pub rtp_remote_enabled: bool,
-    pub rtp_remote_host: String,
-    pub rtp_remote_port: u16,
-    pub rtp_remotes: Vec<RtpRemoteEntry>,
+    pub thru_enabled: bool,
+    pub hotplug: bool,
     pub routing_profiles: Vec<RoutingProfile>,
     pub routing_assignments: Vec<RoutingAssignment>,
-    pub hotplug: bool,
+}
+
+impl Default for MidiConfig {
+    fn default() -> Self {
+        Self {
+            input_device: None,
+            output_device: None,
+            channel_filter: None,
+            thru_enabled: true,
+            hotplug: true,
+            routing_profiles: Vec::new(),
+            routing_assignments: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OscConfig {
+    pub enabled: bool,
+    pub target_ip: String,
+    pub target_port: u16,
+    pub log_messages: bool,
+}
+
+impl Default for OscConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            target_ip: "127.0.0.1".to_string(),
+            target_port: 9000,
+            log_messages: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RtpConfig {
+    pub enabled: bool,
+    pub session_name: String,
+    pub port: u16,
+    pub remote_enabled: bool,
+    pub remotes: Vec<RtpRemoteEntry>,
+    pub log_messages: bool,
+}
+
+impl Default for RtpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            session_name: "OSCMidi".to_string(),
+            port: 5004,
+            remote_enabled: false,
+            remotes: Vec::new(),
+            log_messages: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioConfig {
+    pub enabled: bool,
+    pub backend: Option<String>,
+    pub device: Option<String>,
+    pub sample_rate: u32,
+    pub buffer_size: u32,
+    pub gain_db: f32,
+    pub limiter_enabled: bool,
+    pub vst_path: Option<String>,
+}
+
+impl Default for AudioConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            backend: Some("auto".to_string()),
+            device: None,
+            sample_rate: 48_000,
+            buffer_size: 256,
+            gain_db: 0.0,
+            limiter_enabled: false,
+            vst_path: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct UiConfig {
     pub theme_preset: String,
     pub theme: Theme,
     pub theme_palette: String,
-    pub ui_accent: String,
+    pub accent: String,
     pub corner_radius: f32,
-    pub ui_scale: f32,
+    pub scale: f32,
     pub content_padding: f32,
     pub sidebar_width: f32,
     pub surface_opacity: f32,
@@ -88,52 +184,18 @@ pub struct Config {
     pub reduce_motion: bool,
     pub auto_start: bool,
     pub always_on_top: bool,
-    pub audio_enabled: bool,
-    pub audio_backend: Option<String>,
-    pub audio_device: Option<String>,
-    pub audio_sample_rate: u32,
-    pub audio_buffer_size: u32,
-    pub audio_gain_db: f32,
-    pub audio_limiter_enabled: bool,
-    pub log_all_to_file: bool,
-    pub logs_enabled: bool,
-    pub vst_path: Option<String>,
-    pub avatar_path: Option<String>,
-    pub avatar_offset_x: f32,
-    pub avatar_offset_y: f32,
-    pub avatar_scale: f32,
+    pub avatar: AvatarConfig,
 }
 
-impl Default for Config {
+impl Default for UiConfig {
     fn default() -> Self {
         Self {
-            osc_target_ip: "127.0.0.1".to_string(),
-            osc_target_port: 9000,
-            osc_enabled: true,
-            channel_filter: None,
-            midi_in: None,
-            midi_out: None,
-            midi_thru: true,
-            verbose: false,
-            log_osc: true,
-            log_rtp: false,
-            live_logs: false,
-            rtp_enabled: true,
-            rtp_session_name: "OSCMidi".to_string(),
-            rtp_port: 5004,
-            rtp_remote_enabled: false,
-            rtp_remote_host: "".to_string(),
-            rtp_remote_port: 5004,
-            rtp_remotes: Vec::new(),
-            routing_profiles: Vec::new(),
-            routing_assignments: Vec::new(),
-            hotplug: true,
             theme_preset: "studio".to_string(),
             theme: Theme::Light,
             theme_palette: "light".to_string(),
-            ui_accent: "auto".to_string(),
+            accent: "auto".to_string(),
             corner_radius: 12.0,
-            ui_scale: 1.0,
+            scale: 1.0,
             content_padding: 24.0,
             sidebar_width: 256.0,
             surface_opacity: 0.5,
@@ -143,23 +205,62 @@ impl Default for Config {
             reduce_motion: false,
             auto_start: false,
             always_on_top: false,
-            audio_enabled: true,
-            audio_backend: Some("auto".to_string()),
-            audio_device: None,
-            audio_sample_rate: 48_000,
-            audio_buffer_size: 256,
-            audio_gain_db: 0.0,
-            audio_limiter_enabled: false,
-            log_all_to_file: false,
-            logs_enabled: true,
-            vst_path: None,
-            avatar_path: None,
-            avatar_offset_x: 50.0,
-            avatar_offset_y: 50.0,
-            avatar_scale: 1.0,
+            avatar: AvatarConfig::default(),
         }
     }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LoggingConfig {
+    pub enabled: bool,
+    pub verbose: bool,
+    pub live_logs: bool,
+    pub log_all_to_file: bool,
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            verbose: false,
+            live_logs: false,
+            log_all_to_file: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppConfig {
+    pub version: u32,
+    pub midi: MidiConfig,
+    pub osc: OscConfig,
+    pub rtp: RtpConfig,
+    pub audio: AudioConfig,
+    pub ui: UiConfig,
+    pub logging: LoggingConfig,
+}
+
+impl AppConfig {
+    pub const CURRENT_VERSION: u32 = 2;
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            version: Self::CURRENT_VERSION,
+            midi: MidiConfig::default(),
+            osc: OscConfig::default(),
+            rtp: RtpConfig::default(),
+            audio: AudioConfig::default(),
+            ui: UiConfig::default(),
+            logging: LoggingConfig::default(),
+        }
+    }
+}
+
+pub type Config = AppConfig;
 
 pub const RTP_VIRTUAL_INPUT: &str = "RTP-MIDI (Serveur)";
 pub const VST_INTERNAL_OUTPUT: &str = "VST (Interne)";
@@ -175,46 +276,47 @@ impl ConfigStore {
             .expect("Impossible de déterminer le répertoire utilisateur");
         let cfg_dir = dirs.config_dir();
         fs::create_dir_all(cfg_dir).ok();
-        let path = cfg_dir.join("config.yaml");
+        Self::with_path(cfg_dir.join("config.yaml"))
+    }
+
+    pub fn with_path(path: PathBuf) -> Self {
         let store = Self { path };
         store.ensure_exists();
         store
     }
 
-    pub fn load(&self) -> Config {
-        match fs::read_to_string(&self.path) {
-            Ok(raw) => {
-                let cfg = serde_yaml::from_str(&raw).unwrap_or_else(|_| self.write_default());
-                let (cfg, changed) = normalize_config(cfg);
-                if changed {
-                    let _ = self.save(&cfg);
-                }
-                cfg
-            }
-            Err(_) => self.write_default(),
+    pub fn load(&self) -> AppConfig {
+        let Ok(raw) = fs::read_to_string(&self.path) else {
+            return self.write_default();
+        };
+        let Ok(cfg) = serde_yaml::from_str::<AppConfig>(&raw) else {
+            return self.write_default();
+        };
+        if cfg.version != AppConfig::CURRENT_VERSION {
+            return self.write_default();
         }
+        cfg
     }
 
-    pub fn save(&self, cfg: &Config) -> Result<(), String> {
+    pub fn save(&self, cfg: &AppConfig) -> Result<(), String> {
         let raw = serde_yaml::to_string(cfg).map_err(|e| e.to_string())?;
         fs::write(&self.path, raw).map_err(|e| e.to_string())
     }
 
-    #[allow(dead_code)]
-    pub fn reset_to_default(&self) -> Result<Config, String> {
-        let cfg = Config::default();
+    pub fn reset_to_default(&self) -> Result<AppConfig, String> {
+        let cfg = AppConfig::default();
         self.save(&cfg)?;
         Ok(cfg)
     }
 
     fn ensure_exists(&self) {
         if !self.path.exists() {
-            let _ = self.save(&Config::default());
+            let _ = self.save(&AppConfig::default());
         }
     }
 
-    fn write_default(&self) -> Config {
-        let default_cfg = Config::default();
+    fn write_default(&self) -> AppConfig {
+        let default_cfg = AppConfig::default();
         let _ = self.save(&default_cfg);
         default_cfg
     }
@@ -226,44 +328,23 @@ impl Default for ConfigStore {
     }
 }
 
-fn normalize_config(mut cfg: Config) -> (Config, bool) {
-    let mut changed = false;
-    if cfg.rtp_remotes.is_empty() && !cfg.rtp_remote_host.trim().is_empty() {
-        let host = cfg.rtp_remote_host.trim().to_string();
-        let port = if cfg.rtp_remote_port == 0 {
-            5004
-        } else {
-            cfg.rtp_remote_port
-        };
-        cfg.rtp_remotes.push(RtpRemoteEntry {
-            id: "legacy".to_string(),
-            name: host.clone(),
-            host,
-            port,
-            auto_connect: cfg.rtp_remote_enabled,
-        });
-        changed = true;
-    }
-    (cfg, changed)
-}
-
-impl From<&Config> for BridgeStatus {
-    fn from(cfg: &Config) -> Self {
+impl From<&AppConfig> for RuntimeStatus {
+    fn from(cfg: &AppConfig) -> Self {
         Self {
             running: false,
-            midi_in: cfg.midi_in.clone(),
-            midi_out: cfg.midi_out.clone(),
-            osc_target: format!("{}:{}", cfg.osc_target_ip, cfg.osc_target_port),
-            rtp_active: cfg.rtp_enabled
-                || cfg.rtp_remote_enabled
+            midi_input: cfg.midi.input_device.clone(),
+            midi_output: cfg.midi.output_device.clone(),
+            osc_target: format!("{}:{}", cfg.osc.target_ip, cfg.osc.target_port),
+            rtp_active: cfg.rtp.enabled
+                || cfg.rtp.remote_enabled
                 || cfg
-                    .midi_in
+                    .midi
+                    .input_device
                     .as_ref()
                     .map(|s| s == RTP_VIRTUAL_INPUT)
                     .unwrap_or(false),
             rtp_bound_port: None,
             last_error: None,
-            vst_loaded: false,
             audio_running: false,
             audio_latency_ms: None,
             audio_backend: None,
@@ -273,9 +354,46 @@ impl From<&Config> for BridgeStatus {
             audio_requested_buffer_size: None,
             audio_stream_buffer_size: None,
             audio_buffer_mismatch: None,
+            vst_loaded: false,
             vst_midi_compatible: None,
             audio_xruns: None,
             audio_limiter_enabled: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn store_resets_invalid_payload_to_defaults() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, "legacy: true").expect("write legacy");
+
+        let store = ConfigStore::with_path(path.clone());
+        let config = store.load();
+
+        assert_eq!(config.version, AppConfig::CURRENT_VERSION);
+        let raw = std::fs::read_to_string(path).expect("read rewritten");
+        assert!(raw.contains("version:"));
+    }
+
+    #[test]
+    fn store_resets_wrong_version_to_defaults() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("config.yaml");
+        let legacy = AppConfig {
+            version: AppConfig::CURRENT_VERSION + 1,
+            ..AppConfig::default()
+        };
+        std::fs::write(&path, serde_yaml::to_string(&legacy).expect("yaml")).expect("write");
+
+        let store = ConfigStore::with_path(path);
+        let config = store.load();
+
+        assert_eq!(config.version, AppConfig::CURRENT_VERSION);
     }
 }

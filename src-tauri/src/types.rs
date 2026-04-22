@@ -1,14 +1,15 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct LogEvent {
+pub struct LogEntry {
     pub level: String,
     pub message: String,
     pub timestamp: String,
 }
 
-impl LogEvent {
+impl LogEntry {
     pub fn new(level: &str, message: impl Into<String>) -> Self {
         let now: DateTime<Utc> = Utc::now();
         Self {
@@ -45,15 +46,14 @@ impl AppPaths {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
-pub struct BridgeStatus {
+pub struct RuntimeStatus {
     pub running: bool,
-    pub midi_in: Option<String>,
-    pub midi_out: Option<String>,
+    pub midi_input: Option<String>,
+    pub midi_output: Option<String>,
     pub osc_target: String,
     pub rtp_active: bool,
     pub rtp_bound_port: Option<u16>,
     pub last_error: Option<String>,
-    pub vst_loaded: bool,
     pub audio_running: bool,
     pub audio_latency_ms: Option<f32>,
     pub audio_backend: Option<String>,
@@ -63,6 +63,7 @@ pub struct BridgeStatus {
     pub audio_requested_buffer_size: Option<u32>,
     pub audio_stream_buffer_size: Option<u32>,
     pub audio_buffer_mismatch: Option<bool>,
+    pub vst_loaded: bool,
     pub vst_midi_compatible: Option<bool>,
     pub audio_xruns: Option<u32>,
     pub audio_limiter_enabled: Option<bool>,
@@ -70,7 +71,7 @@ pub struct BridgeStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BridgeMetrics {
+pub struct RuntimeMetrics {
     pub audio_peak_l: Option<f32>,
     pub audio_peak_r: Option<f32>,
     pub audio_latency_ms: Option<f32>,
@@ -100,8 +101,7 @@ pub struct RtpParticipantInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
-pub struct MidiActivityInfo {
+pub struct MidiActivitySnapshot {
     pub source: String,
     pub messages_per_sec: u32,
     pub last_note: Option<u8>,
@@ -155,3 +155,8 @@ pub struct VstParameter {
     pub unit: String,
     pub value: f32,
 }
+
+pub type LogEvent = LogEntry;
+pub type BridgeStatus = RuntimeStatus;
+pub type BridgeMetrics = RuntimeMetrics;
+pub type MidiActivityInfo = MidiActivitySnapshot;

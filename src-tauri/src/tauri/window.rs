@@ -5,22 +5,20 @@ use tauri::WindowEvent;
 #[cfg(target_os = "windows")]
 use windows::Win32::{
     Foundation::HWND,
-    Graphics::Dwm::{
-        DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE,
-    },
+    Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE},
 };
 
 #[cfg(target_os = "windows")]
-use window_vibrancy::{apply_acrylic, clear_blur};
+use window_vibrancy::apply_acrylic;
 
 /// Configure la fenêtre principale
 #[cfg(target_os = "windows")]
 pub fn setup_main_window(window: &tauri::Window) -> Result<(), Box<dyn std::error::Error>> {
     let hwnd = window.hwnd()?;
-    
+
     // Appliquer l'effet de transparence (acrylic)
     apply_acrylic(window, Some((0, 0, 0, 0)))?;
-    
+
     // Configurer les coins de la fenêtre
     unsafe {
         DwmSetWindowAttribute(
@@ -30,15 +28,7 @@ pub fn setup_main_window(window: &tauri::Window) -> Result<(), Box<dyn std::erro
             std::mem::size_of::<i32>() as u32,
         )?;
     }
-    
-    Ok(())
-}
 
-/// Nettoie les effets de transparence
-#[cfg(target_os = "windows")]
-#[allow(dead_code)]
-pub fn cleanup_window_effects(window: &tauri::Window) -> Result<(), Box<dyn std::error::Error>> {
-    clear_blur(window)?;
     Ok(())
 }
 
@@ -61,12 +51,6 @@ pub fn handle_window_event(event: &WindowEvent, window: &tauri::Window) {
 /// Fonction no-op pour les autres plateformes
 #[cfg(not(target_os = "windows"))]
 pub fn setup_main_window(_window: &tauri::Window) -> Result<(), Box<dyn std::error::Error>> {
-    Ok(())
-}
-
-/// Fonction no-op pour les autres plateformes
-#[cfg(not(target_os = "windows"))]
-pub fn cleanup_window_effects(_window: &tauri::Window) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
