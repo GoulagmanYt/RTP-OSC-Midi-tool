@@ -5,8 +5,8 @@ pub const NOTE_MAX: u8 = 108;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MidiFrame {
-    pub data: Vec<u8>,
-    pub source: String,
+    pub data: smallvec::SmallVec<[u8; 32]>,
+    pub source: std::sync::Arc<str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

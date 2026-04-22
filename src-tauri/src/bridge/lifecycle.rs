@@ -40,7 +40,7 @@ pub(super) fn rtp_requested(config: &Config) -> bool {
 
 pub(super) fn sync_rtp(
     rtp_server: &Arc<Mutex<Option<RtpServer>>>,
-    rtp_sink: &Arc<Mutex<Option<Sender<MidiFrame>>>>,
+    rtp_sink: &Arc<parking_lot::RwLock<Option<Sender<MidiFrame>>>>,
     rtp_config: &Arc<Mutex<Option<RtpConfigSnapshot>>>,
     config: &Config,
     logger: &FrontendLogger,
@@ -108,7 +108,7 @@ pub(super) fn start_runtime(
     dev_logging: Arc<AtomicBool>,
     audio: AudioEngine,
     rtp_server: &Arc<Mutex<Option<RtpServer>>>,
-    rtp_sink: &Arc<Mutex<Option<Sender<MidiFrame>>>>,
+    rtp_sink: &Arc<parking_lot::RwLock<Option<Sender<MidiFrame>>>>,
     rtp_config: &Arc<Mutex<Option<RtpConfigSnapshot>>>,
 ) -> Result<BridgeRuntime, String> {
     let logger = FrontendLogger::new(window.clone(), dev_logging);
@@ -129,9 +129,9 @@ pub(super) fn start_runtime(
     status.midi_input = actual_midi_in.lock().clone();
     status.midi_output = actual_midi_out.lock().clone();
 
-    *rtp_sink.lock() = Some(midi_tx.clone());
+    *rtp_sink.write() = Some(midi_tx.clone());
     if let Err(error) = sync_rtp(rtp_server, rtp_sink, rtp_config, &config, &logger, false) {
-        *rtp_sink.lock() = None;
+        *rtp_sink.write() = None;
         return Err(error);
     }
 
@@ -198,7 +198,7 @@ pub(super) fn start_runtime(
 pub(super) fn stop_runtime(
     runtime: BridgeRuntime,
     rtp_server: &Arc<Mutex<Option<RtpServer>>>,
-    rtp_sink: &Arc<Mutex<Option<Sender<MidiFrame>>>>,
+    rtp_sink: &Arc<parking_lot::RwLock<Option<Sender<MidiFrame>>>>,
     rtp_config: &Arc<Mutex<Option<RtpConfigSnapshot>>>,
 ) {
     let config_for_reset = runtime.config.lock().clone();
@@ -221,7 +221,7 @@ pub(super) fn stop_runtime(
         }
     }
 
-    *rtp_sink.lock() = None;
+    *rtp_sink.write() = None;
     if let Some(server) = rtp_server.lock().take() {
         tauri::async_runtime::block_on(server.stop());
     }

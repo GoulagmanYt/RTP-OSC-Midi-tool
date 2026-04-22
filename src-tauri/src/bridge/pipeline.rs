@@ -119,7 +119,7 @@ pub(super) fn handle_midi_frame(
     let mut frame = frame;
     if let Some(profile_idx) = config
         .routing_assignments
-        .get(frame.source.as_str())
+        .get(&*frame.source)
         .copied()
     {
         if let Some(profile) = config.routing_profiles.get(profile_idx) {

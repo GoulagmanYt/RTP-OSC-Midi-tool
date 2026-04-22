@@ -143,7 +143,7 @@ fn audio_callback<T: Sample + FromSample<f32>>(
     match &mut *plugin {
         PluginBackend::Vst2 { instance } => {
             if state.last_frames != frames {
-                instance.set_block_size(frames as i64);
+                // instance.set_block_size(frames as i64); // Removed to prevent VST reset during playback
                 state
                     .block_size_frames
                     .store(frames as u32, Ordering::Relaxed);

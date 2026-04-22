@@ -30,7 +30,7 @@ use tauri::Window;
 pub struct BridgeHandle {
     inner: Arc<Mutex<Option<BridgeRuntime>>>,
     rtp_server: Arc<Mutex<Option<RtpServer>>>,
-    rtp_sink: Arc<Mutex<Option<Sender<MidiFrame>>>>,
+    rtp_sink: Arc<parking_lot::RwLock<Option<Sender<MidiFrame>>>>,
     rtp_config: Arc<Mutex<Option<RtpConfigSnapshot>>>,
 }
 
@@ -61,7 +61,7 @@ impl BridgeHandle {
         Self {
             inner: Arc::new(Mutex::new(None)),
             rtp_server: Arc::new(Mutex::new(None)),
-            rtp_sink: Arc::new(Mutex::new(None)),
+            rtp_sink: Arc::new(parking_lot::RwLock::new(None)),
             rtp_config: Arc::new(Mutex::new(None)),
         }
     }
@@ -134,9 +134,9 @@ impl BridgeHandle {
         let sink = self.rtp_sink.clone();
         thread::spawn(move || {
             thread::sleep(Duration::from_millis(200));
-            let off = vec![0x80 | ch, note, 0];
-            if let Some(tx) = sink.lock().as_ref().cloned() {
-                let _ = tx.send(MidiFrame { data: off, source });
+            let off = smallvec::SmallVec::from_slice(&[0x80 | ch, note, 0]);
+            if let Some(tx) = sink.read().as_ref().cloned() {
+                let _ = tx.send(MidiFrame { data: off, source: std::sync::Arc::from(source.as_str()) });
             }
         });
 
@@ -203,10 +203,10 @@ impl BridgeHandle {
     }
 
     fn inject_frame(&self, data: SmallVec<[u8; 32]>, source: String) -> Result<(), String> {
-        if let Some(tx) = self.rtp_sink.lock().as_ref().cloned() {
+        if let Some(tx) = self.rtp_sink.read().as_ref().cloned() {
             tx.send(MidiFrame {
-                data: data.to_vec(),
-                source,
+                data,
+                source: std::sync::Arc::from(source.as_str()),
             })
             .map_err(|_| "Bridge not running".to_string())
         } else {

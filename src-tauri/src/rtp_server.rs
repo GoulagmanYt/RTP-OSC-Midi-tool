@@ -60,7 +60,7 @@ impl RtpServer {
         port: u16,
         remote_targets: Vec<RtpRemoteTarget>,
         log_rtp: bool,
-        sink: Arc<Mutex<Option<Sender<MidiFrame>>>>,
+        sink: Arc<parking_lot::RwLock<Option<Sender<MidiFrame>>>>,
         logger: FrontendLogger,
     ) -> Result<Self, String> {
         let (stop_tx, mut stop_rx) = oneshot::channel();
@@ -154,17 +154,23 @@ impl RtpServer {
                 .add_listener(MidiMessageEvent, move |(message, _delta)| {
                     let bytes = midi_to_bytes(message);
 
-                    // Logging RTP optionnel : format + IPC frontend sont coûteux,
-                    // activer uniquement pour débogage ciblé.
-                    if log_rtp && logs_enabled() {
-                        rtp_logger.info(format!("RTP MIDI: {:02X?}", bytes.as_slice()));
+                    // Logging RTP optionnel : le formatage + IPC frontend sont coûteux.
+                    // On ne l'active QUE si le mode développeur (verbose) est activé,
+                    // et on l'exécute de façon asynchrone pour NE JAMAIS bloquer
+                    // le thread de réception réseau UDP (ce qui causerait des pertes de notes).
+                    if log_rtp && logs_enabled() && crate::logger::should_log_debug() {
+                        let rtp_logger_clone = rtp_logger.clone();
+                        let bytes_clone = bytes.clone();
+                        tauri::async_runtime::spawn(async move {
+                            rtp_logger_clone.debug(format!("RTP MIDI: {:02X?}", bytes_clone.as_slice()));
+                        });
                     }
 
                     // Acquisition du verrou uniquement pour cloner le Sender
                     // (opération très rapide, pas d'IO).
                     // TODO perf : remplacer Arc<Mutex<Option<Sender>>> par
                     // arc_swap::ArcSwap<Option<Sender>> pour un accès lock-free.
-                    let Some(tx) = midi_sink.lock().as_ref().cloned() else {
+                    let Some(tx) = midi_sink.read().as_ref().cloned() else {
                         return;
                     };
 
@@ -173,8 +179,8 @@ impl RtpServer {
                     // On tente d'abord try_send (non bloquant) ; en cas de saturation
                     // on logue périodiquement pour diagnostiquer sans inonder les logs.
                     match tx.try_send(MidiFrame {
-                        data: bytes.to_vec(),
-                        source: rtp_source.to_string(),
+                        data: bytes,
+                        source: std::sync::Arc::clone(&rtp_source),
                     }) {
                         Ok(()) => {}
                         Err(crossbeam_channel::TrySendError::Full(_)) => {

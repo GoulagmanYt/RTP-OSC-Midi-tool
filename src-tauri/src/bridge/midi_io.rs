@@ -100,7 +100,7 @@ pub(super) fn open_input(
         .port_name(&port)
         .unwrap_or_else(|_| "MIDI IN".to_string());
     logger.info(format!("Entree MIDI connectee: {name}"));
-    let source = name.clone();
+    let source: Arc<str> = Arc::from(name.as_str());
     let tx = midi_tx.clone();
     input
         .connect(
@@ -108,8 +108,8 @@ pub(super) fn open_input(
             "osc-midi-in",
             move |_timestamp, message, _| {
                 let _ = tx.send(MidiFrame {
-                    data: message.to_vec(),
-                    source: source.clone(),
+                    data: smallvec::SmallVec::from_slice(message),
+                    source: Arc::clone(&source),
                 });
             },
             midi_tx,
