@@ -211,15 +211,39 @@ impl RtpDiscoveryManager {
         }));
     }
 
+    /// Arrête la tâche de découverte en arrière-plan.
+    ///
+    /// FIX : l'ancienne implémentation utilisait `async_runtime::block_on(handle)`
+    /// pour attendre la fin de la tâche. Appeler `block_on` depuis un contexte
+    /// tokio (ex. un command handler Tauri async) provoque une panique
+    /// "Cannot start a runtime from within a runtime".
+    ///
+    /// Nouveau comportement : on envoie le signal d'arrêt puis on `abort()` la
+    /// tâche. La tâche se terminera proprement sur la prochaine itération du
+    /// select (via stop_rx), ou sera annulée immédiatement par abort().
+    /// Pas besoin d'attendre la jointure depuis un contexte sync.
     pub fn stop(&self) {
         if let Some(stop_tx) = self.stop_tx.lock().take() {
+            // Signal gracieux : la boucle interne s'arrête sur la prochaine
+            // itération du select!.
             let _ = stop_tx.send(());
         }
         if let Some(handle) = self.task.lock().take() {
-            let _ = async_runtime::block_on(handle);
+            // abort() annule la tâche sans bloquer le thread courant.
+            // Sûr à appeler depuis n'importe quel contexte (sync ou async).
+            handle.abort();
         }
     }
 
+    /// Découvre les sessions RTP immédiatement et met à jour le cache.
+    ///
+    /// FIX : l'ancienne implémentation utilisait `async_runtime::block_on`
+    /// autour d'un `spawn_blocking`, ce qui panique si appelé depuis un
+    /// context tokio.
+    ///
+    /// Nouveau comportement : `tokio::task::block_in_place` exécute le code
+    /// bloquant directement sur le thread courant après l'avoir sorti du pool
+    /// async — valide depuis un contexte tokio multi-thread (utilisé par Tauri).
     pub fn refresh_now(
         &self,
         app_handle: &tauri::AppHandle,
@@ -235,16 +259,14 @@ impl RtpDiscoveryManager {
             }
         }
 
-        let handle = async_runtime::spawn_blocking(|| discover_sessions(DISCOVERY_TIMEOUT));
-        match async_runtime::block_on(handle) {
-            Ok(Ok(sessions)) => {
-                let _changed = self.cache.lock().update(sessions.clone());
-                emit_sessions(app_handle, &sessions);
-                Ok(sessions)
-            }
-            Ok(Err(err)) => Err(err),
-            Err(err) => Err(err.to_string()),
-        }
+        // block_in_place est sans danger depuis un runtime tokio multi-thread :
+        // il cède temporairement le thread au code bloquant sans bloquer
+        // l'executor, contrairement à block_on qui paniquerait ici.
+        let sessions = tokio::task::block_in_place(|| discover_sessions(DISCOVERY_TIMEOUT))?;
+
+        let _changed = self.cache.lock().update(sessions.clone());
+        emit_sessions(app_handle, &sessions);
+        Ok(sessions)
     }
 }
 
