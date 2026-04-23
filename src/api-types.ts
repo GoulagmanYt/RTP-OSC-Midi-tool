@@ -241,3 +241,26 @@ export type LogEntry = {
 export type LogEvent = LogEntry;
 
 export type AudioSettings = AudioConfig;
+
+export type StressTestMode = "audio-vst" | "bridge" | "rtp" | "end-to-end";
+
+export interface SegmentMetrics {
+  dropped: number;
+  xruns: number;
+  latencyMs: number | null;
+}
+
+export interface StressTestResult {
+  sentNotes: number;
+  elapsedMs: number;
+  // Global totals
+  droppedNotes: number;
+  xruns: number;
+  // Per-segment metrics (optional based on test mode)
+  segmentRtp?: SegmentMetrics;
+  segmentBridge?: SegmentMetrics;
+  segmentAudio?: SegmentMetrics;
+  // End-to-end tracking
+  receivedNotes?: number;
+}
+

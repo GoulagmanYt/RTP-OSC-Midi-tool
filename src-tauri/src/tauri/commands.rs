@@ -235,3 +235,15 @@ pub fn open_app_dir(target: String) -> Result<(), CommandError> {
 pub fn clear_log_file() -> Result<(), CommandError> {
     services::clear_log_file()
 }
+
+#[::tauri::command]
+pub fn run_automated_stress_test(
+    rate: u32,
+    duration: u32,
+    mode: Option<String>,
+    state: State<AppState>,
+) -> Result<crate::types::StressTestResult, CommandError> {
+    let mode = mode.as_deref().unwrap_or("audio-vst");
+    services::run_stress_test(mode, rate, duration, state.inner())
+}
+

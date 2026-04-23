@@ -110,7 +110,8 @@ fn main() {
             close_vst_ui,
             set_master_gain,
             set_audio_limiter,
-            send_test_midi
+            send_test_midi,
+            run_automated_stress_test
         ])
         .setup(|app| {
             let window = app.get_webview_window("main").unwrap();

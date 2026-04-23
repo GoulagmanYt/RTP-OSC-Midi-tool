@@ -20,6 +20,10 @@ path = "src/bin/rtp_probe.rs"
 name = "vst_smoke"
 path = "src/bin/vst_smoke.rs"
 
+[[bin]]
+name = "midi_stress"
+path = "src/bin/midi_stress.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

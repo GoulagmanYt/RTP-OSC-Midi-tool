@@ -8,7 +8,7 @@ pub mod rtp_server;
 pub use rtp_discovery::RtpDiscoveryManager;
 #[cfg(test)]
 use rtp_midi::{midi_to_bytes, participant_matches_target};
-pub use rtp_server::{RtpRemoteTarget, RtpServer};
+pub use rtp_server::{RtpRemoteTarget, RtpServer, rtp_dropped_count, reset_rtp_dropped_count};
 
 pub fn ports_available(port: u16) -> Result<bool, String> {
     rtp_discovery::ports_available(port)

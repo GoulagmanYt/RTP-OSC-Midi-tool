@@ -35,6 +35,16 @@ static DROPPED_MIDI_COUNT: AtomicU64 = AtomicU64::new(0);
 /// Intervalle entre deux avertissements de drops consécutifs.
 const DROP_WARN_INTERVAL: Duration = Duration::from_secs(5);
 
+/// Retourne le nombre de messages MIDI RTP abandonnés (canal plein).
+pub fn rtp_dropped_count() -> u64 {
+    DROPPED_MIDI_COUNT.load(Ordering::Relaxed)
+}
+
+/// Réinitialise le compteur de drops RTP (utile pour les tests).
+pub fn reset_rtp_dropped_count() {
+    DROPPED_MIDI_COUNT.store(0, Ordering::Relaxed);
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RtpRemoteTarget {
     pub name: String,

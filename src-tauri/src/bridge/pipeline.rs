@@ -9,7 +9,7 @@ use crate::{
 use midir::MidiOutputConnection;
 use std::{
     collections::HashMap,
-    sync::atomic::{AtomicU32, Ordering},
+    sync::atomic::{AtomicU32, AtomicU64, Ordering},
 };
 use tauri::Emitter;
 
@@ -17,6 +17,11 @@ use super::activity::now_ms;
 
 const MIDI_NOTE_EVENT: &str = "midi:note";
 const OSC_SUSTAIN_PARAM: &str = "/avatar/parameters/sustain";
+
+// Compteurs statiques pour les métriques de pipeline (stress test)
+static PIPELINE_IN_COUNT: AtomicU64 = AtomicU64::new(0);
+static PIPELINE_OUT_COUNT: AtomicU64 = AtomicU64::new(0);
+static PIPELINE_FILTERED_COUNT: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone)]
 struct RoutingProfileRuntime {
@@ -116,7 +121,12 @@ pub(super) fn handle_midi_frame(
     osc_counter: &AtomicU32,
     sustain_pressed_state: &mut [Option<bool>; 16],
 ) {
+    // Compteur entrée pipeline (stress test metrics)
+    PIPELINE_IN_COUNT.fetch_add(1, Ordering::Relaxed);
+
     let mut frame = frame;
+    let mut filtered = false;
+
     if let Some(profile_idx) = config
         .routing_assignments
         .get(&*frame.source)
@@ -124,6 +134,7 @@ pub(super) fn handle_midi_frame(
     {
         if let Some(profile) = config.routing_profiles.get(profile_idx) {
             if profile.enabled && !apply_routing_profile(profile, &mut frame) {
+                PIPELINE_FILTERED_COUNT.fetch_add(1, Ordering::Relaxed);
                 return;
             }
         }
@@ -131,7 +142,9 @@ pub(super) fn handle_midi_frame(
 
     if let Some(status) = frame.data.first() {
         if *status >= 0xF8 {
-            return;
+            // Messages temps-réel système (clock, etc) - pas des notes MIDI
+            // Ne pas compter comme filtré, juste ignorés pour le pipeline audio
+            filtered = true;
         }
     }
 
@@ -146,6 +159,7 @@ pub(super) fn handle_midi_frame(
         let is_channel_voice = (0x80..0xF0).contains(status);
         if is_channel_voice {
             audio.send_midi(frame.data.as_slice());
+            PIPELINE_OUT_COUNT.fetch_add(1, Ordering::Relaxed);
             if config.verbose && should_log_debug() {
                 logger.debug(format!(
                     "BRIDGE: VST MIDI de {}: {:02X?}",
@@ -153,6 +167,9 @@ pub(super) fn handle_midi_frame(
                     frame.data.as_slice()
                 ));
             }
+        } else if !filtered {
+            // Message MIDI non-voix (sys ex, etc) - compté comme filtré pour les stats
+            PIPELINE_FILTERED_COUNT.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -336,4 +353,20 @@ fn apply_routing_profile(profile: &RoutingProfileRuntime, frame: &mut MidiFrame)
         _ => {}
     }
     true
+}
+
+/// Retourne les statistiques de pipeline (in, out, filtered).
+pub fn pipeline_stats() -> (u64, u64, u64) {
+    (
+        PIPELINE_IN_COUNT.load(Ordering::Relaxed),
+        PIPELINE_OUT_COUNT.load(Ordering::Relaxed),
+        PIPELINE_FILTERED_COUNT.load(Ordering::Relaxed),
+    )
+}
+
+/// Réinitialise les compteurs de pipeline (utile pour les tests).
+pub fn reset_pipeline_stats() {
+    PIPELINE_IN_COUNT.store(0, Ordering::Relaxed);
+    PIPELINE_OUT_COUNT.store(0, Ordering::Relaxed);
+    PIPELINE_FILTERED_COUNT.store(0, Ordering::Relaxed);
 }

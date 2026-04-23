@@ -202,7 +202,8 @@ impl BridgeHandle {
             .unwrap_or(false)
     }
 
-    fn inject_frame(&self, data: SmallVec<[u8; 32]>, source: String) -> Result<(), String> {
+    /// Inject a MIDI frame directly into the bridge pipeline (for testing).
+    pub fn inject_frame(&self, data: SmallVec<[u8; 32]>, source: String) -> Result<(), String> {
         if let Some(tx) = self.rtp_sink.read().as_ref().cloned() {
             tx.send(MidiFrame {
                 data,

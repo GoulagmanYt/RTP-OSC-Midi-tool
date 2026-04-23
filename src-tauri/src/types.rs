@@ -160,3 +160,28 @@ pub type LogEvent = LogEntry;
 pub type BridgeStatus = RuntimeStatus;
 pub type BridgeMetrics = RuntimeMetrics;
 pub type MidiActivityInfo = MidiActivitySnapshot;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SegmentMetrics {
+    pub dropped: u32,
+    pub xruns: u32,
+    pub latency_ms: Option<f32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StressTestResult {
+    pub sent_notes: u32,
+    pub elapsed_ms: u64,
+    // Global totals
+    pub dropped_notes: u32,
+    pub xruns: u32,
+    // Per-segment metrics (optional based on test mode)
+    pub segment_rtp: Option<SegmentMetrics>,
+    pub segment_bridge: Option<SegmentMetrics>,
+    pub segment_audio: Option<SegmentMetrics>,
+    // End-to-end tracking
+    pub received_notes: Option<u32>,
+}
+

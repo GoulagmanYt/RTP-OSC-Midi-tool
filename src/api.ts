@@ -155,3 +155,11 @@ export async function sendTestMidi(payload: {
 }): Promise<void> {
   return invokeCommand("send_test_midi", payload);
 }
+
+export async function runAutomatedStressTest(
+  rate: number,
+  duration: number,
+  mode: import("./api-types").StressTestMode = "audio-vst"
+): Promise<import("./api-types").StressTestResult> {
+  return invokeCommand("run_automated_stress_test", { rate, duration, mode });
+}

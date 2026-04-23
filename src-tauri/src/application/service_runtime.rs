@@ -248,3 +248,291 @@ pub fn preflight_check(state: &AppState) -> Result<PreflightReport, CommandError
         messages,
     })
 }
+
+#[derive(Debug, Clone, Copy)]
+pub enum StressTestMode {
+    /// Test direct audio/VST (bypass bridge)
+    AudioVstOnly,
+    /// Test bridge pipeline (inject via bridge)
+    BridgePipeline,
+    /// Test RTP-MIDI input (via local session)
+    RtpInput,
+    /// Test complet end-to-end
+    EndToEnd,
+}
+
+impl StressTestMode {
+    fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "audio-vst" => Some(Self::AudioVstOnly),
+            "bridge" => Some(Self::BridgePipeline),
+            "rtp" => Some(Self::RtpInput),
+            "end-to-end" => Some(Self::EndToEnd),
+            _ => None,
+        }
+    }
+}
+
+/// Run stress test with selected mode to isolate pipeline segment losses.
+pub fn run_stress_test(
+    mode: &str,
+    rate: u32,
+    duration: u32,
+    state: &AppState,
+) -> Result<crate::types::StressTestResult, CommandError> {
+    let mode = StressTestMode::from_str(mode)
+        .ok_or_else(|| runtime_error("stress.invalid-mode", format!("Invalid mode: {}", mode)))?;
+
+    match mode {
+        StressTestMode::AudioVstOnly => run_stress_audio_only(rate, duration, state),
+        StressTestMode::BridgePipeline => run_stress_bridge_pipeline(rate, duration, state),
+        StressTestMode::RtpInput => run_stress_rtp_input(rate, duration, state),
+        StressTestMode::EndToEnd => run_stress_end_to_end(rate, duration, state),
+    }
+}
+
+/// Mode Audio/VST Only: Direct injection to audio engine (bypass bridge).
+fn run_stress_audio_only(
+    rate: u32,
+    duration: u32,
+    state: &AppState,
+) -> Result<crate::types::StressTestResult, CommandError> {
+    if !state.audio.is_running() {
+        return Err(runtime_error("stress.audio-not-running", "Le moteur audio doit être démarré pour le stress test."));
+    }
+
+    let sent = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let elapsed_ms = duration as u64 * 1000;
+
+    // Reset and read initial counters
+    let initial_drops = state.audio.midi_drop_count().unwrap_or(0);
+    let initial_xruns = state.audio.xrun_count().unwrap_or(0);
+
+    let start = std::time::Instant::now();
+    let d = std::time::Duration::from_secs(duration as u64);
+    let interval = std::time::Duration::from_nanos(1_000_000_000 / rate.max(1) as u64);
+
+    let mut next_tick = start;
+    let mut data = smallvec::SmallVec::<[u8; 32]>::new();
+    data.push(0x90);
+    data.push(60);
+    data.push(100);
+
+    while start.elapsed() < d {
+        state.audio.send_midi(&data);
+        sent.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        next_tick += interval;
+        let now = std::time::Instant::now();
+        if now < next_tick {
+            std::thread::sleep(next_tick - now);
+        }
+    }
+
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    let final_drops = state.audio.midi_drop_count().unwrap_or(0);
+    let final_xruns = state.audio.xrun_count().unwrap_or(0);
+
+    let sent_notes = sent.load(std::sync::atomic::Ordering::Relaxed);
+    let audio_drops = final_drops.saturating_sub(initial_drops);
+    let audio_xruns = final_xruns.saturating_sub(initial_xruns);
+
+    Ok(crate::types::StressTestResult {
+        sent_notes,
+        elapsed_ms,
+        dropped_notes: audio_drops,
+        xruns: audio_xruns,
+        segment_rtp: None,
+        segment_bridge: None,
+        segment_audio: Some(crate::types::SegmentMetrics {
+            dropped: audio_drops,
+            xruns: audio_xruns,
+            latency_ms: state.audio.current_latency_ms(),
+        }),
+        received_notes: None,
+    })
+}
+
+/// Mode Bridge Pipeline: Inject via bridge and measure pipeline metrics.
+fn run_stress_bridge_pipeline(
+    rate: u32,
+    duration: u32,
+    state: &AppState,
+) -> Result<crate::types::StressTestResult, CommandError> {
+    use crate::bridge::{pipeline_stats, reset_pipeline_stats};
+
+    if !state.audio.is_running() {
+        return Err(runtime_error("stress.audio-not-running", "Le moteur audio doit être démarré pour le stress test."));
+    }
+
+    // Reset pipeline counters
+    reset_pipeline_stats();
+
+    let sent = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let elapsed_ms = duration as u64 * 1000;
+
+    // Read initial audio counters
+    let initial_audio_drops = state.audio.midi_drop_count().unwrap_or(0);
+    let initial_xruns = state.audio.xrun_count().unwrap_or(0);
+
+    let start = std::time::Instant::now();
+    let d = std::time::Duration::from_secs(duration as u64);
+    let interval = std::time::Duration::from_nanos(1_000_000_000 / rate.max(1) as u64);
+
+    let mut next_tick = start;
+
+    while start.elapsed() < d {
+        // Inject via bridge (same as test note)
+        let ch = 0u8; // Channel 1
+        let note = 60u8;
+        let velocity = 100u8;
+        let data = smallvec::SmallVec::from_slice(&[0x90 | ch, note, velocity]);
+        let _ = state.bridge.inject_frame(data, "StressTest".to_string());
+
+        sent.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        next_tick += interval;
+        let now = std::time::Instant::now();
+        if now < next_tick {
+            std::thread::sleep(next_tick - now);
+        }
+    }
+
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    let final_audio_drops = state.audio.midi_drop_count().unwrap_or(0);
+    let final_xruns = state.audio.xrun_count().unwrap_or(0);
+    let (pipeline_in, pipeline_out, pipeline_filtered) = pipeline_stats();
+
+    let sent_notes = sent.load(std::sync::atomic::Ordering::Relaxed);
+    let audio_drops = final_audio_drops.saturating_sub(initial_audio_drops);
+    let audio_xruns = final_xruns.saturating_sub(initial_xruns);
+
+    // Bridge drops = (injected - pipeline_out) + audio_drops
+    let bridge_drops = sent_notes.saturating_sub(pipeline_out as u32) + audio_drops;
+
+    Ok(crate::types::StressTestResult {
+        sent_notes,
+        elapsed_ms,
+        dropped_notes: bridge_drops + audio_drops,
+        xruns: audio_xruns,
+        segment_rtp: None,
+        segment_bridge: Some(crate::types::SegmentMetrics {
+            dropped: bridge_drops,
+            xruns: 0, // Bridge doesn't generate xruns
+            latency_ms: None,
+        }),
+        segment_audio: Some(crate::types::SegmentMetrics {
+            dropped: audio_drops,
+            xruns: audio_xruns,
+            latency_ms: state.audio.current_latency_ms(),
+        }),
+        received_notes: Some(pipeline_out as u32),
+    })
+}
+
+/// Mode RTP Input: Test RTP-MIDI input layer.
+fn run_stress_rtp_input(
+    _rate: u32,
+    _duration: u32,
+    _state: &AppState,
+) -> Result<crate::types::StressTestResult, CommandError> {
+    // RTP stress test would require setting up a local RTP session as sender
+    // For now, return a placeholder - full implementation would need tokio runtime
+    Err(runtime_error("stress.rtp-not-implemented", "RTP stress test mode requires async runtime integration. Use external midi_stress binary for now."))
+}
+
+/// Mode End-to-End: Test full pipeline with feedback measurement.
+fn run_stress_end_to_end(
+    rate: u32,
+    duration: u32,
+    state: &AppState,
+) -> Result<crate::types::StressTestResult, CommandError> {
+    use crate::bridge::{pipeline_stats, reset_pipeline_stats};
+    use crate::rtp::rtp_dropped_count;
+
+    if !state.audio.is_running() {
+        return Err(runtime_error("stress.audio-not-running", "Le moteur audio doit être démarré pour le stress test."));
+    }
+
+    // Reset all counters
+    reset_pipeline_stats();
+    let initial_rtp_drops = rtp_dropped_count();
+
+    let sent = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let elapsed_ms = duration as u64 * 1000;
+
+    let initial_audio_drops = state.audio.midi_drop_count().unwrap_or(0);
+    let initial_xruns = state.audio.xrun_count().unwrap_or(0);
+
+    let start = std::time::Instant::now();
+    let d = std::time::Duration::from_secs(duration as u64);
+    let interval = std::time::Duration::from_nanos(1_000_000_000 / rate.max(1) as u64);
+
+    let mut next_tick = start;
+
+    while start.elapsed() < d {
+        let ch = 0u8;
+        let note = 60u8;
+        let velocity = 100u8;
+        let data = smallvec::SmallVec::from_slice(&[0x90 | ch, note, velocity]);
+        let _ = state.bridge.inject_frame(data, "StressTest".to_string());
+
+        sent.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        next_tick += interval;
+        let now = std::time::Instant::now();
+        if now < next_tick {
+            std::thread::sleep(next_tick - now);
+        }
+    }
+
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    let final_audio_drops = state.audio.midi_drop_count().unwrap_or(0);
+    let final_xruns = state.audio.xrun_count().unwrap_or(0);
+    let final_rtp_drops = rtp_dropped_count();
+    let (pipeline_in, pipeline_out, _filtered) = pipeline_stats();
+
+    let sent_notes = sent.load(std::sync::atomic::Ordering::Relaxed);
+    let audio_drops = final_audio_drops.saturating_sub(initial_audio_drops);
+    let audio_xruns = final_xruns.saturating_sub(initial_xruns);
+    let rtp_drops = final_rtp_drops.saturating_sub(initial_rtp_drops) as u32;
+
+    // In end-to-end, we don't have separate RTP input (using bridge injection)
+    // but we report the metrics as if coming from respective segments
+    let bridge_drops = sent_notes.saturating_sub(pipeline_out as u32);
+
+    Ok(crate::types::StressTestResult {
+        sent_notes,
+        elapsed_ms,
+        dropped_notes: rtp_drops + bridge_drops + audio_drops,
+        xruns: audio_xruns,
+        segment_rtp: Some(crate::types::SegmentMetrics {
+            dropped: rtp_drops,
+            xruns: 0,
+            latency_ms: None,
+        }),
+        segment_bridge: Some(crate::types::SegmentMetrics {
+            dropped: bridge_drops,
+            xruns: 0,
+            latency_ms: None,
+        }),
+        segment_audio: Some(crate::types::SegmentMetrics {
+            dropped: audio_drops,
+            xruns: audio_xruns,
+            latency_ms: state.audio.current_latency_ms(),
+        }),
+        received_notes: Some(pipeline_out as u32),
+    })
+}
+
+/// Legacy compatibility - runs audio-only mode.
+pub fn run_automated_stress_test(
+    rate: u32,
+    duration: u32,
+    state: &AppState,
+) -> Result<crate::types::StressTestResult, CommandError> {
+    run_stress_test("audio-vst", rate, duration, state)
+}

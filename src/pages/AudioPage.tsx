@@ -1,5 +1,6 @@
 import { AudioConfigCard } from "./audio/AudioConfigCard";
 import { VstParametersDialog } from "./audio/VstParametersDialog";
+import { AudioStressTestCard } from "./audio/AudioStressTestCard";
 import { useAudioPageController } from "./audio/useAudioPageController";
 
 export default function AudioPage() {
@@ -7,6 +8,10 @@ export default function AudioPage() {
 
   return (
     <div className="space-y-6">
+      <AudioStressTestCard
+        bridgeRunning={controller.bridgeRunning}
+        audioRunning={controller.status?.audioRunning ?? false}
+      />
       <AudioConfigCard
         audioBackends={controller.audioBackends}
         audioDevices={controller.audioDevices}
@@ -60,3 +65,4 @@ export default function AudioPage() {
     </div>
   );
 }
+
