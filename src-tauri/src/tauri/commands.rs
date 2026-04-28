@@ -246,4 +246,3 @@ pub fn run_automated_stress_test(
     let mode = mode.as_deref().unwrap_or("audio-vst");
     services::run_stress_test(mode, rate, duration, state.inner())
 }
-

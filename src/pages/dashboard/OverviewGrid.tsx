@@ -37,7 +37,7 @@ export function OverviewGrid({
   onToggleBridge,
 }: Props) {
   return (
-    <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+    <div className="grid gap-4 md:grid-cols-2">
       <Card className="min-h-[180px] min-w-0 border-muted bg-card/60 backdrop-blur-sm">
         <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
           <CardTitle className="text-base font-semibold">{t("dashboard.bridgeStatus")}</CardTitle>
@@ -154,9 +154,11 @@ export function OverviewGrid({
               </div>
             </div>
           ))}
-          <Button variant="link" className="px-0" onClick={onNavigateLogs}>
-            {t("dashboard.viewMore")}
-          </Button>
+          {config?.ui.developerMode && (
+            <Button variant="link" className="px-0" onClick={onNavigateLogs}>
+              {t("dashboard.viewMore")}
+            </Button>
+          )}
         </CardContent>
       </Card>
     </div>

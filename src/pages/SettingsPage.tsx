@@ -210,6 +210,31 @@ export default function SettingsPage() {
         <CardContent className="space-y-4">
           <div className="flex items-center justify-between gap-4">
             <div className="min-w-0 flex flex-col gap-1">
+              <Label>{t("settings.general.developerMode")}</Label>
+              <p className="text-xs text-muted-foreground">{t("settings.general.developerModeHint")}</p>
+            </div>
+            <Switch
+              checked={config?.ui.developerMode || false}
+              onCheckedChange={async (checked) => {
+                if (!checked) {
+                  await updateConfig({
+                    ui: { developerMode: false },
+                    logging: { enabled: false, verbose: false, logAllToFile: false, liveLogs: false },
+                    osc: { logMessages: false },
+                    rtp: { logMessages: false },
+                  });
+                } else {
+                  await updateConfig({ ui: { developerMode: true } });
+                }
+              }}
+            />
+          </div>
+
+          {config?.ui.developerMode && (
+            <>
+              <div className="border-t pt-4" />
+              <div className="flex items-center justify-between gap-4">
+                <div className="min-w-0 flex flex-col gap-1">
               <Label>{t("settings.general.verbose")}</Label>
               <p className="text-xs text-muted-foreground">{t("settings.general.verboseHint")}</p>
             </div>
@@ -257,6 +282,8 @@ export default function SettingsPage() {
               onCheckedChange={(checked) => updateConfig({ logging: { enabled: !checked } })}
             />
           </div>
+          </>
+          )}
         </CardContent>
       </Card>
 
@@ -314,8 +341,9 @@ export default function SettingsPage() {
         </CardContent>
       </Card>
 
-      <Card>
-        <CardHeader>
+      {config?.ui.developerMode && (
+        <Card>
+          <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <Trash2 className="h-5 w-5 text-orange-500" />
             {t("settings.logs.title")}
@@ -332,6 +360,7 @@ export default function SettingsPage() {
           </div>
         </CardContent>
       </Card>
+      )}
 
       <div className="flex justify-end gap-2">
         <Button variant="outline" disabled={busy} onClick={handleReset}>

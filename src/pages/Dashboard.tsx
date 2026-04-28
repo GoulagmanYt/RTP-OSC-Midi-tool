@@ -112,32 +112,34 @@ export default function Dashboard() {
         onNavigateLogs={() => navigate("/logs")}
         onToggleBridge={toggleBridge}
       />
-      <DiagnosticsGrid
-        audioPeakL={audioPeakL}
-        audioPeakR={audioPeakR}
-        bufferMismatch={bufferMismatch}
-        bufferSamples={bufferSamples}
-        config={config}
-        displayPortName={displayPortName}
-        dropoutsActive={dropoutsActive}
-        latencyBadge={latencyBadge}
-        latencyDisplay={latencyDisplay}
-        midiRate={midiRate}
-        oscRate={oscRate}
-        preflight={preflight}
-        requestedBufferSamples={requestedBufferSamples}
-        sampleRate={sampleRate}
-        status={status}
-        streamBufferSamples={streamBufferSamples}
-        t={t}
-        vstMidiCompatible={vstMidiCompatible}
-        vstPath={vstPath}
-        shortVstPath={shortVstPath}
-        xrunCount={xrunCount}
-        onHandlePing={handlePing}
-        onHandleReloadVst={handleReloadVst}
-        onRunPreflight={runPreflight}
-      />
+      {config?.ui.developerMode && (
+        <DiagnosticsGrid
+          audioPeakL={audioPeakL}
+          audioPeakR={audioPeakR}
+          bufferMismatch={bufferMismatch}
+          bufferSamples={bufferSamples}
+          config={config}
+          displayPortName={displayPortName}
+          dropoutsActive={dropoutsActive}
+          latencyBadge={latencyBadge}
+          latencyDisplay={latencyDisplay}
+          midiRate={midiRate}
+          oscRate={oscRate}
+          preflight={preflight}
+          requestedBufferSamples={requestedBufferSamples}
+          sampleRate={sampleRate}
+          status={status}
+          streamBufferSamples={streamBufferSamples}
+          t={t}
+          vstMidiCompatible={vstMidiCompatible}
+          vstPath={vstPath}
+          shortVstPath={shortVstPath}
+          xrunCount={xrunCount}
+          onHandlePing={handlePing}
+          onHandleReloadVst={handleReloadVst}
+          onRunPreflight={runPreflight}
+        />
+      )}
       {status?.lastError ? <ErrorCard error={status.lastError} t={t} /> : null}
     </div>
   );

@@ -10,7 +10,7 @@ use crate::{
     logger::FrontendLogger,
     midi::MidiFrame,
     osc::OscClient,
-    rtp::{RtpRemoteTarget, RtpServer},
+    rtp::{rtp_advertisement::RtpAdvertisementStatus, RtpRemoteTarget, RtpServer},
     types::{BridgeStatus, RtpParticipantInfo},
 };
 use crossbeam_channel::Sender;
@@ -42,6 +42,7 @@ pub(super) struct RtpConfigSnapshot {
     pub(super) remote_enabled: bool,
     pub(super) remote_targets: Vec<RtpRemoteTarget>,
     pub(super) log_rtp: bool,
+    pub(super) advertisement: RtpAdvertisementStatus,
 }
 
 pub(super) struct BridgeRuntime {
@@ -136,7 +137,10 @@ impl BridgeHandle {
             thread::sleep(Duration::from_millis(200));
             let off = smallvec::SmallVec::from_slice(&[0x80 | ch, note, 0]);
             if let Some(tx) = sink.read().as_ref().cloned() {
-                let _ = tx.send(MidiFrame { data: off, source: std::sync::Arc::from(source.as_str()) });
+                let _ = tx.send(MidiFrame {
+                    data: off,
+                    source: std::sync::Arc::from(source.as_str()),
+                });
             }
         });
 
@@ -179,6 +183,15 @@ impl BridgeHandle {
         }
         status.rtp_active = rtp_active;
         status.rtp_bound_port = bound_port;
+        if let Some(cfg) = self.rtp_config.lock().as_ref() {
+            status.rtp_advertised_host = cfg.advertisement.advertised_host.clone();
+            status.rtp_advertised_addresses = cfg.advertisement.advertised_addresses.clone();
+            status.rtp_network_warning = cfg.advertisement.warning.clone();
+        } else {
+            status.rtp_advertised_host = None;
+            status.rtp_advertised_addresses.clear();
+            status.rtp_network_warning = None;
+        }
         status
     }
 

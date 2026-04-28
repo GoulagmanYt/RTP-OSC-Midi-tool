@@ -303,6 +303,8 @@ const fr: TranslationTree = {
       sessionNameLabel: "Nom de session",
       portConfigured: "Port configuré",
       portData: "Port données",
+      advertisedHost: "Hôte annoncé",
+      advertisedAddresses: "Adresses annoncées",
       statusLabel: "Statut",
       about: "À propos du RTP-MIDI",
       aboutText:
@@ -470,6 +472,8 @@ const fr: TranslationTree = {
       general: {
         title: "Paramètres généraux",
         description: "Configurez le fonctionnement et la journalisation.",
+        developerMode: "Mode Développeur",
+        developerModeHint: "Active les outils de diagnostic, les tests et l'accès aux logs complets",
         verbose: "Mode verbose",
         verboseHint: "Journaux console plus détaillés",
         oscLogs: "Journaux OSC",

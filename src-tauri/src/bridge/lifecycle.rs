@@ -78,6 +78,7 @@ pub(super) fn sync_rtp(
                 logger.clone(),
             )?;
             let bound_port = server.bound_port();
+            let advertisement = server.advertisement_status();
             *config_guard = Some(RtpConfigSnapshot {
                 name: config.rtp.session_name.clone(),
                 requested_port: config.rtp.port,
@@ -85,6 +86,7 @@ pub(super) fn sync_rtp(
                 remote_enabled: config.rtp.remote_enabled,
                 remote_targets,
                 log_rtp: config.rtp.log_messages,
+                advertisement,
             });
             *server_guard = Some(server);
         }

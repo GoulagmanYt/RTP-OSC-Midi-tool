@@ -23,6 +23,7 @@ use crate::{
     types::RtpParticipantInfo,
 };
 
+use super::rtp_advertisement::{RtpAdvertisementStatus, RtpMdnsAdvertisement};
 use super::rtp_midi::{midi_to_bytes, participant_matches_target};
 
 const RTP_PARTICIPANTS_EVENT: &str = "rtp:participants";
@@ -41,7 +42,7 @@ pub fn rtp_dropped_count() -> u64 {
 }
 
 /// Réinitialise le compteur de drops RTP (utile pour les tests).
-pub fn reset_rtp_dropped_count() {
+pub fn _reset_rtp_dropped_count() {
     DROPPED_MIDI_COUNT.store(0, Ordering::Relaxed);
 }
 
@@ -62,6 +63,8 @@ pub struct RtpServer {
     handle: JoinHandle<()>,
     bound_port: u16,
     participants: Arc<Mutex<Vec<RtpParticipantInfo>>>,
+    advertisement: Option<RtpMdnsAdvertisement>,
+    advertisement_status: RtpAdvertisementStatus,
 }
 
 impl RtpServer {
@@ -119,6 +122,8 @@ impl RtpServer {
             bound_port,
             bound_port + 1
         ));
+        let advertisement = RtpMdnsAdvertisement::start(&name, bound_port, &logger);
+        let advertisement_status = advertisement.status();
         if !remote_targets.is_empty() {
             for target in &remote_targets {
                 logger.info(format!(
@@ -172,7 +177,8 @@ impl RtpServer {
                         let rtp_logger_clone = rtp_logger.clone();
                         let bytes_clone = bytes.clone();
                         tauri::async_runtime::spawn(async move {
-                            rtp_logger_clone.debug(format!("RTP MIDI: {:02X?}", bytes_clone.as_slice()));
+                            rtp_logger_clone
+                                .debug(format!("RTP MIDI: {:02X?}", bytes_clone.as_slice()));
                         });
                     }
 
@@ -298,8 +304,7 @@ impl RtpServer {
 
                         // next_wake = minimum des prochaines tentatives
                         next_wake = Some(
-                            next_wake
-                                .map_or(state.next_attempt, |c| c.min(state.next_attempt)),
+                            next_wake.map_or(state.next_attempt, |c| c.min(state.next_attempt)),
                         );
                     }
 
@@ -340,10 +345,15 @@ impl RtpServer {
             handle,
             bound_port,
             participants,
+            advertisement: Some(advertisement),
+            advertisement_status,
         })
     }
 
-    pub async fn stop(self) {
+    pub async fn stop(mut self) {
+        if let Some(advertisement) = self.advertisement.take() {
+            advertisement.shutdown();
+        }
         if let Some(stop_tx) = self.stop_tx {
             let _ = stop_tx.send(());
         }
@@ -356,6 +366,10 @@ impl RtpServer {
 
     pub fn participants(&self) -> Vec<RtpParticipantInfo> {
         self.participants.lock().clone()
+    }
+
+    pub fn advertisement_status(&self) -> RtpAdvertisementStatus {
+        self.advertisement_status.clone()
     }
 }
 

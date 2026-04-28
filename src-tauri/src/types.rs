@@ -53,6 +53,9 @@ pub struct RuntimeStatus {
     pub osc_target: String,
     pub rtp_active: bool,
     pub rtp_bound_port: Option<u16>,
+    pub rtp_advertised_host: Option<String>,
+    pub rtp_advertised_addresses: Vec<String>,
+    pub rtp_network_warning: Option<String>,
     pub last_error: Option<String>,
     pub audio_running: bool,
     pub audio_latency_ms: Option<f32>,
@@ -184,4 +187,3 @@ pub struct StressTestResult {
     // End-to-end tracking
     pub received_notes: Option<u32>,
 }
-

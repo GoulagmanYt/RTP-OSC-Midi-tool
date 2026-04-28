@@ -17,7 +17,7 @@ import { Badge } from "../ui/Badge";
 import { useI18n } from "../../providers/LanguageProvider";
 
 export function Sidebar() {
-  const { status, toggleBridge, isLoading } = useBridge();
+  const { status, toggleBridge, isLoading, config } = useBridge();
   const { t } = useI18n();
 
   const navItems = [
@@ -26,7 +26,7 @@ export function Sidebar() {
     { to: "/osc", label: t("nav.osc"), icon: RadioTower },
     { to: "/rtp", label: t("nav.rtpMidi"), icon: Globe2 },
     { to: "/audio", label: t("nav.audioVst"), icon: AudioLines },
-    { to: "/logs", label: t("nav.logs"), icon: ListRestart },
+    ...(config?.ui.developerMode ? [{ to: "/logs", label: t("nav.logs"), icon: ListRestart }] : []),
     { to: "/settings", label: t("nav.settings"), icon: Settings },
   ];
 

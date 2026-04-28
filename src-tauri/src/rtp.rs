@@ -1,3 +1,5 @@
+#[path = "rtp_advertisement.rs"]
+pub mod rtp_advertisement;
 #[path = "rtp_discovery.rs"]
 pub mod rtp_discovery;
 #[path = "rtp_midi.rs"]
@@ -8,7 +10,7 @@ pub mod rtp_server;
 pub use rtp_discovery::RtpDiscoveryManager;
 #[cfg(test)]
 use rtp_midi::{midi_to_bytes, participant_matches_target};
-pub use rtp_server::{RtpRemoteTarget, RtpServer, rtp_dropped_count, reset_rtp_dropped_count};
+pub use rtp_server::{rtp_dropped_count, RtpRemoteTarget, RtpServer};
 
 pub fn ports_available(port: u16) -> Result<bool, String> {
     rtp_discovery::ports_available(port)

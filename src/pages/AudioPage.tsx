@@ -8,10 +8,12 @@ export default function AudioPage() {
 
   return (
     <div className="space-y-6">
-      <AudioStressTestCard
-        bridgeRunning={controller.bridgeRunning}
-        audioRunning={controller.status?.audioRunning ?? false}
-      />
+      {controller.config?.ui.developerMode && (
+        <AudioStressTestCard
+          bridgeRunning={controller.bridgeRunning}
+          audioRunning={controller.status?.audioRunning ?? false}
+        />
+      )}
       <AudioConfigCard
         audioBackends={controller.audioBackends}
         audioDevices={controller.audioDevices}

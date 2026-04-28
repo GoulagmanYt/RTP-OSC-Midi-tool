@@ -54,6 +54,7 @@ function makeConfig(): AppConfig {
       reduceMotion: false,
       autoStart: false,
       alwaysOnTop: false,
+      developerMode: false,
       avatar: {
         path: null,
         offsetX: 50,

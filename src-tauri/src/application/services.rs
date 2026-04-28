@@ -25,6 +25,6 @@ pub use service_diagnostics::export_diagnostics;
 pub use service_paths::{clear_log_file, get_app_paths, open_app_dir};
 pub use service_runtime::{
     get_status, list_midi_inputs, list_midi_outputs, panic_midi, preflight_check,
-    refresh_rtp_sessions, reset_keys, restart_rtp, send_test_midi, start_bridge, stop_bridge,
-    run_automated_stress_test, run_stress_test,
+    refresh_rtp_sessions, reset_keys, restart_rtp, run_stress_test, send_test_midi, start_bridge,
+    stop_bridge,
 };

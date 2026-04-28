@@ -53,8 +53,8 @@ fn test_bridge_midi_flow() {
 
     // Test de création de frames MIDI
     let test_frame = MidiFrame {
-        data: vec![0x90, 60, 100], // Note On C4
-        source: "test".to_string(),
+        data: smallvec::SmallVec::from_slice(&[0x90, 60, 100]), // Note On C4
+        source: Arc::from("test"),
     };
 
     // Vérifier que le frame est bien formé
@@ -69,7 +69,7 @@ fn test_bridge_midi_flow() {
     // Vérifier les détails du frame MIDI
     assert_eq!(test_frame.data[1], 60); // C4
     assert_eq!(test_frame.data[2], 100); // Velocity
-    assert_eq!(test_frame.source.as_str(), "test");
+    assert_eq!(&*test_frame.source, "test");
 }
 
 /// Test simplifié de chargement de plugin VST par défaut
@@ -146,8 +146,8 @@ fn test_bridge_stress() {
         while start.elapsed() < Duration::from_millis(100) {
             // Simuler injection MIDI (ne fera rien si bridge pas démarré)
             let _frame = MidiFrame {
-                data: vec![0x90, (count % 128) as u8, 100],
-                source: "stress_test".to_string(),
+                data: smallvec::SmallVec::from_slice(&[0x90, (count % 128) as u8, 100]),
+                source: Arc::from("stress_test"),
             };
 
             // Le bridge devrait gérer cette frame même non démarré
@@ -207,6 +207,9 @@ fn test_type_compatibility() {
         osc_target: "127.0.0.1:9000".to_string(),
         rtp_active: false,
         rtp_bound_port: None,
+        rtp_advertised_host: None,
+        rtp_advertised_addresses: Vec::new(),
+        rtp_network_warning: None,
         last_error: None,
         audio_running: false,
         audio_latency_ms: None,

@@ -104,6 +104,7 @@ export type UiConfig = {
   reduceMotion: boolean;
   autoStart: boolean;
   alwaysOnTop: boolean;
+  developerMode: boolean;
   avatar: AvatarConfig;
 };
 
@@ -133,6 +134,9 @@ export type RuntimeStatus = {
   oscTarget: string;
   rtpActive: boolean;
   rtpBoundPort?: number | null;
+  rtpAdvertisedHost?: string | null;
+  rtpAdvertisedAddresses: string[];
+  rtpNetworkWarning?: string | null;
   lastError?: string | null;
   vstLoaded?: boolean;
   audioRunning?: boolean;
@@ -263,4 +267,3 @@ export interface StressTestResult {
   // End-to-end tracking
   receivedNotes?: number;
 }
-

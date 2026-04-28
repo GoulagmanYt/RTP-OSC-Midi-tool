@@ -68,6 +68,21 @@ export function RtpStatusCard({ config, status, t }: Props) {
               <span className="text-muted-foreground">{t("rtp.portData")}</span>
               <span className="font-medium">{config?.rtp.port ? config.rtp.port + 1 : "-"}</span>
             </div>
+            <div className="flex items-center justify-between gap-3 rounded p-2 text-sm">
+              <span className="text-muted-foreground">{t("rtp.advertisedHost")}</span>
+              <span className="min-w-0 truncate font-medium">{status?.rtpAdvertisedHost || "-"}</span>
+            </div>
+            <div className="flex items-center justify-between gap-3 rounded p-2 text-sm">
+              <span className="text-muted-foreground">{t("rtp.advertisedAddresses")}</span>
+              <span className="min-w-0 truncate font-medium">
+                {status?.rtpAdvertisedAddresses?.length ? status.rtpAdvertisedAddresses.join(", ") : "-"}
+              </span>
+            </div>
+            {status?.rtpNetworkWarning ? (
+              <div className="rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-100">
+                {status.rtpNetworkWarning}
+              </div>
+            ) : null}
             <div className="flex items-center justify-between rounded p-2 text-sm">
               <span className="text-muted-foreground">{t("rtp.statusLabel")}</span>
               <span className="font-medium">

@@ -184,6 +184,7 @@ pub struct UiConfig {
     pub reduce_motion: bool,
     pub auto_start: bool,
     pub always_on_top: bool,
+    pub developer_mode: bool,
     pub avatar: AvatarConfig,
 }
 
@@ -205,6 +206,7 @@ impl Default for UiConfig {
             reduce_motion: false,
             auto_start: false,
             always_on_top: false,
+            developer_mode: false,
             avatar: AvatarConfig::default(),
         }
     }
@@ -344,6 +346,9 @@ impl From<&AppConfig> for RuntimeStatus {
                     .map(|s| s == RTP_VIRTUAL_INPUT)
                     .unwrap_or(false),
             rtp_bound_port: None,
+            rtp_advertised_host: None,
+            rtp_advertised_addresses: Vec::new(),
+            rtp_network_warning: None,
             last_error: None,
             audio_running: false,
             audio_latency_ms: None,

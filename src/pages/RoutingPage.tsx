@@ -229,21 +229,23 @@ export default function RoutingPage() {
         updateAssignment={updateAssignment}
         removeAssignment={removeAssignment}
       />
-      <TestMidiCard
-        t={t}
-        testChannel={testChannel}
-        testNote={testNote}
-        testVelocity={testVelocity}
-        testCc={testCc}
-        testCcValue={testCcValue}
-        setTestChannel={setTestChannel}
-        setTestNote={setTestNote}
-        setTestVelocity={setTestVelocity}
-        setTestCc={setTestCc}
-        setTestCcValue={setTestCcValue}
-        onTestNote={handleTestNote}
-        onTestCc={handleTestCc}
-      />
+      {config?.ui.developerMode && (
+        <TestMidiCard
+          t={t}
+          testChannel={testChannel}
+          testNote={testNote}
+          testVelocity={testVelocity}
+          testCc={testCc}
+          testCcValue={testCcValue}
+          setTestChannel={setTestChannel}
+          setTestNote={setTestNote}
+          setTestVelocity={setTestVelocity}
+          setTestCc={setTestCc}
+          setTestCcValue={setTestCcValue}
+          onTestNote={handleTestNote}
+          onTestCc={handleTestCc}
+        />
+      )}
       <RoutingStatusCard
         t={t}
         config={config}

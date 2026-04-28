@@ -10,5 +10,5 @@ mod rtp_config;
 pub mod runtime;
 mod status;
 
-pub use runtime::BridgeHandle;
 pub use pipeline::{pipeline_stats, reset_pipeline_stats};
+pub use runtime::BridgeHandle;

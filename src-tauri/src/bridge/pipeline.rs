@@ -127,11 +127,7 @@ pub(super) fn handle_midi_frame(
     let mut frame = frame;
     let mut filtered = false;
 
-    if let Some(profile_idx) = config
-        .routing_assignments
-        .get(&*frame.source)
-        .copied()
-    {
+    if let Some(profile_idx) = config.routing_assignments.get(&*frame.source).copied() {
         if let Some(profile) = config.routing_profiles.get(profile_idx) {
             if profile.enabled && !apply_routing_profile(profile, &mut frame) {
                 PIPELINE_FILTERED_COUNT.fetch_add(1, Ordering::Relaxed);

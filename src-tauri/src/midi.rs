@@ -127,8 +127,8 @@ mod tests {
                 let status = if i % 2 == 0 { 0x90 } else { 0x80 };
                 let velocity = if status == 0x90 { 100 } else { 0 };
                 tx.send(MidiFrame {
-                    data: Vec::from([status, note, velocity]),
-                    source: "stress".to_string(),
+                    data: smallvec::SmallVec::from_slice(&[status, note, velocity]),
+                    source: std::sync::Arc::from("stress"),
                 })
                 .expect("producer send");
             }

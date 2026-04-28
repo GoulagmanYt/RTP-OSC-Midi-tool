@@ -1,5 +1,5 @@
 import { Suspense, lazy, useEffect } from "react";
-import { BrowserRouter, Routes, Route } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { BridgeProvider, useBridge } from "./providers/BridgeProvider";
 import { Shell } from "./components/layout/Shell";
 import { Toaster } from "sonner";
@@ -41,7 +41,7 @@ function AppContent() {
           <Route path="/osc" element={<OscPage />} />
           <Route path="/rtp" element={<RtpPage />} />
           <Route path="/audio" element={<AudioPage />} />
-          <Route path="/logs" element={<LogsPage />} />
+          <Route path="/logs" element={config?.ui.developerMode ? <LogsPage /> : <Navigate to="/" replace />} />
           <Route path="/settings" element={<SettingsPage />} />
         </Route>
       </Routes>

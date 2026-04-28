@@ -1,6 +1,9 @@
 use std::{
     env,
-    sync::{atomic::{AtomicUsize, Ordering}, Arc},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 use tokio::time::sleep;
@@ -50,9 +53,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn rtp_mode(target: &str, rate: usize, duration: u64) -> Result<(), Box<dyn std::error::Error>> {
-    use rtpmidi::sessions::{rtp_midi_session::RtpMidiSession, invite_responder::InviteResponder};
+async fn rtp_mode(
+    target: &str,
+    rate: usize,
+    duration: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
     use midi_types::MidiMessage;
+    use rtpmidi::sessions::{invite_responder::InviteResponder, rtp_midi_session::RtpMidiSession};
 
     println!("Starting RTP stress test...");
     println!("Target: {}", target);
@@ -60,9 +67,10 @@ async fn rtp_mode(target: &str, rate: usize, duration: u64) -> Result<(), Box<dy
     println!("Duration: {} seconds", duration);
 
     let ssrc = 0x87654321;
-    let session = RtpMidiSession::start(0, "MidiStressClient", ssrc, InviteResponder::Accept).await?;
+    let session =
+        RtpMidiSession::start(0, "MidiStressClient", ssrc, InviteResponder::Accept).await?;
     let target_addr: std::net::SocketAddr = target.parse()?;
-    
+
     println!("Inviting {}...", target_addr);
     session.invite_participant(target_addr).await;
 
@@ -90,11 +98,15 @@ async fn rtp_mode(target: &str, rate: usize, duration: u64) -> Result<(), Box<dy
     while start.elapsed() < duration_d {
         // Envoi NoteOn/NoteOff
         let msg = rtpmidi::packets::midi_packets::rtp_midi_message::RtpMidiMessage::MidiMessage(
-            MidiMessage::NoteOn(midi_types::Channel::C1, midi_types::Note::C3, midi_types::Value7::new(100))
+            MidiMessage::NoteOn(
+                midi_types::Channel::C1,
+                midi_types::Note::C3,
+                midi_types::Value7::new(100),
+            ),
         );
         let _ = session.send_midi(&msg).await;
         sent.fetch_add(1, Ordering::Relaxed);
-        
+
         next_tick += interval;
         let now = Instant::now();
         if now < next_tick {
@@ -104,14 +116,23 @@ async fn rtp_mode(target: &str, rate: usize, duration: u64) -> Result<(), Box<dy
 
     monitor.abort();
     let total = sent.load(Ordering::Relaxed);
-    println!("FINAL: Injected {} RTP messages in {}s (Avg: {}/s)", total, duration, total as f64 / duration as f64);
-    
+    println!(
+        "FINAL: Injected {} RTP messages in {}s (Avg: {}/s)",
+        total,
+        duration,
+        total as f64 / duration as f64
+    );
+
     Ok(())
 }
 
-async fn local_mode(port_name: &str, rate: usize, duration: u64) -> Result<(), Box<dyn std::error::Error>> {
+async fn local_mode(
+    port_name: &str,
+    rate: usize,
+    duration: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
     use midir::MidiOutput;
-    
+
     println!("Starting LOCAL (Virtual Port) stress test...");
     println!("Target Port: {}", port_name);
     println!("Rate: {} msgs/sec", rate);
@@ -128,11 +149,16 @@ async fn local_mode(port_name: &str, rate: usize, duration: u64) -> Result<(), B
     });
 
     let Some(port) = port else {
-        println!("Port '{}' non trouvé. Assurez-vous qu'OSCMidi est lancé.", port_name);
+        println!(
+            "Port '{}' non trouvé. Assurez-vous qu'OSCMidi est lancé.",
+            port_name
+        );
         return Ok(());
     };
 
-    let mut conn_out = midi_out.connect(&port, "midi-stress-out").map_err(|e| e.to_string())?;
+    let mut conn_out = midi_out
+        .connect(&port, "midi-stress-out")
+        .map_err(|e| e.to_string())?;
 
     let start = Instant::now();
     let duration_d = Duration::from_secs(duration);
@@ -147,7 +173,7 @@ async fn local_mode(port_name: &str, rate: usize, duration: u64) -> Result<(), B
         // Envoi NoteOn
         let _ = conn_out.send(&[0x90, 60, 100]);
         sent += 1;
-        
+
         next_tick += interval;
         let now = Instant::now();
         if now < next_tick {
@@ -162,7 +188,12 @@ async fn local_mode(port_name: &str, rate: usize, duration: u64) -> Result<(), B
         }
     }
 
-    println!("FINAL: Injected {} LOCAL messages in {}s (Avg: {}/s)", sent, duration, sent as f64 / duration as f64);
-    
+    println!(
+        "FINAL: Injected {} LOCAL messages in {}s (Avg: {}/s)",
+        sent,
+        duration,
+        sent as f64 / duration as f64
+    );
+
     Ok(())
 }

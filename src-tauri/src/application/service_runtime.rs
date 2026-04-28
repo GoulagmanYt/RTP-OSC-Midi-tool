@@ -298,7 +298,10 @@ fn run_stress_audio_only(
     state: &AppState,
 ) -> Result<crate::types::StressTestResult, CommandError> {
     if !state.audio.is_running() {
-        return Err(runtime_error("stress.audio-not-running", "Le moteur audio doit être démarré pour le stress test."));
+        return Err(runtime_error(
+            "stress.audio-not-running",
+            "Le moteur audio doit être démarré pour le stress test.",
+        ));
     }
 
     let sent = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
@@ -363,7 +366,10 @@ fn run_stress_bridge_pipeline(
     use crate::bridge::{pipeline_stats, reset_pipeline_stats};
 
     if !state.audio.is_running() {
-        return Err(runtime_error("stress.audio-not-running", "Le moteur audio doit être démarré pour le stress test."));
+        return Err(runtime_error(
+            "stress.audio-not-running",
+            "Le moteur audio doit être démarré pour le stress test.",
+        ));
     }
 
     // Reset pipeline counters
@@ -403,7 +409,7 @@ fn run_stress_bridge_pipeline(
 
     let final_audio_drops = state.audio.midi_drop_count().unwrap_or(0);
     let final_xruns = state.audio.xrun_count().unwrap_or(0);
-    let (pipeline_in, pipeline_out, pipeline_filtered) = pipeline_stats();
+    let (_pipeline_in, pipeline_out, _pipeline_filtered) = pipeline_stats();
 
     let sent_notes = sent.load(std::sync::atomic::Ordering::Relaxed);
     let audio_drops = final_audio_drops.saturating_sub(initial_audio_drops);
@@ -453,7 +459,10 @@ fn run_stress_end_to_end(
     use crate::rtp::rtp_dropped_count;
 
     if !state.audio.is_running() {
-        return Err(runtime_error("stress.audio-not-running", "Le moteur audio doit être démarré pour le stress test."));
+        return Err(runtime_error(
+            "stress.audio-not-running",
+            "Le moteur audio doit être démarré pour le stress test.",
+        ));
     }
 
     // Reset all counters
@@ -493,7 +502,7 @@ fn run_stress_end_to_end(
     let final_audio_drops = state.audio.midi_drop_count().unwrap_or(0);
     let final_xruns = state.audio.xrun_count().unwrap_or(0);
     let final_rtp_drops = rtp_dropped_count();
-    let (pipeline_in, pipeline_out, _filtered) = pipeline_stats();
+    let (_pipeline_in, pipeline_out, _filtered) = pipeline_stats();
 
     let sent_notes = sent.load(std::sync::atomic::Ordering::Relaxed);
     let audio_drops = final_audio_drops.saturating_sub(initial_audio_drops);
@@ -529,7 +538,7 @@ fn run_stress_end_to_end(
 }
 
 /// Legacy compatibility - runs audio-only mode.
-pub fn run_automated_stress_test(
+pub fn _run_automated_stress_test(
     rate: u32,
     duration: u32,
     state: &AppState,
