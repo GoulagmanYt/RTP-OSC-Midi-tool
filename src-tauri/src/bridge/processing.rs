@@ -102,7 +102,10 @@ fn processing_loop(
 
         update_osc_client(&snapshot, &logger, &mut osc_client, &mut current_target);
 
-        match midi_rx.recv_timeout(Duration::from_millis(10)) {
+        // Batch-drain: process ALL available messages per iteration to prevent
+        // channel overflow during MIDI bursts (chords, rapid passages, file playback).
+        let first = midi_rx.recv_timeout(Duration::from_millis(1));
+        match first {
             Ok(frame) => {
                 record_activity(&activity, &frame);
                 handle_midi_frame(
@@ -114,7 +117,21 @@ fn processing_loop(
                     &audio,
                     &osc_counter,
                     &mut sustain_pressed_state,
-                )
+                );
+                // Drain remaining buffered messages without waiting.
+                while let Ok(frame) = midi_rx.try_recv() {
+                    record_activity(&activity, &frame);
+                    handle_midi_frame(
+                        &snapshot,
+                        osc_client.as_ref(),
+                        &mut midi_out,
+                        &logger,
+                        frame,
+                        &audio,
+                        &osc_counter,
+                        &mut sustain_pressed_state,
+                    );
+                }
             }
             Err(RecvTimeoutError::Timeout) => continue,
             Err(_) => break,
