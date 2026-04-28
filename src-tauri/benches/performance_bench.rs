@@ -2,6 +2,7 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use osc_midi_bridge::{
     audio::AudioEngine, bridge::BridgeHandle, config::ConfigStore, midi::MidiFrame,
 };
+use std::sync::Arc;
 
 /// Benchmark du parsing de frames MIDI
 fn bench_midi_frame_parsing(c: &mut Criterion) {
@@ -12,8 +13,8 @@ fn bench_midi_frame_parsing(c: &mut Criterion) {
             let status = if velocity > 0 { 0x90 } else { 0x80 };
 
             MidiFrame {
-                data: vec![status, note, velocity],
-                source: "benchmark".to_string(),
+                data: vec![status, note, velocity].into(),
+                source: Arc::from("benchmark"),
             }
         })
         .collect();
@@ -26,8 +27,8 @@ fn bench_midi_frame_parsing(c: &mut Criterion) {
                 let status = if velocity > 0 { 0x90 } else { 0x80 };
 
                 black_box(MidiFrame {
-                    data: vec![status, note, velocity],
-                    source: "benchmark".to_string(),
+                    data: vec![status, note, velocity].into(),
+                    source: Arc::from("benchmark"),
                 });
             }
         })

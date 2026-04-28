@@ -82,87 +82,97 @@ impl AudioEngine {
     }
 
     pub fn send_midi(&self, bytes: &[u8]) {
-        let Some(packet) = MidiPacket::from_bytes(bytes) else {
+        let Some(mut packet) = MidiPacket::from_bytes(bytes) else {
             return;
         };
 
-        let pushed = {
-            let mut guard = self.midi_tx.lock();
-            let Some(tx) = guard.as_mut() else {
-                background_log("debug", "send_midi: Audio runtime not started");
-                return;
+        loop {
+            let push_result = {
+                let mut guard = self.midi_tx.lock();
+                let Some(tx) = guard.as_mut() else {
+                    background_log("debug", "send_midi: Audio runtime not started");
+                    return;
+                };
+                tx.push(packet)
             };
-            tx.push(packet).is_ok()
-        };
 
-        if pushed {
-            if crate::logger::should_log_debug() {
-                let pushed_now = self
-                    .midi_push_log_accumulator
-                    .fetch_add(1, Ordering::Relaxed)
-                    + 1;
-                let now_ms = timestamp_ms();
-                let last_ms = self.midi_push_log_last_ms.load(Ordering::Relaxed);
-                if now_ms.saturating_sub(last_ms) >= 1000
-                    && self
-                        .midi_push_log_last_ms
-                        .compare_exchange(last_ms, now_ms, Ordering::Relaxed, Ordering::Relaxed)
-                        .is_ok()
-                {
-                    let pushed_since_last = if pushed_now > 1 {
-                        self.midi_push_log_accumulator.swap(0, Ordering::Relaxed)
-                    } else {
-                        self.midi_push_log_accumulator.store(0, Ordering::Relaxed);
-                        pushed_now
-                    };
-                    background_log(
-                        "debug",
-                        format!(
-                            "MIDI -> Ring Buffer throughput: {} msg/s (latest={:02X?})",
-                            pushed_since_last,
-                            &bytes[..bytes.len().min(3)]
-                        ),
-                    );
+            match push_result {
+                Ok(()) => {
+                    self.record_midi_push(bytes);
+                    return;
+                }
+                Err(rtrb::PushError::Full(returned)) => {
+                    packet = returned;
+                    self.record_midi_backpressure(bytes);
+                    std::thread::yield_now();
                 }
             }
+        }
+    }
+
+    fn record_midi_push(&self, bytes: &[u8]) {
+        if !crate::logger::should_log_debug() {
             return;
         }
+        let pushed_now = self
+            .midi_push_log_accumulator
+            .fetch_add(1, Ordering::Relaxed)
+            + 1;
+        let now_ms = timestamp_ms();
+        let last_ms = self.midi_push_log_last_ms.load(Ordering::Relaxed);
+        if now_ms.saturating_sub(last_ms) >= 1000
+            && self
+                .midi_push_log_last_ms
+                .compare_exchange(last_ms, now_ms, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            let pushed_since_last = if pushed_now > 1 {
+                self.midi_push_log_accumulator.swap(0, Ordering::Relaxed)
+            } else {
+                self.midi_push_log_accumulator.store(0, Ordering::Relaxed);
+                pushed_now
+            };
+            background_log(
+                "debug",
+                format!(
+                    "MIDI -> Ring Buffer throughput: {} msg/s (latest={:02X?})",
+                    pushed_since_last,
+                    &bytes[..bytes.len().min(3)]
+                ),
+            );
+        }
+    }
 
-        if let Some(runtime) = self.runtime.lock().as_ref() {
-            runtime.midi_drop_count.fetch_add(1, Ordering::Relaxed);
+    fn record_midi_backpressure(&self, bytes: &[u8]) {
+        if !crate::logger::should_log_debug() {
+            return;
         }
-        if packet.is_critical_release() {
-            self.midi_emergency_reset_requested
-                .store(true, Ordering::Relaxed);
-        }
-        if crate::logger::should_log_debug() {
-            let dropped = self
-                .midi_drop_log_accumulator
-                .fetch_add(1, Ordering::Relaxed)
-                + 1;
-            let now_ms = timestamp_ms();
-            let last_ms = self.midi_drop_log_last_ms.load(Ordering::Relaxed);
-            if now_ms.saturating_sub(last_ms) >= 1000
-                && self
-                    .midi_drop_log_last_ms
-                    .compare_exchange(last_ms, now_ms, Ordering::Relaxed, Ordering::Relaxed)
-                    .is_ok()
-            {
-                let dropped_since_last = if dropped > 1 {
-                    self.midi_drop_log_accumulator.swap(0, Ordering::Relaxed)
-                } else {
-                    self.midi_drop_log_accumulator.store(0, Ordering::Relaxed);
-                    dropped
-                };
-                background_log(
-                    "warn",
-                    format!(
-                        "MIDI dropped before audio callback (ring full): {} drops in ~1s (latest={:02X?})",
-                        dropped_since_last,
-                        &bytes[..bytes.len().min(3)]
-                    ),
-                );
-            }
+        let blocked = self
+            .midi_drop_log_accumulator
+            .fetch_add(1, Ordering::Relaxed)
+            + 1;
+        let now_ms = timestamp_ms();
+        let last_ms = self.midi_drop_log_last_ms.load(Ordering::Relaxed);
+        if now_ms.saturating_sub(last_ms) >= 1000
+            && self
+                .midi_drop_log_last_ms
+                .compare_exchange(last_ms, now_ms, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            let blocked_since_last = if blocked > 1 {
+                self.midi_drop_log_accumulator.swap(0, Ordering::Relaxed)
+            } else {
+                self.midi_drop_log_accumulator.store(0, Ordering::Relaxed);
+                blocked
+            };
+            background_log(
+                "warn",
+                format!(
+                    "MIDI backpressure before audio callback: {} waits in ~1s (latest={:02X?})",
+                    blocked_since_last,
+                    &bytes[..bytes.len().min(3)]
+                ),
+            );
         }
     }
 }
@@ -359,6 +369,43 @@ mod tests {
             elapsed,
             received as f64 / elapsed.as_secs_f64()
         );
+    }
+
+    #[test]
+    fn send_midi_waits_for_ring_capacity_instead_of_dropping() {
+        let engine = AudioEngine::new();
+        let (mut tx, mut rx) = RingBuffer::<MidiPacket>::new(1);
+        tx.push(MidiPacket::from_bytes(&[0x90, 60, 100]).expect("first packet"))
+            .expect("prefill ring");
+        *engine.midi_tx.lock() = Some(tx);
+
+        let done = Arc::new(AtomicBool::new(false));
+        let done_for_thread = done.clone();
+        let engine_for_thread = engine.clone();
+        let handle = thread::spawn(move || {
+            engine_for_thread.send_midi(&[0x90, 61, 100]);
+            done_for_thread.store(true, Ordering::Relaxed);
+        });
+
+        thread::sleep(std::time::Duration::from_millis(20));
+        assert!(
+            !done.load(Ordering::Relaxed),
+            "send_midi must apply backpressure while the ring is full"
+        );
+
+        let first = rx.pop().expect("first packet still queued");
+        assert_eq!(first.data, [0x90, 60, 100]);
+
+        for _ in 0..100 {
+            if done.load(Ordering::Relaxed) {
+                break;
+            }
+            thread::sleep(std::time::Duration::from_millis(1));
+        }
+        handle.join().expect("send_midi thread join");
+
+        let second = rx.pop().expect("second packet should be queued after capacity frees");
+        assert_eq!(second.data, [0x90, 61, 100]);
     }
 
     #[test]

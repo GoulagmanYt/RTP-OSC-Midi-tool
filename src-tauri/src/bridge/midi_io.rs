@@ -107,10 +107,11 @@ pub(super) fn open_input(
             &port,
             "osc-midi-in",
             move |_timestamp, message, _| {
-                let _ = tx.send(MidiFrame {
+                let frame = MidiFrame {
                     data: smallvec::SmallVec::from_slice(message),
                     source: Arc::clone(&source),
-                });
+                };
+                let _ = tx.send(frame);
             },
             midi_tx,
         )
@@ -241,5 +242,14 @@ mod tests {
             initial_connected_output(&config),
             Some(VST_INTERNAL_OUTPUT.to_string())
         );
+    }
+
+    #[test]
+    fn midi_input_callback_does_not_use_drop_send_path() {
+        let source = include_str!("midi_io.rs");
+        let forbidden = ["tx", "try_send("].join(".");
+
+        assert!(!source.contains(&forbidden));
+        assert!(source.contains("tx.send(frame)"));
     }
 }

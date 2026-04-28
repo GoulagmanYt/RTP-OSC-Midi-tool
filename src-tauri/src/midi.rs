@@ -86,7 +86,7 @@ pub fn adjust_note(note: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossbeam_channel::bounded;
+    use crossbeam_channel::unbounded;
     use std::{thread, time::Instant};
 
     #[test]
@@ -119,7 +119,7 @@ mod tests {
     #[test]
     fn stress_midi_pipeline_no_loss() {
         const TOTAL: usize = 400_000;
-        let (tx, rx) = bounded::<MidiFrame>(8192);
+        let (tx, rx) = unbounded::<MidiFrame>();
 
         let producer = thread::spawn(move || {
             for i in 0..TOTAL {

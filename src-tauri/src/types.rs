@@ -84,6 +84,11 @@ pub struct RuntimeMetrics {
     pub audio_emergency_resets: Option<u32>,
     pub midi_messages_per_sec: u32,
     pub osc_messages_per_sec: u32,
+    pub bridge_queue_depth: u64,
+    pub bridge_queue_max_depth: u64,
+    pub bridge_messages_in: u64,
+    pub bridge_messages_out: u64,
+    pub rtp_midi_drops: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

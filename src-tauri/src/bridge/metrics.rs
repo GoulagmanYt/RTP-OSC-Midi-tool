@@ -1,5 +1,5 @@
-use super::activity::MidiActivityTracker;
-use crate::{audio::AudioEngine, types::BridgeMetrics};
+use super::{activity::MidiActivityTracker, pipeline::pipeline_metrics_snapshot};
+use crate::{audio::AudioEngine, rtp::rtp_dropped_count, types::BridgeMetrics};
 use parking_lot::Mutex;
 use std::{
     sync::{
@@ -35,6 +35,7 @@ pub(super) fn spawn_activity_emitter(
                 Some((left, right)) => (Some(left), Some(right)),
                 None => (None, None),
             };
+            let pipeline = pipeline_metrics_snapshot();
             let metrics = BridgeMetrics {
                 audio_peak_l,
                 audio_peak_r,
@@ -45,6 +46,11 @@ pub(super) fn spawn_activity_emitter(
                 audio_emergency_resets: audio.emergency_reset_count(),
                 midi_messages_per_sec: midi_messages,
                 osc_messages_per_sec: osc_messages,
+                bridge_queue_depth: pipeline.queue_depth,
+                bridge_queue_max_depth: pipeline.queue_max_depth,
+                bridge_messages_in: pipeline.messages_in,
+                bridge_messages_out: pipeline.messages_out,
+                rtp_midi_drops: rtp_dropped_count(),
             };
             let _ = window.emit(BRIDGE_METRICS_EVENT, metrics);
         }

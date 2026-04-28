@@ -1,7 +1,7 @@
 use super::{
     activity::{record_activity, MidiActivityTracker},
     midi_io::{open_output, reset_midi_output},
-    pipeline::{handle_midi_frame, ConfigSnapshot},
+    pipeline::{handle_midi_frame, update_pipeline_queue_depth, ConfigSnapshot},
 };
 use crate::{
     audio::AudioEngine, config::Config, logger::FrontendLogger, midi::MidiFrame, osc::OscClient,
@@ -102,11 +102,14 @@ fn processing_loop(
 
         update_osc_client(&snapshot, &logger, &mut osc_client, &mut current_target);
 
-        // Batch-drain: process ALL available messages per iteration to prevent
-        // channel overflow during MIDI bursts (chords, rapid passages, file playback).
+        update_pipeline_queue_depth(midi_rx.len());
+
+        // Batch-drain: process all currently available messages per iteration to
+        // keep the unbounded channel near empty during MIDI bursts.
         let first = midi_rx.recv_timeout(Duration::from_millis(1));
         match first {
             Ok(frame) => {
+                update_pipeline_queue_depth(midi_rx.len());
                 record_activity(&activity, &frame);
                 handle_midi_frame(
                     &snapshot,
@@ -120,6 +123,7 @@ fn processing_loop(
                 );
                 // Drain remaining buffered messages without waiting.
                 while let Ok(frame) = midi_rx.try_recv() {
+                    update_pipeline_queue_depth(midi_rx.len());
                     record_activity(&activity, &frame);
                     handle_midi_frame(
                         &snapshot,
@@ -132,6 +136,7 @@ fn processing_loop(
                         &mut sustain_pressed_state,
                     );
                 }
+                update_pipeline_queue_depth(midi_rx.len());
             }
             Err(RecvTimeoutError::Timeout) => continue,
             Err(_) => break,

@@ -118,9 +118,9 @@ pub(super) fn start_runtime(
     let wants_rtp = rtp_requested(&config);
     let mut status = build_initial_status(&config, &audio, wants_rtp);
 
-    use crossbeam_channel::bounded;
+    use crossbeam_channel::unbounded;
     let stop = Arc::new(AtomicBool::new(false));
-    let (midi_tx, midi_rx) = bounded::<MidiFrame>(2048);
+    let (midi_tx, midi_rx) = unbounded::<MidiFrame>();
     let shared_config = Arc::new(Mutex::new(config.clone()));
     let config_rev = Arc::new(AtomicU64::new(1));
     let activity_tracker = Arc::new(Mutex::new(MidiActivityTracker::default()));
@@ -228,4 +228,17 @@ pub(super) fn stop_runtime(
         tauri::async_runtime::block_on(server.stop());
     }
     *rtp_config.lock() = None;
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn runtime_uses_unbounded_midi_channel() {
+        let source = include_str!("lifecycle.rs");
+        let required = ["unbounded", "::<MidiFrame>()"].concat();
+        let forbidden = ["bounded", "::<MidiFrame>(2048)"].concat();
+
+        assert!(source.contains(&required));
+        assert!(!source.contains(&forbidden));
+    }
 }

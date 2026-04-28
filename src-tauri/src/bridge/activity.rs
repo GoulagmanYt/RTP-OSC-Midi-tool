@@ -57,7 +57,7 @@ impl MidiActivityTracker {
 
 pub(super) fn record_activity(activity: &Arc<Mutex<MidiActivityTracker>>, frame: &MidiFrame) {
     let mut guard = activity.lock();
-    guard.record(&*frame.source, frame.data.as_slice());
+    guard.record(&frame.source, frame.data.as_slice());
 }
 
 pub(super) fn now_ms() -> u64 {

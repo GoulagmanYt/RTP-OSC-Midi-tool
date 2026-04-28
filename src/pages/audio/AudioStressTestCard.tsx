@@ -30,8 +30,8 @@ export function AudioStressTestCard({ bridgeRunning, audioRunning }: Props) {
       // 50,000 messages over 5 seconds
       const res = await runAutomatedStressTest(50000, 5, mode);
       setResult(res);
-    } catch (err: any) {
-      setError(err.message || "Failed to run stress test");
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to run stress test");
     } finally {
       setRunning(false);
     }

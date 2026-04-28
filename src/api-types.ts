@@ -165,6 +165,11 @@ export type RuntimeMetrics = {
   audioEmergencyResets?: number | null;
   midiMessagesPerSec: number;
   oscMessagesPerSec: number;
+  bridgeQueueDepth: number;
+  bridgeQueueMaxDepth: number;
+  bridgeMessagesIn: number;
+  bridgeMessagesOut: number;
+  rtpMidiDrops: number;
 };
 
 export type BridgeMetrics = RuntimeMetrics;

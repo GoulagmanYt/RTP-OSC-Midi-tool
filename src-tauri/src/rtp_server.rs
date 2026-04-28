@@ -33,9 +33,6 @@ const RTP_PARTICIPANTS_EVENT: &str = "rtp:participants";
 /// le thread de log périodique.
 static DROPPED_MIDI_COUNT: AtomicU64 = AtomicU64::new(0);
 
-/// Intervalle entre deux avertissements de drops consécutifs.
-const DROP_WARN_INTERVAL: Duration = Duration::from_secs(5);
-
 /// Retourne le nombre de messages MIDI RTP abandonnés (canal plein).
 pub fn rtp_dropped_count() -> u64 {
     DROPPED_MIDI_COUNT.load(Ordering::Relaxed)
@@ -148,23 +145,14 @@ impl RtpServer {
         let notify_for_left = notify.clone();
         emit_participants(&logger, &participants);
 
-        // Timestamp du dernier avertissement de drop — partagé via Arc<Mutex>
-        // car add_listener exige une closure Fn (pas FnMut).
-        // Initialisé à (maintenant - intervalle) pour que le 1er drop soit
-        // toujours loggué immédiatement.
-        let last_drop_warn: Arc<Mutex<Instant>> =
-            Arc::new(Mutex::new(Instant::now() - DROP_WARN_INTERVAL));
-
         let handle = async_runtime::spawn(async move {
             // ── Listener MIDI ────────────────────────────────────────────────
             // HOT PATH : ce callback est appelé sur chaque message reçu.
             // Règles :
             //   • Pas de verrou long-durée.
             //   • Pas d'allocation évitable.
-            //   • Jamais bloquant : on abandonne le message plutôt que
-            //     de bloquer le thread de la lib rtpmidi.
+            //   • Pas de chemin de drop interne : le canal bridge est non borné.
             let rtp_logger = logger.clone();
-            let last_drop_warn_cb = Arc::clone(&last_drop_warn);
             session
                 .add_listener(MidiMessageEvent, move |(message, _delta)| {
                     let bytes = midi_to_bytes(message);
@@ -190,35 +178,10 @@ impl RtpServer {
                         return;
                     };
 
-                    // FIX CRITIQUE : l'ancien `try_send` avec `let _ =` abandonnait
-                    // silencieusement les messages quand le canal était plein.
-                    // On tente d'abord try_send (non bloquant) ; en cas de saturation
-                    // on logue périodiquement pour diagnostiquer sans inonder les logs.
-                    match tx.try_send(MidiFrame {
+                    let _ = tx.send(MidiFrame {
                         data: bytes,
                         source: std::sync::Arc::clone(&rtp_source),
-                    }) {
-                        Ok(()) => {}
-                        Err(crossbeam_channel::TrySendError::Full(_)) => {
-                            let dropped = DROPPED_MIDI_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-                            let now = Instant::now();
-                            // Intériorité mutable via Mutex : add_listener exige Fn,
-                            // on ne peut pas capturer une variable mut directement.
-                            let mut guard = last_drop_warn_cb.lock();
-                            if now.duration_since(*guard) >= DROP_WARN_INTERVAL {
-                                *guard = now;
-                                // On libère le verrou avant le log (potentiellement lent).
-                                drop(guard);
-                                rtp_logger.warn(format!(
-                                    "RTP-MIDI : canal MIDI saturé — {dropped} message(s) \
-                                     abandonnés. Envisager d'augmenter la capacité du canal \
-                                     ou de réduire la charge du consommateur."
-                                ));
-                            }
-                        }
-                        // Le canal est fermé = serveur en cours d'arrêt, comportement normal.
-                        Err(crossbeam_channel::TrySendError::Disconnected(_)) => {}
-                    }
+                    });
                 })
                 .await;
 
@@ -376,4 +339,16 @@ impl RtpServer {
 fn emit_participants(logger: &FrontendLogger, participants: &Arc<Mutex<Vec<RtpParticipantInfo>>>) {
     let snapshot = participants.lock().clone();
     let _ = logger.app_handle().emit(RTP_PARTICIPANTS_EVENT, snapshot);
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn rtp_callback_does_not_use_drop_send_path() {
+        let source = include_str!("rtp_server.rs");
+        let forbidden = ["tx", "try_send("].join(".");
+
+        assert!(!source.contains(&forbidden));
+        assert!(source.contains("tx.send(MidiFrame"));
+    }
 }

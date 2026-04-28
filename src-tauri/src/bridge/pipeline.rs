@@ -11,7 +11,7 @@ use std::{
     collections::HashMap,
     sync::atomic::{AtomicU32, AtomicU64, Ordering},
 };
-use tauri::Emitter;
+use tauri::{async_runtime, Emitter};
 
 use super::activity::now_ms;
 
@@ -22,6 +22,17 @@ const OSC_SUSTAIN_PARAM: &str = "/avatar/parameters/sustain";
 static PIPELINE_IN_COUNT: AtomicU64 = AtomicU64::new(0);
 static PIPELINE_OUT_COUNT: AtomicU64 = AtomicU64::new(0);
 static PIPELINE_FILTERED_COUNT: AtomicU64 = AtomicU64::new(0);
+static PIPELINE_QUEUE_DEPTH: AtomicU64 = AtomicU64::new(0);
+static PIPELINE_QUEUE_MAX_DEPTH: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PipelineMetricsSnapshot {
+    pub queue_depth: u64,
+    pub queue_max_depth: u64,
+    pub messages_in: u64,
+    pub messages_out: u64,
+    pub messages_filtered: u64,
+}
 
 #[derive(Clone)]
 struct RoutingProfileRuntime {
@@ -230,16 +241,17 @@ pub(super) fn handle_midi_frame(
     } else if let Some(note) = parse_note(frame.data.as_slice()) {
         if note.index.is_some() {
             let pressed = matches!(note.kind, MidiKind::NoteOn);
-            let _ = logger.app_handle().emit(
-                MIDI_NOTE_EVENT,
-                MidiNoteEvent {
-                    source: frame.source.to_string(),
-                    note: note.note,
-                    channel: note.channel,
-                    pressed,
-                    timestamp_ms: now_ms(),
-                },
-            );
+            let app_handle = logger.app_handle();
+            let event = MidiNoteEvent {
+                source: frame.source.to_string(),
+                note: note.note,
+                channel: note.channel,
+                pressed,
+                timestamp_ms: now_ms(),
+            };
+            async_runtime::spawn(async move {
+                let _ = app_handle.emit(MIDI_NOTE_EVENT, event);
+            });
         }
 
         if let Some(filter) = config.channel_filter {
@@ -360,9 +372,60 @@ pub fn pipeline_stats() -> (u64, u64, u64) {
     )
 }
 
+pub fn update_pipeline_queue_depth(depth: usize) {
+    let depth = depth as u64;
+    PIPELINE_QUEUE_DEPTH.store(depth, Ordering::Relaxed);
+
+    let mut current = PIPELINE_QUEUE_MAX_DEPTH.load(Ordering::Relaxed);
+    while depth > current {
+        match PIPELINE_QUEUE_MAX_DEPTH.compare_exchange(
+            current,
+            depth,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => break,
+            Err(observed) => current = observed,
+        }
+    }
+}
+
+pub fn pipeline_metrics_snapshot() -> PipelineMetricsSnapshot {
+    PipelineMetricsSnapshot {
+        queue_depth: PIPELINE_QUEUE_DEPTH.load(Ordering::Relaxed),
+        queue_max_depth: PIPELINE_QUEUE_MAX_DEPTH.load(Ordering::Relaxed),
+        messages_in: PIPELINE_IN_COUNT.load(Ordering::Relaxed),
+        messages_out: PIPELINE_OUT_COUNT.load(Ordering::Relaxed),
+        messages_filtered: PIPELINE_FILTERED_COUNT.load(Ordering::Relaxed),
+    }
+}
+
 /// Réinitialise les compteurs de pipeline (utile pour les tests).
 pub fn reset_pipeline_stats() {
     PIPELINE_IN_COUNT.store(0, Ordering::Relaxed);
     PIPELINE_OUT_COUNT.store(0, Ordering::Relaxed);
     PIPELINE_FILTERED_COUNT.store(0, Ordering::Relaxed);
+    PIPELINE_QUEUE_DEPTH.store(0, Ordering::Relaxed);
+    PIPELINE_QUEUE_MAX_DEPTH.store(0, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pipeline_metrics_snapshot_tracks_queue_depth_and_counts() {
+        reset_pipeline_stats();
+        PIPELINE_IN_COUNT.store(10, Ordering::Relaxed);
+        PIPELINE_OUT_COUNT.store(9, Ordering::Relaxed);
+        update_pipeline_queue_depth(7);
+        update_pipeline_queue_depth(3);
+
+        let snapshot = pipeline_metrics_snapshot();
+
+        assert_eq!(snapshot.queue_depth, 3);
+        assert_eq!(snapshot.queue_max_depth, 7);
+        assert_eq!(snapshot.messages_in, 10);
+        assert_eq!(snapshot.messages_out, 9);
+    }
 }
