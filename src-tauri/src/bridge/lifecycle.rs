@@ -13,6 +13,7 @@ use crate::{
     logger::FrontendLogger,
     midi::MidiFrame,
     osc::OscClient,
+    reliable_playback::{ReliablePlaybackServer, DEFAULT_RELIABLE_PLAYBACK_ADDR},
     rtp::RtpServer,
     types::RtpParticipantInfo,
 };
@@ -136,6 +137,14 @@ pub(super) fn start_runtime(
         *rtp_sink.write() = None;
         return Err(error);
     }
+    let reliable_playback =
+        match ReliablePlaybackServer::start(DEFAULT_RELIABLE_PLAYBACK_ADDR, midi_tx.clone()) {
+            Ok(server) => Some(server),
+            Err(error) => {
+                cleanup_startup_rtp(rtp_server, rtp_sink, rtp_config);
+                return Err(error);
+            }
+        };
 
     status.rtp_active = rtp_server.lock().is_some();
     status.rtp_bound_port = rtp_config.lock().as_ref().map(|current| current.bound_port);
@@ -190,6 +199,7 @@ pub(super) fn start_runtime(
         processing,
         midi_watcher,
         activity_emitter,
+        reliable_playback,
         config: shared_config,
         config_rev,
         actual_midi_in,
@@ -214,6 +224,9 @@ pub(super) fn stop_runtime(
     if let Some(handle) = runtime.activity_emitter {
         let _ = handle.join();
     }
+    if let Some(server) = runtime.reliable_playback {
+        server.stop();
+    }
     if config_for_reset.osc.enabled {
         if let Ok(osc) = OscClient::new(
             &config_for_reset.osc.target_ip,
@@ -223,6 +236,18 @@ pub(super) fn stop_runtime(
         }
     }
 
+    *rtp_sink.write() = None;
+    if let Some(server) = rtp_server.lock().take() {
+        tauri::async_runtime::block_on(server.stop());
+    }
+    *rtp_config.lock() = None;
+}
+
+fn cleanup_startup_rtp(
+    rtp_server: &Arc<Mutex<Option<RtpServer>>>,
+    rtp_sink: &Arc<parking_lot::RwLock<Option<Sender<MidiFrame>>>>,
+    rtp_config: &Arc<Mutex<Option<RtpConfigSnapshot>>>,
+) {
     *rtp_sink.write() = None;
     if let Some(server) = rtp_server.lock().take() {
         tauri::async_runtime::block_on(server.stop());
@@ -240,5 +265,13 @@ mod tests {
 
         assert!(source.contains(&required));
         assert!(!source.contains(&forbidden));
+    }
+
+    #[test]
+    fn start_runtime_cleans_up_rtp_state_when_reliable_start_fails() {
+        let source = include_str!("lifecycle.rs");
+
+        assert!(source.contains("cleanup_startup_rtp"));
+        assert!(source.contains("cleanup_startup_rtp(rtp_server, rtp_sink, rtp_config);"));
     }
 }

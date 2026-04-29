@@ -10,6 +10,7 @@ mod logger;
 mod midi;
 mod osc;
 mod plugin_probe;
+mod reliable_playback;
 mod rtp;
 mod tauri;
 mod types;

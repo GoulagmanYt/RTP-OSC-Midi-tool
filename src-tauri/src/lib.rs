@@ -10,6 +10,7 @@ pub mod logger;
 pub mod midi;
 pub mod osc;
 pub mod plugin_probe;
+pub mod reliable_playback;
 pub mod rtp;
 pub mod tauri;
 pub mod types;

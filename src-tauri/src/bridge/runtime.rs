@@ -10,6 +10,7 @@ use crate::{
     logger::FrontendLogger,
     midi::MidiFrame,
     osc::OscClient,
+    reliable_playback::ReliablePlaybackServer,
     rtp::{rtp_advertisement::RtpAdvertisementStatus, RtpRemoteTarget, RtpServer},
     types::{BridgeStatus, RtpParticipantInfo},
 };
@@ -51,6 +52,7 @@ pub(super) struct BridgeRuntime {
     pub(super) processing: Option<thread::JoinHandle<()>>,
     pub(super) midi_watcher: Option<thread::JoinHandle<()>>,
     pub(super) activity_emitter: Option<thread::JoinHandle<()>>,
+    pub(super) reliable_playback: Option<ReliablePlaybackServer>,
     pub(super) config: Arc<Mutex<Config>>,
     pub(super) config_rev: Arc<AtomicU64>,
     pub(super) actual_midi_in: Arc<Mutex<Option<String>>>,

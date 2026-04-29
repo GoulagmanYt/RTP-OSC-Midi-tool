@@ -89,6 +89,11 @@ pub struct RuntimeMetrics {
     pub bridge_messages_in: u64,
     pub bridge_messages_out: u64,
     pub rtp_midi_drops: u64,
+    pub reliable_playback_messages_in: u64,
+    pub reliable_playback_messages_out: u64,
+    pub reliable_playback_dropped: u64,
+    pub reliable_playback_max_late_us: u64,
+    pub reliable_playback_active_session: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

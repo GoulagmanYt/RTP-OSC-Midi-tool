@@ -155,11 +155,20 @@ pub(super) fn handle_midi_frame(
         }
     }
 
-    if config.verbose && should_log_debug() && frame.source.starts_with("RTP:") {
-        logger.debug(format!(
-            "MIDI IN (RTP) -> pipeline: {:02X?}",
-            frame.data.as_slice()
-        ));
+    if config.verbose && should_log_debug() {
+        let input_label = if frame.source.starts_with("RTP:") {
+            Some("RTP")
+        } else if frame.source.starts_with("ReliablePLV:") {
+            Some("ReliablePLV")
+        } else {
+            None
+        };
+        if let Some(label) = input_label {
+            logger.debug(format!(
+                "MIDI IN ({label}) -> pipeline: {:02X?}",
+                frame.data.as_slice()
+            ));
+        }
     }
 
     if let Some(status) = frame.data.first() {
@@ -427,5 +436,13 @@ mod tests {
         assert_eq!(snapshot.queue_max_depth, 7);
         assert_eq!(snapshot.messages_in, 10);
         assert_eq!(snapshot.messages_out, 9);
+    }
+
+    #[test]
+    fn pipeline_debug_logging_names_reliable_playback_input() {
+        let source = include_str!("pipeline.rs");
+
+        assert!(source.contains("ReliablePLV:"));
+        assert!(source.contains("MIDI IN (ReliablePLV) -> pipeline"));
     }
 }

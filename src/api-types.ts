@@ -170,6 +170,11 @@ export type RuntimeMetrics = {
   bridgeMessagesIn: number;
   bridgeMessagesOut: number;
   rtpMidiDrops: number;
+  reliablePlaybackMessagesIn: number;
+  reliablePlaybackMessagesOut: number;
+  reliablePlaybackDropped: number;
+  reliablePlaybackMaxLateUs: number;
+  reliablePlaybackActiveSession?: string | null;
 };
 
 export type BridgeMetrics = RuntimeMetrics;
