@@ -6,3 +6,5 @@ src-tauri/target
 .venv
 vendor/rack/rack-sys/external
 reports
+
+*.code-workspace
