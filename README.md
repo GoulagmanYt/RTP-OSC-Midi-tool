@@ -64,6 +64,16 @@ npm run build
 npm run tauri:build
 ```
 
+## GitHub Windows Builds
+
+GitHub Actions builds the Windows app automatically:
+
+- on every push to `main`, download the `OSCMidi-windows-main` artifact from the workflow run;
+- on every tag matching `v*`, for example `v0.1.0`, the workflow uploads the Windows artifacts and attaches them to the GitHub Release;
+- manual builds can be started from the `Build Windows App` workflow using `workflow_dispatch`.
+
+The generated files include the standalone `OSCMidi.exe` and the Tauri installer artifacts when produced by the bundle step.
+
 ## Verification Commands
 
 ```bash
@@ -154,3 +164,4 @@ Only supported instrument plugins are shown. Effects are hidden by design.
 ## License
 
 No explicit license file is currently present in this repository.
+

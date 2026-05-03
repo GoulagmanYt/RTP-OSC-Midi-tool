@@ -1,10 +1,10 @@
 [build]
-# Keep all build artefacts inside the repository.
-target-dir = "D:\\PROGRAMMATION\\oscMIDI\\.cargo-target"
+# Keep Cargo build artifacts in the repository workspace on every machine.
+target-dir = ".cargo-target"
 incremental = false
 
 [env]
-# Path vers le SDK ASIO pour la compilation CPAL (ASIO backend).
-ASIOSDK_DIR = "D:\\PROGRAMMATION\\oscMIDI\\ASIOSDK"
-ASIO_SDK_DIR = "D:\\PROGRAMMATION\\oscMIDI\\ASIOSDK"
-CPAL_ASIO_DIR = "D:\\PROGRAMMATION\\oscMIDI\\ASIOSDK"
+# CPAL ASIO build support. Paths are relative to this repository root.
+ASIOSDK_DIR = { value = "ASIOSDK", relative = true }
+ASIO_SDK_DIR = { value = "ASIOSDK", relative = true }
+CPAL_ASIO_DIR = { value = "ASIOSDK", relative = true }
