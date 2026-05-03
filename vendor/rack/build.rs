@@ -75,7 +75,8 @@ fn main() {
         } else {
             env::current_dir().unwrap().join(&sdk_path)
         };
-        config.define("VST3_SDK_PATH", sdk_path_abs.to_str().unwrap());
+        let sdk_path_cmake = sdk_path_abs.to_string_lossy().replace('\\', "/");
+        config.define("VST3_SDK_PATH", sdk_path_cmake.as_str());
         eprintln!("Configuring CMake with VST3 SDK at: {}", sdk_path_abs.display());
         true
     } else {
