@@ -3,6 +3,7 @@ use crate::{
     logger::FrontendLogger,
     midi::MidiFrame,
 };
+use super::pipeline::try_enqueue_midi_frame;
 use crossbeam_channel::Sender;
 use midir::{
     Ignore, MidiInput, MidiInputConnection, MidiInputPort, MidiOutput, MidiOutputConnection,
@@ -111,7 +112,7 @@ pub(super) fn open_input(
                     data: smallvec::SmallVec::from_slice(message),
                     source: Arc::clone(&source),
                 };
-                let _ = tx.send(frame);
+                let _ = try_enqueue_midi_frame(&tx, frame);
             },
             midi_tx,
         )
@@ -245,11 +246,12 @@ mod tests {
     }
 
     #[test]
-    fn midi_input_callback_does_not_use_drop_send_path() {
+    fn midi_input_callback_uses_bounded_enqueue_path() {
         let source = include_str!("midi_io.rs");
-        let forbidden = ["tx", "try_send("].join(".");
 
+        let required = ["try_enqueue_midi_frame", "(&tx, frame)"].concat();
+        let forbidden = ["tx", ".send(frame)"].concat();
+        assert!(source.contains(&required));
         assert!(!source.contains(&forbidden));
-        assert!(source.contains("tx.send(frame)"));
     }
 }

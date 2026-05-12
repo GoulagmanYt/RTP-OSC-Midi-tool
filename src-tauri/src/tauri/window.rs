@@ -39,6 +39,12 @@ pub fn handle_window_event(event: &WindowEvent, window: &tauri::Window) {
         WindowEvent::Focused(focused) => {
             if *focused {
                 let _ = setup_main_window(window);
+            } else {
+                // When the window loses focus, Windows may downgrade the process
+                // scheduling (remove foreground boost, apply EcoQoS on Win11).
+                // Re-assert HIGH_PRIORITY_CLASS and disable power throttling
+                // to prevent audio callback preemption.
+                crate::audio::windows_tuning::reapply_process_priority_on_focus_loss();
             }
         }
         WindowEvent::Resized(_) => {

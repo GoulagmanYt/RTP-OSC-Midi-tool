@@ -30,6 +30,14 @@ pub(super) fn build_initial_status(
         vst_loaded: audio.is_running(),
         vst_midi_compatible: audio.vst_midi_compatible(),
         audio_xruns: audio.xrun_count(),
+        audio_midi_drops: audio.midi_drop_count(),
+        audio_lock_misses: audio.audio_lock_miss_count(),
+        audio_emergency_resets: audio.emergency_reset_count(),
+        audio_callback_max_us: audio.callback_max_us(),
+        audio_callback_last_us: audio.callback_last_us(),
+        audio_callback_over_budget_count: audio.callback_over_budget_count(),
+        audio_mmcss_enabled: audio.mmcss_enabled(),
+        audio_power_throttling_disabled: audio.power_throttling_disabled(),
         audio_limiter_enabled: audio.limiter_enabled(),
     }
 }

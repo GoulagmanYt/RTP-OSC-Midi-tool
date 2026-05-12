@@ -115,6 +115,39 @@ export function useAudioPageController() {
     return Number(((activeBufferSize / activeSampleRate) * 1000 * 2).toFixed(2));
   }, [status?.audioLatencyMs, activeBufferSize, activeSampleRate]);
 
+  const updateAudioConfig = useCallback(
+    async (patch: Partial<NonNullable<typeof config>["audio"]>) => {
+      if (!config) return;
+      const previousAudio = config.audio;
+      const updated = { ...config, audio: { ...config.audio, ...patch } };
+      await updateConfig({ audio: patch });
+
+      const restartKeys: Array<keyof typeof patch> = ["backend", "device", "sampleRate", "bufferSize", "vstPath"];
+      const requiresRestart = restartKeys.some((key) => patch[key] !== undefined);
+      if (!requiresRestart || !status?.audioRunning || !updated.audio.enabled) {
+        return;
+      }
+
+      try {
+        await saveConfigApi(updated);
+        await reloadVst();
+        await refreshStatus();
+      } catch (e) {
+        await updateConfig({ audio: previousAudio });
+        try {
+          await saveConfigApi({ ...config, audio: previousAudio });
+          await reloadVst();
+          await refreshStatus();
+        } catch (rollbackError) {
+          console.error("Failed to restore previous audio runtime", rollbackError);
+        }
+        const message = e instanceof Error ? e.message : String(e);
+        toast.error(message || t("toasts.audio.vstReloadFailed"));
+      }
+    },
+    [config, refreshStatus, status?.audioRunning, t, updateConfig]
+  );
+
   const loadCachedVstPlugins = useCallback(async () => {
     try {
       const plugins = await listVstPlugins();
@@ -142,7 +175,7 @@ export function useAudioPageController() {
   }, [loadCachedVstPlugins]);
 
   const handleBackendChange = async (value: string) => {
-    await updateConfig({ audio: { backend: value, device: null } });
+    await updateAudioConfig({ backend: value, device: null });
     await refreshAudioDevices(value);
   };
 
@@ -157,13 +190,11 @@ export function useAudioPageController() {
     try {
       const devices = await listAudioDevices(preset.backend);
       const chosen = devices.find((device) => device === config?.audio.device) || devices[0] || null;
-      await updateConfig({
-        audio: {
-          backend: preset.backend,
-          device: chosen,
-          bufferSize: preset.bufferSize,
-          sampleRate: preset.sampleRate,
-        },
+      await updateAudioConfig({
+        backend: preset.backend,
+        device: chosen,
+        bufferSize: preset.bufferSize,
+        sampleRate: preset.sampleRate,
       });
       await refreshAudioDevices(preset.backend);
       toast.success(t("toasts.audio.presetApplied", { preset: preset.label }));
@@ -198,23 +229,14 @@ export function useAudioPageController() {
       setVstParameterDialogOpen(false);
       setVstParams([]);
       const updated = { ...config, audio: { ...config.audio, vstPath: path } };
-      await updateConfig({ audio: { vstPath: path } });
+      await updateAudioConfig({ vstPath: path });
       try {
         await saveConfigApi(updated);
       } catch (e) {
         console.error("Failed to save VST path", e);
       }
-      if (status?.audioRunning && updated.audio.enabled) {
-        try {
-          await reloadVst();
-          await refreshStatus();
-        } catch (e) {
-          const message = e instanceof Error ? e.message : String(e);
-          toast.error(message || t("toasts.audio.vstReloadFailed"));
-        }
-      }
     },
-    [config, refreshStatus, status?.audioRunning, t, updateConfig]
+    [config, updateAudioConfig]
   );
 
   const handleSelectVst = async (path: string) => {
@@ -348,6 +370,7 @@ export function useAudioPageController() {
     persistConfig,
     handleSelectVst,
     updateConfig,
+    updateAudioConfig,
     setVstParameterDialogOpen,
     handleVstParamChange,
   };

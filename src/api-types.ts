@@ -150,6 +150,14 @@ export type RuntimeStatus = {
   audioBufferMismatch?: boolean | null;
   vstMidiCompatible?: boolean | null;
   audioXruns?: number | null;
+  audioMidiDrops?: number | null;
+  audioLockMisses?: number | null;
+  audioEmergencyResets?: number | null;
+  audioCallbackMaxUs?: number | null;
+  audioCallbackLastUs?: number | null;
+  audioCallbackOverBudgetCount?: number | null;
+  audioMmcssEnabled?: boolean | null;
+  audioPowerThrottlingDisabled?: boolean | null;
   audioLimiterEnabled?: boolean | null;
 };
 
@@ -163,12 +171,18 @@ export type RuntimeMetrics = {
   audioMidiDrops?: number | null;
   audioLockMisses?: number | null;
   audioEmergencyResets?: number | null;
+  audioCallbackMaxUs?: number | null;
+  audioCallbackLastUs?: number | null;
+  audioCallbackOverBudgetCount?: number | null;
+  audioMmcssEnabled?: boolean | null;
+  audioPowerThrottlingDisabled?: boolean | null;
   midiMessagesPerSec: number;
   oscMessagesPerSec: number;
   bridgeQueueDepth: number;
   bridgeQueueMaxDepth: number;
   bridgeMessagesIn: number;
   bridgeMessagesOut: number;
+  bridgeMessagesDropped: number;
   rtpMidiDrops: number;
   reliablePlaybackMessagesIn: number;
   reliablePlaybackMessagesOut: number;

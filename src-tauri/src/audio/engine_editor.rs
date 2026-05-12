@@ -333,7 +333,9 @@ impl AudioEngine {
             return Err(AudioError::Message("Audio not started".into()));
         };
 
-        let mut plugin = runtime.plugin.lock();
+        let Some(mut plugin) = runtime.plugin.try_lock() else {
+            return Err(AudioError::Message("VST busy, retry".into()));
+        };
         match &mut *plugin {
             PluginBackend::Vst3 { instance, .. } => {
                 let count = instance.parameter_count();
@@ -368,7 +370,9 @@ impl AudioEngine {
         let Some(runtime) = guard.as_ref() else {
             return Err(AudioError::Message("Audio not started".into()));
         };
-        let mut plugin = runtime.plugin.lock();
+        let Some(mut plugin) = runtime.plugin.try_lock() else {
+            return Err(AudioError::Message("VST busy, retry".into()));
+        };
         match &mut *plugin {
             PluginBackend::Vst3 { instance, .. } => {
                 let normalized = value.clamp(0.0, 1.0);

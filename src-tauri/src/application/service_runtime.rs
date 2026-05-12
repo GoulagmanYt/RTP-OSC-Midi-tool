@@ -415,13 +415,13 @@ fn run_stress_bridge_pipeline(
     let audio_drops = final_audio_drops.saturating_sub(initial_audio_drops);
     let audio_xruns = final_xruns.saturating_sub(initial_xruns);
 
-    // Bridge drops = (injected - pipeline_out) + audio_drops
+    // Bridge drops = messages that did not reach the audio segment plus audio drops.
     let bridge_drops = sent_notes.saturating_sub(pipeline_out as u32) + audio_drops;
 
     Ok(crate::types::StressTestResult {
         sent_notes,
         elapsed_ms,
-        dropped_notes: bridge_drops + audio_drops,
+        dropped_notes: bridge_drops,
         xruns: audio_xruns,
         segment_rtp: None,
         segment_bridge: Some(crate::types::SegmentMetrics {
@@ -544,4 +544,22 @@ pub fn _run_automated_stress_test(
     state: &AppState,
 ) -> Result<crate::types::StressTestResult, CommandError> {
     run_stress_test("audio-vst", rate, duration, state)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn bridge_stress_does_not_double_count_audio_drops() {
+        let source = include_str!("service_runtime.rs");
+
+        let forbidden = ["dropped_notes: bridge_drops", " + audio_drops"].concat();
+        assert!(
+            !source.contains(&forbidden),
+            "bridge stress totals must not add audio drops twice"
+        );
+        assert!(
+            source.contains("dropped_notes: bridge_drops"),
+            "bridge stress total should be the bridge segment total"
+        );
+    }
 }

@@ -2,6 +2,7 @@
 
 use super::{
     lifecycle::{start_runtime, stop_runtime, sync_rtp as sync_rtp_runtime},
+    pipeline::try_enqueue_midi_frame,
     status::{enrich_status_from_runtime, refresh_runtime_status},
 };
 use crate::{
@@ -139,7 +140,7 @@ impl BridgeHandle {
             thread::sleep(Duration::from_millis(200));
             let off = smallvec::SmallVec::from_slice(&[0x80 | ch, note, 0]);
             if let Some(tx) = sink.read().as_ref().cloned() {
-                let _ = tx.send(MidiFrame {
+                let _ = try_enqueue_midi_frame(&tx, MidiFrame {
                     data: off,
                     source: std::sync::Arc::from(source.as_str()),
                 });
@@ -220,11 +221,10 @@ impl BridgeHandle {
     /// Inject a MIDI frame directly into the bridge pipeline (for testing).
     pub fn inject_frame(&self, data: SmallVec<[u8; 32]>, source: String) -> Result<(), String> {
         if let Some(tx) = self.rtp_sink.read().as_ref().cloned() {
-            tx.send(MidiFrame {
+            try_enqueue_midi_frame(&tx, MidiFrame {
                 data,
                 source: std::sync::Arc::from(source.as_str()),
             })
-            .map_err(|_| "Bridge not running".to_string())
         } else {
             Err("Bridge not running".to_string())
         }

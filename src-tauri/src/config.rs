@@ -362,6 +362,14 @@ impl From<&AppConfig> for RuntimeStatus {
             vst_loaded: false,
             vst_midi_compatible: None,
             audio_xruns: None,
+            audio_midi_drops: None,
+            audio_lock_misses: None,
+            audio_emergency_resets: None,
+            audio_callback_max_us: None,
+            audio_callback_last_us: None,
+            audio_callback_over_budget_count: None,
+            audio_mmcss_enabled: None,
+            audio_power_throttling_disabled: None,
             audio_limiter_enabled: None,
         }
     }

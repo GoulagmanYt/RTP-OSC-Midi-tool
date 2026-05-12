@@ -77,6 +77,9 @@ pub(super) struct AudioRuntime {
     pub(super) midi_drop_count: Arc<AtomicU32>,
     pub(super) audio_lock_miss_count: Arc<AtomicU32>,
     pub(super) emergency_reset_count: Arc<AtomicU32>,
+    pub(super) callback_last_us: Arc<AtomicU32>,
+    pub(super) callback_max_us: Arc<AtomicU32>,
+    pub(super) callback_over_budget_count: Arc<AtomicU32>,
     pub(super) sample_rate: u32,
     pub(super) requested_buffer_size: u32,
     pub(super) stream_buffer_size: Option<u32>,
@@ -110,6 +113,7 @@ unsafe impl Sync for AudioRuntime {}
 
 pub(super) const MIDI_RING_CAPACITY: usize = 16384;
 pub(super) const MAX_PENDING_MIDI: usize = 8192;
+pub(super) const MIDI_DRAIN_BUDGET_PER_CALLBACK: usize = 512;
 pub(super) const MIDI_EVENT_BATCH_CAPACITY: usize = 512;
 pub(super) const RESET_CONTROLLERS: [u8; 4] = [64, 120, 121, 123];
 pub(super) const VST_EDITOR_IDLE_TIMER_MS: u32 = 50;
@@ -185,6 +189,10 @@ pub(super) struct AudioCallbackState {
     pub(super) audio_lock_miss_count: Arc<AtomicU32>,
     pub(super) emergency_reset_count: Arc<AtomicU32>,
     pub(super) emergency_reset_requested: Arc<AtomicBool>,
+    pub(super) callback_last_us: Arc<AtomicU32>,
+    pub(super) callback_max_us: Arc<AtomicU32>,
+    pub(super) callback_over_budget_count: Arc<AtomicU32>,
+    pub(super) sample_rate: u32,
     pub(super) last_output: Vec<f32>,
     pub(super) needs_emergency_reset: bool,
     pub(super) last_frames: usize,
@@ -210,6 +218,10 @@ impl AudioCallbackState {
         audio_lock_miss_count: Arc<AtomicU32>,
         emergency_reset_count: Arc<AtomicU32>,
         emergency_reset_requested: Arc<AtomicBool>,
+        callback_last_us: Arc<AtomicU32>,
+        callback_max_us: Arc<AtomicU32>,
+        callback_over_budget_count: Arc<AtomicU32>,
+        sample_rate: u32,
     ) -> Self {
         Self {
             midi_rx,
@@ -228,6 +240,10 @@ impl AudioCallbackState {
             audio_lock_miss_count,
             emergency_reset_count,
             emergency_reset_requested,
+            callback_last_us,
+            callback_max_us,
+            callback_over_budget_count,
+            sample_rate,
             last_output: Vec::new(),
             needs_emergency_reset: false,
             last_frames: 0,
@@ -277,7 +293,10 @@ impl AudioCallbackState {
             self.needs_emergency_reset = true;
             self.pending_midi.clear();
         }
-        while let Ok(msg) = self.midi_rx.pop() {
+        for _ in 0..MIDI_DRAIN_BUDGET_PER_CALLBACK {
+            let Ok(msg) = self.midi_rx.pop() else {
+                break;
+            };
             self.enqueue_midi(msg);
         }
     }

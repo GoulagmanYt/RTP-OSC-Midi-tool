@@ -18,6 +18,13 @@ type Props = {
   latencyDisplay: number | null;
   midiRate?: number | null;
   oscRate?: number | null;
+  audioMidiDrops?: number | null;
+  audioLockMisses?: number | null;
+  audioEmergencyResets?: number | null;
+  audioCallbackMaxUs?: number | null;
+  audioCallbackOverBudgetCount?: number | null;
+  audioMmcssEnabled?: boolean | null;
+  audioPowerThrottlingDisabled?: boolean | null;
   preflight: PreflightReport | null;
   requestedBufferSamples?: number;
   sampleRate?: number;
@@ -46,6 +53,13 @@ export function DiagnosticsGrid({
   preflight,
   midiRate,
   oscRate,
+  audioMidiDrops,
+  audioLockMisses,
+  audioEmergencyResets,
+  audioCallbackMaxUs,
+  audioCallbackOverBudgetCount,
+  audioMmcssEnabled,
+  audioPowerThrottlingDisabled,
   requestedBufferSamples,
   sampleRate,
   status,
@@ -267,6 +281,56 @@ export function DiagnosticsGrid({
             <div className="flex items-center justify-between">
               <span>{t("dashboard.xruns")}</span>
               <span className="font-medium">{xrunCount ?? "--"}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span>{t("dashboard.audioMidiDrops")}</span>
+              <span className="font-medium">{audioMidiDrops ?? "--"}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span>{t("dashboard.audioLockMisses")}</span>
+              <span className="font-medium">{audioLockMisses ?? "--"}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span>{t("dashboard.audioEmergencyResets")}</span>
+              <span className="font-medium">{audioEmergencyResets ?? "--"}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span>{t("dashboard.audioCallbackMax")}</span>
+              <span className="font-medium">
+                {audioCallbackMaxUs !== null && audioCallbackMaxUs !== undefined ? `${audioCallbackMaxUs} us` : "--"}
+              </span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span>{t("dashboard.audioCallbackOverBudget")}</span>
+              <span className="font-medium">{audioCallbackOverBudgetCount ?? "--"}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span>{t("dashboard.audioMmcss")}</span>
+              <Badge variant={audioMmcssEnabled === false ? "warning" : audioMmcssEnabled ? "success" : "secondary"}>
+                {audioMmcssEnabled === null || audioMmcssEnabled === undefined
+                  ? "--"
+                  : audioMmcssEnabled
+                  ? t("common.on")
+                  : t("common.off")}
+              </Badge>
+            </div>
+            <div className="flex items-center justify-between">
+              <span>{t("dashboard.audioPowerTuning")}</span>
+              <Badge
+                variant={
+                  audioPowerThrottlingDisabled === false
+                    ? "warning"
+                    : audioPowerThrottlingDisabled
+                    ? "success"
+                    : "secondary"
+                }
+              >
+                {audioPowerThrottlingDisabled === null || audioPowerThrottlingDisabled === undefined
+                  ? "--"
+                  : audioPowerThrottlingDisabled
+                  ? t("common.on")
+                  : t("common.off")}
+              </Badge>
             </div>
             <div className="flex items-center justify-between">
               <span>{t("dashboard.monitorDropouts")}</span>

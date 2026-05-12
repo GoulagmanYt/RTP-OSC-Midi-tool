@@ -49,6 +49,9 @@ pub(super) fn build_stream(
     audio_lock_miss_count: Arc<AtomicU32>,
     emergency_reset_count: Arc<AtomicU32>,
     emergency_reset_requested: Arc<AtomicBool>,
+    callback_last_us: Arc<AtomicU32>,
+    callback_max_us: Arc<AtomicU32>,
+    callback_over_budget_count: Arc<AtomicU32>,
     vst_path: PathBuf,
     logger: &FrontendLogger,
     backend_name: &str,
@@ -85,7 +88,10 @@ pub(super) fn build_stream(
     let mut config: StreamConfig = desired
         .with_sample_rate(SampleRate(actual_sample_rate))
         .config();
-    let target_buffer_size = choose_buffer_size(supported_buffer_size, buffer_size);
+    let mut target_buffer_size = choose_buffer_size(supported_buffer_size, buffer_size);
+    if backend_name.to_lowercase().contains("wasapi") {
+        target_buffer_size = choose_buffer_size(supported_buffer_size, target_buffer_size.max(512));
+    }
     if target_buffer_size != buffer_size {
         logger.warn(format!(
             "Requested buffer size {} not supported on '{}'. Using {} instead.",
@@ -166,6 +172,10 @@ pub(super) fn build_stream(
                     audio_lock_miss_count.clone(),
                     emergency_reset_count.clone(),
                     emergency_reset_requested.clone(),
+                    callback_last_us.clone(),
+                    callback_max_us.clone(),
+                    callback_over_budget_count.clone(),
+                    actual_sample_rate,
                     device_name,
                 )?,
                 SampleFormat::I16 => build_output_stream_for_sample::<i16>(
@@ -186,6 +196,10 @@ pub(super) fn build_stream(
                     audio_lock_miss_count.clone(),
                     emergency_reset_count.clone(),
                     emergency_reset_requested.clone(),
+                    callback_last_us.clone(),
+                    callback_max_us.clone(),
+                    callback_over_budget_count.clone(),
+                    actual_sample_rate,
                     device_name,
                 )?,
                 SampleFormat::U16 => build_output_stream_for_sample::<u16>(
@@ -206,6 +220,10 @@ pub(super) fn build_stream(
                     audio_lock_miss_count.clone(),
                     emergency_reset_count.clone(),
                     emergency_reset_requested.clone(),
+                    callback_last_us.clone(),
+                    callback_max_us.clone(),
+                    callback_over_budget_count.clone(),
+                    actual_sample_rate,
                     device_name,
                 )?,
                 other => {

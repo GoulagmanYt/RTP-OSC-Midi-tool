@@ -18,6 +18,7 @@ use rtpmidi::sessions::{
 };
 
 use crate::{
+    bridge::pipeline::try_enqueue_midi_frame,
     logger::{logs_enabled, FrontendLogger},
     midi::MidiFrame,
     types::RtpParticipantInfo,
@@ -178,7 +179,7 @@ impl RtpServer {
                         return;
                     };
 
-                    let _ = tx.send(MidiFrame {
+                    let _ = try_enqueue_midi_frame(&tx, MidiFrame {
                         data: bytes,
                         source: std::sync::Arc::clone(&rtp_source),
                     });
@@ -344,11 +345,12 @@ fn emit_participants(logger: &FrontendLogger, participants: &Arc<Mutex<Vec<RtpPa
 #[cfg(test)]
 mod tests {
     #[test]
-    fn rtp_callback_does_not_use_drop_send_path() {
+    fn rtp_callback_uses_bounded_enqueue_path() {
         let source = include_str!("rtp_server.rs");
-        let forbidden = ["tx", "try_send("].join(".");
 
+        let required = ["try_enqueue_midi_frame", "(&tx, MidiFrame"].concat();
+        let forbidden = ["tx", ".send(MidiFrame"].concat();
+        assert!(source.contains(&required));
         assert!(!source.contains(&forbidden));
-        assert!(source.contains("tx.send(MidiFrame"));
     }
 }

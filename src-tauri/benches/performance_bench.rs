@@ -123,6 +123,14 @@ fn bench_json_serialization(c: &mut Criterion) {
         audio_buffer_mismatch: Some(false),
         vst_midi_compatible: Some(true),
         audio_xruns: Some(0),
+        audio_midi_drops: Some(0),
+        audio_lock_misses: Some(0),
+        audio_emergency_resets: Some(0),
+        audio_callback_max_us: Some(0),
+        audio_callback_last_us: Some(0),
+        audio_callback_over_budget_count: Some(0),
+        audio_mmcss_enabled: Some(true),
+        audio_power_throttling_disabled: Some(true),
         audio_limiter_enabled: Some(false),
     };
 

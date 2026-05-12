@@ -51,7 +51,7 @@ export default function AudioPage() {
         onSaveConfig={controller.persistConfig}
         onSelectVst={controller.handleSelectVst}
         onToggleAudio={controller.handleAudioToggle}
-        onUpdateAudioConfig={(patch) => controller.updateConfig({ audio: patch })}
+        onUpdateAudioConfig={controller.updateAudioConfig}
       />
       <VstParametersDialog
         isVst3={controller.isVst3}

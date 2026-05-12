@@ -34,6 +34,15 @@ export default function Dashboard() {
   const vstMidiCompatible = status?.vstMidiCompatible ?? null;
   const limiterEnabled = status?.audioLimiterEnabled ?? config?.audio.limiterEnabled ?? false;
   const xrunCount = metrics?.audioXruns ?? status?.audioXruns ?? null;
+  const audioMidiDrops = metrics?.audioMidiDrops ?? status?.audioMidiDrops ?? null;
+  const audioLockMisses = metrics?.audioLockMisses ?? status?.audioLockMisses ?? null;
+  const audioEmergencyResets = metrics?.audioEmergencyResets ?? status?.audioEmergencyResets ?? null;
+  const audioCallbackMaxUs = metrics?.audioCallbackMaxUs ?? status?.audioCallbackMaxUs ?? null;
+  const audioCallbackOverBudgetCount =
+    metrics?.audioCallbackOverBudgetCount ?? status?.audioCallbackOverBudgetCount ?? null;
+  const audioMmcssEnabled = metrics?.audioMmcssEnabled ?? status?.audioMmcssEnabled ?? null;
+  const audioPowerThrottlingDisabled =
+    metrics?.audioPowerThrottlingDisabled ?? status?.audioPowerThrottlingDisabled ?? null;
   const latencyMs =
     metrics?.audioLatencyMs ??
     status?.audioLatencyMs ??
@@ -48,16 +57,29 @@ export default function Dashboard() {
   const latencyDisplay = latencyMs !== null ? Number(latencyMs.toFixed(1)) : null;
 
   useEffect(() => {
-    if (metrics?.audioXruns === null || metrics?.audioXruns === undefined) {
+    const healthTotal =
+      (metrics?.audioXruns ?? 0) +
+      (metrics?.audioMidiDrops ?? 0) +
+      (metrics?.audioLockMisses ?? 0) +
+      (metrics?.audioEmergencyResets ?? 0) +
+      (metrics?.audioCallbackOverBudgetCount ?? 0);
+    if (!metrics || healthTotal === 0) {
       return;
     }
-    const current = metrics.audioXruns;
+    const current = healthTotal;
     const previous = lastXrun.current;
     lastXrun.current = current;
     if (previous !== null && current > previous) {
       setLastDropoutAt(Date.now());
     }
-  }, [metrics?.audioXruns]);
+  }, [
+    metrics,
+    metrics?.audioCallbackOverBudgetCount,
+    metrics?.audioEmergencyResets,
+    metrics?.audioLockMisses,
+    metrics?.audioMidiDrops,
+    metrics?.audioXruns,
+  ]);
 
   useEffect(() => {
     if (lastDropoutAt === null) return;
@@ -125,6 +147,13 @@ export default function Dashboard() {
           latencyDisplay={latencyDisplay}
           midiRate={midiRate}
           oscRate={oscRate}
+          audioMidiDrops={audioMidiDrops}
+          audioLockMisses={audioLockMisses}
+          audioEmergencyResets={audioEmergencyResets}
+          audioCallbackMaxUs={audioCallbackMaxUs}
+          audioCallbackOverBudgetCount={audioCallbackOverBudgetCount}
+          audioMmcssEnabled={audioMmcssEnabled}
+          audioPowerThrottlingDisabled={audioPowerThrottlingDisabled}
           preflight={preflight}
           requestedBufferSamples={requestedBufferSamples}
           sampleRate={sampleRate}

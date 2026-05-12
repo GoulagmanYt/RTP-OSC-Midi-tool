@@ -28,6 +28,8 @@ use std::{
 };
 use tauri::{Emitter, Window};
 
+pub(super) const BRIDGE_MIDI_QUEUE_CAPACITY: usize = 8192;
+
 pub(super) fn rtp_requested(config: &Config) -> bool {
     config.rtp.enabled
         || config.rtp.remote_enabled
@@ -119,9 +121,9 @@ pub(super) fn start_runtime(
     let wants_rtp = rtp_requested(&config);
     let mut status = build_initial_status(&config, &audio, wants_rtp);
 
-    use crossbeam_channel::unbounded;
+    use crossbeam_channel::bounded;
     let stop = Arc::new(AtomicBool::new(false));
-    let (midi_tx, midi_rx) = unbounded::<MidiFrame>();
+    let (midi_tx, midi_rx) = bounded::<MidiFrame>(BRIDGE_MIDI_QUEUE_CAPACITY);
     let shared_config = Arc::new(Mutex::new(config.clone()));
     let config_rev = Arc::new(AtomicU64::new(1));
     let activity_tracker = Arc::new(Mutex::new(MidiActivityTracker::default()));
@@ -258,10 +260,10 @@ fn cleanup_startup_rtp(
 #[cfg(test)]
 mod tests {
     #[test]
-    fn runtime_uses_unbounded_midi_channel() {
+    fn runtime_uses_bounded_midi_channel() {
         let source = include_str!("lifecycle.rs");
-        let required = ["unbounded", "::<MidiFrame>()"].concat();
-        let forbidden = ["bounded", "::<MidiFrame>(2048)"].concat();
+        let required = ["bounded", "::<MidiFrame>(BRIDGE_MIDI_QUEUE_CAPACITY)"].concat();
+        let forbidden = ["unbounded", "::<MidiFrame>()"].concat();
 
         assert!(source.contains(&required));
         assert!(!source.contains(&forbidden));

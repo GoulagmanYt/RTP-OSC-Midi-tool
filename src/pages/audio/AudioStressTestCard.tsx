@@ -13,7 +13,6 @@ const TEST_MODES: { value: StressTestMode; label: string; icon: React.ReactNode;
   { value: "audio-vst", label: "Audio/VST Only", icon: <AudioWaveform className="h-4 w-4" />, description: "Test direct moteur audio (bypass bridge)" },
   { value: "bridge", label: "Bridge Pipeline", icon: <Workflow className="h-4 w-4" />, description: "Test routage et filtrage MIDI" },
   { value: "end-to-end", label: "End-to-End", icon: <Layers className="h-4 w-4" />, description: "Test complet de la pipeline" },
-  { value: "rtp", label: "RTP Input", icon: <Network className="h-4 w-4" />, description: "Test entrée RTP-MIDI (externe)" },
 ];
 
 export function AudioStressTestCard({ bridgeRunning, audioRunning }: Props) {

@@ -127,6 +127,35 @@ impl AudioEngine {
             .map(|r| r.emergency_reset_count.load(Ordering::Relaxed))
     }
 
+    pub fn callback_last_us(&self) -> Option<u32> {
+        self.runtime
+            .lock()
+            .as_ref()
+            .map(|r| r.callback_last_us.load(Ordering::Relaxed))
+    }
+
+    pub fn callback_max_us(&self) -> Option<u32> {
+        self.runtime
+            .lock()
+            .as_ref()
+            .map(|r| r.callback_max_us.load(Ordering::Relaxed))
+    }
+
+    pub fn callback_over_budget_count(&self) -> Option<u32> {
+        self.runtime
+            .lock()
+            .as_ref()
+            .map(|r| r.callback_over_budget_count.load(Ordering::Relaxed))
+    }
+
+    pub fn mmcss_enabled(&self) -> Option<bool> {
+        super::windows_tuning::audio_mmcss_enabled()
+    }
+
+    pub fn power_throttling_disabled(&self) -> Option<bool> {
+        super::windows_tuning::audio_power_throttling_disabled()
+    }
+
     pub fn ping(&self) -> Result<(), AudioError> {
         if self.runtime.lock().is_none() {
             return Err(AudioError::Message("Audio runtime not started".into()));

@@ -14,7 +14,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::midi::MidiFrame;
+use crate::{bridge::pipeline::try_enqueue_midi_frame, midi::MidiFrame};
 
 const PROTOCOL_VERSION: u8 = 1;
 pub const DEFAULT_RELIABLE_PLAYBACK_ADDR: &str = "0.0.0.0:5056";
@@ -384,7 +384,7 @@ fn run_schedule(
                 data: SmallVec::from_slice(&event.data),
                 source: Arc::clone(&source),
             };
-            if tx.send(frame).is_ok() {
+            if try_enqueue_midi_frame(&tx, frame).is_ok() {
                 processed += 1;
                 MESSAGES_OUT.fetch_add(1, Ordering::Relaxed);
             } else {
@@ -430,7 +430,7 @@ fn inject_all_notes_off(tx: &Sender<MidiFrame>, source: &str) {
     let source: Arc<str> = Arc::from(source.to_string());
     for channel in 0u8..16 {
         for data in [[0xB0 | channel, 64, 0], [0xB0 | channel, 123, 0]] {
-            let _ = tx.send(MidiFrame {
+            let _ = try_enqueue_midi_frame(tx, MidiFrame {
                 data: SmallVec::from_slice(&data),
                 source: Arc::clone(&source),
             });

@@ -121,6 +121,14 @@ pub(super) fn apply_vst2_parameters(instance: &mut PluginInstance, values: &[f32
 }
 
 pub(super) fn save_vst_state(plugin: &Arc<Mutex<PluginBackend>>, vst_path: &Path) {
+    save_vst_state_inner(plugin, vst_path, false);
+}
+
+pub(super) fn save_vst_state_blocking(plugin: &Arc<Mutex<PluginBackend>>, vst_path: &Path) {
+    save_vst_state_inner(plugin, vst_path, true);
+}
+
+fn save_vst_state_inner(plugin: &Arc<Mutex<PluginBackend>>, vst_path: &Path, allow_blocking: bool) {
     if is_sforzando_vst3(vst_path) {
         return;
     }
@@ -133,9 +141,15 @@ pub(super) fn save_vst_state(plugin: &Arc<Mutex<PluginBackend>>, vst_path: &Path
         let _ = fs::create_dir_all(parent);
     }
 
-    let mut guard = match plugin.try_lock() {
-        Some(guard) => guard,
-        None => plugin.lock(),
+    let Some(mut guard) = plugin.try_lock().or_else(|| {
+        if allow_blocking {
+            Some(plugin.lock())
+        } else {
+            None
+        }
+    }) else {
+        background_log("warn", "VST state save skipped because plugin is busy");
+        return;
     };
 
     match &mut *guard {
@@ -283,4 +297,22 @@ pub(super) fn load_vst_state(
 fn is_sforzando_vst3(vst_path: &Path) -> bool {
     let path = vst_path.to_string_lossy().to_lowercase();
     path.ends_with("sforzando.vst3") || path.contains("\\sforzando.vst3")
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn save_vst_state_nonblocking_skips_when_plugin_busy() {
+        let source = include_str!("state_codec.rs");
+
+        let forbidden = ["None => ", "plugin.lock()"].concat();
+        assert!(
+            !source.contains(&forbidden),
+            "save_vst_state must not block the audio callback when the plugin is busy"
+        );
+        assert!(
+            source.contains("save_vst_state_blocking"),
+            "blocking state save should be explicit and used only after stream shutdown"
+        );
+    }
 }

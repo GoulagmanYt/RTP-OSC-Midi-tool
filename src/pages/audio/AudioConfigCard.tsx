@@ -280,6 +280,42 @@ export function AudioConfigCard({
           <span>{t("audio.xruns")}</span>
           <span className="font-semibold text-foreground">{status?.audioXruns ?? "--"}</span>
         </div>
+        <div className="grid gap-2 rounded-md border border-border/60 bg-muted/20 p-3 text-xs text-muted-foreground md:grid-cols-2">
+          <div className="flex items-center justify-between gap-3">
+            <span>{t("dashboard.audioMidiDrops")}</span>
+            <span className="font-semibold text-foreground">{status?.audioMidiDrops ?? "--"}</span>
+          </div>
+          <div className="flex items-center justify-between gap-3">
+            <span>{t("dashboard.audioLockMisses")}</span>
+            <span className="font-semibold text-foreground">{status?.audioLockMisses ?? "--"}</span>
+          </div>
+          <div className="flex items-center justify-between gap-3">
+            <span>{t("dashboard.audioEmergencyResets")}</span>
+            <span className="font-semibold text-foreground">{status?.audioEmergencyResets ?? "--"}</span>
+          </div>
+          <div className="flex items-center justify-between gap-3">
+            <span>{t("dashboard.audioCallbackOverBudget")}</span>
+            <span className="font-semibold text-foreground">{status?.audioCallbackOverBudgetCount ?? "--"}</span>
+          </div>
+          <div className="flex items-center justify-between gap-3">
+            <span>{t("dashboard.audioCallbackMax")}</span>
+            <span className="font-semibold text-foreground">
+              {status?.audioCallbackMaxUs !== null && status?.audioCallbackMaxUs !== undefined
+                ? `${status.audioCallbackMaxUs} us`
+                : "--"}
+            </span>
+          </div>
+          <div className="flex items-center justify-between gap-3">
+            <span>{t("dashboard.audioMmcss")}</span>
+            <span className="font-semibold text-foreground">
+              {status?.audioMmcssEnabled === null || status?.audioMmcssEnabled === undefined
+                ? "--"
+                : status.audioMmcssEnabled
+                ? "OK"
+                : t("common.off")}
+            </span>
+          </div>
+        </div>
 
         <div className="space-y-2">
           <Label>{t("audio.vstInstruments", { path: "Windows VST folders" })}</Label>

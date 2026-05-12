@@ -22,7 +22,7 @@ use super::{
     device_selection::{select_device, select_host},
     engine::{db_to_linear, is_sforzando_vst3, AudioEngine},
     runtime_state::{AudioError, AudioRuntime, AudioSettings, EditorWindow},
-    state_codec::{load_vst_state, save_vst_state},
+    state_codec::{load_vst_state, save_vst_state_blocking},
     stream_runtime::build_stream,
     windows_tuning::apply_audio_process_tuning,
 };
@@ -92,7 +92,7 @@ impl AudioEngine {
 
             reset_all_notes(plugin.clone());
             drop(runtime);
-            save_vst_state(&plugin, &vst_path);
+            save_vst_state_blocking(&plugin, &vst_path);
             if is_vst3 && !is_sforzando {
                 if let Some(handle) = app_handle_for_drop {
                     let (tx, rx) = mpsc::channel();
@@ -176,6 +176,9 @@ impl AudioEngine {
         let midi_drop_count = Arc::new(AtomicU32::new(0));
         let audio_lock_miss_count = Arc::new(AtomicU32::new(0));
         let emergency_reset_count = Arc::new(AtomicU32::new(0));
+        let callback_last_us = Arc::new(AtomicU32::new(0));
+        let callback_max_us = Arc::new(AtomicU32::new(0));
+        let callback_over_budget_count = Arc::new(AtomicU32::new(0));
 
         let mut candidates: Vec<(Option<String>, Option<String>, u8, bool)> = Vec::new();
         let preferred_backend = settings.backend.as_deref().unwrap_or("auto").to_lowercase();
@@ -300,6 +303,9 @@ impl AudioEngine {
                 audio_lock_miss_count.clone(),
                 emergency_reset_count.clone(),
                 self.midi_emergency_reset_requested.clone(),
+                callback_last_us.clone(),
+                callback_max_us.clone(),
+                callback_over_budget_count.clone(),
                 vst_path.clone(),
                 &logger,
                 backend_name,
@@ -391,6 +397,9 @@ impl AudioEngine {
             midi_drop_count,
             audio_lock_miss_count,
             emergency_reset_count,
+            callback_last_us,
+            callback_max_us,
+            callback_over_budget_count,
             sample_rate: active_sample_rate,
             requested_buffer_size: settings.buffer_size,
             stream_buffer_size,

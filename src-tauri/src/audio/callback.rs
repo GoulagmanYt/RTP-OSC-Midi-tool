@@ -4,6 +4,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU32, Ordering},
     Arc,
 };
+use std::time::Instant;
 
 use cpal::{
     traits::DeviceTrait, FromSample, OutputCallbackInfo, Sample, SizedSample, Stream, StreamConfig,
@@ -46,6 +47,10 @@ pub(super) fn build_output_stream_for_sample<T: Sample + SizedSample + FromSampl
     audio_lock_miss_count: Arc<AtomicU32>,
     emergency_reset_count: Arc<AtomicU32>,
     emergency_reset_requested: Arc<AtomicBool>,
+    callback_last_us: Arc<AtomicU32>,
+    callback_max_us: Arc<AtomicU32>,
+    callback_over_budget_count: Arc<AtomicU32>,
+    sample_rate: u32,
     device_name: &str,
 ) -> Result<Stream, AudioError> {
     let mut state = AudioCallbackState::new(
@@ -59,6 +64,10 @@ pub(super) fn build_output_stream_for_sample<T: Sample + SizedSample + FromSampl
         audio_lock_miss_count,
         emergency_reset_count,
         emergency_reset_requested,
+        callback_last_us,
+        callback_max_us,
+        callback_over_budget_count,
+        sample_rate,
     );
     device
         .build_output_stream(
@@ -100,10 +109,12 @@ fn audio_callback<T: Sample + FromSample<f32>>(
     plugin: &Arc<Mutex<PluginBackend>>,
     _info: &OutputCallbackInfo,
 ) {
+    let callback_started = Instant::now();
     let silence = T::from_sample(0.0f32);
     if device_channels == 0 {
         meter_left.store(0.0f32.to_bits(), Ordering::Relaxed);
         meter_right.store(0.0f32.to_bits(), Ordering::Relaxed);
+        finish_callback_timing(state, 0, callback_started);
         return;
     }
 
@@ -111,6 +122,7 @@ fn audio_callback<T: Sample + FromSample<f32>>(
     if frames == 0 {
         meter_left.store(0.0f32.to_bits(), Ordering::Relaxed);
         meter_right.store(0.0f32.to_bits(), Ordering::Relaxed);
+        finish_callback_timing(state, 0, callback_started);
         return;
     }
 
@@ -130,6 +142,7 @@ fn audio_callback<T: Sample + FromSample<f32>>(
                 meter_left,
                 meter_right,
             );
+            finish_callback_timing(state, frames, callback_started);
             return;
         }
     };
@@ -177,6 +190,7 @@ fn audio_callback<T: Sample + FromSample<f32>>(
                     meter_left,
                     meter_right,
                 );
+                finish_callback_timing(state, frames, callback_started);
                 return;
             }
         }
@@ -212,6 +226,7 @@ fn audio_callback<T: Sample + FromSample<f32>>(
                         meter_left,
                         meter_right,
                     );
+                    finish_callback_timing(state, frames, callback_started);
                     return;
                 }
             }
@@ -222,6 +237,7 @@ fn audio_callback<T: Sample + FromSample<f32>>(
         data.fill(silence);
         meter_left.store(0.0f32.to_bits(), Ordering::Relaxed);
         meter_right.store(0.0f32.to_bits(), Ordering::Relaxed);
+        finish_callback_timing(state, frames, callback_started);
         return;
     }
 
@@ -275,4 +291,32 @@ fn audio_callback<T: Sample + FromSample<f32>>(
 
     meter_left.store(peak_l.min(1.0).to_bits(), Ordering::Relaxed);
     meter_right.store(peak_r.min(1.0).to_bits(), Ordering::Relaxed);
+    finish_callback_timing(state, frames, callback_started);
+}
+
+fn finish_callback_timing(state: &AudioCallbackState, frames: usize, started: Instant) {
+    let elapsed_us = started.elapsed().as_micros().min(u32::MAX as u128) as u32;
+    state.callback_last_us.store(elapsed_us, Ordering::Relaxed);
+
+    let mut current = state.callback_max_us.load(Ordering::Relaxed);
+    while elapsed_us > current {
+        match state.callback_max_us.compare_exchange(
+            current,
+            elapsed_us,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => break,
+            Err(observed) => current = observed,
+        }
+    }
+
+    if frames > 0 && state.sample_rate > 0 {
+        let budget_us = ((frames as u64) * 1_000_000u64 / state.sample_rate as u64) as u32;
+        if budget_us > 0 && elapsed_us > budget_us {
+            state
+                .callback_over_budget_count
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }

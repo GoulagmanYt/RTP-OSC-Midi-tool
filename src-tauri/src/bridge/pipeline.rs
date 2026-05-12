@@ -2,10 +2,11 @@ use crate::{
     audio::AudioEngine,
     config::{Config, RoutingAssignment, RoutingMapping, RoutingProfile},
     logger::{logs_enabled, should_log_debug, FrontendLogger},
-    midi::{parse_note, parse_sustain, MidiFrame, MidiKind},
+    midi::{is_critical_release_message, parse_note, parse_sustain, MidiFrame, MidiKind},
     osc::OscClient,
     types::MidiNoteEvent,
 };
+use crossbeam_channel::{Sender, TrySendError};
 use midir::MidiOutputConnection;
 use std::{
     collections::HashMap,
@@ -24,6 +25,7 @@ static PIPELINE_OUT_COUNT: AtomicU64 = AtomicU64::new(0);
 static PIPELINE_FILTERED_COUNT: AtomicU64 = AtomicU64::new(0);
 static PIPELINE_QUEUE_DEPTH: AtomicU64 = AtomicU64::new(0);
 static PIPELINE_QUEUE_MAX_DEPTH: AtomicU64 = AtomicU64::new(0);
+static PIPELINE_DROPPED_COUNT: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PipelineMetricsSnapshot {
@@ -32,6 +34,7 @@ pub struct PipelineMetricsSnapshot {
     pub messages_in: u64,
     pub messages_out: u64,
     pub messages_filtered: u64,
+    pub messages_dropped: u64,
 }
 
 #[derive(Clone)]
@@ -406,6 +409,30 @@ pub fn pipeline_metrics_snapshot() -> PipelineMetricsSnapshot {
         messages_in: PIPELINE_IN_COUNT.load(Ordering::Relaxed),
         messages_out: PIPELINE_OUT_COUNT.load(Ordering::Relaxed),
         messages_filtered: PIPELINE_FILTERED_COUNT.load(Ordering::Relaxed),
+        messages_dropped: PIPELINE_DROPPED_COUNT.load(Ordering::Relaxed),
+    }
+}
+
+pub fn try_enqueue_midi_frame(tx: &Sender<MidiFrame>, frame: MidiFrame) -> Result<(), String> {
+    match tx.try_send(frame) {
+        Ok(()) => Ok(()),
+        Err(TrySendError::Full(frame)) => {
+            if is_critical_release_message(frame.data.as_slice()) {
+                std::thread::yield_now();
+                match tx.try_send(frame) {
+                    Ok(()) => Ok(()),
+                    Err(TrySendError::Full(_)) => {
+                        PIPELINE_DROPPED_COUNT.fetch_add(1, Ordering::Relaxed);
+                        Err("Bridge queue full; critical MIDI release dropped".to_string())
+                    }
+                    Err(TrySendError::Disconnected(_)) => Err("Bridge not running".to_string()),
+                }
+            } else {
+                PIPELINE_DROPPED_COUNT.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+        }
+        Err(TrySendError::Disconnected(_)) => Err("Bridge not running".to_string()),
     }
 }
 
@@ -416,6 +443,7 @@ pub fn reset_pipeline_stats() {
     PIPELINE_FILTERED_COUNT.store(0, Ordering::Relaxed);
     PIPELINE_QUEUE_DEPTH.store(0, Ordering::Relaxed);
     PIPELINE_QUEUE_MAX_DEPTH.store(0, Ordering::Relaxed);
+    PIPELINE_DROPPED_COUNT.store(0, Ordering::Relaxed);
 }
 
 #[cfg(test)]
@@ -436,6 +464,7 @@ mod tests {
         assert_eq!(snapshot.queue_max_depth, 7);
         assert_eq!(snapshot.messages_in, 10);
         assert_eq!(snapshot.messages_out, 9);
+        assert_eq!(snapshot.messages_dropped, 0);
     }
 
     #[test]

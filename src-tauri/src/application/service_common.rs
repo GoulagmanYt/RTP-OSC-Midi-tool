@@ -48,6 +48,14 @@ pub(crate) fn with_audio_status(mut status: BridgeStatus, audio: &AudioEngine) -
     status.audio_buffer_mismatch = audio.buffer_size_mismatch();
     status.vst_midi_compatible = audio.vst_midi_compatible();
     status.audio_xruns = audio.xrun_count();
+    status.audio_midi_drops = audio.midi_drop_count();
+    status.audio_lock_misses = audio.audio_lock_miss_count();
+    status.audio_emergency_resets = audio.emergency_reset_count();
+    status.audio_callback_max_us = audio.callback_max_us();
+    status.audio_callback_last_us = audio.callback_last_us();
+    status.audio_callback_over_budget_count = audio.callback_over_budget_count();
+    status.audio_mmcss_enabled = audio.mmcss_enabled();
+    status.audio_power_throttling_disabled = audio.power_throttling_disabled();
     status.audio_limiter_enabled = audio.limiter_enabled();
     status
 }
@@ -78,4 +86,25 @@ pub(crate) fn io_to_error(code: &str, domain: &str, err: impl ToString) -> Comma
 
 pub(crate) fn clear_log_file() -> Result<(), CommandError> {
     logger::clear_log_file().map_err(|err| paths_error("paths.clear-log-failed", err))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn with_audio_status_includes_audio_health_counters() {
+        let source = include_str!("service_common.rs");
+
+        for required in [
+            "status.audio_midi_drops = audio.midi_drop_count();",
+            "status.audio_lock_misses = audio.audio_lock_miss_count();",
+            "status.audio_emergency_resets = audio.emergency_reset_count();",
+            "status.audio_callback_max_us = audio.callback_max_us();",
+            "status.audio_callback_last_us = audio.callback_last_us();",
+            "status.audio_callback_over_budget_count = audio.callback_over_budget_count();",
+            "status.audio_mmcss_enabled = audio.mmcss_enabled();",
+            "status.audio_power_throttling_disabled = audio.power_throttling_disabled();",
+        ] {
+            assert!(source.contains(required), "missing status assignment: {required}");
+        }
+    }
 }

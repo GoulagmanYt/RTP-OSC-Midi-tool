@@ -13,7 +13,7 @@ mod runtime_state;
 mod state_codec;
 mod stream_config;
 mod stream_runtime;
-mod windows_tuning;
+pub mod windows_tuning;
 
 pub use engine::AudioEngine;
 pub use runtime_state::{AudioError, AudioSettings};

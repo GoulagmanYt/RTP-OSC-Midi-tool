@@ -5,7 +5,7 @@ use super::runtime_state::{timestamp_ms, AudioRuntime, MidiPacket};
 use super::{
     callback::{midi_to_rack_event, replay_last_output_or_silence, reset_messages_for_channel},
     plugin_host::SimpleHost,
-    runtime_state::{AudioCallbackState, MAX_PENDING_MIDI},
+    runtime_state::{AudioCallbackState, MAX_PENDING_MIDI, MIDI_DRAIN_BUDGET_PER_CALLBACK},
     state_codec::{decode_state, encode_state_chunk, encode_state_params, SavedState},
 };
 use std::{
@@ -36,6 +36,16 @@ use super::stream_config::{buffer_fallback_candidates, choose_buffer_size, max_p
 use crate::logger::background_log;
 #[cfg(test)]
 use crate::plugin_probe::detect_vst3_channels;
+
+const CRITICAL_MIDI_PUSH_ATTEMPTS: usize = 64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum MidiSendOutcome {
+    Sent,
+    DroppedNonCritical,
+    CriticalFallbackReset,
+    AudioStopped,
+}
 
 // FIX #1: Add #[derive(Clone)] — all fields are Arc<T> so Clone is safe and required
 // for audio.clone() calls in bridge.rs and main.rs.
@@ -82,16 +92,21 @@ impl AudioEngine {
     }
 
     pub fn send_midi(&self, bytes: &[u8]) {
+        let _ = self.send_midi_with_outcome(bytes);
+    }
+
+    pub(super) fn send_midi_with_outcome(&self, bytes: &[u8]) -> MidiSendOutcome {
         let Some(mut packet) = MidiPacket::from_bytes(bytes) else {
-            return;
+            return MidiSendOutcome::AudioStopped;
         };
 
+        let mut attempts = 0usize;
         loop {
             let push_result = {
                 let mut guard = self.midi_tx.lock();
                 let Some(tx) = guard.as_mut() else {
                     background_log("debug", "send_midi: Audio runtime not started");
-                    return;
+                    return MidiSendOutcome::AudioStopped;
                 };
                 tx.push(packet)
             };
@@ -99,14 +114,32 @@ impl AudioEngine {
             match push_result {
                 Ok(()) => {
                     self.record_midi_push(bytes);
-                    return;
+                    return MidiSendOutcome::Sent;
                 }
                 Err(rtrb::PushError::Full(returned)) => {
                     packet = returned;
-                    self.record_midi_backpressure(bytes);
+                    if !packet.is_critical_release() {
+                        self.record_midi_backpressure(bytes);
+                        self.record_midi_drop_metric();
+                        return MidiSendOutcome::DroppedNonCritical;
+                    }
+                    if attempts >= CRITICAL_MIDI_PUSH_ATTEMPTS {
+                        self.record_midi_backpressure(bytes);
+                        self.record_midi_drop_metric();
+                        self.midi_emergency_reset_requested
+                            .store(true, Ordering::Relaxed);
+                        return MidiSendOutcome::CriticalFallbackReset;
+                    }
+                    attempts += 1;
                     std::thread::yield_now();
                 }
             }
+        }
+    }
+
+    fn record_midi_drop_metric(&self) {
+        if let Some(runtime) = self.runtime.lock().as_ref() {
+            runtime.midi_drop_count.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -271,6 +304,10 @@ mod tests {
             Arc::new(AtomicU32::new(0)),
             Arc::new(AtomicU32::new(0)),
             reset_flag,
+            Arc::new(AtomicU32::new(0)),
+            Arc::new(AtomicU32::new(0)),
+            Arc::new(AtomicU32::new(0)),
+            48_000,
         );
         // Pre-fill pending MIDI with note-on events
         for note in 0..10u8 {
@@ -310,6 +347,10 @@ mod tests {
             Arc::new(AtomicU32::new(0)),
             Arc::new(AtomicU32::new(0)),
             Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicU32::new(0)),
+            Arc::new(AtomicU32::new(0)),
+            Arc::new(AtomicU32::new(0)),
+            48_000,
         );
         for _ in 0..MAX_PENDING_MIDI {
             state
@@ -372,40 +413,76 @@ mod tests {
     }
 
     #[test]
-    fn send_midi_waits_for_ring_capacity_instead_of_dropping() {
+    fn send_midi_drops_non_critical_when_ring_full() {
         let engine = AudioEngine::new();
         let (mut tx, mut rx) = RingBuffer::<MidiPacket>::new(1);
         tx.push(MidiPacket::from_bytes(&[0x90, 60, 100]).expect("first packet"))
             .expect("prefill ring");
         *engine.midi_tx.lock() = Some(tx);
 
-        let done = Arc::new(AtomicBool::new(false));
-        let done_for_thread = done.clone();
-        let engine_for_thread = engine.clone();
-        let handle = thread::spawn(move || {
-            engine_for_thread.send_midi(&[0x90, 61, 100]);
-            done_for_thread.store(true, Ordering::Relaxed);
-        });
+        let outcome = engine.send_midi_with_outcome(&[0x90, 61, 100]);
 
-        thread::sleep(std::time::Duration::from_millis(20));
+        assert_eq!(outcome, MidiSendOutcome::DroppedNonCritical);
+
+        let first = rx.pop().expect("first packet still queued");
+        assert_eq!(first.data, [0x90, 60, 100]);
+        assert!(rx.pop().is_err(), "non-critical note-on must be dropped");
+    }
+
+    #[test]
+    fn send_midi_preserves_critical_release_or_requests_reset() {
+        let engine = AudioEngine::new();
+        let (mut tx, mut rx) = RingBuffer::<MidiPacket>::new(1);
+        tx.push(MidiPacket::from_bytes(&[0x90, 60, 100]).expect("first packet"))
+            .expect("prefill ring");
+        *engine.midi_tx.lock() = Some(tx);
+
+        let outcome = engine.send_midi_with_outcome(&[0x80, 60, 0]);
+
+        assert_eq!(outcome, MidiSendOutcome::CriticalFallbackReset);
         assert!(
-            !done.load(Ordering::Relaxed),
-            "send_midi must apply backpressure while the ring is full"
+            engine.midi_emergency_reset_requested.load(Ordering::Relaxed),
+            "critical release overflow should request an emergency reset"
         );
 
         let first = rx.pop().expect("first packet still queued");
         assert_eq!(first.data, [0x90, 60, 100]);
+        assert!(rx.pop().is_err(), "ring should not receive stale fallback data");
+    }
 
-        for _ in 0..100 {
-            if done.load(Ordering::Relaxed) {
-                break;
-            }
-            thread::sleep(std::time::Duration::from_millis(1));
+    #[test]
+    fn drain_midi_respects_callback_budget() {
+        let (mut tx, rx) = RingBuffer::<MidiPacket>::new(MIDI_DRAIN_BUDGET_PER_CALLBACK + 128);
+        for i in 0..(MIDI_DRAIN_BUDGET_PER_CALLBACK + 64) {
+            tx.push(MidiPacket::from_bytes(&[0x90, (i % 100) as u8, 100]).expect("packet"))
+                .expect("push packet");
         }
-        handle.join().expect("send_midi thread join");
 
-        let second = rx.pop().expect("second packet should be queued after capacity frees");
-        assert_eq!(second.data, [0x90, 61, 100]);
+        let mut state = AudioCallbackState::new(
+            rx,
+            0,
+            2,
+            Arc::new(AtomicU32::new(0)),
+            Arc::new(AtomicU32::new(0)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicU32::new(0)),
+            Arc::new(AtomicU32::new(0)),
+            Arc::new(AtomicU32::new(0)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicU32::new(0)),
+            Arc::new(AtomicU32::new(0)),
+            Arc::new(AtomicU32::new(0)),
+            48_000,
+        );
+
+        state.drain_midi();
+
+        assert_eq!(state.pending_midi.len(), MIDI_DRAIN_BUDGET_PER_CALLBACK);
+        let mut remaining = 0usize;
+        while state.midi_rx.pop().is_ok() {
+            remaining += 1;
+        }
+        assert_eq!(remaining, 64);
     }
 
     #[test]
@@ -449,6 +526,10 @@ mod tests {
             Arc::new(AtomicU32::new(0)),
             Arc::new(AtomicU32::new(0)),
             Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicU32::new(0)),
+            Arc::new(AtomicU32::new(0)),
+            Arc::new(AtomicU32::new(0)),
+            48_000,
         );
         state.last_output = vec![0.25, -0.5, 0.1, -0.2];
         let meter_left = AtomicU32::new(0);
@@ -476,6 +557,10 @@ mod tests {
             Arc::new(AtomicU32::new(0)),
             Arc::new(AtomicU32::new(0)),
             Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicU32::new(0)),
+            Arc::new(AtomicU32::new(0)),
+            Arc::new(AtomicU32::new(0)),
+            48_000,
         );
         let meter_left = AtomicU32::new(0);
         let meter_right = AtomicU32::new(0);
