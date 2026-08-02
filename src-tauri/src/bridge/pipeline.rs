@@ -12,11 +12,9 @@ use std::{
     collections::HashMap,
     sync::atomic::{AtomicU32, AtomicU64, Ordering},
 };
-use tauri::{async_runtime, Emitter};
 
 use super::activity::now_ms;
 
-const MIDI_NOTE_EVENT: &str = "midi:note";
 const OSC_SUSTAIN_PARAM: &str = "/avatar/parameters/sustain";
 
 // Compteurs statiques pour les métriques de pipeline (stress test)
@@ -26,6 +24,20 @@ static PIPELINE_FILTERED_COUNT: AtomicU64 = AtomicU64::new(0);
 static PIPELINE_QUEUE_DEPTH: AtomicU64 = AtomicU64::new(0);
 static PIPELINE_QUEUE_MAX_DEPTH: AtomicU64 = AtomicU64::new(0);
 static PIPELINE_DROPPED_COUNT: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnqueueOutcome {
+    Enqueued,
+    DroppedNonCritical,
+}
+
+#[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
+pub enum EnqueueError {
+    #[error("Bridge queue full; critical MIDI release dropped")]
+    CriticalReleaseDropped,
+    #[error("Bridge not running")]
+    Disconnected,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PipelineMetricsSnapshot {
@@ -134,6 +146,7 @@ pub(super) fn handle_midi_frame(
     audio: &AudioEngine,
     osc_counter: &AtomicU32,
     sustain_pressed_state: &mut [Option<bool>; 16],
+    midi_event_tx: &Sender<MidiNoteEvent>,
 ) {
     // Compteur entrée pipeline (stress test metrics)
     PIPELINE_IN_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -231,7 +244,7 @@ pub(super) fn handle_midi_frame(
         }
 
         if let Some(osc_client) = osc {
-            if let Err(err) = osc_client.send_param(OSC_SUSTAIN_PARAM, sustain.pressed) {
+            if let Err(err) = osc_client.send_sustain(sustain.pressed) {
                 if logs_enabled() {
                     logger.error(format!("Envoi OSC echoue: {err}"));
                 }
@@ -253,7 +266,6 @@ pub(super) fn handle_midi_frame(
     } else if let Some(note) = parse_note(frame.data.as_slice()) {
         if note.index.is_some() {
             let pressed = matches!(note.kind, MidiKind::NoteOn);
-            let app_handle = logger.app_handle();
             let event = MidiNoteEvent {
                 source: frame.source.to_string(),
                 note: note.note,
@@ -261,9 +273,7 @@ pub(super) fn handle_midi_frame(
                 pressed,
                 timestamp_ms: now_ms(),
             };
-            async_runtime::spawn(async move {
-                let _ = app_handle.emit(MIDI_NOTE_EVENT, event);
-            });
+            let _ = midi_event_tx.try_send(event);
         }
 
         if let Some(filter) = config.channel_filter {
@@ -303,7 +313,7 @@ pub(super) fn handle_midi_frame(
             };
 
             if let Some(osc_client) = osc {
-                if let Err(err) = osc_client.send_param(&param, pressed) {
+                if let Err(err) = osc_client.send_note(index, pressed) {
                     if logs_enabled() {
                         logger.error(format!("Envoi OSC echoue: {err}"));
                     }
@@ -413,26 +423,29 @@ pub fn pipeline_metrics_snapshot() -> PipelineMetricsSnapshot {
     }
 }
 
-pub fn try_enqueue_midi_frame(tx: &Sender<MidiFrame>, frame: MidiFrame) -> Result<(), String> {
+pub fn try_enqueue_midi_frame(
+    tx: &Sender<MidiFrame>,
+    frame: MidiFrame,
+) -> Result<EnqueueOutcome, EnqueueError> {
     match tx.try_send(frame) {
-        Ok(()) => Ok(()),
+        Ok(()) => Ok(EnqueueOutcome::Enqueued),
         Err(TrySendError::Full(frame)) => {
             if is_critical_release_message(frame.data.as_slice()) {
                 std::thread::yield_now();
                 match tx.try_send(frame) {
-                    Ok(()) => Ok(()),
+                    Ok(()) => Ok(EnqueueOutcome::Enqueued),
                     Err(TrySendError::Full(_)) => {
                         PIPELINE_DROPPED_COUNT.fetch_add(1, Ordering::Relaxed);
-                        Err("Bridge queue full; critical MIDI release dropped".to_string())
+                        Err(EnqueueError::CriticalReleaseDropped)
                     }
-                    Err(TrySendError::Disconnected(_)) => Err("Bridge not running".to_string()),
+                    Err(TrySendError::Disconnected(_)) => Err(EnqueueError::Disconnected),
                 }
             } else {
                 PIPELINE_DROPPED_COUNT.fetch_add(1, Ordering::Relaxed);
-                Ok(())
+                Ok(EnqueueOutcome::DroppedNonCritical)
             }
         }
-        Err(TrySendError::Disconnected(_)) => Err("Bridge not running".to_string()),
+        Err(TrySendError::Disconnected(_)) => Err(EnqueueError::Disconnected),
     }
 }
 
@@ -449,6 +462,15 @@ pub fn reset_pipeline_stats() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossbeam_channel::bounded;
+    use std::sync::Arc;
+
+    fn frame(data: &[u8]) -> MidiFrame {
+        MidiFrame {
+            data: smallvec::SmallVec::from_slice(data),
+            source: Arc::from("test"),
+        }
+    }
 
     #[test]
     fn pipeline_metrics_snapshot_tracks_queue_depth_and_counts() {
@@ -473,5 +495,27 @@ mod tests {
 
         assert!(source.contains("ReliablePLV:"));
         assert!(source.contains("MIDI IN (ReliablePLV) -> pipeline"));
+    }
+
+    #[test]
+    fn bounded_enqueue_reports_non_critical_drop() {
+        let (tx, _rx) = bounded(1);
+        tx.try_send(frame(&[0x90, 60, 100])).expect("prefill");
+
+        let outcome = try_enqueue_midi_frame(&tx, frame(&[0x90, 61, 100]))
+            .expect("non-critical overflow is an outcome");
+
+        assert_eq!(outcome, EnqueueOutcome::DroppedNonCritical);
+    }
+
+    #[test]
+    fn bounded_enqueue_reports_critical_drop_as_error() {
+        let (tx, _rx) = bounded(1);
+        tx.try_send(frame(&[0x90, 60, 100])).expect("prefill");
+
+        let error = try_enqueue_midi_frame(&tx, frame(&[0x80, 60, 0]))
+            .expect_err("critical release must not look successfully queued");
+
+        assert_eq!(error, EnqueueError::CriticalReleaseDropped);
     }
 }

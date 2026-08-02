@@ -249,3 +249,41 @@ fn reliable_server_processes_50k_preloaded_events_without_drops() {
 
     server.stop();
 }
+
+#[test]
+fn reliable_server_shutdown_cancels_scheduled_playback() {
+    let _guard = test_guard();
+    reset_reliable_playback_metrics();
+    let (tx, rx) = unbounded();
+    let server = ReliablePlaybackServer::start("127.0.0.1:0", tx).expect("start server");
+    let mut stream = connect(&server, Duration::from_secs(3));
+
+    send_frame(
+        &mut stream,
+        json!({
+            "type": "prepare",
+            "version": 1,
+            "sessionId": "shutdown-session",
+            "song": "shutdown.mid",
+            "total": 1,
+            "events": [
+                {"seq": 0, "dueUs": 60_000_000, "data": [0x90, 60, 100]}
+            ]
+        }),
+    );
+    assert_eq!(recv_frame(&mut stream)["type"], "prepared");
+    send_frame(
+        &mut stream,
+        json!({"type": "start", "sessionId": "shutdown-session", "startDelayMs": 0}),
+    );
+
+    server.stop();
+
+    let frames: Vec<_> = rx.try_iter().collect();
+    assert_eq!(frames.len(), 32);
+    assert!(frames.iter().all(|frame| (frame.data[0] & 0xF0) == 0xB0));
+    assert_eq!(reliable_playback_metrics_snapshot().messages_out, 0);
+    assert!(reliable_playback_metrics_snapshot()
+        .active_session
+        .is_none());
+}

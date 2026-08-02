@@ -1,7 +1,7 @@
 #![allow(deprecated)]
 
 use std::sync::{
-    atomic::{AtomicBool, AtomicU32, Ordering},
+    atomic::{AtomicBool, Ordering},
     Arc,
 };
 use std::time::Instant;
@@ -19,7 +19,9 @@ use super::callback_render::replay_last_output_or_silence as replay_output_or_si
 use super::{
     callback_midi::{process_pending_vst2_midi, process_pending_vst3_midi, send_reset_messages},
     callback_render::{limit_sample, process_vst3_plugin},
-    runtime_state::{AudioCallbackState, AudioError, MidiPacket, PluginBackend},
+    runtime_state::{
+        AudioCallbackState, AudioControls, AudioError, AudioTelemetry, MidiPacket, PluginBackend,
+    },
     windows_tuning::apply_audio_thread_priority,
 };
 
@@ -35,57 +37,35 @@ pub(super) fn build_output_stream_for_sample<T: Sample + SizedSample + FromSampl
     channels: usize,
     plugin_inputs: usize,
     plugin_outputs: usize,
-    gain_bits: Arc<AtomicU32>,
-    limiter_enabled: Arc<AtomicBool>,
-    xruns: Arc<AtomicU32>,
-    meter_left: Arc<AtomicU32>,
-    meter_right: Arc<AtomicU32>,
-    block_size_frames: Arc<AtomicU32>,
+    controls: Arc<AudioControls>,
+    telemetry: Arc<AudioTelemetry>,
     midi_rx: Consumer<MidiPacket>,
     plugin: Arc<Mutex<PluginBackend>>,
-    midi_drop_count: Arc<AtomicU32>,
-    audio_lock_miss_count: Arc<AtomicU32>,
-    emergency_reset_count: Arc<AtomicU32>,
     emergency_reset_requested: Arc<AtomicBool>,
-    callback_last_us: Arc<AtomicU32>,
-    callback_max_us: Arc<AtomicU32>,
-    callback_over_budget_count: Arc<AtomicU32>,
     sample_rate: u32,
+    max_frames: usize,
     device_name: &str,
 ) -> Result<Stream, AudioError> {
     let mut state = AudioCallbackState::new(
         midi_rx,
         plugin_inputs,
         plugin_outputs,
-        xruns.clone(),
-        block_size_frames,
-        limiter_enabled,
-        midi_drop_count,
-        audio_lock_miss_count,
-        emergency_reset_count,
+        max_frames,
+        channels,
+        Arc::clone(&controls),
+        Arc::clone(&telemetry),
         emergency_reset_requested,
-        callback_last_us,
-        callback_max_us,
-        callback_over_budget_count,
         sample_rate,
     );
+    let error_telemetry = Arc::clone(&telemetry);
     device
         .build_output_stream(
             cfg,
             move |data: &mut [T], info: &OutputCallbackInfo| {
-                audio_callback(
-                    data,
-                    channels,
-                    &gain_bits,
-                    &meter_left,
-                    &meter_right,
-                    &mut state,
-                    &plugin,
-                    info,
-                )
+                audio_callback(data, channels, &mut state, &plugin, info)
             },
             move |err| {
-                xruns.fetch_add(1, Ordering::Relaxed);
+                error_telemetry.xruns.fetch_add(1, Ordering::Relaxed);
                 background_log("warn", format!("Audio stream error: {}", err));
             },
             None,
@@ -98,13 +78,9 @@ pub(super) fn build_output_stream_for_sample<T: Sample + SizedSample + FromSampl
         })
 }
 
-#[allow(clippy::too_many_arguments)]
 fn audio_callback<T: Sample + FromSample<f32>>(
     data: &mut [T],
     device_channels: usize,
-    gain_bits: &AtomicU32,
-    meter_left: &AtomicU32,
-    meter_right: &AtomicU32,
     state: &mut AudioCallbackState,
     plugin: &Arc<Mutex<PluginBackend>>,
     _info: &OutputCallbackInfo,
@@ -112,36 +88,57 @@ fn audio_callback<T: Sample + FromSample<f32>>(
     let callback_started = Instant::now();
     let silence = T::from_sample(0.0f32);
     if device_channels == 0 {
-        meter_left.store(0.0f32.to_bits(), Ordering::Relaxed);
-        meter_right.store(0.0f32.to_bits(), Ordering::Relaxed);
+        state
+            .telemetry
+            .meter_left
+            .store(0.0f32.to_bits(), Ordering::Relaxed);
+        state
+            .telemetry
+            .meter_right
+            .store(0.0f32.to_bits(), Ordering::Relaxed);
         finish_callback_timing(state, 0, callback_started);
         return;
     }
 
     let frames = data.len() / device_channels;
     if frames == 0 {
-        meter_left.store(0.0f32.to_bits(), Ordering::Relaxed);
-        meter_right.store(0.0f32.to_bits(), Ordering::Relaxed);
+        state
+            .telemetry
+            .meter_left
+            .store(0.0f32.to_bits(), Ordering::Relaxed);
+        state
+            .telemetry
+            .meter_right
+            .store(0.0f32.to_bits(), Ordering::Relaxed);
         finish_callback_timing(state, 0, callback_started);
         return;
     }
 
     apply_audio_thread_priority(state);
-    state.prepare(frames);
+    if !state.prepare(frames) {
+        state.telemetry.xruns.fetch_add(1, Ordering::Relaxed);
+        data.fill(silence);
+        state
+            .telemetry
+            .meter_left
+            .store(0.0f32.to_bits(), Ordering::Relaxed);
+        state
+            .telemetry
+            .meter_right
+            .store(0.0f32.to_bits(), Ordering::Relaxed);
+        finish_callback_timing(state, frames, callback_started);
+        return;
+    }
     state.drain_midi();
 
     let mut plugin = match plugin.try_lock() {
         Some(p) => p,
         None => {
-            state.audio_lock_miss_count.fetch_add(1, Ordering::Relaxed);
-            replay_output_or_silence(
-                data,
-                device_channels,
-                silence,
-                state,
-                meter_left,
-                meter_right,
-            );
+            state
+                .telemetry
+                .audio_lock_miss_count
+                .fetch_add(1, Ordering::Relaxed);
+            replay_output_or_silence(data, device_channels, silence, state);
             finish_callback_timing(state, frames, callback_started);
             return;
         }
@@ -150,7 +147,10 @@ fn audio_callback<T: Sample + FromSample<f32>>(
     if state.needs_emergency_reset {
         send_reset_messages(&mut plugin);
         state.needs_emergency_reset = false;
-        state.emergency_reset_count.fetch_add(1, Ordering::Relaxed);
+        state
+            .telemetry
+            .emergency_reset_count
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     match &mut *plugin {
@@ -158,6 +158,7 @@ fn audio_callback<T: Sample + FromSample<f32>>(
             if state.last_frames != frames {
                 // instance.set_block_size(frames as i64); // Removed to prevent VST reset during playback
                 state
+                    .telemetry
                     .block_size_frames
                     .store(frames as u32, Ordering::Relaxed);
                 state.last_frames = frames;
@@ -180,16 +181,9 @@ fn audio_callback<T: Sample + FromSample<f32>>(
             }));
 
             if result.is_err() {
-                state.xruns.fetch_add(1, Ordering::Relaxed);
+                state.telemetry.xruns.fetch_add(1, Ordering::Relaxed);
                 state.record_error();
-                replay_output_or_silence(
-                    data,
-                    device_channels,
-                    silence,
-                    state,
-                    meter_left,
-                    meter_right,
-                );
+                replay_output_or_silence(data, device_channels, silence, state);
                 finish_callback_timing(state, frames, callback_started);
                 return;
             }
@@ -201,6 +195,7 @@ fn audio_callback<T: Sample + FromSample<f32>>(
         } => {
             if state.last_frames != frames {
                 state
+                    .telemetry
                     .block_size_frames
                     .store(frames as u32, Ordering::Relaxed);
                 state.last_frames = frames;
@@ -216,16 +211,9 @@ fn audio_callback<T: Sample + FromSample<f32>>(
             match result {
                 Ok(Ok(())) => {}
                 Ok(Err(_)) | Err(_) => {
-                    state.xruns.fetch_add(1, Ordering::Relaxed);
+                    state.telemetry.xruns.fetch_add(1, Ordering::Relaxed);
                     state.record_error();
-                    replay_output_or_silence(
-                        data,
-                        device_channels,
-                        silence,
-                        state,
-                        meter_left,
-                        meter_right,
-                    );
+                    replay_output_or_silence(data, device_channels, silence, state);
                     finish_callback_timing(state, frames, callback_started);
                     return;
                 }
@@ -235,14 +223,20 @@ fn audio_callback<T: Sample + FromSample<f32>>(
 
     if state.plugin_outputs == 0 {
         data.fill(silence);
-        meter_left.store(0.0f32.to_bits(), Ordering::Relaxed);
-        meter_right.store(0.0f32.to_bits(), Ordering::Relaxed);
+        state
+            .telemetry
+            .meter_left
+            .store(0.0f32.to_bits(), Ordering::Relaxed);
+        state
+            .telemetry
+            .meter_right
+            .store(0.0f32.to_bits(), Ordering::Relaxed);
         finish_callback_timing(state, frames, callback_started);
         return;
     }
 
-    let gain_linear = f32::from_bits(gain_bits.load(Ordering::Relaxed));
-    let limiter_on = state.limiter_enabled.load(Ordering::Relaxed);
+    let gain_linear = f32::from_bits(state.controls.gain_bits.load(Ordering::Relaxed));
+    let limiter_on = state.controls.limiter_enabled.load(Ordering::Relaxed);
     let left = &state.outputs[0];
     let right = if state.plugin_outputs > 1 {
         &state.outputs[1]
@@ -252,9 +246,7 @@ fn audio_callback<T: Sample + FromSample<f32>>(
 
     let mut peak_l = 0.0f32;
     let mut peak_r = 0.0f32;
-    if state.last_output.len() != data.len() {
-        state.last_output.resize(data.len(), 0.0);
-    }
+    debug_assert!(state.last_output.len() >= data.len());
     for (frame_idx, frame) in data.chunks_exact_mut(device_channels).enumerate() {
         let mut l = left[frame_idx] * gain_linear;
         let mut r = right[frame_idx] * gain_linear;
@@ -289,18 +281,27 @@ fn audio_callback<T: Sample + FromSample<f32>>(
         }
     }
 
-    meter_left.store(peak_l.min(1.0).to_bits(), Ordering::Relaxed);
-    meter_right.store(peak_r.min(1.0).to_bits(), Ordering::Relaxed);
+    state
+        .telemetry
+        .meter_left
+        .store(peak_l.min(1.0).to_bits(), Ordering::Relaxed);
+    state
+        .telemetry
+        .meter_right
+        .store(peak_r.min(1.0).to_bits(), Ordering::Relaxed);
     finish_callback_timing(state, frames, callback_started);
 }
 
 fn finish_callback_timing(state: &AudioCallbackState, frames: usize, started: Instant) {
     let elapsed_us = started.elapsed().as_micros().min(u32::MAX as u128) as u32;
-    state.callback_last_us.store(elapsed_us, Ordering::Relaxed);
+    state
+        .telemetry
+        .callback_last_us
+        .store(elapsed_us, Ordering::Relaxed);
 
-    let mut current = state.callback_max_us.load(Ordering::Relaxed);
+    let mut current = state.telemetry.callback_max_us.load(Ordering::Relaxed);
     while elapsed_us > current {
-        match state.callback_max_us.compare_exchange(
+        match state.telemetry.callback_max_us.compare_exchange(
             current,
             elapsed_us,
             Ordering::Relaxed,
@@ -315,6 +316,7 @@ fn finish_callback_timing(state: &AudioCallbackState, frames: usize, started: In
         let budget_us = ((frames as u64) * 1_000_000u64 / state.sample_rate as u64) as u32;
         if budget_us > 0 && elapsed_us > budget_us {
             state
+                .telemetry
                 .callback_over_budget_count
                 .fetch_add(1, Ordering::Relaxed);
         }

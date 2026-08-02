@@ -2,10 +2,7 @@
 
 use std::{
     path::PathBuf,
-    sync::{
-        atomic::{AtomicBool, AtomicU32},
-        Arc,
-    },
+    sync::{atomic::AtomicBool, Arc},
 };
 
 use cpal::{
@@ -21,7 +18,9 @@ use crate::logger::FrontendLogger;
 use super::{
     callback::build_output_stream_for_sample,
     plugin_host::load_plugin_backend,
-    runtime_state::{AudioError, MidiPacket, PluginBackend, MIDI_RING_CAPACITY},
+    runtime_state::{
+        AudioControls, AudioError, AudioTelemetry, MidiPacket, PluginBackend, MIDI_RING_CAPACITY,
+    },
     stream_config::{choose_buffer_size, max_plugin_block_size, select_output_config},
 };
 
@@ -39,19 +38,9 @@ pub(super) fn build_stream(
     device: &Device,
     sample_rate: u32,
     buffer_size: u32,
-    gain_bits: Arc<AtomicU32>,
-    limiter_enabled: Arc<AtomicBool>,
-    xruns: Arc<AtomicU32>,
-    meter_left: Arc<AtomicU32>,
-    meter_right: Arc<AtomicU32>,
-    block_size_frames: Arc<AtomicU32>,
-    midi_drop_count: Arc<AtomicU32>,
-    audio_lock_miss_count: Arc<AtomicU32>,
-    emergency_reset_count: Arc<AtomicU32>,
+    controls: Arc<AudioControls>,
+    telemetry: Arc<AudioTelemetry>,
     emergency_reset_requested: Arc<AtomicBool>,
-    callback_last_us: Arc<AtomicU32>,
-    callback_max_us: Arc<AtomicU32>,
-    callback_over_budget_count: Arc<AtomicU32>,
     vst_path: PathBuf,
     logger: &FrontendLogger,
     backend_name: &str,
@@ -116,11 +105,15 @@ pub(super) fn build_stream(
 
     let initial_block_size = match config.buffer_size {
         BufferSize::Fixed(sz) => {
-            block_size_frames.store(sz, std::sync::atomic::Ordering::Relaxed);
+            telemetry
+                .block_size_frames
+                .store(sz, std::sync::atomic::Ordering::Relaxed);
             sz
         }
         BufferSize::Default => {
-            block_size_frames.store(0, std::sync::atomic::Ordering::Relaxed);
+            telemetry
+                .block_size_frames
+                .store(0, std::sync::atomic::Ordering::Relaxed);
             buffer_size
         }
     };
@@ -160,22 +153,13 @@ pub(super) fn build_stream(
                     channels,
                     plugin_inputs,
                     plugin_outputs,
-                    gain_bits.clone(),
-                    limiter_enabled.clone(),
-                    xruns.clone(),
-                    meter_left.clone(),
-                    meter_right.clone(),
-                    block_size_frames.clone(),
+                    Arc::clone(&controls),
+                    Arc::clone(&telemetry),
                     midi_rx,
                     plugin.clone(),
-                    midi_drop_count.clone(),
-                    audio_lock_miss_count.clone(),
-                    emergency_reset_count.clone(),
                     emergency_reset_requested.clone(),
-                    callback_last_us.clone(),
-                    callback_max_us.clone(),
-                    callback_over_budget_count.clone(),
                     actual_sample_rate,
+                    plugin_max_block_size as usize,
                     device_name,
                 )?,
                 SampleFormat::I16 => build_output_stream_for_sample::<i16>(
@@ -184,22 +168,13 @@ pub(super) fn build_stream(
                     channels,
                     plugin_inputs,
                     plugin_outputs,
-                    gain_bits.clone(),
-                    limiter_enabled.clone(),
-                    xruns.clone(),
-                    meter_left.clone(),
-                    meter_right.clone(),
-                    block_size_frames.clone(),
+                    Arc::clone(&controls),
+                    Arc::clone(&telemetry),
                     midi_rx,
                     plugin.clone(),
-                    midi_drop_count.clone(),
-                    audio_lock_miss_count.clone(),
-                    emergency_reset_count.clone(),
                     emergency_reset_requested.clone(),
-                    callback_last_us.clone(),
-                    callback_max_us.clone(),
-                    callback_over_budget_count.clone(),
                     actual_sample_rate,
+                    plugin_max_block_size as usize,
                     device_name,
                 )?,
                 SampleFormat::U16 => build_output_stream_for_sample::<u16>(
@@ -208,22 +183,13 @@ pub(super) fn build_stream(
                     channels,
                     plugin_inputs,
                     plugin_outputs,
-                    gain_bits.clone(),
-                    limiter_enabled.clone(),
-                    xruns.clone(),
-                    meter_left.clone(),
-                    meter_right.clone(),
-                    block_size_frames.clone(),
+                    Arc::clone(&controls),
+                    Arc::clone(&telemetry),
                     midi_rx,
                     plugin.clone(),
-                    midi_drop_count.clone(),
-                    audio_lock_miss_count.clone(),
-                    emergency_reset_count.clone(),
                     emergency_reset_requested.clone(),
-                    callback_last_us.clone(),
-                    callback_max_us.clone(),
-                    callback_over_budget_count.clone(),
                     actual_sample_rate,
+                    plugin_max_block_size as usize,
                     device_name,
                 )?,
                 other => {

@@ -1,5 +1,4 @@
 use crossbeam_channel::Sender;
-use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
@@ -7,8 +6,8 @@ use std::{
     io::{ErrorKind, Read, Write},
     net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs},
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        Arc, LazyLock,
     },
     thread,
     time::{Duration, Instant},
@@ -18,13 +17,15 @@ use crate::{bridge::pipeline::try_enqueue_midi_frame, midi::MidiFrame};
 
 const PROTOCOL_VERSION: u8 = 1;
 pub const DEFAULT_RELIABLE_PLAYBACK_ADDR: &str = "0.0.0.0:5056";
-const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
+const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
+const MAX_EVENT_BYTES: usize = 1024;
+const MAX_CONNECTIONS: usize = 8;
 
 static MESSAGES_IN: AtomicU64 = AtomicU64::new(0);
 static MESSAGES_OUT: AtomicU64 = AtomicU64::new(0);
 static DROPPED: AtomicU64 = AtomicU64::new(0);
 static MAX_LATE_US: AtomicU64 = AtomicU64::new(0);
-static ACTIVE_SESSION: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
+static ACTIVE_SESSION: LazyLock<Mutex<Option<String>>> = LazyLock::new(|| Mutex::new(None));
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReliablePlaybackMetricsSnapshot {
@@ -40,7 +41,7 @@ pub struct ReliablePlaybackMetricsSnapshot {
 pub struct ReliablePlaybackEvent {
     pub seq: u64,
     pub due_us: u64,
-    pub data: Vec<u8>,
+    pub data: SmallVec<[u8; 3]>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -104,6 +105,15 @@ pub struct ReliablePlaybackServer {
     local_addr: SocketAddr,
     stop: Arc<AtomicBool>,
     handle: Mutex<Option<thread::JoinHandle<()>>>,
+    workers: Arc<Mutex<Vec<thread::JoinHandle<()>>>>,
+}
+
+struct ConnectionPermit(Arc<AtomicUsize>);
+
+impl Drop for ConnectionPermit {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 impl ReliablePlaybackServer {
@@ -118,12 +128,16 @@ impl ReliablePlaybackServer {
             .map_err(|err| format!("Reliable playback local addr failed: {err}"))?;
         let stop = Arc::new(AtomicBool::new(false));
         let stop_for_thread = Arc::clone(&stop);
-        let handle = thread::spawn(move || accept_loop(listener, tx, stop_for_thread));
+        let workers = Arc::new(Mutex::new(Vec::new()));
+        let workers_for_thread = Arc::clone(&workers);
+        let handle =
+            thread::spawn(move || accept_loop(listener, tx, stop_for_thread, workers_for_thread));
 
         Ok(Self {
             local_addr,
             stop,
             handle: Mutex::new(Some(handle)),
+            workers,
         })
     }
 
@@ -141,6 +155,15 @@ impl ReliablePlaybackServer {
         let _ = TcpStream::connect_timeout(&wake_addr, Duration::from_millis(100));
         if let Some(handle) = self.handle.lock().take() {
             let _ = handle.join();
+        }
+        loop {
+            let handles = std::mem::take(&mut *self.workers.lock());
+            if handles.is_empty() {
+                break;
+            }
+            for handle in handles {
+                let _ = handle.join();
+            }
         }
     }
 }
@@ -164,13 +187,35 @@ pub fn reset_reliable_playback_metrics() {
     *ACTIVE_SESSION.lock() = None;
 }
 
-fn accept_loop(listener: TcpListener, tx: Sender<MidiFrame>, stop: Arc<AtomicBool>) {
+fn accept_loop(
+    listener: TcpListener,
+    tx: Sender<MidiFrame>,
+    stop: Arc<AtomicBool>,
+    workers: Arc<Mutex<Vec<thread::JoinHandle<()>>>>,
+) {
+    let active_connections = Arc::new(AtomicUsize::new(0));
     while !stop.load(Ordering::Relaxed) {
+        reap_finished_workers(&workers);
         match listener.accept() {
             Ok((stream, _addr)) => {
+                let acquired = active_connections
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |active| {
+                        (active < MAX_CONNECTIONS).then_some(active + 1)
+                    })
+                    .is_ok();
+                if !acquired {
+                    log::warn!("Reliable playback connection limit reached");
+                    continue;
+                }
                 let tx = tx.clone();
                 let stop = Arc::clone(&stop);
-                thread::spawn(move || handle_connection(stream, tx, stop));
+                let scheduler_workers = Arc::clone(&workers);
+                let permit = ConnectionPermit(Arc::clone(&active_connections));
+                let handle = thread::spawn(move || {
+                    let _permit = permit;
+                    handle_connection(stream, tx, stop, scheduler_workers);
+                });
+                workers.lock().push(handle);
             }
             Err(err) if err.kind() == ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(10));
@@ -183,7 +228,30 @@ fn accept_loop(listener: TcpListener, tx: Sender<MidiFrame>, stop: Arc<AtomicBoo
     }
 }
 
-fn handle_connection(mut stream: TcpStream, tx: Sender<MidiFrame>, server_stop: Arc<AtomicBool>) {
+fn reap_finished_workers(workers: &Mutex<Vec<thread::JoinHandle<()>>>) {
+    let mut finished = Vec::new();
+    {
+        let mut guard = workers.lock();
+        let mut index = 0;
+        while index < guard.len() {
+            if guard[index].is_finished() {
+                finished.push(guard.swap_remove(index));
+            } else {
+                index += 1;
+            }
+        }
+    }
+    for handle in finished {
+        let _ = handle.join();
+    }
+}
+
+fn handle_connection(
+    mut stream: TcpStream,
+    tx: Sender<MidiFrame>,
+    server_stop: Arc<AtomicBool>,
+    workers: Arc<Mutex<Vec<thread::JoinHandle<()>>>>,
+) {
     let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
     let writer = match stream.try_clone() {
         Ok(writer) => Arc::new(Mutex::new(writer)),
@@ -193,7 +261,7 @@ fn handle_connection(mut stream: TcpStream, tx: Sender<MidiFrame>, server_stop: 
         }
     };
 
-    let prepared = match read_client_frame(&mut stream, &server_stop, false) {
+    let prepared = Arc::new(match read_client_frame(&mut stream, &server_stop, false) {
         Ok(ClientFrame::Prepare {
             version,
             session_id,
@@ -244,7 +312,7 @@ fn handle_connection(mut stream: TcpStream, tx: Sender<MidiFrame>, server_stop: 
             log::debug!("Reliable playback read prepare failed: {err}");
             return;
         }
-    };
+    });
 
     let cancel = Arc::new(AtomicBool::new(false));
     let done = Arc::new(AtomicBool::new(false));
@@ -262,10 +330,20 @@ fn handle_connection(mut stream: TcpStream, tx: Sender<MidiFrame>, server_stop: 
                 let writer = Arc::clone(&writer);
                 let cancel = Arc::clone(&cancel);
                 let done = Arc::clone(&done);
-                let session = prepared.clone();
-                thread::spawn(move || {
-                    run_schedule(session, start_delay_ms, tx, writer, cancel, done);
+                let session = Arc::clone(&prepared);
+                let server_stop = Arc::clone(&server_stop);
+                let handle = thread::spawn(move || {
+                    run_schedule(
+                        session,
+                        start_delay_ms,
+                        tx,
+                        writer,
+                        cancel,
+                        done,
+                        server_stop,
+                    );
                 });
+                workers.lock().push(handle);
             }
             Ok(ClientFrame::Stop { session_id }) if session_id == prepared.session_id => {
                 cancel.store(true, Ordering::Relaxed);
@@ -294,6 +372,13 @@ fn handle_connection(mut stream: TcpStream, tx: Sender<MidiFrame>, server_stop: 
                 if err.kind() == ErrorKind::WouldBlock || err.kind() == ErrorKind::TimedOut => {}
             Err(_) => break,
         }
+    }
+
+    if started && !done.load(Ordering::Relaxed) {
+        cancel.store(true, Ordering::Relaxed);
+        inject_all_notes_off(&tx, &format!("ReliablePLV:{}:stop", prepared.song));
+        *ACTIVE_SESSION.lock() = None;
+        done.store(true, Ordering::Relaxed);
     }
 }
 
@@ -336,6 +421,12 @@ fn validate_prepare(
                 format!("empty MIDI data at seq {}", event.seq),
             ));
         }
+        if event.data.len() > MAX_EVENT_BYTES {
+            return Err((
+                Some(session_id),
+                format!("MIDI data too large at seq {}", event.seq),
+            ));
+        }
         previous_due = event.due_us;
     }
     Ok(PreparedSession {
@@ -346,12 +437,13 @@ fn validate_prepare(
 }
 
 fn run_schedule(
-    session: PreparedSession,
+    session: Arc<PreparedSession>,
     start_delay_ms: u64,
     tx: Sender<MidiFrame>,
     writer: Arc<Mutex<TcpStream>>,
     cancel: Arc<AtomicBool>,
     done: Arc<AtomicBool>,
+    server_stop: Arc<AtomicBool>,
 ) {
     let source: Arc<str> = Arc::from(format!("ReliablePLV:{}", session.song));
     let start = Instant::now() + Duration::from_millis(start_delay_ms);
@@ -361,15 +453,15 @@ fn run_schedule(
     let mut index = 0usize;
 
     while index < session.events.len() {
-        if cancel.load(Ordering::Relaxed) {
+        if cancel.load(Ordering::Relaxed) || server_stop.load(Ordering::Relaxed) {
             *ACTIVE_SESSION.lock() = None;
             done.store(true, Ordering::Relaxed);
             return;
         }
         let due_us = session.events[index].due_us;
         let target = start + Duration::from_micros(due_us);
-        wait_until(target, &cancel);
-        if cancel.load(Ordering::Relaxed) {
+        wait_until(target, &cancel, &server_stop);
+        if cancel.load(Ordering::Relaxed) || server_stop.load(Ordering::Relaxed) {
             *ACTIVE_SESSION.lock() = None;
             done.store(true, Ordering::Relaxed);
             return;
@@ -384,12 +476,15 @@ fn run_schedule(
                 data: SmallVec::from_slice(&event.data),
                 source: Arc::clone(&source),
             };
-            if try_enqueue_midi_frame(&tx, frame).is_ok() {
-                processed += 1;
-                MESSAGES_OUT.fetch_add(1, Ordering::Relaxed);
-            } else {
-                dropped += 1;
-                DROPPED.fetch_add(1, Ordering::Relaxed);
+            match try_enqueue_midi_frame(&tx, frame) {
+                Ok(crate::bridge::pipeline::EnqueueOutcome::Enqueued) => {
+                    processed += 1;
+                    MESSAGES_OUT.fetch_add(1, Ordering::Relaxed);
+                }
+                Ok(crate::bridge::pipeline::EnqueueOutcome::DroppedNonCritical) | Err(_) => {
+                    dropped += 1;
+                    DROPPED.fetch_add(1, Ordering::Relaxed);
+                }
             }
             index += 1;
         }
@@ -408,9 +503,9 @@ fn run_schedule(
     done.store(true, Ordering::Relaxed);
 }
 
-fn wait_until(target: Instant, cancel: &AtomicBool) {
+fn wait_until(target: Instant, cancel: &AtomicBool, server_stop: &AtomicBool) {
     loop {
-        if cancel.load(Ordering::Relaxed) {
+        if cancel.load(Ordering::Relaxed) || server_stop.load(Ordering::Relaxed) {
             return;
         }
         let now = Instant::now();
@@ -430,10 +525,13 @@ fn inject_all_notes_off(tx: &Sender<MidiFrame>, source: &str) {
     let source: Arc<str> = Arc::from(source.to_string());
     for channel in 0u8..16 {
         for data in [[0xB0 | channel, 64, 0], [0xB0 | channel, 123, 0]] {
-            let _ = try_enqueue_midi_frame(tx, MidiFrame {
-                data: SmallVec::from_slice(&data),
-                source: Arc::clone(&source),
-            });
+            let _ = try_enqueue_midi_frame(
+                tx,
+                MidiFrame {
+                    data: SmallVec::from_slice(&data),
+                    source: Arc::clone(&source),
+                },
+            );
         }
     }
 }
@@ -554,7 +652,7 @@ mod tests {
                 assert_eq!(song, "dup.mid");
                 assert_eq!(total, 1);
                 assert_eq!(events[0].due_us, 0);
-                assert_eq!(events[0].data, vec![0x90, 60, 100]);
+                assert_eq!(events[0].data.as_slice(), &[0x90, 60, 100]);
             }
             _ => panic!("expected prepare frame"),
         }

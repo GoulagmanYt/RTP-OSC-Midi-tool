@@ -1,9 +1,9 @@
+use super::pipeline::try_enqueue_midi_frame;
 use crate::{
     config::{Config, RTP_VIRTUAL_INPUT, VST_INTERNAL_OUTPUT, VST_INTERNAL_OUTPUT_LEGACY},
     logger::FrontendLogger,
     midi::MidiFrame,
 };
-use super::pipeline::try_enqueue_midi_frame;
 use crossbeam_channel::Sender;
 use midir::{
     Ignore, MidiInput, MidiInputConnection, MidiInputPort, MidiOutput, MidiOutputConnection,

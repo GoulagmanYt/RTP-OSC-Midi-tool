@@ -2,10 +2,12 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use osc_midi_bridge::{
     audio::AudioEngine, bridge::BridgeHandle, config::ConfigStore, midi::MidiFrame,
 };
+use smallvec::SmallVec;
 use std::sync::Arc;
 
 /// Benchmark du parsing de frames MIDI
 fn bench_midi_frame_parsing(c: &mut Criterion) {
+    let source: Arc<str> = Arc::from("benchmark");
     let frames: Vec<MidiFrame> = (0..1000)
         .map(|i| {
             let note = (i % 128) as u8;
@@ -13,8 +15,8 @@ fn bench_midi_frame_parsing(c: &mut Criterion) {
             let status = if velocity > 0 { 0x90 } else { 0x80 };
 
             MidiFrame {
-                data: vec![status, note, velocity].into(),
-                source: Arc::from("benchmark"),
+                data: SmallVec::from_slice(&[status, note, velocity]),
+                source: Arc::clone(&source),
             }
         })
         .collect();
@@ -27,8 +29,8 @@ fn bench_midi_frame_parsing(c: &mut Criterion) {
                 let status = if velocity > 0 { 0x90 } else { 0x80 };
 
                 black_box(MidiFrame {
-                    data: vec![status, note, velocity].into(),
-                    source: Arc::from("benchmark"),
+                    data: SmallVec::from_slice(&[status, note, velocity]),
+                    source: Arc::clone(&source),
                 });
             }
         })
@@ -75,8 +77,10 @@ fn bench_audio_engine_operations(c: &mut Criterion) {
 /// Benchmark des opérations Bridge
 fn bench_bridge_operations(c: &mut Criterion) {
     let bridge = BridgeHandle::new();
-    let config_store = ConfigStore::new();
+    let config_dir = tempfile::tempdir().expect("benchmark config tempdir");
+    let config_store = ConfigStore::with_path(config_dir.path().join("config.yaml"));
     let config = config_store.load();
+    config_store.save(&config).expect("seed benchmark config");
 
     c.bench_function("bridge_status_check", |b| {
         b.iter(|| {

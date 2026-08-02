@@ -24,13 +24,15 @@ pub(super) struct MidiActivityTracker {
 
 impl MidiActivityTracker {
     pub(super) fn record(&mut self, source: &str, data: &[u8]) {
-        let entry = self.stats.entry(source.to_string()).or_default();
-        entry.messages = entry.messages.saturating_add(1);
-        entry.last_seen_ms = Some(now_ms());
-        if let Some(note) = parse_note(data) {
-            entry.last_note = Some(note.note);
-            entry.last_channel = Some(note.channel);
+        let timestamp_ms = now_ms();
+        if let Some(entry) = self.stats.get_mut(source) {
+            entry.record(data, timestamp_ms);
+            return;
         }
+
+        let mut entry = MidiActivityState::default();
+        entry.record(data, timestamp_ms);
+        self.stats.insert(source.to_owned(), entry);
     }
 
     pub(super) fn snapshot_and_reset(&mut self) -> Vec<MidiActivityInfo> {
@@ -52,6 +54,17 @@ impl MidiActivityTracker {
             }
         });
         snapshot
+    }
+}
+
+impl MidiActivityState {
+    fn record(&mut self, data: &[u8], timestamp_ms: u64) {
+        self.messages = self.messages.saturating_add(1);
+        self.last_seen_ms = Some(timestamp_ms);
+        if let Some(note) = parse_note(data) {
+            self.last_note = Some(note.note);
+            self.last_channel = Some(note.channel);
+        }
     }
 }
 

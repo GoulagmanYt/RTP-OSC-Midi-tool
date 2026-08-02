@@ -10,14 +10,17 @@ use crate::logger::FrontendLogger;
 impl AudioEngine {
     pub fn set_gain(&self, gain_db: f32) {
         if let Some(rt) = self.runtime.lock().as_mut() {
-            rt.gain_bits
+            rt.controls
+                .gain_bits
                 .store(db_to_linear(gain_db).to_bits(), Ordering::Relaxed);
         }
     }
 
     pub fn set_limiter_enabled(&self, enabled: bool) {
         if let Some(rt) = self.runtime.lock().as_mut() {
-            rt.limiter_enabled.store(enabled, Ordering::Relaxed);
+            rt.controls
+                .limiter_enabled
+                .store(enabled, Ordering::Relaxed);
         }
     }
 
@@ -35,7 +38,7 @@ impl AudioEngine {
 
     pub fn current_buffer_size(&self) -> Option<u32> {
         self.runtime.lock().as_ref().and_then(|r| {
-            let frames = r.block_size_frames.load(Ordering::Relaxed);
+            let frames = r.telemetry.block_size_frames.load(Ordering::Relaxed);
             if frames == 0 {
                 None
             } else {
@@ -60,7 +63,7 @@ impl AudioEngine {
 
     pub fn buffer_size_mismatch(&self) -> Option<bool> {
         self.runtime.lock().as_ref().and_then(|r| {
-            let frames = r.block_size_frames.load(Ordering::Relaxed);
+            let frames = r.telemetry.block_size_frames.load(Ordering::Relaxed);
             if frames == 0 {
                 None
             } else {
@@ -77,27 +80,27 @@ impl AudioEngine {
         self.runtime
             .lock()
             .as_ref()
-            .map(|r| r.xruns.load(Ordering::Relaxed))
+            .map(|r| r.telemetry.xruns.load(Ordering::Relaxed))
     }
 
     pub fn limiter_enabled(&self) -> Option<bool> {
         self.runtime
             .lock()
             .as_ref()
-            .map(|r| r.limiter_enabled.load(Ordering::Relaxed))
+            .map(|r| r.controls.limiter_enabled.load(Ordering::Relaxed))
     }
 
     pub fn peak_levels(&self) -> Option<(f32, f32)> {
         self.runtime.lock().as_ref().map(|r| {
-            let left = f32::from_bits(r.meter_left.load(Ordering::Relaxed));
-            let right = f32::from_bits(r.meter_right.load(Ordering::Relaxed));
+            let left = f32::from_bits(r.telemetry.meter_left.load(Ordering::Relaxed));
+            let right = f32::from_bits(r.telemetry.meter_right.load(Ordering::Relaxed));
             (left, right)
         })
     }
 
     pub fn current_latency_ms(&self) -> Option<f32> {
         self.runtime.lock().as_ref().and_then(|r| {
-            let frames = r.block_size_frames.load(Ordering::Relaxed);
+            let frames = r.telemetry.block_size_frames.load(Ordering::Relaxed);
             if frames == 0 {
                 None
             } else {
@@ -110,42 +113,43 @@ impl AudioEngine {
         self.runtime
             .lock()
             .as_ref()
-            .map(|r| r.midi_drop_count.load(Ordering::Relaxed))
+            .map(|r| r.telemetry.midi_drop_count.load(Ordering::Relaxed))
     }
 
     pub fn audio_lock_miss_count(&self) -> Option<u32> {
         self.runtime
             .lock()
             .as_ref()
-            .map(|r| r.audio_lock_miss_count.load(Ordering::Relaxed))
+            .map(|r| r.telemetry.audio_lock_miss_count.load(Ordering::Relaxed))
     }
 
     pub fn emergency_reset_count(&self) -> Option<u32> {
         self.runtime
             .lock()
             .as_ref()
-            .map(|r| r.emergency_reset_count.load(Ordering::Relaxed))
+            .map(|r| r.telemetry.emergency_reset_count.load(Ordering::Relaxed))
     }
 
     pub fn callback_last_us(&self) -> Option<u32> {
         self.runtime
             .lock()
             .as_ref()
-            .map(|r| r.callback_last_us.load(Ordering::Relaxed))
+            .map(|r| r.telemetry.callback_last_us.load(Ordering::Relaxed))
     }
 
     pub fn callback_max_us(&self) -> Option<u32> {
         self.runtime
             .lock()
             .as_ref()
-            .map(|r| r.callback_max_us.load(Ordering::Relaxed))
+            .map(|r| r.telemetry.callback_max_us.load(Ordering::Relaxed))
     }
 
     pub fn callback_over_budget_count(&self) -> Option<u32> {
-        self.runtime
-            .lock()
-            .as_ref()
-            .map(|r| r.callback_over_budget_count.load(Ordering::Relaxed))
+        self.runtime.lock().as_ref().map(|r| {
+            r.telemetry
+                .callback_over_budget_count
+                .load(Ordering::Relaxed)
+        })
     }
 
     pub fn mmcss_enabled(&self) -> Option<bool> {

@@ -66,11 +66,12 @@ pub(super) fn apply_audio_thread_priority(state: &mut AudioCallbackState) {
     }
     unsafe {
         let mut task_index = 0u32;
-        let mmcss_result = AvSetMmThreadCharacteristicsW(w!("Pro Audio"), &mut task_index)
-            .or_else(|pro_audio_error| {
+        let mmcss_result = AvSetMmThreadCharacteristicsW(w!("Pro Audio"), &mut task_index).or_else(
+            |pro_audio_error| {
                 AvSetMmThreadCharacteristicsW(w!("Audio"), &mut task_index)
                     .map_err(|audio_error| (pro_audio_error, audio_error))
-            });
+            },
+        );
         match mmcss_result {
             Ok(handle) => {
                 store_bool(&AUDIO_MMCSS_ENABLED, true);

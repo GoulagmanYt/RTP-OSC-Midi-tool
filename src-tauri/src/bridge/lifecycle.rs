@@ -2,7 +2,7 @@ use super::{
     activity::MidiActivityTracker,
     metrics::spawn_activity_emitter,
     midi_io::{initial_connected_input, initial_connected_output, open_output, watch_midi_input},
-    processing::spawn_processing_loop,
+    processing::{spawn_midi_event_emitter, spawn_processing_loop},
     rtp_config::resolve_remote_targets,
     runtime::{BridgeRuntime, RtpConfigSnapshot},
     status::build_initial_status,
@@ -15,7 +15,7 @@ use crate::{
     osc::OscClient,
     reliable_playback::{ReliablePlaybackServer, DEFAULT_RELIABLE_PLAYBACK_ADDR},
     rtp::RtpServer,
-    types::RtpParticipantInfo,
+    types::{MidiNoteEvent, RtpParticipantInfo},
 };
 use crossbeam_channel::Sender;
 use parking_lot::Mutex;
@@ -124,6 +124,7 @@ pub(super) fn start_runtime(
     use crossbeam_channel::bounded;
     let stop = Arc::new(AtomicBool::new(false));
     let (midi_tx, midi_rx) = bounded::<MidiFrame>(BRIDGE_MIDI_QUEUE_CAPACITY);
+    let (midi_event_tx, midi_event_rx) = bounded::<MidiNoteEvent>(1024);
     let shared_config = Arc::new(Mutex::new(config.clone()));
     let config_rev = Arc::new(AtomicU64::new(1));
     let activity_tracker = Arc::new(Mutex::new(MidiActivityTracker::default()));
@@ -185,6 +186,13 @@ pub(super) fn start_runtime(
         activity_tracker.clone(),
         osc_counter.clone(),
         actual_midi_out.clone(),
+        midi_event_tx,
+    ));
+
+    let midi_event_emitter = Some(spawn_midi_event_emitter(
+        stop.clone(),
+        window.clone(),
+        midi_event_rx,
     ));
 
     let activity_emitter = Some(spawn_activity_emitter(
@@ -201,6 +209,7 @@ pub(super) fn start_runtime(
         processing,
         midi_watcher,
         activity_emitter,
+        midi_event_emitter,
         reliable_playback,
         config: shared_config,
         config_rev,
@@ -224,6 +233,9 @@ pub(super) fn stop_runtime(
         let _ = handle.join();
     }
     if let Some(handle) = runtime.activity_emitter {
+        let _ = handle.join();
+    }
+    if let Some(handle) = runtime.midi_event_emitter {
         let _ = handle.join();
     }
     if let Some(server) = runtime.reliable_playback {

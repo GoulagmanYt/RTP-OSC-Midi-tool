@@ -5,8 +5,9 @@ use super::{
 };
 use crate::{
     audio::AudioEngine, config::Config, logger::FrontendLogger, midi::MidiFrame, osc::OscClient,
+    types::MidiNoteEvent,
 };
-use crossbeam_channel::{Receiver, RecvTimeoutError};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 use midir::MidiOutputConnection;
 use parking_lot::Mutex;
 use std::{
@@ -17,6 +18,9 @@ use std::{
     thread,
     time::Duration,
 };
+use tauri::{Emitter, Window};
+
+const MIDI_NOTE_EVENT: &str = "midi:note";
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn spawn_processing_loop(
@@ -31,6 +35,7 @@ pub(super) fn spawn_processing_loop(
     activity: Arc<Mutex<MidiActivityTracker>>,
     osc_counter: Arc<AtomicU32>,
     actual_midi_out: Arc<Mutex<Option<String>>>,
+    midi_event_tx: Sender<MidiNoteEvent>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         processing_loop(
@@ -45,6 +50,7 @@ pub(super) fn spawn_processing_loop(
             activity,
             osc_counter,
             actual_midi_out,
+            midi_event_tx,
         );
     })
 }
@@ -62,6 +68,7 @@ fn processing_loop(
     activity: Arc<Mutex<MidiActivityTracker>>,
     osc_counter: Arc<AtomicU32>,
     actual_midi_out: Arc<Mutex<Option<String>>>,
+    midi_event_tx: Sender<MidiNoteEvent>,
 ) {
     let initial_cfg = shared_config.lock().clone();
     logger.info(format!(
@@ -120,6 +127,7 @@ fn processing_loop(
                     &audio,
                     &osc_counter,
                     &mut sustain_pressed_state,
+                    &midi_event_tx,
                 );
                 // Drain remaining buffered messages without waiting.
                 while let Ok(frame) = midi_rx.try_recv() {
@@ -134,6 +142,7 @@ fn processing_loop(
                         &audio,
                         &osc_counter,
                         &mut sustain_pressed_state,
+                        &midi_event_tx,
                     );
                 }
                 update_pipeline_queue_depth(midi_rx.len());
@@ -154,16 +163,19 @@ fn update_osc_client(
     osc_client: &mut Option<OscClient>,
     current_target: &mut (String, u16),
 ) {
+    let target_changed = current_target.1 != snapshot.osc_target_port
+        || current_target.0.as_str() != snapshot.osc_target_ip;
+
     if snapshot.osc_enabled {
-        let target_tuple = (snapshot.osc_target_ip.clone(), snapshot.osc_target_port);
-        if target_tuple != *current_target || osc_client.is_none() {
+        if target_changed || osc_client.is_none() {
             match OscClient::new(&snapshot.osc_target_ip, snapshot.osc_target_port) {
                 Ok(new_osc) => {
-                    *current_target = target_tuple.clone();
+                    current_target.0.clone_from(&snapshot.osc_target_ip);
+                    current_target.1 = snapshot.osc_target_port;
                     *osc_client = Some(new_osc);
                     logger.info(format!(
                         "Cible OSC mise a jour -> {}:{}",
-                        target_tuple.0, target_tuple.1
+                        current_target.0, current_target.1
                     ));
                 }
                 Err(err) => {
@@ -177,6 +189,27 @@ fn update_osc_client(
             logger.debug("OSC desactive (client suspendu)");
         }
         *osc_client = None;
-        *current_target = (snapshot.osc_target_ip.clone(), snapshot.osc_target_port);
+        if target_changed {
+            current_target.0.clone_from(&snapshot.osc_target_ip);
+            current_target.1 = snapshot.osc_target_port;
+        }
     }
+}
+
+pub(super) fn spawn_midi_event_emitter(
+    stop: Arc<AtomicBool>,
+    window: Window,
+    rx: Receiver<MidiNoteEvent>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        while !stop.load(Ordering::Relaxed) {
+            match rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(event) => {
+                    let _ = window.emit(MIDI_NOTE_EVENT, event);
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+    })
 }

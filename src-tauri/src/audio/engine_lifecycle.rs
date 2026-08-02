@@ -21,7 +21,9 @@ use super::{
     callback_midi::reset_all_notes,
     device_selection::{select_device, select_host},
     engine::{db_to_linear, is_sforzando_vst3, AudioEngine},
-    runtime_state::{AudioError, AudioRuntime, AudioSettings, EditorWindow},
+    runtime_state::{
+        AudioControls, AudioError, AudioRuntime, AudioSettings, AudioTelemetry, EditorWindow,
+    },
     state_codec::{load_vst_state, save_vst_state_blocking},
     stream_runtime::build_stream,
     windows_tuning::apply_audio_process_tuning,
@@ -77,17 +79,19 @@ impl AudioEngine {
                             "Timed out waiting for VST editor to close on main thread",
                         );
                     }
-                } else if let Some(_editor_win) = runtime.editor_window.lock().take() {
+                } else if let Some(editor_win) = runtime.editor_window.lock().take() {
                     background_log(
                         "warn",
-                        "Failed to schedule VST editor close on main thread; forcing local drop",
+                        "Failed to schedule VST editor close on main thread; leaking thread-affine editor",
                     );
+                    std::mem::forget(editor_win);
                 }
-            } else if let Some(_editor_win) = editor_window_arc.lock().take() {
+            } else if let Some(editor_win) = editor_window_arc.lock().take() {
                 background_log(
                     "warn",
-                    "Stopping audio without AppHandle: VST editor might not close cleanly",
+                    "Stopping audio without AppHandle; leaking thread-affine VST editor",
                 );
+                std::mem::forget(editor_win);
             }
 
             reset_all_notes(plugin.clone());
@@ -167,18 +171,22 @@ impl AudioEngine {
         let mut stream_opt = None;
         let mut selected_backend: Option<String> = None;
         let mut selected_device: Option<String> = None;
-        let gain_bits = Arc::new(AtomicU32::new(db_to_linear(settings.gain_db).to_bits()));
-        let limiter_enabled = Arc::new(AtomicBool::new(settings.limiter_enabled));
-        let xruns = Arc::new(AtomicU32::new(0));
-        let meter_left = Arc::new(AtomicU32::new(0.0f32.to_bits()));
-        let meter_right = Arc::new(AtomicU32::new(0.0f32.to_bits()));
-        let block_size_frames = Arc::new(AtomicU32::new(0));
-        let midi_drop_count = Arc::new(AtomicU32::new(0));
-        let audio_lock_miss_count = Arc::new(AtomicU32::new(0));
-        let emergency_reset_count = Arc::new(AtomicU32::new(0));
-        let callback_last_us = Arc::new(AtomicU32::new(0));
-        let callback_max_us = Arc::new(AtomicU32::new(0));
-        let callback_over_budget_count = Arc::new(AtomicU32::new(0));
+        let controls = Arc::new(AudioControls {
+            gain_bits: AtomicU32::new(db_to_linear(settings.gain_db).to_bits()),
+            limiter_enabled: AtomicBool::new(settings.limiter_enabled),
+        });
+        let telemetry = Arc::new(AudioTelemetry {
+            xruns: AtomicU32::new(0),
+            meter_left: AtomicU32::new(0.0f32.to_bits()),
+            meter_right: AtomicU32::new(0.0f32.to_bits()),
+            block_size_frames: AtomicU32::new(0),
+            midi_drop_count: AtomicU32::new(0),
+            audio_lock_miss_count: AtomicU32::new(0),
+            emergency_reset_count: AtomicU32::new(0),
+            callback_last_us: AtomicU32::new(0),
+            callback_max_us: AtomicU32::new(0),
+            callback_over_budget_count: AtomicU32::new(0),
+        });
 
         let mut candidates: Vec<(Option<String>, Option<String>, u8, bool)> = Vec::new();
         let preferred_backend = settings.backend.as_deref().unwrap_or("auto").to_lowercase();
@@ -293,19 +301,9 @@ impl AudioEngine {
                 &device,
                 settings.sample_rate,
                 settings.buffer_size,
-                gain_bits.clone(),
-                limiter_enabled.clone(),
-                xruns.clone(),
-                meter_left.clone(),
-                meter_right.clone(),
-                block_size_frames.clone(),
-                midi_drop_count.clone(),
-                audio_lock_miss_count.clone(),
-                emergency_reset_count.clone(),
+                Arc::clone(&controls),
+                Arc::clone(&telemetry),
                 self.midi_emergency_reset_requested.clone(),
-                callback_last_us.clone(),
-                callback_max_us.clone(),
-                callback_over_budget_count.clone(),
                 vst_path.clone(),
                 &logger,
                 backend_name,
@@ -388,18 +386,8 @@ impl AudioEngine {
             _stream: stream,
             plugin: plugin.clone(),
             editor_window: Arc::new(parking_lot::Mutex::new(None)),
-            gain_bits: gain_bits.clone(),
-            limiter_enabled: limiter_enabled.clone(),
-            xruns: xruns.clone(),
-            meter_left: meter_left.clone(),
-            meter_right: meter_right.clone(),
-            block_size_frames: block_size_frames.clone(),
-            midi_drop_count,
-            audio_lock_miss_count,
-            emergency_reset_count,
-            callback_last_us,
-            callback_max_us,
-            callback_over_budget_count,
+            controls,
+            telemetry,
             sample_rate: active_sample_rate,
             requested_buffer_size: settings.buffer_size,
             stream_buffer_size,

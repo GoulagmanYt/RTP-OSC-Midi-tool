@@ -1,6 +1,6 @@
 #![allow(deprecated)]
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::Ordering;
 
 use cpal::{FromSample, Sample};
 use rack::PluginInstance as _;
@@ -13,13 +13,17 @@ pub(super) fn replay_last_output_or_silence<T: Sample + FromSample<f32>>(
     device_channels: usize,
     silence: T,
     state: &mut AudioCallbackState,
-    meter_left: &AtomicU32,
-    meter_right: &AtomicU32,
 ) {
     if state.last_output.is_empty() || device_channels == 0 {
         data.fill(silence);
-        meter_left.store(0.0f32.to_bits(), Ordering::Relaxed);
-        meter_right.store(0.0f32.to_bits(), Ordering::Relaxed);
+        state
+            .telemetry
+            .meter_left
+            .store(0.0f32.to_bits(), Ordering::Relaxed);
+        state
+            .telemetry
+            .meter_right
+            .store(0.0f32.to_bits(), Ordering::Relaxed);
         return;
     }
 
@@ -37,8 +41,14 @@ pub(super) fn replay_last_output_or_silence<T: Sample + FromSample<f32>>(
     if device_channels == 1 {
         peak_r = peak_l;
     }
-    meter_left.store(peak_l.min(1.0).to_bits(), Ordering::Relaxed);
-    meter_right.store(peak_r.min(1.0).to_bits(), Ordering::Relaxed);
+    state
+        .telemetry
+        .meter_left
+        .store(peak_l.min(1.0).to_bits(), Ordering::Relaxed);
+    state
+        .telemetry
+        .meter_right
+        .store(peak_r.min(1.0).to_bits(), Ordering::Relaxed);
 }
 
 pub(super) fn process_vst3_plugin(

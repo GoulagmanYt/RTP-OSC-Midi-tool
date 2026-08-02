@@ -4,19 +4,18 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, LazyLock,
     },
 };
 
 use chrono::Local;
 use directories::ProjectDirs;
-use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use tauri::{Emitter, Manager, Window};
 
 use crate::types::LogEvent;
 
-static LOG_FILE: Lazy<Mutex<Option<std::fs::File>>> = Lazy::new(|| Mutex::new(None));
+static LOG_FILE: LazyLock<Mutex<Option<std::fs::File>>> = LazyLock::new(|| Mutex::new(None));
 static GLOBAL_DEV_MODE: AtomicBool = AtomicBool::new(false);
 static LOG_ALL_TO_FILE: AtomicBool = AtomicBool::new(false);
 static LOGS_ENABLED: AtomicBool = AtomicBool::new(true);

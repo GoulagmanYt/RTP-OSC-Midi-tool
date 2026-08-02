@@ -53,6 +53,7 @@ pub(super) struct BridgeRuntime {
     pub(super) processing: Option<thread::JoinHandle<()>>,
     pub(super) midi_watcher: Option<thread::JoinHandle<()>>,
     pub(super) activity_emitter: Option<thread::JoinHandle<()>>,
+    pub(super) midi_event_emitter: Option<thread::JoinHandle<()>>,
     pub(super) reliable_playback: Option<ReliablePlaybackServer>,
     pub(super) config: Arc<Mutex<Config>>,
     pub(super) config_rev: Arc<AtomicU64>,
@@ -140,10 +141,13 @@ impl BridgeHandle {
             thread::sleep(Duration::from_millis(200));
             let off = smallvec::SmallVec::from_slice(&[0x80 | ch, note, 0]);
             if let Some(tx) = sink.read().as_ref().cloned() {
-                let _ = try_enqueue_midi_frame(&tx, MidiFrame {
-                    data: off,
-                    source: std::sync::Arc::from(source.as_str()),
-                });
+                let _ = try_enqueue_midi_frame(
+                    &tx,
+                    MidiFrame {
+                        data: off,
+                        source: std::sync::Arc::from(source.as_str()),
+                    },
+                );
             }
         });
 
@@ -221,10 +225,15 @@ impl BridgeHandle {
     /// Inject a MIDI frame directly into the bridge pipeline (for testing).
     pub fn inject_frame(&self, data: SmallVec<[u8; 32]>, source: String) -> Result<(), String> {
         if let Some(tx) = self.rtp_sink.read().as_ref().cloned() {
-            try_enqueue_midi_frame(&tx, MidiFrame {
-                data,
-                source: std::sync::Arc::from(source.as_str()),
-            })
+            try_enqueue_midi_frame(
+                &tx,
+                MidiFrame {
+                    data,
+                    source: std::sync::Arc::from(source.as_str()),
+                },
+            )
+            .map(|_| ())
+            .map_err(|error| error.to_string())
         } else {
             Err("Bridge not running".to_string())
         }

@@ -104,7 +104,10 @@ mod tests {
             "status.audio_mmcss_enabled = audio.mmcss_enabled();",
             "status.audio_power_throttling_disabled = audio.power_throttling_disabled();",
         ] {
-            assert!(source.contains(required), "missing status assignment: {required}");
+            assert!(
+                source.contains(required),
+                "missing status assignment: {required}"
+            );
         }
     }
 }

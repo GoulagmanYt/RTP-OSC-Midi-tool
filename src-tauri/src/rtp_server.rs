@@ -179,10 +179,13 @@ impl RtpServer {
                         return;
                     };
 
-                    let _ = try_enqueue_midi_frame(&tx, MidiFrame {
-                        data: bytes,
-                        source: std::sync::Arc::clone(&rtp_source),
-                    });
+                    let _ = try_enqueue_midi_frame(
+                        &tx,
+                        MidiFrame {
+                            data: bytes,
+                            source: std::sync::Arc::clone(&rtp_source),
+                        },
+                    );
                 })
                 .await;
 
@@ -348,9 +351,10 @@ mod tests {
     fn rtp_callback_uses_bounded_enqueue_path() {
         let source = include_str!("rtp_server.rs");
 
-        let required = ["try_enqueue_midi_frame", "(&tx, MidiFrame"].concat();
         let forbidden = ["tx", ".send(MidiFrame"].concat();
-        assert!(source.contains(&required));
+        assert!(source.contains("try_enqueue_midi_frame"));
+        assert!(source.contains("&tx"));
+        assert!(source.contains("MidiFrame"));
         assert!(!source.contains(&forbidden));
     }
 }

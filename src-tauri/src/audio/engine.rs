@@ -5,7 +5,10 @@ use super::runtime_state::{timestamp_ms, AudioRuntime, MidiPacket};
 use super::{
     callback::{midi_to_rack_event, replay_last_output_or_silence, reset_messages_for_channel},
     plugin_host::SimpleHost,
-    runtime_state::{AudioCallbackState, MAX_PENDING_MIDI, MIDI_DRAIN_BUDGET_PER_CALLBACK},
+    runtime_state::{
+        AudioCallbackState, AudioControls, AudioTelemetry, MAX_PENDING_MIDI,
+        MIDI_DRAIN_BUDGET_PER_CALLBACK,
+    },
     state_codec::{decode_state, encode_state_chunk, encode_state_params, SavedState},
 };
 use std::{
@@ -60,14 +63,6 @@ pub struct AudioEngine {
     pub(super) midi_drop_log_last_ms: Arc<AtomicU64>,
     pub(super) midi_drop_log_accumulator: Arc<AtomicU32>,
 }
-
-// SAFETY: AudioEngine is a handle type made of Arc<Mutex<...>> state and atomics.
-// All shared mutable access goes through those synchronization primitives.
-unsafe impl Send for AudioEngine {}
-// SAFETY: Sharing AudioEngine between threads is sound for the same reason:
-// interior mutability is synchronized and non-Send editor/plugin state is kept
-// behind the runtime guards defined in runtime_state.rs.
-unsafe impl Sync for AudioEngine {}
 
 impl AudioEngine {
     pub fn new() -> Self {
@@ -139,7 +134,10 @@ impl AudioEngine {
 
     fn record_midi_drop_metric(&self) {
         if let Some(runtime) = self.runtime.lock().as_ref() {
-            runtime.midi_drop_count.fetch_add(1, Ordering::Relaxed);
+            runtime
+                .telemetry
+                .midi_drop_count
+                .fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -233,6 +231,37 @@ mod tests {
     use rtrb::RingBuffer;
     use std::{thread, time::Instant};
 
+    fn callback_test_state(
+        rx: rtrb::Consumer<MidiPacket>,
+        emergency_reset_requested: Arc<AtomicBool>,
+    ) -> AudioCallbackState {
+        AudioCallbackState::new(
+            rx,
+            0,
+            2,
+            1024,
+            2,
+            Arc::new(AudioControls {
+                gain_bits: AtomicU32::new(1.0f32.to_bits()),
+                limiter_enabled: AtomicBool::new(false),
+            }),
+            Arc::new(AudioTelemetry {
+                xruns: AtomicU32::new(0),
+                meter_left: AtomicU32::new(0),
+                meter_right: AtomicU32::new(0),
+                block_size_frames: AtomicU32::new(0),
+                midi_drop_count: AtomicU32::new(0),
+                audio_lock_miss_count: AtomicU32::new(0),
+                emergency_reset_count: AtomicU32::new(0),
+                callback_last_us: AtomicU32::new(0),
+                callback_max_us: AtomicU32::new(0),
+                callback_over_budget_count: AtomicU32::new(0),
+            }),
+            emergency_reset_requested,
+            48_000,
+        )
+    }
+
     #[test]
     fn midi_to_rack_event_handles_zero_velocity_note_on() {
         let event = midi_to_rack_event([0x90, 60, 0]).expect("event");
@@ -293,22 +322,7 @@ mod tests {
     fn emergency_reset_clears_pending_midi() {
         let (_tx, rx) = RingBuffer::new(8);
         let reset_flag = Arc::new(AtomicBool::new(true));
-        let mut state = AudioCallbackState::new(
-            rx,
-            0,
-            2,
-            Arc::new(AtomicU32::new(0)),
-            Arc::new(AtomicU32::new(0)),
-            Arc::new(AtomicBool::new(false)),
-            Arc::new(AtomicU32::new(0)),
-            Arc::new(AtomicU32::new(0)),
-            Arc::new(AtomicU32::new(0)),
-            reset_flag,
-            Arc::new(AtomicU32::new(0)),
-            Arc::new(AtomicU32::new(0)),
-            Arc::new(AtomicU32::new(0)),
-            48_000,
-        );
+        let mut state = callback_test_state(rx, reset_flag);
         // Pre-fill pending MIDI with note-on events
         for note in 0..10u8 {
             state.pending_midi.push_back(MidiPacket {
@@ -336,22 +350,7 @@ mod tests {
     #[test]
     fn overflow_prefers_dropping_note_on_for_critical_release() {
         let (_tx, rx) = RingBuffer::new(8);
-        let mut state = AudioCallbackState::new(
-            rx,
-            0,
-            2,
-            Arc::new(AtomicU32::new(0)),
-            Arc::new(AtomicU32::new(0)),
-            Arc::new(AtomicBool::new(false)),
-            Arc::new(AtomicU32::new(0)),
-            Arc::new(AtomicU32::new(0)),
-            Arc::new(AtomicU32::new(0)),
-            Arc::new(AtomicBool::new(false)),
-            Arc::new(AtomicU32::new(0)),
-            Arc::new(AtomicU32::new(0)),
-            Arc::new(AtomicU32::new(0)),
-            48_000,
-        );
+        let mut state = callback_test_state(rx, Arc::new(AtomicBool::new(false)));
         for _ in 0..MAX_PENDING_MIDI {
             state
                 .pending_midi
@@ -441,13 +440,18 @@ mod tests {
 
         assert_eq!(outcome, MidiSendOutcome::CriticalFallbackReset);
         assert!(
-            engine.midi_emergency_reset_requested.load(Ordering::Relaxed),
+            engine
+                .midi_emergency_reset_requested
+                .load(Ordering::Relaxed),
             "critical release overflow should request an emergency reset"
         );
 
         let first = rx.pop().expect("first packet still queued");
         assert_eq!(first.data, [0x90, 60, 100]);
-        assert!(rx.pop().is_err(), "ring should not receive stale fallback data");
+        assert!(
+            rx.pop().is_err(),
+            "ring should not receive stale fallback data"
+        );
     }
 
     #[test]
@@ -458,22 +462,7 @@ mod tests {
                 .expect("push packet");
         }
 
-        let mut state = AudioCallbackState::new(
-            rx,
-            0,
-            2,
-            Arc::new(AtomicU32::new(0)),
-            Arc::new(AtomicU32::new(0)),
-            Arc::new(AtomicBool::new(false)),
-            Arc::new(AtomicU32::new(0)),
-            Arc::new(AtomicU32::new(0)),
-            Arc::new(AtomicU32::new(0)),
-            Arc::new(AtomicBool::new(false)),
-            Arc::new(AtomicU32::new(0)),
-            Arc::new(AtomicU32::new(0)),
-            Arc::new(AtomicU32::new(0)),
-            48_000,
-        );
+        let mut state = callback_test_state(rx, Arc::new(AtomicBool::new(false)));
 
         state.drain_midi();
 
@@ -483,6 +472,24 @@ mod tests {
             remaining += 1;
         }
         assert_eq!(remaining, 64);
+    }
+
+    #[test]
+    fn callback_buffers_are_fixed_after_initialization() {
+        let (_tx, rx) = RingBuffer::new(8);
+        let mut state = callback_test_state(rx, Arc::new(AtomicBool::new(false)));
+        let input_ptr = state.input_silence.as_ptr();
+        let output_ptrs: Vec<_> = state.outputs.iter().map(Vec::as_ptr).collect();
+        let pending_capacity = state.pending_midi.capacity();
+
+        assert!(state.prepare(1024));
+        assert_eq!(state.input_silence.as_ptr(), input_ptr);
+        assert_eq!(
+            state.outputs.iter().map(Vec::as_ptr).collect::<Vec<_>>(),
+            output_ptrs
+        );
+        assert_eq!(state.pending_midi.capacity(), pending_capacity);
+        assert!(!state.prepare(1025));
     }
 
     #[test]
@@ -515,62 +522,41 @@ mod tests {
     #[test]
     fn replay_last_output_reuses_previous_block_on_lock_miss() {
         let (_tx, rx) = RingBuffer::new(8);
-        let mut state = AudioCallbackState::new(
-            rx,
-            0,
-            2,
-            Arc::new(AtomicU32::new(0)),
-            Arc::new(AtomicU32::new(0)),
-            Arc::new(AtomicBool::new(false)),
-            Arc::new(AtomicU32::new(0)),
-            Arc::new(AtomicU32::new(0)),
-            Arc::new(AtomicU32::new(0)),
-            Arc::new(AtomicBool::new(false)),
-            Arc::new(AtomicU32::new(0)),
-            Arc::new(AtomicU32::new(0)),
-            Arc::new(AtomicU32::new(0)),
-            48_000,
-        );
+        let mut state = callback_test_state(rx, Arc::new(AtomicBool::new(false)));
         state.last_output = vec![0.25, -0.5, 0.1, -0.2];
-        let meter_left = AtomicU32::new(0);
-        let meter_right = AtomicU32::new(0);
         let mut out = vec![0.0f32; 4];
 
-        replay_last_output_or_silence(&mut out, 2, 0.0f32, &mut state, &meter_left, &meter_right);
+        replay_last_output_or_silence(&mut out, 2, 0.0f32, &mut state);
 
         assert_eq!(out, vec![0.25, -0.5, 0.1, -0.2]);
-        assert_eq!(f32::from_bits(meter_left.load(Ordering::Relaxed)), 0.25);
-        assert_eq!(f32::from_bits(meter_right.load(Ordering::Relaxed)), 0.5);
+        assert_eq!(
+            f32::from_bits(state.telemetry.meter_left.load(Ordering::Relaxed)),
+            0.25
+        );
+        assert_eq!(
+            f32::from_bits(state.telemetry.meter_right.load(Ordering::Relaxed)),
+            0.5
+        );
     }
 
     #[test]
     fn replay_last_output_falls_back_to_silence_without_history() {
         let (_tx, rx) = RingBuffer::new(8);
-        let mut state = AudioCallbackState::new(
-            rx,
-            0,
-            2,
-            Arc::new(AtomicU32::new(0)),
-            Arc::new(AtomicU32::new(0)),
-            Arc::new(AtomicBool::new(false)),
-            Arc::new(AtomicU32::new(0)),
-            Arc::new(AtomicU32::new(0)),
-            Arc::new(AtomicU32::new(0)),
-            Arc::new(AtomicBool::new(false)),
-            Arc::new(AtomicU32::new(0)),
-            Arc::new(AtomicU32::new(0)),
-            Arc::new(AtomicU32::new(0)),
-            48_000,
-        );
-        let meter_left = AtomicU32::new(0);
-        let meter_right = AtomicU32::new(0);
+        let mut state = callback_test_state(rx, Arc::new(AtomicBool::new(false)));
+        state.last_output.clear();
         let mut out = vec![1.0f32; 4];
 
-        replay_last_output_or_silence(&mut out, 2, 0.0f32, &mut state, &meter_left, &meter_right);
+        replay_last_output_or_silence(&mut out, 2, 0.0f32, &mut state);
 
         assert_eq!(out, vec![0.0, 0.0, 0.0, 0.0]);
-        assert_eq!(f32::from_bits(meter_left.load(Ordering::Relaxed)), 0.0);
-        assert_eq!(f32::from_bits(meter_right.load(Ordering::Relaxed)), 0.0);
+        assert_eq!(
+            f32::from_bits(state.telemetry.meter_left.load(Ordering::Relaxed)),
+            0.0
+        );
+        assert_eq!(
+            f32::from_bits(state.telemetry.meter_right.load(Ordering::Relaxed)),
+            0.0
+        );
     }
 
     #[test]

@@ -2,11 +2,30 @@ use crate::midi::{NOTE_MAX, NOTE_MIN};
 use rosc::{encoder, OscMessage, OscPacket, OscType};
 use std::io::ErrorKind;
 use std::net::{SocketAddr, UdpSocket};
+use std::sync::LazyLock;
 use std::thread;
 use std::time::Duration;
 
 pub const PARAMETER_PATH: &str = "/avatar/parameters/";
 pub const SUSTAIN_PARAM: &str = "/avatar/parameters/sustain";
+
+static NOTE_PACKETS: LazyLock<Vec<[Box<[u8]>; 2]>> = LazyLock::new(|| {
+    (1..=(NOTE_MAX - NOTE_MIN + 1))
+        .map(|index| {
+            [
+                encode_param(&parameter_name(index), false).into_boxed_slice(),
+                encode_param(&parameter_name(index), true).into_boxed_slice(),
+            ]
+        })
+        .collect()
+});
+
+static SUSTAIN_PACKETS: LazyLock<[Box<[u8]>; 2]> = LazyLock::new(|| {
+    [
+        encode_param(SUSTAIN_PARAM, false).into_boxed_slice(),
+        encode_param(SUSTAIN_PARAM, true).into_boxed_slice(),
+    ]
+});
 
 pub fn parameter_name(index: u8) -> String {
     format!("{PARAMETER_PATH}{index}")
@@ -19,6 +38,8 @@ pub struct OscClient {
 
 impl OscClient {
     pub fn new(ip: &str, port: u16) -> Result<Self, String> {
+        LazyLock::force(&NOTE_PACKETS);
+        LazyLock::force(&SUSTAIN_PACKETS);
         let target = format!("{ip}:{port}")
             .parse::<SocketAddr>()
             .map_err(|e| e.to_string())?;
@@ -29,12 +50,20 @@ impl OscClient {
         Ok(Self { socket, target })
     }
 
-    pub fn send_param(&self, name: &str, pressed: bool) -> Result<(), String> {
-        let value = if pressed { 1 } else { 0 };
-        self.send_packet(OscPacket::Message(OscMessage {
-            addr: name.to_string(),
-            args: vec![OscType::Int(value)],
-        }))
+    #[cfg(test)]
+    fn send_param(&self, name: &str, pressed: bool) -> Result<(), String> {
+        self.send_encoded(&encode_param(name, pressed))
+    }
+
+    pub fn send_note(&self, index: u8, pressed: bool) -> Result<(), String> {
+        let packet = NOTE_PACKETS
+            .get(usize::from(index.saturating_sub(1)))
+            .ok_or_else(|| format!("OSC note index out of range: {index}"))?;
+        self.send_encoded(&packet[usize::from(pressed)])
+    }
+
+    pub fn send_sustain(&self, pressed: bool) -> Result<(), String> {
+        self.send_encoded(&SUSTAIN_PACKETS[usize::from(pressed)])
     }
 
     pub fn send_reset_all(&self) -> Result<(), String> {
@@ -43,11 +72,11 @@ impl OscClient {
             addr: format!("{PARAMETER_PATH}K1"),
             args: vec![OscType::Float(0.0)],
         }));
-        let _ = self.send_param(SUSTAIN_PARAM, false);
+        let _ = self.send_sustain(false);
         thread::sleep(Duration::from_millis(20));
         for note in NOTE_MIN..=NOTE_MAX {
             let index = (note - NOTE_MIN) + 1;
-            let _ = self.send_param(&parameter_name(index), false);
+            let _ = self.send_note(index, false);
             thread::sleep(Duration::from_millis(6));
         }
         Ok(())
@@ -55,9 +84,13 @@ impl OscClient {
 
     fn send_packet(&self, packet: OscPacket) -> Result<(), String> {
         let data = encoder::encode(&packet).map_err(|e| e.to_string())?;
+        self.send_encoded(&data)
+    }
+
+    fn send_encoded(&self, data: &[u8]) -> Result<(), String> {
         let mut last_retry_error: Option<std::io::Error> = None;
         for _ in 0..3 {
-            match self.socket.send_to(&data, self.target) {
+            match self.socket.send_to(data, self.target) {
                 Ok(_) => return Ok(()),
                 Err(err)
                     if matches!(
@@ -75,6 +108,15 @@ impl OscClient {
             .map(|e| e.to_string())
             .unwrap_or_else(|| "OSC send failed after retries".to_string()))
     }
+}
+
+fn encode_param(name: &str, pressed: bool) -> Vec<u8> {
+    let value = i32::from(pressed);
+    encoder::encode(&OscPacket::Message(OscMessage {
+        addr: name.to_owned(),
+        args: vec![OscType::Int(value)],
+    }))
+    .expect("encoding a fixed OSC parameter packet must succeed")
 }
 
 #[cfg(test)]

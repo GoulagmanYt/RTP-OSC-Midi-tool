@@ -64,22 +64,32 @@ pub(super) enum PluginBackend {
     },
 }
 
+#[repr(align(64))]
+pub(super) struct AudioControls {
+    pub(super) gain_bits: AtomicU32,
+    pub(super) limiter_enabled: AtomicBool,
+}
+
+#[repr(align(64))]
+pub(super) struct AudioTelemetry {
+    pub(super) xruns: AtomicU32,
+    pub(super) meter_left: AtomicU32,
+    pub(super) meter_right: AtomicU32,
+    pub(super) block_size_frames: AtomicU32,
+    pub(super) midi_drop_count: AtomicU32,
+    pub(super) audio_lock_miss_count: AtomicU32,
+    pub(super) emergency_reset_count: AtomicU32,
+    pub(super) callback_last_us: AtomicU32,
+    pub(super) callback_max_us: AtomicU32,
+    pub(super) callback_over_budget_count: AtomicU32,
+}
+
 pub(super) struct AudioRuntime {
     pub(super) _stream: Stream,
     pub(super) plugin: Arc<Mutex<PluginBackend>>,
     pub(super) editor_window: Arc<Mutex<Option<EditorWindow>>>,
-    pub(super) gain_bits: Arc<AtomicU32>,
-    pub(super) limiter_enabled: Arc<AtomicBool>,
-    pub(super) xruns: Arc<AtomicU32>,
-    pub(super) meter_left: Arc<AtomicU32>,
-    pub(super) meter_right: Arc<AtomicU32>,
-    pub(super) block_size_frames: Arc<AtomicU32>,
-    pub(super) midi_drop_count: Arc<AtomicU32>,
-    pub(super) audio_lock_miss_count: Arc<AtomicU32>,
-    pub(super) emergency_reset_count: Arc<AtomicU32>,
-    pub(super) callback_last_us: Arc<AtomicU32>,
-    pub(super) callback_max_us: Arc<AtomicU32>,
-    pub(super) callback_over_budget_count: Arc<AtomicU32>,
+    pub(super) controls: Arc<AudioControls>,
+    pub(super) telemetry: Arc<AudioTelemetry>,
     pub(super) sample_rate: u32,
     pub(super) requested_buffer_size: u32,
     pub(super) stream_buffer_size: Option<u32>,
@@ -100,16 +110,16 @@ pub(super) enum EditorWindow {
     },
 }
 
-// SAFETY: EditorWindow is only accessed behind Arc<Mutex<...>> and all UI access stays
-// on the owning thread through explicit synchronization in the engine.
+// SAFETY: this type is moved only into closures scheduled by `run_on_main_thread`.
+// Every editor/GUI method and normal drop happens on that thread. Exceptional
+// scheduling failures deliberately leak the thread-affine value rather than
+// dropping it on the caller thread.
 unsafe impl Send for EditorWindow {}
-// SAFETY: Shared access is synchronized through Mutex; raw window/plugin GUI handles are not
-// accessed concurrently without locking.
-unsafe impl Sync for EditorWindow {}
-// SAFETY: AudioRuntime is composed of thread-safe primitives and guarded plugin/editor state.
+
+// SAFETY: the CPAL stream is created, controlled, and dropped as part of the
+// synchronized runtime lifecycle. Plugin/editor mutation remains guarded, and
+// editor operations are dispatched to the main thread as documented above.
 unsafe impl Send for AudioRuntime {}
-// SAFETY: Shared AudioRuntime access always happens through Arc<Mutex<_>> in AudioEngine.
-unsafe impl Sync for AudioRuntime {}
 
 pub(super) const MIDI_RING_CAPACITY: usize = 16384;
 pub(super) const MAX_PENDING_MIDI: usize = 8192;
@@ -182,16 +192,10 @@ pub(super) struct AudioCallbackState {
     pub(super) output_ptrs: Vec<*mut f32>,
     pub(super) plugin_inputs: usize,
     pub(super) plugin_outputs: usize,
-    pub(super) xruns: Arc<AtomicU32>,
-    pub(super) block_size_frames: Arc<AtomicU32>,
-    pub(super) limiter_enabled: Arc<AtomicBool>,
-    pub(super) midi_drop_count: Arc<AtomicU32>,
-    pub(super) audio_lock_miss_count: Arc<AtomicU32>,
-    pub(super) emergency_reset_count: Arc<AtomicU32>,
+    pub(super) max_frames: usize,
+    pub(super) controls: Arc<AudioControls>,
+    pub(super) telemetry: Arc<AudioTelemetry>,
     pub(super) emergency_reset_requested: Arc<AtomicBool>,
-    pub(super) callback_last_us: Arc<AtomicU32>,
-    pub(super) callback_max_us: Arc<AtomicU32>,
-    pub(super) callback_over_budget_count: Arc<AtomicU32>,
     pub(super) sample_rate: u32,
     pub(super) last_output: Vec<f32>,
     pub(super) needs_emergency_reset: bool,
@@ -201,8 +205,9 @@ pub(super) struct AudioCallbackState {
     pub(super) mmcss_applied: bool,
 }
 
-// SAFETY: AudioCallbackState is confined to the audio callback thread; moving it across
-// threads is safe because all shared state is held in atomics/ring buffers.
+// SAFETY: AudioCallbackState is moved into the callback before any callback runs and
+// remains confined there. Its raw pointers refer to fixed-capacity heap allocations;
+// `prepare` never resizes those allocations and refreshes the pointers before use.
 unsafe impl Send for AudioCallbackState {}
 
 impl AudioCallbackState {
@@ -211,40 +216,36 @@ impl AudioCallbackState {
         midi_rx: Consumer<MidiPacket>,
         plugin_inputs: usize,
         plugin_outputs: usize,
-        xruns: Arc<AtomicU32>,
-        block_size_frames: Arc<AtomicU32>,
-        limiter_enabled: Arc<AtomicBool>,
-        midi_drop_count: Arc<AtomicU32>,
-        audio_lock_miss_count: Arc<AtomicU32>,
-        emergency_reset_count: Arc<AtomicU32>,
+        max_frames: usize,
+        device_channels: usize,
+        controls: Arc<AudioControls>,
+        telemetry: Arc<AudioTelemetry>,
         emergency_reset_requested: Arc<AtomicBool>,
-        callback_last_us: Arc<AtomicU32>,
-        callback_max_us: Arc<AtomicU32>,
-        callback_over_budget_count: Arc<AtomicU32>,
         sample_rate: u32,
     ) -> Self {
+        let max_frames = max_frames.max(1);
+        let input_silence = vec![0.0; max_frames];
+        let input_ptrs = vec![input_silence.as_ptr(); plugin_inputs];
+        let mut outputs: Vec<Vec<f32>> =
+            (0..plugin_outputs).map(|_| vec![0.0; max_frames]).collect();
+        let output_ptrs = outputs.iter_mut().map(Vec::as_mut_ptr).collect();
+
         Self {
             midi_rx,
-            pending_midi: VecDeque::with_capacity(256),
+            pending_midi: VecDeque::with_capacity(MAX_PENDING_MIDI),
             midi_events: Vec::with_capacity(MIDI_EVENT_BATCH_CAPACITY),
-            input_silence: Vec::new(),
-            input_ptrs: vec![std::ptr::null(); plugin_inputs],
-            outputs: (0..plugin_outputs).map(|_| Vec::new()).collect(),
-            output_ptrs: vec![std::ptr::null_mut(); plugin_outputs],
+            input_silence,
+            input_ptrs,
+            outputs,
+            output_ptrs,
             plugin_inputs,
             plugin_outputs,
-            xruns,
-            block_size_frames,
-            limiter_enabled,
-            midi_drop_count,
-            audio_lock_miss_count,
-            emergency_reset_count,
+            max_frames,
+            controls,
+            telemetry,
             emergency_reset_requested,
-            callback_last_us,
-            callback_max_us,
-            callback_over_budget_count,
             sample_rate,
-            last_output: Vec::new(),
+            last_output: vec![0.0; max_frames.saturating_mul(device_channels)],
             needs_emergency_reset: false,
             last_frames: 0,
             error_count: 0,
@@ -253,36 +254,27 @@ impl AudioCallbackState {
         }
     }
 
-    pub(super) fn prepare(&mut self, frames: usize) {
-        if self.input_silence.len() < frames {
-            self.input_silence.resize(frames, 0.0);
+    pub(super) fn prepare(&mut self, frames: usize) -> bool {
+        if frames > self.max_frames {
+            return false;
         }
 
         let input_ptr = self.input_silence.as_ptr();
-        if self.input_ptrs.len() != self.plugin_inputs {
-            self.input_ptrs.resize(self.plugin_inputs, input_ptr);
-        }
+        debug_assert_eq!(self.input_ptrs.len(), self.plugin_inputs);
         for ptr in &mut self.input_ptrs {
             *ptr = input_ptr;
         }
 
-        if self.outputs.len() != self.plugin_outputs {
-            self.outputs = (0..self.plugin_outputs).map(|_| Vec::new()).collect();
-            self.output_ptrs
-                .resize(self.plugin_outputs, std::ptr::null_mut());
-        }
+        debug_assert_eq!(self.outputs.len(), self.plugin_outputs);
 
         for output in &mut self.outputs {
-            if output.len() < frames {
-                output.resize(frames, 0.0);
-            } else {
-                output[..frames].fill(0.0);
-            }
+            output[..frames].fill(0.0);
         }
 
         for (idx, output) in self.outputs.iter_mut().enumerate() {
             self.output_ptrs[idx] = output.as_mut_ptr();
         }
+        true
     }
 
     pub(super) fn drain_midi(&mut self) {
@@ -309,25 +301,33 @@ impl AudioCallbackState {
 
         if self.drop_oldest_note_on() {
             self.pending_midi.push_back(msg);
-            self.midi_drop_count.fetch_add(1, Ordering::Relaxed);
+            self.telemetry
+                .midi_drop_count
+                .fetch_add(1, Ordering::Relaxed);
             return;
         }
 
         if !msg.is_critical_release() {
-            self.midi_drop_count.fetch_add(1, Ordering::Relaxed);
+            self.telemetry
+                .midi_drop_count
+                .fetch_add(1, Ordering::Relaxed);
             return;
         }
 
         if self.drop_oldest_non_critical() {
             self.pending_midi.push_back(msg);
-            self.midi_drop_count.fetch_add(1, Ordering::Relaxed);
+            self.telemetry
+                .midi_drop_count
+                .fetch_add(1, Ordering::Relaxed);
             return;
         }
 
         self.pending_midi.clear();
         self.pending_midi.push_back(msg);
         self.needs_emergency_reset = true;
-        self.midi_drop_count.fetch_add(1, Ordering::Relaxed);
+        self.telemetry
+            .midi_drop_count
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     fn drop_oldest_note_on(&mut self) -> bool {
