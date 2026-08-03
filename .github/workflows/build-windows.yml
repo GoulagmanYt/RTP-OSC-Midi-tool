@@ -113,10 +113,26 @@ jobs:
 
       - name: Attach artifacts to GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            artifacts/OSCMidi.exe
-            artifacts/*.msi
-          fail_on_unmatched_files: true
-          generate_release_notes: true
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $repository = $env:GITHUB_REPOSITORY
+          $msi = Get-ChildItem artifacts -Filter '*.msi' -File -ErrorAction Stop
+          $assets = @('artifacts/OSCMidi.exe') + @($msi.FullName)
+
+          gh release view $tag --repo $repository *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag @assets --repo $repository --clobber
+          } else {
+            gh release create $tag @assets `
+              --repo $repository `
+              --verify-tag `
+              --generate-notes `
+              --title "OSCMidi $tag"
+          }
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to publish GitHub Release $tag"
+          }
