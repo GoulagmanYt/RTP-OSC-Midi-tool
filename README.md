@@ -41,6 +41,8 @@ Required tools:
 - Node.js 20 or newer, including npm.
 - Rust stable toolchain through `rustup`.
 - Visual Studio Build Tools with the C++ MSVC toolchain.
+- CMake available on PATH.
+- LLVM/Clang with `clang.exe` and `libclang.dll` available on PATH or in the standard install locations.
 - Git.
 - The ASIO SDK folder included in this repository.
 
@@ -58,6 +60,18 @@ npm run tauri:dev
 ## Building Locally
 
 Recommended Windows build script:
+
+If you are building on a fresh Windows machine, install the following prerequisites first:
+
+```powershell
+winget install OpenJS.NodeJS.LTS
+winget install Rustlang.Rustup
+winget install Microsoft.VisualStudio.2022.BuildTools --override "--wait --passThru --add Microsoft.VisualStudio.Component.VC.Tools.x86.x64 --add Microsoft.VisualStudio.Component.Windows11SDK.22000"
+winget install Kitware.CMake
+winget install LLVM.LLVM
+```
+
+Then run:
 
 ```bat
 build_windows.bat
