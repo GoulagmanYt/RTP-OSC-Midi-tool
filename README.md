@@ -15,7 +15,7 @@ OSCMidi is a Windows-only desktop bridge for routing MIDI between RTP-MIDI netwo
 
 ## Current Release
 
-Latest intended release tag: `v1.0.0`.
+Latest intended release tag: `v1.1.0`.
 
 For tagged releases, GitHub Actions builds the Windows executable and attaches the generated artifacts to the GitHub Release.
 
