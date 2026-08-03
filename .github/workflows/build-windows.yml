@@ -19,19 +19,19 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: '0'
+      CI: 'true'
       ASIOSDK_DIR: ${{ github.workspace }}\ASIOSDK
       ASIO_SDK_DIR: ${{ github.workspace }}\ASIOSDK
       CPAL_ASIO_DIR: ${{ github.workspace }}\ASIOSDK
-      TAURI_BUNDLE_TARGETS: app,msi
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          node-version: '24'
           cache: npm
           cache-dependency-path: package-lock.json
 
@@ -49,39 +49,56 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci --no-fund --no-audit
 
-      - name: Build Tauri application
-        run: npm run tauri:build
+      - name: Validate application version
+        shell: pwsh
+        run: |
+          $packageVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $tauriVersion = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $cargoMetadata = cargo metadata `
+            --manifest-path src-tauri/Cargo.toml `
+            --format-version 1 `
+            --no-deps | ConvertFrom-Json
+          $cargoVersion = $cargoMetadata.packages[0].version
+
+          $versions = @($packageVersion, $tauriVersion, $cargoVersion) | Sort-Object -Unique
+          if ($versions.Count -ne 1) {
+            throw "Version mismatch: package.json=$packageVersion, tauri.conf.json=$tauriVersion, Cargo.toml=$cargoVersion"
+          }
+
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne "v$packageVersion") {
+            throw "Release tag $env:GITHUB_REF_NAME does not match application version v$packageVersion"
+          }
+
+          Write-Host "Validated OSCMidi version $packageVersion"
+
+      - name: Build Tauri application and MSI installer
+        run: npm run tauri:build -- --bundles msi --ci
 
       - name: Collect Windows artifacts
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path artifacts | Out-Null
 
-          $patterns = @(
-            '.cargo-target/release/OSCMidi.exe',
-            '.cargo-target/release/bundle/msi/*.msi',
-            '.cargo-target/release/bundle/nsis/*.exe',
-            '.cargo-target/release/bundle/app/*.exe'
+          $binary = Get-Item '.cargo-target/release/OSCMidi.exe' -ErrorAction Stop
+          $installers = @(
+            Get-ChildItem '.cargo-target/release/bundle/msi' `
+              -Filter '*.msi' `
+              -File `
+              -ErrorAction SilentlyContinue
           )
 
-          $found = @()
-          foreach ($pattern in $patterns) {
-            $found += Get-ChildItem -Path $pattern -File -ErrorAction SilentlyContinue
+          if ($installers.Count -eq 0) {
+            throw 'The Tauri build completed without producing an MSI installer.'
           }
 
-          if (-not $found) {
-            Write-Error 'No Windows build artifacts were found.'
-            exit 1
-          }
-
-          foreach ($file in $found | Sort-Object FullName -Unique) {
+          foreach ($file in @($binary) + $installers) {
             Copy-Item -LiteralPath $file.FullName -Destination artifacts/
           }
 
           Get-ChildItem artifacts -File | Format-Table Name, Length
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: OSCMidi-windows-${{ github.ref_name }}
           path: artifacts/*
@@ -91,5 +108,8 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/*
+          files: |
+            artifacts/OSCMidi.exe
+            artifacts/*.msi
+          fail_on_unmatched_files: true
           generate_release_notes: true

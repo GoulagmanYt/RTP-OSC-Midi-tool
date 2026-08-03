@@ -91,19 +91,27 @@ echo --- Build OSCMidi (%DATE% %TIME%) --- >"%LOG_FILE%"
 where npm >nul 2>nul || goto NONODE
 where cargo >nul 2>nul || where rustup >nul 2>nul || goto NORUST
 
-call :LOG "[1/4] Install deps (npm ci)..."
-if exist node_modules (
-  call :RUNCMD npm install --no-fund --no-audit --silent || goto ERROR
-) else (
-  call :RUNCMD npm ci --no-fund --no-audit || goto ERROR
+call :LOG "[1/3] Install deps (npm ci)..."
+call :RUNCMD npm ci --no-fund --no-audit || goto ERROR
+
+call :LOG "[2/3] Bundle Tauri (.exe + .msi)..."
+call :RUNCMD npm run tauri:build -- --bundles msi --ci || goto ERROR
+
+if not exist "%CARGO_TARGET_DIR%\release\OSCMidi.exe" (
+  call :LOG "Erreur : OSCMidi.exe n'a pas ete genere."
+  set "EXIT_CODE=1"
+  goto ERROR
 )
 
-call :LOG "[2/4] Build UI (Vite)..."
-call :RUNCMD npm run build || goto ERROR
-
-call :LOG "[3/4] Bundle Tauri (.exe + .msi)..."
-set TAURI_BUNDLE_TARGETS=app,msi
-call :RUNCMD npm run tauri:build || goto ERROR
+set "MSI_FOUND="
+for %%I in ("%CARGO_TARGET_DIR%\release\bundle\msi\*.msi") do (
+  if exist "%%~fI" set "MSI_FOUND=1"
+)
+if not defined MSI_FOUND (
+  call :LOG "Erreur : aucun installateur MSI n'a ete genere."
+  set "EXIT_CODE=1"
+  goto ERROR
+)
 
 if exist "%CARGO_TARGET_DIR%\release\osc-midi-bridge.exe" (
   del /f /q "%CARGO_TARGET_DIR%\release\osc-midi-bridge.exe" >>"%LOG_FILE%" 2>&1
@@ -112,7 +120,7 @@ if exist "%CARGO_TARGET_DIR%\release\vst_smoke.exe" (
   del /f /q "%CARGO_TARGET_DIR%\release\vst_smoke.exe" >>"%LOG_FILE%" 2>&1
 )
 
-call :LOG "[4/4] Build termine. Artefacts : %CARGO_TARGET_DIR%\release\bundle\ et %CARGO_TARGET_DIR%\release\OSCMidi.exe"
+call :LOG "[3/3] Build termine. Artefacts : %CARGO_TARGET_DIR%\release\bundle\msi\ et %CARGO_TARGET_DIR%\release\OSCMidi.exe"
 set "BUILD_STATUS=OK"
 set "EXIT_CODE=0"
 goto FINALIZE
@@ -131,7 +139,7 @@ goto FINALIZE
 
 :ERROR
 set "BUILD_STATUS=FAIL"
-set "EXIT_CODE=%ERRORLEVEL%"
+if "%EXIT_CODE%"=="0" set "EXIT_CODE=%ERRORLEVEL%"
 goto FINALIZE
 
 :FINALIZE
