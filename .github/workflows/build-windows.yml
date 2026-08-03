@@ -42,9 +42,16 @@ jobs:
           targets: x86_64-pc-windows-msvc
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
+        uses: actions/cache@v5
         with:
-          workspaces: src-tauri -> ../.cargo-target
+          path: |
+            .cargo-target
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: rust-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            rust-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Install frontend dependencies
         run: npm ci --no-fund --no-audit
