@@ -25,6 +25,7 @@ pub(super) fn spawn_activity_emitter(
     audio: AudioEngine,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
+        let mut worker_editor_was_open = false;
         while !stop.load(Ordering::Relaxed) {
             thread::sleep(Duration::from_secs(1));
             let snapshot = activity_state.lock().snapshot_and_reset();
@@ -32,6 +33,11 @@ pub(super) fn spawn_activity_emitter(
                 acc.saturating_add(entry.messages_per_sec)
             });
             let _ = window.emit(MIDI_ACTIVITY_EVENT, snapshot);
+            let worker_editor_open = audio.vst_worker_editor_open();
+            if worker_editor_was_open && !worker_editor_open {
+                let _ = window.emit("audio:vst-editor-hidden", ());
+            }
+            worker_editor_was_open = worker_editor_open;
             let osc_messages = osc_counter.swap(0, Ordering::Relaxed);
             let peaks = audio.peak_levels();
             let (audio_peak_l, audio_peak_r) = match peaks {
@@ -61,9 +67,9 @@ pub(super) fn spawn_activity_emitter(
                 audio_midi_queue_depth: audio.audio_midi_queue_depth(),
                 audio_midi_queue_max_depth: audio.audio_midi_queue_max_depth(),
                 audio_midi_oldest_us: audio.audio_midi_oldest_us(),
-                vst_worker_state: "disabled".to_string(),
-                vst_worker_restarts: 0,
-                vst_worker_last_exit: None,
+                vst_worker_state: audio.vst_worker_state(),
+                vst_worker_restarts: audio.vst_worker_restarts(),
+                vst_worker_last_exit: audio.vst_worker_last_exit(),
                 audio_mmcss_enabled: audio.mmcss_enabled(),
                 audio_power_throttling_disabled: audio.power_throttling_disabled(),
                 midi_messages_per_sec: midi_messages,

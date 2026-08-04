@@ -92,10 +92,24 @@ impl RtpServer {
                 return Err("Impossible de demarrer RTP-MIDI (port invalide)".to_string());
             }
             for p in try_ports {
-                match RtpMidiSession::start(p, &name, ssrc, InviteResponder::Accept).await {
-                    Ok(session) => return Ok((session, p)),
-                    Err(err) => {
-                        if err.kind() == std::io::ErrorKind::AddrInUse {
+                // rtpmidi can release its UDP sockets a few scheduler ticks
+                // after stop_gracefully() completes. Retry the preferred pair
+                // briefly so an immediate bridge restart keeps ports 5004/5005.
+                let retry_delays_ms = if p == port {
+                    &[0u64, 25, 50, 100, 200][..]
+                } else {
+                    &[0u64][..]
+                };
+                for (attempt, delay_ms) in retry_delays_ms.iter().enumerate() {
+                    if *delay_ms > 0 {
+                        tokio::time::sleep(Duration::from_millis(*delay_ms)).await;
+                    }
+                    match RtpMidiSession::start(p, &name, ssrc, InviteResponder::Accept).await {
+                        Ok(session) => return Ok((session, p)),
+                        Err(err)
+                            if err.kind() == std::io::ErrorKind::AddrInUse
+                                && attempt + 1 < retry_delays_ms.len() => {}
+                        Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => {
                             if let (Some(next_ctrl), Some(next_data)) =
                                 (p.checked_add(2), p.checked_add(3))
                             {
@@ -105,8 +119,9 @@ impl RtpServer {
                             } else {
                                 logger.warn(format!("Port RTP {p} occupé, autre tentative"));
                             }
-                            continue;
-                        } else {
+                            break;
+                        }
+                        Err(err) => {
                             logger.error(format!("Erreur RTP-MIDI: {err}"));
                             return Err(err.to_string());
                         }

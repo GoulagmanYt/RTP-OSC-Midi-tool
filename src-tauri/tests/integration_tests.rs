@@ -22,6 +22,7 @@ fn test_audio_engine_lifecycle() {
     // Test de configuration audio valide
     let settings = AudioSettings {
         enabled: true,
+        vst_worker_enabled: false,
         backend: Some("auto".to_string()),
         device: None,
         sample_rate: 48_000,

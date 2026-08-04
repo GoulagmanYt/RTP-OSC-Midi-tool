@@ -210,7 +210,7 @@ fn default_vst_host_abi_version() -> u32 {
     1
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct VstParameter {
     pub index: usize,

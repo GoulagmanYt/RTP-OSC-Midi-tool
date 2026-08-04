@@ -36,6 +36,7 @@ function makeConfig(): AppConfig {
       bufferSize: 256,
       gainDb: 0,
       limiterEnabled: false,
+      vstWorkerEnabled: false,
       vstPath: null,
     },
     ui: {

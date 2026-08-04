@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "build": {
-    "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build",
+    "beforeDevCommand": "npm run prepare:vst-worker:dev && npm run dev",
+    "beforeBuildCommand": "npm run prepare:vst-worker:release && npm run build",
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420"
   },
@@ -10,6 +10,9 @@
     "icon": [
       "icons/icon.ico",
       "icons/icon.png"
+    ],
+    "externalBin": [
+      "binaries/vst-host-worker"
     ],
     "targets": [
       "msi"

@@ -75,17 +75,14 @@ without flooding external MIDI or OSC destinations. The former UI "End-to-End"
 mode was hidden because it injected after RTP and therefore did not test RTP at
 all; true RTP end-to-end testing remains external/phase 2 work.
 
-## Deliberately not enabled yet
+## Phase 2 worker
 
-The full `vst-host-worker.exe` runtime (named-pipe control/MIDI protocol,
-heartbeat, restart budget, and worker-owned editor) is not enabled by this
-change. The scan is isolated, but the active plugin still runs in the Tauri
-process. Enabling a partially implemented worker would create a less reliable
-audio path, so `vstWorkerState` reports `disabled` until that phase is completed
-and passes the real-plugin campaign.
+Phase 1 is frozen in commit `e8de779`. The optional phase 2 worker is described
+in `docs/VST_WORKER_PHASE2.md`. It is disabled by default and can be enabled from
+the Audio page for real-plugin validation; no automatic fallback to in-process
+hosting occurs when isolation is selected.
 
-The deterministic native VST fixtures and the 30-minute Splice/Voicemeeter
-release campaign also require a plugin build/signing environment and the target
+The 30-minute Splice/Voicemeeter release campaign still requires the target
 audio device. The existing real-plugin smoke tests remain opt-in/ignored.
 
 ## Validation performed

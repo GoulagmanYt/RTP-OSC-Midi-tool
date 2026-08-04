@@ -79,6 +79,7 @@ export type RtpConfig = {
 
 export type AudioConfig = {
   enabled: boolean;
+  vstWorkerEnabled: boolean;
   backend?: string | null;
   device?: string | null;
   sampleRate: number;

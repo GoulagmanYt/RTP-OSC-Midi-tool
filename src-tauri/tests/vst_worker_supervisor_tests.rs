@@ -1,0 +1,92 @@
+#![cfg(target_os = "windows")]
+
+use std::time::Duration;
+
+use osc_midi_bridge::{
+    audio::AudioSettings,
+    vst_worker::{VstWorkerState, VstWorkerSupervisor},
+};
+
+fn fixture_settings() -> AudioSettings {
+    AudioSettings {
+        enabled: true,
+        vst_worker_enabled: true,
+        backend: Some("asio".into()),
+        device: Some("fixture".into()),
+        sample_rate: 48_000,
+        buffer_size: 512,
+        gain_db: 0.0,
+        limiter_enabled: false,
+        vst_path: Some("fixture.vst3".into()),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn isolated_worker_survives_midi_and_contains_process_crashes() {
+    let fixture = env!("CARGO_BIN_EXE_vst-worker-fixture");
+    std::env::set_var("OSCMIDI_VST_WORKER_PATH", fixture);
+    std::env::set_var("OSCMIDI_VST_WORKER_INHERIT_STDIO", "1");
+    std::env::set_var("OSCMIDI_VST_FIXTURE_MODE", "ready");
+
+    let supervisor = VstWorkerSupervisor::new();
+    let status = supervisor
+        .start(fixture_settings(), Some("fixture-class".into()))
+        .await
+        .expect("fixture worker should become ready");
+    assert_eq!(status.stream_buffer_size, 512);
+    assert_eq!(supervisor.snapshot().state, VstWorkerState::Ready);
+    for sequence in 0..10_000u32 {
+        let note = 36 + (sequence % 48) as u8;
+        assert!(supervisor.try_send_midi(&[0x90, note, 100]));
+    }
+    supervisor.stop().await.expect("fixture worker stop");
+    assert_eq!(supervisor.snapshot().state, VstWorkerState::Disabled);
+
+    std::env::set_var("OSCMIDI_VST_FIXTURE_MODE", "crash");
+    let crashed = VstWorkerSupervisor::new();
+    assert!(crashed.start(fixture_settings(), None).await.is_err());
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let snapshot = crashed.snapshot();
+    assert_eq!(snapshot.state, VstWorkerState::Faulted);
+    assert_eq!(snapshot.restarts, 3);
+    assert!(snapshot.last_exit.is_some());
+
+    std::env::set_var("OSCMIDI_VST_FIXTURE_MODE", "hang");
+    let hung = VstWorkerSupervisor::new();
+    hung.start(fixture_settings(), None)
+        .await
+        .expect("hang fixture first becomes ready");
+    let detection_started = std::time::Instant::now();
+    while hung.snapshot().restarts == 0 && detection_started.elapsed() < Duration::from_secs(3) {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(
+        detection_started.elapsed() < Duration::from_millis(2_000),
+        "hung worker was not detected within the 1.5 second heartbeat budget"
+    );
+    let exhaustion_deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    while (hung.snapshot().restarts < 3 || hung.snapshot().state != VstWorkerState::Faulted)
+        && tokio::time::Instant::now() < exhaustion_deadline
+    {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(hung.snapshot().restarts, 3);
+    hung.stop().await.ok();
+
+    std::env::remove_var("OSCMIDI_VST_FIXTURE_MODE");
+    std::env::set_var(
+        "OSCMIDI_VST_WORKER_PATH",
+        env!("CARGO_BIN_EXE_vst-host-worker"),
+    );
+    let real_worker = VstWorkerSupervisor::new();
+    let invalid_load = real_worker.start(fixture_settings(), None).await;
+    assert!(
+        invalid_load.is_err(),
+        "the real worker must reject a nonexistent fixture VST"
+    );
+    assert_eq!(real_worker.snapshot().state, VstWorkerState::Faulted);
+    real_worker.stop().await.ok();
+
+    std::env::remove_var("OSCMIDI_VST_WORKER_PATH");
+    std::env::remove_var("OSCMIDI_VST_WORKER_INHERIT_STDIO");
+}

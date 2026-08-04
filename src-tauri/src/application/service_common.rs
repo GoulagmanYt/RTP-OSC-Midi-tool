@@ -65,6 +65,9 @@ pub(crate) fn with_audio_status(mut status: BridgeStatus, audio: &AudioEngine) -
     status.audio_midi_queue_max_depth = audio.audio_midi_queue_max_depth();
     status.audio_midi_oldest_us = audio.audio_midi_oldest_us();
     status.audio_lifecycle_state = audio.lifecycle_state().to_string();
+    status.vst_worker_state = audio.vst_worker_state();
+    status.vst_worker_restarts = audio.vst_worker_restarts();
+    status.vst_worker_last_exit = audio.vst_worker_last_exit();
     status.audio_mmcss_enabled = audio.mmcss_enabled();
     status.audio_power_throttling_disabled = audio.power_throttling_disabled();
     status.audio_limiter_enabled = audio.limiter_enabled();

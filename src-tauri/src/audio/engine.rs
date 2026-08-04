@@ -64,6 +64,10 @@ pub struct AudioEngine {
     pub(super) midi_push_log_accumulator: Arc<AtomicU32>,
     pub(super) midi_drop_log_last_ms: Arc<AtomicU64>,
     pub(super) midi_drop_log_accumulator: Arc<AtomicU32>,
+    #[cfg(target_os = "windows")]
+    pub(super) worker_enabled: Arc<AtomicBool>,
+    #[cfg(target_os = "windows")]
+    pub(super) worker: crate::vst_worker::VstWorkerSupervisor,
 }
 
 impl AudioEngine {
@@ -80,14 +84,26 @@ impl AudioEngine {
             midi_push_log_accumulator: Arc::new(AtomicU32::new(0)),
             midi_drop_log_last_ms: Arc::new(AtomicU64::new(0)),
             midi_drop_log_accumulator: Arc::new(AtomicU32::new(0)),
+            #[cfg(target_os = "windows")]
+            worker_enabled: Arc::new(AtomicBool::new(false)),
+            #[cfg(target_os = "windows")]
+            worker: crate::vst_worker::VstWorkerSupervisor::new(),
         }
     }
 
     pub fn is_running(&self) -> bool {
+        #[cfg(target_os = "windows")]
+        if self.is_worker_enabled() {
+            return self.worker.is_ready();
+        }
         self.runtime.lock().is_some()
     }
 
     pub fn is_vst_loaded(&self) -> bool {
+        #[cfg(target_os = "windows")]
+        if self.is_worker_enabled() {
+            return self.worker.is_ready();
+        }
         self.runtime.lock().is_some()
     }
 
@@ -95,11 +111,36 @@ impl AudioEngine {
         let _ = self.send_midi_with_outcome(bytes);
     }
 
+    #[allow(dead_code)]
+    pub fn send_midi_with_age(&self, bytes: &[u8], age_us: u64) {
+        let Some(packet) = MidiPacket::from_bytes_with_age(bytes, age_us) else {
+            return;
+        };
+        let _ = self.send_midi_packet_with_outcome(packet, bytes);
+    }
+
     pub(super) fn send_midi_with_outcome(&self, bytes: &[u8]) -> MidiSendOutcome {
-        let Some(mut packet) = MidiPacket::from_bytes(bytes) else {
+        #[cfg(target_os = "windows")]
+        if self.is_worker_enabled() {
+            return if self.worker.try_send_midi(bytes) {
+                MidiSendOutcome::Sent
+            } else {
+                MidiSendOutcome::DroppedNonCritical
+            };
+        }
+
+        let Some(packet) = MidiPacket::from_bytes(bytes) else {
             return MidiSendOutcome::AudioStopped;
         };
 
+        self.send_midi_packet_with_outcome(packet, bytes)
+    }
+
+    fn send_midi_packet_with_outcome(
+        &self,
+        mut packet: MidiPacket,
+        bytes: &[u8],
+    ) -> MidiSendOutcome {
         let mut attempts = 0usize;
         loop {
             let push_result = {
@@ -210,6 +251,11 @@ impl AudioEngine {
                 ),
             );
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(super) fn is_worker_enabled(&self) -> bool {
+        self.worker_enabled.load(Ordering::Acquire)
     }
 }
 

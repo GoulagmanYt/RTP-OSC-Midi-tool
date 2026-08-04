@@ -187,6 +187,8 @@ const fr: TranslationTree = {
       description: "Configurez le backend ASIO/WASAPI et l'hôte VST.",
       enableEngine: "Activer le moteur audio",
       enableEngineHint: "Nécessite un redémarrage du bridge",
+      vstWorker: "Isoler le VST dans un worker",
+      vstWorkerHint: "Phase 2 : le crash ou blocage d'un plug-in ne ferme plus l'application",
       quickPresets: "Profils audio rapides",
       preset: {
         low: "Faible latence",

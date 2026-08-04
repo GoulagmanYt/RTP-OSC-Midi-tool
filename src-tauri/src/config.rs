@@ -142,6 +142,8 @@ impl Default for RtpConfig {
 #[serde(rename_all = "camelCase")]
 pub struct AudioConfig {
     pub enabled: bool,
+    #[serde(default)]
+    pub vst_worker_enabled: bool,
     pub backend: Option<String>,
     pub device: Option<String>,
     pub sample_rate: u32,
@@ -155,6 +157,7 @@ impl Default for AudioConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            vst_worker_enabled: false,
             backend: Some("auto".to_string()),
             device: None,
             sample_rate: 48_000,

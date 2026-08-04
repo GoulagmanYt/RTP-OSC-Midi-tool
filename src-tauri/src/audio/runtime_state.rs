@@ -54,10 +54,12 @@ use windows::Win32::Foundation::HWND;
 
 use crate::types::VstParameter;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioSettings {
     pub enabled: bool,
+    #[serde(default)]
+    pub vst_worker_enabled: bool,
     pub backend: Option<String>,
     pub device: Option<String>,
     pub sample_rate: u32,
@@ -72,6 +74,7 @@ impl Default for AudioSettings {
     fn default() -> Self {
         Self {
             enabled: true,
+            vst_worker_enabled: false,
             backend: Some("auto".to_string()),
             device: None,
             sample_rate: 48_000,
@@ -256,6 +259,10 @@ pub(super) struct MidiPacket {
 
 impl MidiPacket {
     pub(super) fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        Self::from_bytes_with_age(bytes, 0)
+    }
+
+    pub(super) fn from_bytes_with_age(bytes: &[u8], age_us: u64) -> Option<Self> {
         if bytes.is_empty() {
             return None;
         }
@@ -267,7 +274,7 @@ impl MidiPacket {
         Some(Self {
             data,
             len: len as u8,
-            timestamp_us: monotonic_us(),
+            timestamp_us: monotonic_us().saturating_sub(age_us),
         })
     }
 

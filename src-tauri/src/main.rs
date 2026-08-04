@@ -15,6 +15,7 @@ mod rtp;
 mod tauri;
 mod types;
 mod vst_scan;
+mod vst_worker;
 
 use ::tauri::{Emitter, Manager};
 

@@ -129,6 +129,22 @@ fn refresh_vst3_parameter_cache(
 
 impl AudioEngine {
     pub fn stop(&self, app_handle: Option<tauri::AppHandle>) {
+        #[cfg(target_os = "windows")]
+        if self.is_worker_enabled() {
+            let _lifecycle_guard = self.lifecycle_gate.lock();
+            self.lifecycle_state
+                .store(AudioLifecycleState::Stopping as u8, Ordering::Release);
+            if let Err(error) = crate::tauri::utils::safe_block_on(self.worker.stop()) {
+                background_log("error", format!("Failed to stop VST worker: {error}"));
+                self.lifecycle_state
+                    .store(AudioLifecycleState::Faulted as u8, Ordering::Release);
+                return;
+            }
+            self.worker_enabled.store(false, Ordering::Release);
+            self.lifecycle_state
+                .store(AudioLifecycleState::Stopped as u8, Ordering::Release);
+            return;
+        }
         let _lifecycle_guard = self.lifecycle_gate.lock();
         let _ = self.stop_locked(app_handle, false);
     }
@@ -220,7 +236,7 @@ impl AudioEngine {
                 background_log(
                     "warn",
                     format!(
-                        "Quarantining VST3 instance {:?}: native destructor is known to crash or block; memory will be reclaimed when OSCMidi exits",
+                        "Quarantining VST3 instance {:?}: native destructor is known to crash or block; memory will be reclaimed when the hosting process exits",
                         vst_path
                     ),
                 );
@@ -276,10 +292,23 @@ impl AudioEngine {
 
     pub fn start(
         &self,
-        settings: AudioSettings,
+        mut settings: AudioSettings,
         vst_fallback: Option<PathBuf>,
         logger: FrontendLogger,
     ) -> Result<(), AudioError> {
+        #[cfg(target_os = "windows")]
+        {
+            if settings.vst_worker_enabled {
+                return self.start_isolated_worker(settings, vst_fallback, logger);
+            }
+            if self.is_worker_enabled() {
+                crate::tauri::utils::safe_block_on(self.worker.stop())
+                    .map_err(AudioError::Message)?;
+                self.worker_enabled.store(false, Ordering::Release);
+            }
+        }
+        // The in-process backend must never inherit a supervisor routing flag.
+        settings.vst_worker_enabled = false;
         let Some(_lifecycle_guard) = self.lifecycle_gate.try_lock() else {
             return Err(AudioError::Message(
                 "An audio start/reload/stop operation is already in progress".into(),
@@ -303,6 +332,77 @@ impl AudioEngine {
         self.lifecycle_state
             .store(final_state as u8, Ordering::Release);
         result
+    }
+
+    #[cfg(target_os = "windows")]
+    fn start_isolated_worker(
+        &self,
+        mut settings: AudioSettings,
+        vst_fallback: Option<PathBuf>,
+        logger: FrontendLogger,
+    ) -> Result<(), AudioError> {
+        let Some(_lifecycle_guard) = self.lifecycle_gate.try_lock() else {
+            return Err(AudioError::Message(
+                "An audio start/reload/stop operation is already in progress".into(),
+            ));
+        };
+
+        let _ = self.stop_locked(Some(logger.app_handle()), false);
+        self.lifecycle_state
+            .store(AudioLifecycleState::Loading as u8, Ordering::Release);
+        self.worker_enabled.store(true, Ordering::Release);
+
+        if !settings.enabled {
+            crate::tauri::utils::safe_block_on(self.worker.stop()).map_err(AudioError::Message)?;
+            self.worker_enabled.store(false, Ordering::Release);
+            self.lifecycle_state
+                .store(AudioLifecycleState::Stopped as u8, Ordering::Release);
+            return Ok(());
+        }
+
+        let vst_path = match super::plugin_host::resolve_vst_path(&settings, vst_fallback, &logger)
+        {
+            Ok(path) => path,
+            Err(error) => {
+                self.lifecycle_state
+                    .store(AudioLifecycleState::Faulted as u8, Ordering::Release);
+                return Err(error);
+            }
+        };
+        let vst_probe = match ensure_supported_plugin_in_app(&vst_path) {
+            Ok(probe) => probe,
+            Err(error) => {
+                self.lifecycle_state
+                    .store(AudioLifecycleState::Faulted as u8, Ordering::Release);
+                return Err(AudioError::Message(error));
+            }
+        };
+        settings.vst_path = Some(vst_path.to_string_lossy().to_string());
+        logger.info(format!(
+            "Launching isolated VST worker for '{}' ({}, {})",
+            vst_probe.name, vst_probe.format, vst_probe.architecture
+        ));
+
+        match crate::tauri::utils::safe_block_on(
+            self.worker.start(settings, vst_probe.class_uid.clone()),
+        ) {
+            Ok(status) => {
+                *self.last_vst.lock() = Some(vst_path);
+                self.lifecycle_state
+                    .store(AudioLifecycleState::Running as u8, Ordering::Release);
+                logger.info(format!(
+                    "VST worker ready on '{}' ({} Hz / {} samples)",
+                    status.device, status.sample_rate, status.stream_buffer_size
+                ));
+                Ok(())
+            }
+            Err(error) => {
+                self.lifecycle_state
+                    .store(AudioLifecycleState::Faulted as u8, Ordering::Release);
+                logger.error(format!("VST worker failed: {error}"));
+                Err(AudioError::Message(error))
+            }
+        }
     }
 
     fn start_locked_after_stop(
@@ -636,6 +736,11 @@ impl AudioEngine {
     }
 
     pub fn panic_all_notes(&self) -> Result<(), AudioError> {
+        #[cfg(target_os = "windows")]
+        if self.is_worker_enabled() {
+            return crate::tauri::utils::safe_block_on(self.worker.panic_all_notes())
+                .map_err(AudioError::Message);
+        }
         let guard = self.runtime.lock();
         let Some(runtime) = guard.as_ref() else {
             background_log("warn", "panic_all_notes: Audio runtime not started");

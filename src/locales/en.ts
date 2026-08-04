@@ -187,6 +187,8 @@ const en: TranslationTree = {
       description: "Configure ASIO/WASAPI backend and VST host settings.",
       enableEngine: "Enable Audio Engine",
       enableEngineHint: "Requires bridge restart",
+      vstWorker: "Isolate VST in worker",
+      vstWorkerHint: "Phase 2: a plug-in crash or hang no longer closes the application",
       quickPresets: "Quick audio presets",
       preset: {
         low: "Low Latency",

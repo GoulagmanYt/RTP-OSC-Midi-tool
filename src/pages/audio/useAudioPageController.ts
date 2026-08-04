@@ -132,7 +132,14 @@ export function useAudioPageController() {
       if (!config) return;
       const previousAudio = config.audio;
       const updated = { ...config, audio: { ...config.audio, ...patch } };
-      const restartKeys: Array<keyof typeof patch> = ["backend", "device", "sampleRate", "bufferSize", "vstPath"];
+      const restartKeys: Array<keyof typeof patch> = [
+        "backend",
+        "device",
+        "sampleRate",
+        "bufferSize",
+        "vstPath",
+        "vstWorkerEnabled",
+      ];
       const requiresRestart = restartKeys.some((key) => patch[key] !== undefined);
       const shouldRestart = requiresRestart && Boolean(status?.audioRunning) && updated.audio.enabled;
       if (shouldRestart && audioReloadInFlight.current) {

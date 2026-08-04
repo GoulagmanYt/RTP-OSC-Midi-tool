@@ -15,6 +15,7 @@ pub mod rtp;
 pub mod tauri;
 pub mod types;
 pub mod vst_scan;
+pub mod vst_worker;
 
 // Réexporter les types les plus courants pour faciliter l'utilisation
 pub use audio::AudioEngine;

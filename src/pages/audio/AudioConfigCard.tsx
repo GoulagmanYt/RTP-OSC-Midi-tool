@@ -107,6 +107,23 @@ export function AudioConfigCard({
           <Switch checked={config?.audio.enabled ?? false} onCheckedChange={onToggleAudio} />
         </div>
 
+        <div className="flex items-center justify-between rounded-md border border-border/60 bg-muted/20 p-3">
+          <Label className="flex flex-col gap-1">
+            <span>{t("audio.vstWorker")}</span>
+            <span className="text-xs font-normal text-muted-foreground">{t("audio.vstWorkerHint")}</span>
+          </Label>
+          <div className="flex items-center gap-3">
+            <Badge variant={status?.vstWorkerState === "ready" ? "default" : "secondary"}>
+              {status?.vstWorkerState ?? "disabled"}
+            </Badge>
+            <Switch
+              checked={config?.audio.vstWorkerEnabled ?? false}
+              onCheckedChange={(checked) => onUpdateAudioConfig({ vstWorkerEnabled: checked })}
+              disabled={audioReloading}
+            />
+          </div>
+        </div>
+
         <div className="space-y-2">
           <Label>{t("audio.quickPresets")}</Label>
           <div className="grid gap-2 md:grid-cols-3">

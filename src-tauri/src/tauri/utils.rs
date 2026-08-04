@@ -146,6 +146,7 @@ pub fn sync_rtp_discovery(config: &Config, state: &AppState, app: &AppHandle) {
 pub fn audio_settings_from_config(config: &Config) -> crate::audio::AudioSettings {
     crate::audio::AudioSettings {
         enabled: config.audio.enabled,
+        vst_worker_enabled: config.audio.vst_worker_enabled,
         backend: config.audio.backend.clone(),
         device: config.audio.device.clone(),
         sample_rate: config.audio.sample_rate,

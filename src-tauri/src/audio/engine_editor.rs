@@ -190,6 +190,12 @@ fn resize_vst_window_to_client(hwnd: HWND, width: i32, height: i32) -> Result<()
 
 impl AudioEngine {
     pub fn open_vst_ui(&self, app_handle: tauri::AppHandle) -> Result<(), AudioError> {
+        #[cfg(target_os = "windows")]
+        if self.is_worker_enabled() {
+            let _ = app_handle;
+            return crate::tauri::utils::safe_block_on(self.worker.open_editor())
+                .map_err(AudioError::Message);
+        }
         let (plugin_arc, editor_window_arc) = {
             let mut guard = self.runtime.lock();
             let Some(runtime) = guard.as_mut() else {
@@ -344,6 +350,12 @@ impl AudioEngine {
     }
 
     pub fn close_vst_ui(&self, app_handle: tauri::AppHandle) -> Result<(), AudioError> {
+        #[cfg(target_os = "windows")]
+        if self.is_worker_enabled() {
+            let _ = app_handle;
+            return crate::tauri::utils::safe_block_on(self.worker.close_editor())
+                .map_err(AudioError::Message);
+        }
         let editor_window_arc = {
             let mut guard = self.runtime.lock();
             let Some(runtime) = guard.as_mut() else {
@@ -371,6 +383,11 @@ impl AudioEngine {
     }
 
     pub fn list_vst_parameters(&self) -> Result<Vec<VstParameter>, AudioError> {
+        #[cfg(target_os = "windows")]
+        if self.is_worker_enabled() {
+            return crate::tauri::utils::safe_block_on(self.worker.list_parameters())
+                .map_err(AudioError::Message);
+        }
         let guard = self.runtime.lock();
         let Some(runtime) = guard.as_ref() else {
             return Err(AudioError::Message("Audio not started".into()));
@@ -381,6 +398,11 @@ impl AudioEngine {
     }
 
     pub fn set_vst_parameter(&self, index: usize, value: f32) -> Result<(), AudioError> {
+        #[cfg(target_os = "windows")]
+        if self.is_worker_enabled() {
+            return crate::tauri::utils::safe_block_on(self.worker.set_parameter(index, value))
+                .map_err(AudioError::Message);
+        }
         let guard = self.runtime.lock();
         let Some(runtime) = guard.as_ref() else {
             return Err(AudioError::Message("Audio not started".into()));
