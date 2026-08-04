@@ -70,7 +70,7 @@ pub(super) fn sync_rtp(
 
         if needs_restart {
             if let Some(existing) = server_guard.take() {
-                tauri::async_runtime::block_on(existing.stop());
+                crate::tauri::utils::safe_block_on(existing.stop());
             }
             let server = RtpServer::start(
                 config.rtp.session_name.clone(),
@@ -95,7 +95,7 @@ pub(super) fn sync_rtp(
         }
     } else {
         if let Some(existing) = server_guard.take() {
-            tauri::async_runtime::block_on(existing.stop());
+            crate::tauri::utils::safe_block_on(existing.stop());
         }
         *config_guard = None;
         let _ = logger
@@ -252,7 +252,7 @@ pub(super) fn stop_runtime(
 
     *rtp_sink.write() = None;
     if let Some(server) = rtp_server.lock().take() {
-        tauri::async_runtime::block_on(server.stop());
+        crate::tauri::utils::safe_block_on(server.stop());
     }
     *rtp_config.lock() = None;
 }
@@ -264,7 +264,7 @@ fn cleanup_startup_rtp(
 ) {
     *rtp_sink.write() = None;
     if let Some(server) = rtp_server.lock().take() {
-        tauri::async_runtime::block_on(server.stop());
+        crate::tauri::utils::safe_block_on(server.stop());
     }
     *rtp_config.lock() = None;
 }
@@ -287,5 +287,13 @@ mod tests {
 
         assert!(source.contains("cleanup_startup_rtp"));
         assert!(source.contains("cleanup_startup_rtp(rtp_server, rtp_sink, rtp_config);"));
+    }
+
+    #[test]
+    fn rtp_shutdown_never_nests_tauri_block_on_directly() {
+        let source = include_str!("lifecycle.rs");
+        let forbidden = ["async_runtime", "::block_on"].concat();
+        assert!(!source.contains(&forbidden));
+        assert!(source.contains("safe_block_on(server.stop())"));
     }
 }

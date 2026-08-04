@@ -29,8 +29,10 @@ pub(super) fn replay_last_output_or_silence<T: Sample + FromSample<f32>>(
 
     let mut peak_l = 0.0f32;
     let mut peak_r = 0.0f32;
+    let sample_count = data.len().max(1) as f32;
     for (idx, slot) in data.iter_mut().enumerate() {
-        let sample = state.last_output.get(idx).copied().unwrap_or(0.0);
+        let ramp = 1.0 - (idx as f32 / sample_count);
+        let sample = state.last_output.get(idx).copied().unwrap_or(0.0) * ramp;
         *slot = T::from_sample(sample);
         match idx % device_channels {
             0 => peak_l = peak_l.max(sample.abs()),
@@ -49,6 +51,9 @@ pub(super) fn replay_last_output_or_silence<T: Sample + FromSample<f32>>(
         .telemetry
         .meter_right
         .store(peak_r.min(1.0).to_bits(), Ordering::Relaxed);
+    let rendered = data.len().min(state.last_output.len());
+    state.last_output[..rendered].fill(0.0);
+    state.recovering_from_silence = true;
 }
 
 pub(super) fn process_vst3_plugin(

@@ -232,6 +232,7 @@ fn test_type_compatibility() {
         audio_mmcss_enabled: None,
         audio_power_throttling_disabled: None,
         audio_limiter_enabled: None,
+        ..RuntimeStatus::default()
     };
 
     // Test sérialisation (utilisé par Tauri)

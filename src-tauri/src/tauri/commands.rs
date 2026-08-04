@@ -1,6 +1,6 @@
 //! Commandes Tauri: fine couche d'adaptation vers la couche application.
 
-use tauri::{AppHandle, State, Window};
+use tauri::{AppHandle, Emitter, State, Window};
 
 use crate::{
     application::services,
@@ -26,7 +26,7 @@ pub fn get_config(app: AppHandle, state: State<AppState>) -> Config {
 pub fn save_config(
     window: Window,
     config: Config,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<(), CommandError> {
     services::save_config(&window, config, state.inner())
 }
@@ -42,18 +42,18 @@ pub fn list_midi_outputs() -> Result<Vec<String>, CommandError> {
 }
 
 #[::tauri::command]
-pub fn start_bridge(
+pub async fn start_bridge(
     app: AppHandle,
     window: Window,
     config: Config,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<BridgeStatus, CommandError> {
     services::start_bridge(&app, &window, config, state.inner())
 }
 
 #[::tauri::command]
-pub fn stop_bridge(app: AppHandle, state: State<AppState>) -> Result<(), CommandError> {
-    services::stop_bridge(&app, state.inner())
+pub async fn stop_bridge(app: AppHandle, state: State<'_, AppState>) -> Result<(), CommandError> {
+    services::stop_bridge(&app, state.inner()).await
 }
 
 #[::tauri::command]
@@ -74,7 +74,7 @@ pub fn send_test_midi(
     velocity: u8,
     cc: u8,
     value: u8,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<(), CommandError> {
     services::send_test_midi(kind, channel, note, velocity, cc, value, state.inner())
 }
@@ -121,8 +121,20 @@ pub fn list_vst_plugins(state: State<AppState>) -> Vec<VstPluginEntry> {
 }
 
 #[::tauri::command]
-pub fn refresh_vst_plugins(state: State<AppState>) -> Vec<VstPluginEntry> {
-    services::refresh_vst_plugins(state.inner())
+pub async fn refresh_vst_plugins(
+    window: Window,
+    state: State<'_, AppState>,
+) -> Result<Vec<VstPluginEntry>, CommandError> {
+    let _ = window.emit(
+        "vst:scan-progress",
+        serde_json::json!({ "state": "started" }),
+    );
+    let plugins = services::refresh_vst_plugins(state.inner());
+    let _ = window.emit(
+        "vst:scan-progress",
+        serde_json::json!({ "state": "finished", "count": plugins.len() }),
+    );
+    Ok(plugins)
 }
 
 #[::tauri::command]
@@ -134,37 +146,37 @@ pub fn list_vst_parameters(state: State<AppState>) -> Result<Vec<VstParameter>, 
 pub fn set_vst_parameter(
     index: usize,
     value: f32,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<(), CommandError> {
     services::set_vst_parameter(index, value, state.inner())
 }
 
 #[::tauri::command]
-pub fn start_audio(
+pub async fn start_audio(
     app: AppHandle,
     window: Window,
     settings: AudioSettings,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<(), CommandError> {
     services::start_audio(&app, &window, settings, state.inner())
 }
 
 #[::tauri::command]
-pub fn stop_audio(app: AppHandle, state: State<AppState>) -> Result<(), CommandError> {
+pub async fn stop_audio(app: AppHandle, state: State<'_, AppState>) -> Result<(), CommandError> {
     services::stop_audio(&app, state.inner())
 }
 
 #[::tauri::command]
-pub fn open_vst_ui(
+pub async fn open_vst_ui(
     app: AppHandle,
     window: Window,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<(), CommandError> {
     services::open_vst_ui(&app, &window, state.inner())
 }
 
 #[::tauri::command]
-pub fn close_vst_ui(app: AppHandle, state: State<AppState>) -> Result<(), CommandError> {
+pub async fn close_vst_ui(app: AppHandle, state: State<'_, AppState>) -> Result<(), CommandError> {
     services::close_vst_ui(&app, state.inner())
 }
 
@@ -179,19 +191,19 @@ pub fn set_audio_limiter(enabled: bool, state: State<AppState>) -> Result<(), Co
 }
 
 #[::tauri::command]
-pub fn ping_audio(
+pub async fn ping_audio(
     app: AppHandle,
     window: Window,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<(), CommandError> {
     services::ping_audio(&app, &window, state.inner())
 }
 
 #[::tauri::command]
-pub fn reload_vst(
+pub async fn reload_vst(
     app: AppHandle,
     window: Window,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<BridgeStatus, CommandError> {
     services::reload_vst(&app, &window, state.inner())
 }
@@ -212,11 +224,11 @@ pub fn export_diagnostics(path: String, state: State<AppState>) -> Result<(), Co
 }
 
 #[::tauri::command]
-pub fn import_config(
+pub async fn import_config(
     app: AppHandle,
     window: Window,
     path: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<Config, CommandError> {
     services::import_config(&app, &window, path, state.inner())
 }

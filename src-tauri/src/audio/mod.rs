@@ -13,6 +13,7 @@ mod runtime_state;
 mod state_codec;
 mod stream_config;
 mod stream_runtime;
+mod thread_affinity;
 pub mod windows_tuning;
 
 pub use engine::AudioEngine;

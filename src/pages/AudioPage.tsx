@@ -17,6 +17,7 @@ export default function AudioPage() {
       <AudioConfigCard
         audioBackends={controller.audioBackends}
         audioDevices={controller.audioDevices}
+        audioReloading={controller.audioReloading}
         bridgeRunning={controller.bridgeRunning}
         bufferMismatch={controller.bufferMismatch}
         canOpenSelectedVstUi={controller.canOpenSelectedVstUi}
@@ -24,6 +25,7 @@ export default function AudioPage() {
         config={controller.config}
         currentLatencyMs={controller.currentLatencyMs}
         isVst3={controller.isVst3}
+        midiMessagesPerSec={controller.midiMessagesPerSec}
         quickPresets={controller.quickPresets}
         selectedPluginKindLabel={controller.selectedPluginKindLabel}
         selectedPluginStatusLabel={controller.selectedPluginStatusLabel}

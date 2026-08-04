@@ -47,12 +47,15 @@ export function useRuntimeEvents({ appendLog, setMetrics, t }: RuntimeEventsOpti
         const previous = lastAudioHealth.current;
         lastAudioHealth.current = current;
 
+        const deltas = {
+          xruns: positiveDelta(previous.xruns, current.xruns),
+          midiDrops: positiveDelta(previous.midiDrops, current.midiDrops),
+          lockMisses: positiveDelta(previous.lockMisses, current.lockMisses),
+          emergencyResets: positiveDelta(previous.emergencyResets, current.emergencyResets),
+          deadlines: positiveDelta(previous.callbackOverBudget, current.callbackOverBudget),
+        };
         const increment =
-          positiveDelta(previous.xruns, current.xruns) +
-          positiveDelta(previous.midiDrops, current.midiDrops) +
-          positiveDelta(previous.lockMisses, current.lockMisses) +
-          positiveDelta(previous.emergencyResets, current.emergencyResets) +
-          positiveDelta(previous.callbackOverBudget, current.callbackOverBudget);
+          deltas.xruns + deltas.midiDrops + deltas.lockMisses + deltas.emergencyResets + deltas.deadlines;
         if (increment === 0) {
           return;
         }
@@ -61,7 +64,16 @@ export function useRuntimeEvents({ appendLog, setMetrics, t }: RuntimeEventsOpti
           return;
         }
         lastDropoutToastMs.current = now;
-        toast.error(t("toasts.audio.dropouts", { count: increment }));
+        toast.error(
+          t("toasts.audio.dropouts", {
+            count: increment,
+            xruns: deltas.xruns,
+            deadlines: deltas.deadlines,
+            lockMisses: deltas.lockMisses,
+            midiDrops: deltas.midiDrops,
+            resets: deltas.emergencyResets,
+          })
+        );
       });
 
       if (disposed) {

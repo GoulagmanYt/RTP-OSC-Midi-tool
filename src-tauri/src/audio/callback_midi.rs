@@ -72,9 +72,13 @@ pub(super) fn process_pending_vst2_midi(
     state: &mut AudioCallbackState,
     instance: &mut PluginInstance,
 ) {
-    while let Some(msg) = state.pending_midi.pop_front() {
-        let _ = msg.timestamp_ms;
-        let mut midi_event = api::MidiEvent {
+    state.vst2_midi_events.clear();
+    while state.vst2_midi_events.len() < state.vst2_midi_events.capacity() {
+        let Some(msg) = state.pending_midi.pop_front() else {
+            break;
+        };
+        let _ = msg.timestamp_us;
+        state.vst2_midi_events.push(api::MidiEvent {
             event_type: api::EventType::Midi,
             byte_size: std::mem::size_of::<api::MidiEvent>() as i32,
             delta_frames: 0,
@@ -87,16 +91,21 @@ pub(super) fn process_pending_vst2_midi(
             note_off_velocity: 0,
             _reserved1: 0,
             _reserved2: 0,
+        });
+    }
+    for (index, event) in state.vst2_midi_events.iter_mut().enumerate() {
+        state.vst2_event_batch.events[index] = event as *mut api::MidiEvent as *mut api::Event;
+    }
+    state.vst2_event_batch.num_events = state.vst2_midi_events.len() as i32;
+    if state.vst2_event_batch.num_events > 0 {
+        // VST2 models Events as a C flexible array whose Rust declaration has
+        // only two pointer slots. Vst2EventBatch provides the full preallocated
+        // 512-pointer layout expected by the ABI.
+        let events = unsafe {
+            &*(&state.vst2_event_batch as *const super::runtime_state::Vst2EventBatch
+                as *const api::Events)
         };
-        let events = api::Events {
-            num_events: 1,
-            _reserved: 0,
-            events: [
-                &mut midi_event as *mut api::MidiEvent as *mut api::Event,
-                std::ptr::null_mut(),
-            ],
-        };
-        instance.process_events(&events);
+        instance.process_events(events);
     }
 }
 
@@ -109,13 +118,14 @@ pub(super) fn process_pending_vst3_midi(
     }
 
     state.midi_events.clear();
-    while let Some(msg) = state.pending_midi.pop_front() {
-        let _ = msg.timestamp_ms;
+    let mut consumed = 0usize;
+    while consumed < state.midi_events.capacity() {
+        let Some(msg) = state.pending_midi.pop_front() else {
+            break;
+        };
+        consumed += 1;
+        let _ = msg.timestamp_us;
         if let Some(event) = midi_to_rack_event(msg.data) {
-            if state.midi_events.len() == state.midi_events.capacity() {
-                instance.send_midi(&state.midi_events)?;
-                state.midi_events.clear();
-            }
             state.midi_events.push(event);
         }
     }

@@ -1,6 +1,6 @@
 #![allow(deprecated)]
 
-use super::runtime_state::{timestamp_ms, AudioRuntime, MidiPacket};
+use super::runtime_state::{timestamp_ms, AudioLifecycleState, AudioRuntime, MidiPacket};
 #[cfg(test)]
 use super::{
     callback::{midi_to_rack_event, replay_last_output_or_silence, reset_messages_for_channel},
@@ -14,7 +14,7 @@ use super::{
 use std::{
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering},
         Arc,
     },
 };
@@ -54,6 +54,8 @@ pub(super) enum MidiSendOutcome {
 // for audio.clone() calls in bridge.rs and main.rs.
 #[derive(Clone)]
 pub struct AudioEngine {
+    pub(super) lifecycle_gate: Arc<Mutex<()>>,
+    pub(super) lifecycle_state: Arc<AtomicU8>,
     pub(super) runtime: Arc<Mutex<Option<AudioRuntime>>>,
     pub(super) last_vst: Arc<Mutex<Option<PathBuf>>>,
     pub(super) midi_tx: Arc<Mutex<Option<Producer<MidiPacket>>>>,
@@ -66,7 +68,10 @@ pub struct AudioEngine {
 
 impl AudioEngine {
     pub fn new() -> Self {
+        super::thread_affinity::register_main_ui_thread();
         Self {
+            lifecycle_gate: Arc::new(Mutex::new(())),
+            lifecycle_state: Arc::new(AtomicU8::new(AudioLifecycleState::Stopped as u8)),
             runtime: Arc::new(Mutex::new(None)),
             last_vst: Arc::new(Mutex::new(None)),
             midi_tx: Arc::new(Mutex::new(None)),
@@ -219,6 +224,15 @@ pub(super) fn is_sforzando_vst3(vst_path: &Path) -> bool {
     path.ends_with("sforzando.vst3") || path.contains("\\sforzando.vst3")
 }
 
+pub(super) fn requires_vst3_destructor_quarantine(vst_path: &Path) -> bool {
+    if is_sforzando_vst3(vst_path) {
+        return true;
+    }
+    let path = vst_path.to_string_lossy().to_lowercase();
+    path.ends_with(".vst3")
+        && (path.contains("\\splice\\") || path.ends_with("splice instrument.vst3"))
+}
+
 pub(super) fn db_to_linear(db: f32) -> f32 {
     10f32.powf(db / 20.0)
 }
@@ -245,20 +259,10 @@ mod tests {
                 gain_bits: AtomicU32::new(1.0f32.to_bits()),
                 limiter_enabled: AtomicBool::new(false),
             }),
-            Arc::new(AudioTelemetry {
-                xruns: AtomicU32::new(0),
-                meter_left: AtomicU32::new(0),
-                meter_right: AtomicU32::new(0),
-                block_size_frames: AtomicU32::new(0),
-                midi_drop_count: AtomicU32::new(0),
-                audio_lock_miss_count: AtomicU32::new(0),
-                emergency_reset_count: AtomicU32::new(0),
-                callback_last_us: AtomicU32::new(0),
-                callback_max_us: AtomicU32::new(0),
-                callback_over_budget_count: AtomicU32::new(0),
-            }),
+            Arc::new(AudioTelemetry::new()),
             emergency_reset_requested,
             48_000,
+            crossbeam_channel::bounded(8).1,
         )
     }
 
@@ -328,7 +332,7 @@ mod tests {
             state.pending_midi.push_back(MidiPacket {
                 data: [0x90, note, 100],
                 len: 3,
-                timestamp_ms: 0,
+                timestamp_us: 0,
             });
         }
         assert_eq!(state.pending_midi.len(), 10);
@@ -374,7 +378,7 @@ mod tests {
                 let packet = MidiPacket {
                     data: [0x90, (i % 88) as u8 + 21, 100],
                     len: 3,
-                    timestamp_ms: i,
+                    timestamp_us: i,
                 };
                 loop {
                     if tx.push(packet).is_ok() {
@@ -392,7 +396,7 @@ mod tests {
             match rx.pop() {
                 Ok(packet) => {
                     assert_eq!(
-                        packet.timestamp_ms, next_timestamp,
+                        packet.timestamp_us, next_timestamp,
                         "audio ring order mismatch"
                     );
                     next_timestamp += 1;
@@ -520,7 +524,7 @@ mod tests {
     }
 
     #[test]
-    fn replay_last_output_reuses_previous_block_on_lock_miss() {
+    fn replay_last_output_ramps_previous_block_to_silence_on_lock_miss() {
         let (_tx, rx) = RingBuffer::new(8);
         let mut state = callback_test_state(rx, Arc::new(AtomicBool::new(false)));
         state.last_output = vec![0.25, -0.5, 0.1, -0.2];
@@ -528,14 +532,16 @@ mod tests {
 
         replay_last_output_or_silence(&mut out, 2, 0.0f32, &mut state);
 
-        assert_eq!(out, vec![0.25, -0.5, 0.1, -0.2]);
+        assert_eq!(out, vec![0.25, -0.375, 0.05, -0.05]);
+        assert!(state.last_output.iter().all(|sample| *sample == 0.0));
+        assert!(state.recovering_from_silence);
         assert_eq!(
             f32::from_bits(state.telemetry.meter_left.load(Ordering::Relaxed)),
             0.25
         );
         assert_eq!(
             f32::from_bits(state.telemetry.meter_right.load(Ordering::Relaxed)),
-            0.5
+            0.375
         );
     }
 
@@ -557,6 +563,22 @@ mod tests {
             f32::from_bits(state.telemetry.meter_right.load(Ordering::Relaxed)),
             0.0
         );
+    }
+
+    #[test]
+    fn quarantines_known_blocking_vst3_destructors_only() {
+        assert!(requires_vst3_destructor_quarantine(Path::new(
+            r"C:\Program Files\Common Files\VST3\Splice\Splice INSTRUMENT.vst3"
+        )));
+        assert!(requires_vst3_destructor_quarantine(Path::new(
+            r"C:\VST3\sforzando.vst3"
+        )));
+        assert!(!requires_vst3_destructor_quarantine(Path::new(
+            r"C:\VST3\Other Instrument.vst3"
+        )));
+        assert!(!requires_vst3_destructor_quarantine(Path::new(
+            r"C:\VST2\Splice.dll"
+        )));
     }
 
     #[test]

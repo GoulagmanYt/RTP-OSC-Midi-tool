@@ -39,6 +39,8 @@ pub(crate) fn with_audio_status(mut status: BridgeStatus, audio: &AudioEngine) -
     status.audio_running = audio.is_running();
     status.vst_loaded = audio.is_vst_loaded();
     status.audio_latency_ms = audio.current_latency_ms();
+    status.audio_buffer_period_ms = audio.audio_buffer_period_ms();
+    status.plugin_latency_samples = audio.plugin_latency_samples();
     status.audio_backend = audio.current_backend();
     status.audio_device = audio.current_device();
     status.audio_sample_rate = audio.current_sample_rate();
@@ -54,6 +56,15 @@ pub(crate) fn with_audio_status(mut status: BridgeStatus, audio: &AudioEngine) -
     status.audio_callback_max_us = audio.callback_max_us();
     status.audio_callback_last_us = audio.callback_last_us();
     status.audio_callback_over_budget_count = audio.callback_over_budget_count();
+    status.consecutive_deadline_misses = audio.consecutive_deadline_misses();
+    status.dsp_process_last_us = audio.dsp_process_last_us();
+    status.dsp_process_p95_us = audio.dsp_process_percentile_us(95);
+    status.dsp_process_p99_us = audio.dsp_process_percentile_us(99);
+    status.dsp_process_max_us = audio.dsp_process_max_us();
+    status.audio_midi_queue_depth = audio.audio_midi_queue_depth();
+    status.audio_midi_queue_max_depth = audio.audio_midi_queue_max_depth();
+    status.audio_midi_oldest_us = audio.audio_midi_oldest_us();
+    status.audio_lifecycle_state = audio.lifecycle_state().to_string();
     status.audio_mmcss_enabled = audio.mmcss_enabled();
     status.audio_power_throttling_disabled = audio.power_throttling_disabled();
     status.audio_limiter_enabled = audio.limiter_enabled();

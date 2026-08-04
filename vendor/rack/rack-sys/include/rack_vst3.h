@@ -12,6 +12,7 @@ extern "C" {
 typedef struct RackVST3Scanner RackVST3Scanner;
 typedef struct RackVST3Plugin RackVST3Plugin;
 typedef struct RackVST3Gui RackVST3Gui;
+typedef struct RackVST3MidiEvent RackVST3MidiEvent;
 
 // Plugin type enum
 typedef enum {
@@ -119,6 +120,7 @@ int rack_vst3_plugin_get_input_channels(RackVST3Plugin* plugin);
 // Returns number of output channels, or 0 if not initialized or query failed
 // Thread-safety: Should be called after initialize()
 int rack_vst3_plugin_get_output_channels(RackVST3Plugin* plugin);
+uint32_t rack_vst3_plugin_get_latency_samples(RackVST3Plugin* plugin);
 
 // Process audio (planar format - one buffer per channel)
 // Uses planar (non-interleaved) audio format matching VST3 internal format.
@@ -145,6 +147,19 @@ int rack_vst3_plugin_process(
     uint32_t frames
 );
 
+// Queue MIDI and process audio in one realtime FFI transition. Event storage is
+// preallocated by the host and event_count must not exceed 512.
+int rack_vst3_plugin_process_with_midi(
+    RackVST3Plugin* plugin,
+    const RackVST3MidiEvent* events,
+    uint32_t event_count,
+    const float* const* inputs,
+    uint32_t num_input_channels,
+    float* const* outputs,
+    uint32_t num_output_channels,
+    uint32_t frames
+);
+
 // Get parameter count
 // Thread-safety: Read-only after initialization. Safe to call from any thread.
 int rack_vst3_plugin_parameter_count(RackVST3Plugin* plugin);
@@ -161,6 +176,7 @@ int rack_vst3_plugin_get_parameter(RackVST3Plugin* plugin, uint32_t index, float
 // must not be accessed concurrently.
 // Note: Calling during audio processing may cause clicks/pops.
 int rack_vst3_plugin_set_parameter(RackVST3Plugin* plugin, uint32_t index, float value);
+int rack_vst3_plugin_set_parameter_audio(RackVST3Plugin* plugin, uint32_t index, float value);
 
 // Get parameter info
 // name: output buffer for parameter name (allocated by caller)
@@ -284,13 +300,13 @@ typedef enum {
 } RackVST3MidiEventType;
 
 // MIDI event struct
-typedef struct {
+struct RackVST3MidiEvent {
     uint32_t sample_offset;  // Sample offset within buffer
     uint8_t status;          // MIDI status byte
     uint8_t data1;           // First data byte (note/CC number)
     uint8_t data2;           // Second data byte (velocity/value)
     uint8_t channel;         // MIDI channel (0-15)
-} RackVST3MidiEvent;
+};
 
 // Send MIDI events to plugin
 // events: array of MIDI events

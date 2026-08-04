@@ -136,6 +136,7 @@ fn bench_json_serialization(c: &mut Criterion) {
         audio_mmcss_enabled: Some(true),
         audio_power_throttling_disabled: Some(true),
         audio_limiter_enabled: Some(false),
+        ..BridgeStatus::default()
     };
 
     c.bench_function("bridge_status_serialize", |b| {

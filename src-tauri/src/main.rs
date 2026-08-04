@@ -22,6 +22,18 @@ use crate::tauri::{commands::*, state::AppState, window::handle_window_event};
 
 /// Fonction principale de l'application
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--vst-probe") {
+        let path = std::env::args_os().nth(2).map(std::path::PathBuf::from);
+        let Some(path) = path else {
+            std::process::exit(2);
+        };
+        let entry = crate::plugin_probe::probe_plugin(&path);
+        if let Ok(json) = serde_json::to_string(&entry) {
+            println!("OSCMIDI_PROBE_JSON:{json}");
+            return;
+        }
+        std::process::exit(1);
+    }
     // Configuration du gestionnaire de panique
     std::panic::set_hook(Box::new(|info| {
         let msg = match info.payload().downcast_ref::<&str>() {

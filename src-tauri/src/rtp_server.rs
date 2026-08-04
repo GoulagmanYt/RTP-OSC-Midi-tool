@@ -21,6 +21,7 @@ use crate::{
     bridge::pipeline::try_enqueue_midi_frame,
     logger::{logs_enabled, FrontendLogger},
     midi::MidiFrame,
+    tauri::utils::safe_block_on,
     types::RtpParticipantInfo,
 };
 
@@ -80,7 +81,7 @@ impl RtpServer {
             return Err("Port RTP invalide: 65535 reserve".to_string());
         }
 
-        let (session, bound_port) = async_runtime::block_on(async {
+        let (session, bound_port) = safe_block_on(async {
             let ssrc = (Uuid::new_v4().as_u128() & 0xFFFF_FFFF) as u32;
             let try_ports = [0u16, 2, 4]
                 .into_iter()

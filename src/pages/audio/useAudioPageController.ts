@@ -1,5 +1,5 @@
 import { listen } from "@tauri-apps/api/event";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
   closeVstUi,
@@ -18,11 +18,13 @@ import {
 import type { VstParameter, VstPluginEntry } from "../../api";
 import { useI18n } from "../../providers/LanguageProvider";
 import { useBridge } from "../../providers/BridgeProvider";
+import { mergeLiveAudioMetrics } from "./liveStatus";
 
 export function useAudioPageController() {
   const {
     config,
-    status,
+    status: statusSnapshot,
+    metrics,
     updateConfig,
     saveConfig: persistConfig,
     audioBackends,
@@ -32,12 +34,22 @@ export function useAudioPageController() {
   } = useBridge();
   const { t } = useI18n();
 
+  // RuntimeStatus is an on-demand snapshot, while RuntimeMetrics is emitted
+  // every second by the bridge. Merge both so the Audio page keeps moving
+  // during normal MIDI playback, not only after buttons that refresh status.
+  const status = useMemo(
+    () => mergeLiveAudioMetrics(statusSnapshot, metrics),
+    [statusSnapshot, metrics]
+  );
+
   const [vstUiOpen, setVstUiOpen] = useState(false);
   const [vstParameterDialogOpen, setVstParameterDialogOpen] = useState(false);
   const [vstPlugins, setVstPlugins] = useState<VstPluginEntry[]>([]);
   const [vstPluginsLoading, setVstPluginsLoading] = useState(false);
   const [vstParams, setVstParams] = useState<VstParameter[]>([]);
   const [vstParamsLoading, setVstParamsLoading] = useState(false);
+  const [audioReloading, setAudioReloading] = useState(false);
+  const audioReloadInFlight = useRef(false);
 
   useEffect(() => {
     const unlisten = listen("audio:vst-editor-hidden", () => {
@@ -112,7 +124,7 @@ export function useAudioPageController() {
       return status.audioLatencyMs;
     }
     if (!activeBufferSize || !activeSampleRate) return null;
-    return Number(((activeBufferSize / activeSampleRate) * 1000 * 2).toFixed(2));
+    return Number(((activeBufferSize / activeSampleRate) * 1000).toFixed(2));
   }, [status?.audioLatencyMs, activeBufferSize, activeSampleRate]);
 
   const updateAudioConfig = useCallback(
@@ -120,15 +132,22 @@ export function useAudioPageController() {
       if (!config) return;
       const previousAudio = config.audio;
       const updated = { ...config, audio: { ...config.audio, ...patch } };
-      await updateConfig({ audio: patch });
-
       const restartKeys: Array<keyof typeof patch> = ["backend", "device", "sampleRate", "bufferSize", "vstPath"];
       const requiresRestart = restartKeys.some((key) => patch[key] !== undefined);
-      if (!requiresRestart || !status?.audioRunning || !updated.audio.enabled) {
+      const shouldRestart = requiresRestart && Boolean(status?.audioRunning) && updated.audio.enabled;
+      if (shouldRestart && audioReloadInFlight.current) {
         return;
       }
 
+      if (shouldRestart) {
+        audioReloadInFlight.current = true;
+        setAudioReloading(true);
+      }
       try {
+        await updateConfig({ audio: patch });
+        if (!shouldRestart) {
+          return;
+        }
         await saveConfigApi(updated);
         await reloadVst();
         await refreshStatus();
@@ -143,6 +162,11 @@ export function useAudioPageController() {
         }
         const message = e instanceof Error ? e.message : String(e);
         toast.error(message || t("toasts.audio.vstReloadFailed"));
+      } finally {
+        if (shouldRestart) {
+          audioReloadInFlight.current = false;
+          setAudioReloading(false);
+        }
       }
     },
     [config, refreshStatus, status?.audioRunning, t, updateConfig]
@@ -299,6 +323,9 @@ export function useAudioPageController() {
   };
 
   const handleReloadVst = async () => {
+    if (audioReloadInFlight.current) return;
+    audioReloadInFlight.current = true;
+    setAudioReloading(true);
     try {
       await reloadVst();
       toast.success(t("toasts.audio.vstReloaded"));
@@ -306,6 +333,9 @@ export function useAudioPageController() {
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       toast.error(message || t("toasts.audio.vstReloadFailed"));
+    } finally {
+      audioReloadInFlight.current = false;
+      setAudioReloading(false);
     }
   };
 
@@ -334,6 +364,7 @@ export function useAudioPageController() {
     activeSampleRate,
     audioBackends,
     audioDevices,
+    audioReloading,
     bridgeRunning,
     bufferMismatch,
     canOpenSelectedVstUi,
@@ -341,6 +372,7 @@ export function useAudioPageController() {
     config,
     currentLatencyMs,
     isVst3,
+    midiMessagesPerSec: metrics?.midiMessagesPerSec ?? null,
     quickPresets,
     requestedBufferSize,
     selectedPluginKindLabel,

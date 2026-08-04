@@ -24,6 +24,7 @@ static PIPELINE_FILTERED_COUNT: AtomicU64 = AtomicU64::new(0);
 static PIPELINE_QUEUE_DEPTH: AtomicU64 = AtomicU64::new(0);
 static PIPELINE_QUEUE_MAX_DEPTH: AtomicU64 = AtomicU64::new(0);
 static PIPELINE_DROPPED_COUNT: AtomicU64 = AtomicU64::new(0);
+static MIDI_DEBUG_SAMPLE_LAST_MS: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnqueueOutcome {
@@ -147,17 +148,29 @@ pub(super) fn handle_midi_frame(
     osc_counter: &AtomicU32,
     sustain_pressed_state: &mut [Option<bool>; 16],
     midi_event_tx: &Sender<MidiNoteEvent>,
+    deliver_audio: bool,
+    deliver_midi_thru: bool,
+    deliver_osc_ui: bool,
 ) {
     // Compteur entrée pipeline (stress test metrics)
-    PIPELINE_IN_COUNT.fetch_add(1, Ordering::Relaxed);
+    if deliver_audio {
+        PIPELINE_IN_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
 
     let mut frame = frame;
     let mut filtered = false;
+    // A load test must measure the queues/audio callback, not benchmark the
+    // synchronous file logger by writing thousands of lines per second.
+    let log_frame = !frame.source.starts_with("StressTest");
+    let log_sample =
+        config.verbose && log_frame && should_log_debug() && should_sample_midi_debug(now_ms());
 
     if let Some(profile_idx) = config.routing_assignments.get(&*frame.source).copied() {
         if let Some(profile) = config.routing_profiles.get(profile_idx) {
             if profile.enabled && !apply_routing_profile(profile, &mut frame) {
-                PIPELINE_FILTERED_COUNT.fetch_add(1, Ordering::Relaxed);
+                if deliver_audio {
+                    PIPELINE_FILTERED_COUNT.fetch_add(1, Ordering::Relaxed);
+                }
                 return;
             }
         }
@@ -171,7 +184,7 @@ pub(super) fn handle_midi_frame(
         }
     }
 
-    if config.verbose && should_log_debug() {
+    if log_sample {
         let input_label = if frame.source.starts_with("RTP:") {
             Some("RTP")
         } else if frame.source.starts_with("ReliablePLV:") {
@@ -187,34 +200,40 @@ pub(super) fn handle_midi_frame(
         }
     }
 
-    if let Some(status) = frame.data.first() {
-        let is_channel_voice = (0x80..0xF0).contains(status);
-        if is_channel_voice {
-            audio.send_midi(frame.data.as_slice());
-            PIPELINE_OUT_COUNT.fetch_add(1, Ordering::Relaxed);
-            if config.verbose && should_log_debug() {
-                logger.debug(format!(
-                    "BRIDGE: VST MIDI de {}: {:02X?}",
-                    frame.source,
-                    frame.data.as_slice()
-                ));
+    if deliver_audio {
+        if let Some(status) = frame.data.first() {
+            let is_channel_voice = (0x80..0xF0).contains(status);
+            if is_channel_voice {
+                audio.send_midi(frame.data.as_slice());
+                PIPELINE_OUT_COUNT.fetch_add(1, Ordering::Relaxed);
+                if log_sample {
+                    logger.debug(format!(
+                        "BRIDGE: VST MIDI de {}: {:02X?}",
+                        frame.source,
+                        frame.data.as_slice()
+                    ));
+                }
+            } else if !filtered {
+                // Message MIDI non-voix (sys ex, etc) - compté comme filtré pour les stats
+                PIPELINE_FILTERED_COUNT.fetch_add(1, Ordering::Relaxed);
             }
-        } else if !filtered {
-            // Message MIDI non-voix (sys ex, etc) - compté comme filtré pour les stats
-            PIPELINE_FILTERED_COUNT.fetch_add(1, Ordering::Relaxed);
         }
     }
 
-    if config.midi_thru {
+    if deliver_midi_thru && config.midi_thru {
         if let Some(out) = midi_out.as_mut() {
             let _ = out.send(frame.data.as_slice());
         }
     }
 
+    if !deliver_osc_ui {
+        return;
+    }
+
     if let Some(sustain) = parse_sustain(frame.data.as_slice()) {
         if let Some(filter) = config.channel_filter {
             if sustain.channel != filter {
-                if config.verbose && should_log_debug() {
+                if log_sample {
                     logger.debug(format!(
                         "Sustain canal {} filtre (filtre: {})",
                         sustain.channel, filter
@@ -234,7 +253,7 @@ pub(super) fn handle_midi_frame(
         sustain_pressed_state[channel_idx] = Some(sustain.pressed);
 
         if !config.osc_enabled {
-            if config.verbose && should_log_debug() {
+            if log_sample {
                 logger.debug(format!(
                     "OSC desactive -> sustain ignoree pour OSC depuis {}",
                     frame.source
@@ -257,7 +276,7 @@ pub(super) fn handle_midi_frame(
             } else {
                 osc_counter.fetch_add(1, Ordering::Relaxed);
             }
-        } else if config.verbose && logs_enabled() {
+        } else if log_sample && logs_enabled() {
             logger.warn(format!(
                 "OSC actif mais client indisponible pour {}:{}",
                 config.osc_target_ip, config.osc_target_port
@@ -278,7 +297,7 @@ pub(super) fn handle_midi_frame(
 
         if let Some(filter) = config.channel_filter {
             if note.channel != filter {
-                if config.verbose && should_log_debug() {
+                if log_sample {
                     logger.debug(format!(
                         "Note canal {} filtree (filtre: {})",
                         note.channel, filter
@@ -288,7 +307,7 @@ pub(super) fn handle_midi_frame(
             }
         }
 
-        if note.index.is_none() && config.verbose && logs_enabled() {
+        if note.index.is_none() && log_sample && logs_enabled() {
             logger.warn(format!(
                 "Note hors plage ({}) recue depuis {}",
                 note.note, frame.source
@@ -298,7 +317,7 @@ pub(super) fn handle_midi_frame(
 
         if let Some(index) = note.index {
             if !config.osc_enabled {
-                if config.verbose && should_log_debug() {
+                if log_sample {
                     logger.debug(format!(
                         "OSC desactive -> note {} ignoree pour OSC depuis {}",
                         index, frame.source
@@ -323,14 +342,14 @@ pub(super) fn handle_midi_frame(
                 } else {
                     osc_counter.fetch_add(1, Ordering::Relaxed);
                 }
-            } else if config.verbose && logs_enabled() {
+            } else if log_sample && logs_enabled() {
                 logger.warn(format!(
                     "OSC actif mais client indisponible pour {}:{}",
                     config.osc_target_ip, config.osc_target_port
                 ));
             }
         }
-    } else if config.verbose && should_log_debug() {
+    } else if log_sample {
         logger.debug(format!(
             "Message ignore depuis {}: {:?}",
             frame.source,
@@ -423,6 +442,18 @@ pub fn pipeline_metrics_snapshot() -> PipelineMetricsSnapshot {
     }
 }
 
+fn should_sample_midi_debug(now_ms: u64) -> bool {
+    let last = MIDI_DEBUG_SAMPLE_LAST_MS.load(Ordering::Relaxed);
+    now_ms.saturating_sub(last) >= 1_000
+        && MIDI_DEBUG_SAMPLE_LAST_MS
+            .compare_exchange(last, now_ms, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+}
+
+pub(super) fn record_fanout_drop() {
+    PIPELINE_DROPPED_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+
 pub fn try_enqueue_midi_frame(
     tx: &Sender<MidiFrame>,
     frame: MidiFrame,
@@ -495,6 +526,15 @@ mod tests {
 
         assert!(source.contains("ReliablePLV:"));
         assert!(source.contains("MIDI IN (ReliablePLV) -> pipeline"));
+    }
+
+    #[test]
+    fn midi_debug_sampling_is_rate_limited() {
+        MIDI_DEBUG_SAMPLE_LAST_MS.store(0, Ordering::Relaxed);
+        assert!(should_sample_midi_debug(1_000));
+        assert!(!should_sample_midi_debug(1_001));
+        assert!(!should_sample_midi_debug(1_999));
+        assert!(should_sample_midi_debug(2_000));
     }
 
     #[test]

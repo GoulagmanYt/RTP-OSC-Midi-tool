@@ -1,7 +1,10 @@
 #![allow(deprecated)]
 
 use std::collections::HashSet;
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use crate::types::VstPluginEntry;
 use rack::PluginInfo as RackPluginInfo;
@@ -70,7 +73,7 @@ pub fn scan_vst_plugins_in_roots(roots: &[PathBuf]) -> Vec<VstPluginEntry> {
         for path in scan_plugin_candidates(&root) {
             let key = normalize_path(&path);
             if seen_paths.insert(key) {
-                let entry = probe_plugin(&path);
+                let entry = probe_plugin_isolated(&path, Duration::from_secs(10));
                 if is_listable_instrument_entry(&entry) {
                     entries.push(entry);
                 }
@@ -92,7 +95,7 @@ fn is_listable_instrument_entry(entry: &VstPluginEntry) -> bool {
 }
 
 pub fn ensure_supported_plugin_in_app(path: &Path) -> Result<VstPluginEntry, String> {
-    let entry = probe_plugin(path);
+    let entry = probe_plugin_isolated(path, Duration::from_secs(10));
     if entry.supported {
         Ok(entry)
     } else {
@@ -101,6 +104,106 @@ pub fn ensure_supported_plugin_in_app(path: &Path) -> Result<VstPluginEntry, Str
             .clone()
             .unwrap_or_else(|| "Plugin is not supported in this app".to_string()))
     }
+}
+
+pub fn probe_plugin_isolated(path: &Path, timeout: Duration) -> VstPluginEntry {
+    match run_probe_process(path, timeout) {
+        Ok(entry) => entry,
+        Err(reason) => unsupported_entry(
+            path,
+            plugin_name(path),
+            if is_vst3_path(path) { "VST3" } else { "VST2" }.to_string(),
+            "instrument".to_string(),
+            "unknown".to_string(),
+            reason,
+        ),
+    }
+}
+
+fn run_probe_process(path: &Path, timeout: Duration) -> Result<VstPluginEntry, String> {
+    let current_exe = std::env::current_exe()
+        .map_err(|error| format!("Could not locate probe executable: {error}"))?;
+    let dedicated = current_exe.with_file_name(if cfg!(windows) {
+        "vst_probe.exe"
+    } else {
+        "vst_probe"
+    });
+    let (program, use_current_exe) = if dedicated.exists() && dedicated != current_exe {
+        (dedicated, false)
+    } else {
+        (current_exe, true)
+    };
+    let mut command = Command::new(program);
+    if use_current_exe {
+        command.arg("--vst-probe");
+    }
+    let mut child = command
+        .arg(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("Failed to start isolated VST probe: {error}"))?;
+    let mut stdout_pipe = child
+        .stdout
+        .take()
+        .ok_or_else(|| "VST probe stdout pipe unavailable".to_string())?;
+    let mut stderr_pipe = child
+        .stderr
+        .take()
+        .ok_or_else(|| "VST probe stderr pipe unavailable".to_string())?;
+    let stdout_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = stdout_pipe.read_to_end(&mut bytes);
+        bytes
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = stderr_pipe.read_to_end(&mut bytes);
+        bytes
+    });
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if started.elapsed() < timeout => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                return Err(format!(
+                    "VST probe timed out after {:.1}s",
+                    timeout.as_secs_f32()
+                ));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                return Err(format!("Failed while waiting for VST probe: {error}"));
+            }
+        }
+    }
+    let stdout_bytes = stdout_reader
+        .join()
+        .map_err(|_| "VST probe stdout reader panicked".to_string())?;
+    let stderr_bytes = stderr_reader
+        .join()
+        .map_err(|_| "VST probe stderr reader panicked".to_string())?;
+    let stdout = String::from_utf8_lossy(&stdout_bytes);
+    let json = stdout
+        .lines()
+        .rev()
+        .find_map(|line| line.strip_prefix("OSCMIDI_PROBE_JSON:"))
+        .ok_or_else(|| {
+            let stderr = String::from_utf8_lossy(&stderr_bytes);
+            format!("VST probe exited without a result: {}", stderr.trim())
+        })?;
+    serde_json::from_str(json).map_err(|error| format!("Invalid VST probe result: {error}"))
 }
 
 pub fn probe_plugin(path: &Path) -> VstPluginEntry {
@@ -128,6 +231,7 @@ pub(crate) fn unsupported_entry(
     architecture: String,
     reason: String,
 ) -> VstPluginEntry {
+    let (file_modified_ms, file_size) = plugin_file_metadata(path);
     VstPluginEntry {
         name,
         path: path.to_string_lossy().to_string(),
@@ -139,7 +243,23 @@ pub(crate) fn unsupported_entry(
         midi_compatible: None,
         has_editor: false,
         channel_layout: None,
+        class_uid: None,
+        file_modified_ms,
+        file_size,
+        host_abi_version: 1,
     }
+}
+
+pub(crate) fn plugin_file_metadata(path: &Path) -> (Option<u64>, Option<u64>) {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return (None, None);
+    };
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64);
+    (modified, Some(metadata.len()))
 }
 
 #[cfg(test)]

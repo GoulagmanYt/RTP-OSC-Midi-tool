@@ -2,12 +2,20 @@ use std::{path::PathBuf, sync::atomic::Ordering, time::Duration};
 
 use super::{
     engine::{db_to_linear, AudioEngine},
-    runtime_state::AudioError,
+    runtime_state::{AudioError, AudioLifecycleState},
 };
 
 use crate::logger::FrontendLogger;
 
 impl AudioEngine {
+    pub fn lifecycle_state(&self) -> &'static str {
+        AudioLifecycleState::from_u8(
+            self.lifecycle_state
+                .load(std::sync::atomic::Ordering::Acquire),
+        )
+        .as_str()
+    }
+
     pub fn set_gain(&self, gain_db: f32) {
         if let Some(rt) = self.runtime.lock().as_mut() {
             rt.controls
@@ -104,9 +112,24 @@ impl AudioEngine {
             if frames == 0 {
                 None
             } else {
-                Some((frames as f32 / r.sample_rate as f32) * 1000.0 * 2.0)
+                Some(((frames + r.plugin_latency_samples) as f32 / r.sample_rate as f32) * 1000.0)
             }
         })
+    }
+
+    pub fn audio_buffer_period_ms(&self) -> Option<f32> {
+        self.runtime.lock().as_ref().and_then(|r| {
+            let frames = r.telemetry.block_size_frames.load(Ordering::Relaxed);
+            (frames > 0 && r.sample_rate > 0)
+                .then_some((frames as f32 / r.sample_rate as f32) * 1000.0)
+        })
+    }
+
+    pub fn plugin_latency_samples(&self) -> Option<u32> {
+        self.runtime
+            .lock()
+            .as_ref()
+            .map(|runtime| runtime.plugin_latency_samples)
     }
 
     pub fn midi_drop_count(&self) -> Option<u32> {
@@ -150,6 +173,57 @@ impl AudioEngine {
                 .callback_over_budget_count
                 .load(Ordering::Relaxed)
         })
+    }
+
+    pub fn consecutive_deadline_misses(&self) -> Option<u32> {
+        self.runtime.lock().as_ref().map(|r| {
+            r.telemetry
+                .consecutive_deadline_misses
+                .load(Ordering::Relaxed)
+        })
+    }
+
+    pub fn dsp_process_last_us(&self) -> Option<u32> {
+        self.runtime
+            .lock()
+            .as_ref()
+            .map(|r| r.telemetry.dsp_process_last_us.load(Ordering::Relaxed))
+    }
+
+    pub fn dsp_process_max_us(&self) -> Option<u32> {
+        self.runtime
+            .lock()
+            .as_ref()
+            .map(|r| r.telemetry.dsp_process_max_us.load(Ordering::Relaxed))
+    }
+
+    pub fn dsp_process_percentile_us(&self, percentile: u32) -> Option<u32> {
+        self.runtime
+            .lock()
+            .as_ref()
+            .map(|r| r.telemetry.dsp_percentile_us(percentile))
+    }
+
+    pub fn audio_midi_queue_depth(&self) -> Option<u32> {
+        self.runtime
+            .lock()
+            .as_ref()
+            .map(|r| r.telemetry.audio_midi_queue_depth.load(Ordering::Relaxed))
+    }
+
+    pub fn audio_midi_queue_max_depth(&self) -> Option<u32> {
+        self.runtime.lock().as_ref().map(|r| {
+            r.telemetry
+                .audio_midi_queue_max_depth
+                .load(Ordering::Relaxed)
+        })
+    }
+
+    pub fn audio_midi_oldest_us(&self) -> Option<u64> {
+        self.runtime
+            .lock()
+            .as_ref()
+            .map(|r| r.telemetry.audio_midi_oldest_us.load(Ordering::Relaxed))
     }
 
     pub fn mmcss_enabled(&self) -> Option<bool> {

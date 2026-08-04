@@ -1,38 +1,33 @@
 #![allow(deprecated)]
 
-use std::{
-    path::PathBuf,
-    sync::{mpsc, Arc},
-};
+use std::sync::{mpsc, Arc};
 
 use parking_lot::Mutex;
-use rack::PluginInstance as _;
 use vst::plugin::Plugin;
 
 use windows::core::{w, PCWSTR};
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::HBRUSH;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowLongPtrW, IsWindowVisible, KillTimer,
-    RegisterClassW, SetForegroundWindow, SetTimer, SetWindowLongPtrW, ShowWindow, CREATESTRUCTW,
-    CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, GWLP_USERDATA, HCURSOR, HICON, SW_HIDE, SW_SHOW,
-    WM_CLOSE, WM_CREATE, WM_DESTROY, WM_TIMER, WNDCLASSW, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    RegisterClassW, SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, GWLP_USERDATA, HCURSOR, HICON,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SW_HIDE, SW_SHOW, WINDOW_EX_STYLE, WM_CLOSE,
+    WM_CREATE, WM_DESTROY, WM_TIMER, WNDCLASSW, WS_OVERLAPPEDWINDOW,
 };
 
-use crate::types::VstParameter;
+use crate::{logger::background_log, types::VstParameter};
 
 use super::{
     engine::AudioEngine,
     runtime_state::{AudioError, EditorWindow, PluginBackend, VST_EDITOR_IDLE_TIMER_MS},
-    state_codec::save_vst_state,
 };
 
 struct WindowData {
     state: std::sync::Weak<Mutex<Option<EditorWindow>>>,
     app_handle: Option<tauri::AppHandle>,
-    plugin: Option<Arc<Mutex<PluginBackend>>>,
-    vst_path: Option<PathBuf>,
 }
 
 unsafe extern "system" fn vst_window_proc(
@@ -78,11 +73,6 @@ unsafe extern "system" fn vst_window_proc(
             if !ptr.is_null() {
                 // SAFETY: ptr comes from our Box<WindowData> stored at WM_CREATE and lives until WM_DESTROY.
                 unsafe {
-                    if let (Some(plugin), Some(vst_path)) =
-                        ((*ptr).plugin.as_ref(), (*ptr).vst_path.as_ref())
-                    {
-                        save_vst_state(plugin, vst_path);
-                    }
                     if let Some(handle) = &(*ptr).app_handle {
                         use tauri::Emitter;
                         let _ = handle.emit("audio:vst-editor-hidden", ());
@@ -134,10 +124,10 @@ fn create_vst_window(
         let data_ptr = Box::into_raw(data_box);
 
         let hwnd = CreateWindowExW(
-            windows::Win32::UI::WindowsAndMessaging::WINDOW_EX_STYLE(0),
+            WINDOW_EX_STYLE(0),
             class_name,
             PCWSTR(title_wide.as_ptr()),
-            WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+            WS_OVERLAPPEDWINDOW,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             if width > 0 { width } else { CW_USEDEFAULT },
@@ -157,25 +147,55 @@ fn create_vst_window(
             return Err("Failed to create window".to_string());
         }
 
-        let _ = ShowWindow(hwnd, SW_SHOW);
-        let _ = SetForegroundWindow(hwnd);
-
         Ok(hwnd)
     }
 }
 
+fn resize_vst_window_to_client(hwnd: HWND, width: i32, height: i32) -> Result<(), String> {
+    if !(1..=8192).contains(&width) || !(1..=8192).contains(&height) {
+        return Err(format!("invalid editor size {width}x{height}"));
+    }
+
+    // SAFETY: hwnd is a live top-level window created by create_vst_window. The
+    // requested RECT is local and SetWindowPos does not change ownership/z-order.
+    unsafe {
+        let mut rect = RECT {
+            left: 0,
+            top: 0,
+            right: width,
+            bottom: height,
+        };
+        let dpi = GetDpiForWindow(hwnd).max(96);
+        AdjustWindowRectExForDpi(
+            &mut rect,
+            WS_OVERLAPPEDWINDOW,
+            false,
+            WINDOW_EX_STYLE(0),
+            dpi,
+        )
+        .map_err(|error| error.to_string())?;
+        SetWindowPos(
+            hwnd,
+            None,
+            0,
+            0,
+            rect.right - rect.left,
+            rect.bottom - rect.top,
+            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 impl AudioEngine {
     pub fn open_vst_ui(&self, app_handle: tauri::AppHandle) -> Result<(), AudioError> {
-        let (plugin_arc, editor_window_arc, vst_path) = {
+        let (plugin_arc, editor_window_arc) = {
             let mut guard = self.runtime.lock();
             let Some(runtime) = guard.as_mut() else {
                 return Err(AudioError::Message("Audio not started".into()));
             };
-            (
-                runtime.plugin.clone(),
-                runtime.editor_window.clone(),
-                runtime.vst_path.clone(),
-            )
+            (runtime.plugin.clone(), runtime.editor_window.clone())
         };
 
         let weak_editor_window = Arc::downgrade(&editor_window_arc);
@@ -202,6 +222,7 @@ impl AudioEngine {
                     let mut plugin = plugin_arc.lock();
                     match &mut *plugin {
                         PluginBackend::Vst2 { instance } => {
+                            background_log("debug", "VST2 editor: requesting editor object");
                             let editor = instance.get_editor();
                             let Some(mut editor) = editor else {
                                 return Err(AudioError::Message(
@@ -209,25 +230,42 @@ impl AudioEngine {
                                 ));
                             };
 
-                            let (width, height) = editor.size();
-                            let win_width = if width > 0 { width + 16 } else { 800 };
-                            let win_height = if height > 0 { height + 39 } else { 600 };
-
                             let window_data = WindowData {
                                 state: weak_editor_window,
                                 app_handle: Some(app_handle_clone),
-                                plugin: Some(plugin_arc.clone()),
-                                vst_path: Some(vst_path.clone()),
                             };
 
-                            let hwnd =
-                                create_vst_window("VST Editor", win_width, win_height, window_data)
-                                    .map_err(AudioError::Message)?;
+                            // Some legacy VST2 plugins crash on effEditGetRect before
+                            // effEditOpen. Create a hidden neutral parent first, then ask
+                            // for the editor size only after the native editor is open.
+                            background_log("debug", "VST2 editor: creating hidden parent window");
+                            let hwnd = create_vst_window("VST Editor", 800, 600, window_data)
+                                .map_err(AudioError::Message)?;
 
                             let hwnd_ptr = hwnd.0;
+                            background_log("debug", "VST2 editor: calling effEditOpen");
                             if editor.open(hwnd_ptr) {
+                                let (width, height) = editor.size();
+                                match resize_vst_window_to_client(hwnd, width, height) {
+                                    Ok(()) => background_log(
+                                        "debug",
+                                        format!(
+                                            "VST2 editor: effEditOpen succeeded; resized client to {width}x{height}"
+                                        ),
+                                    ),
+                                    Err(error) => background_log(
+                                        "warn",
+                                        format!(
+                                            "VST2 editor: post-open size unavailable ({error}); keeping compatibility container 800x600"
+                                        ),
+                                    ),
+                                }
                                 *editor_window_arc.lock() =
                                     Some(EditorWindow::Vst2 { editor, hwnd });
+                                unsafe {
+                                    let _ = ShowWindow(hwnd, SW_SHOW);
+                                    let _ = SetForegroundWindow(hwnd);
+                                }
                                 Ok(())
                             } else {
                                 unsafe {
@@ -237,38 +275,43 @@ impl AudioEngine {
                             }
                         }
                         PluginBackend::Vst3 { instance, .. } => {
+                            background_log("debug", "VST3 editor: creating GUI controller");
                             let mut gui = instance.create_gui().map_err(|e| {
                                 AudioError::Message(format!("Failed to create VST3 editor: {e}"))
                             })?;
+                            background_log("debug", "VST3 editor: querying GUI size");
                             let (width, height) = gui.size().map_err(|e| {
                                 AudioError::Message(format!("Failed to get VST3 editor size: {e}"))
                             })?;
-                            let win_width = if width > 0.0 {
-                                width.round() as i32 + 16
-                            } else {
-                                800
-                            };
-                            let win_height = if height > 0.0 {
-                                height.round() as i32 + 39
-                            } else {
-                                600
-                            };
+                            let client_width = width.round() as i32;
+                            let client_height = height.round() as i32;
 
                             let window_data = WindowData {
                                 state: weak_editor_window,
                                 app_handle: Some(app_handle_clone),
-                                plugin: Some(plugin_arc.clone()),
-                                vst_path: Some(vst_path.clone()),
                             };
 
+                            background_log(
+                                "debug",
+                                "VST3 editor: creating hidden parent window",
+                            );
                             let hwnd = create_vst_window(
                                 "VST3 Editor",
-                                win_width,
-                                win_height,
+                                client_width,
+                                client_height,
                                 window_data,
                             )
                             .map_err(AudioError::Message)?;
+                            if let Err(error) =
+                                resize_vst_window_to_client(hwnd, client_width, client_height)
+                            {
+                                background_log(
+                                    "warn",
+                                    format!("VST3 editor: could not apply GUI size: {error}"),
+                                );
+                            }
 
+                            background_log("debug", "VST3 editor: attaching GUI to parent window");
                             if let Err(err) = gui.attach(hwnd.0) {
                                 unsafe {
                                     let _ = DestroyWindow(hwnd);
@@ -277,8 +320,13 @@ impl AudioEngine {
                                     "Failed to attach VST3 editor: {err}"
                                 )));
                             }
+                            background_log("debug", "VST3 editor: attach succeeded");
 
                             *editor_window_arc.lock() = Some(EditorWindow::Vst3 { gui, hwnd });
+                            unsafe {
+                                let _ = ShowWindow(hwnd, SW_SHOW);
+                                let _ = SetForegroundWindow(hwnd);
+                            }
                             Ok(())
                         }
                     }
@@ -296,16 +344,12 @@ impl AudioEngine {
     }
 
     pub fn close_vst_ui(&self, app_handle: tauri::AppHandle) -> Result<(), AudioError> {
-        let (editor_window_arc, plugin_arc, vst_path) = {
+        let editor_window_arc = {
             let mut guard = self.runtime.lock();
             let Some(runtime) = guard.as_mut() else {
                 return Err(AudioError::Message("Audio not started".into()));
             };
-            (
-                runtime.editor_window.clone(),
-                runtime.plugin.clone(),
-                runtime.vst_path.clone(),
-            )
+            runtime.editor_window.clone()
         };
 
         app_handle
@@ -317,7 +361,6 @@ impl AudioEngine {
                     unsafe {
                         let _ = ShowWindow(*hwnd, SW_HIDE);
                     }
-                    save_vst_state(&plugin_arc, &vst_path);
                 }
             })
             .map_err(|_| {
@@ -333,36 +376,8 @@ impl AudioEngine {
             return Err(AudioError::Message("Audio not started".into()));
         };
 
-        let Some(mut plugin) = runtime.plugin.try_lock() else {
-            return Err(AudioError::Message("VST busy, retry".into()));
-        };
-        match &mut *plugin {
-            PluginBackend::Vst3 { instance, .. } => {
-                let count = instance.parameter_count();
-                let mut params = Vec::with_capacity(count);
-                for index in 0..count {
-                    let info = instance.parameter_info(index).map_err(|e| {
-                        AudioError::Message(format!("VST3 parameter info failed: {}", e))
-                    })?;
-                    let value = instance.get_parameter(index).map_err(|e| {
-                        AudioError::Message(format!("VST3 get parameter failed: {}", e))
-                    })?;
-                    params.push(VstParameter {
-                        index,
-                        name: info.name,
-                        min: info.min,
-                        max: info.max,
-                        default: info.default,
-                        unit: info.unit,
-                        value,
-                    });
-                }
-                Ok(params)
-            }
-            _ => Err(AudioError::Message(
-                "VST3 parameters are only available for VST3 plugins".into(),
-            )),
-        }
+        let parameters = runtime.parameter_cache.lock().clone();
+        Ok(parameters)
     }
 
     pub fn set_vst_parameter(&self, index: usize, value: f32) -> Result<(), AudioError> {
@@ -370,19 +385,22 @@ impl AudioEngine {
         let Some(runtime) = guard.as_ref() else {
             return Err(AudioError::Message("Audio not started".into()));
         };
-        let Some(mut plugin) = runtime.plugin.try_lock() else {
-            return Err(AudioError::Message("VST busy, retry".into()));
-        };
-        match &mut *plugin {
-            PluginBackend::Vst3 { instance, .. } => {
-                let normalized = value.clamp(0.0, 1.0);
-                instance
-                    .set_parameter(index, normalized)
-                    .map_err(|e| AudioError::Message(format!("VST3 set parameter failed: {}", e)))
-            }
-            _ => Err(AudioError::Message(
-                "VST3 parameters are only available for VST3 plugins".into(),
-            )),
+        let normalized = value.clamp(0.0, 1.0);
+        if index >= runtime.parameter_cache.lock().len() {
+            return Err(AudioError::Message(
+                "VST3 parameter index out of range".into(),
+            ));
         }
+        runtime
+            .parameter_tx
+            .try_send(super::runtime_state::ParameterCommand {
+                index,
+                value: normalized,
+            })
+            .map_err(|_| AudioError::Message("VST3 parameter queue is full".into()))?;
+        if let Some(parameter) = runtime.parameter_cache.lock().get_mut(index) {
+            parameter.value = normalized;
+        }
+        Ok(())
     }
 }

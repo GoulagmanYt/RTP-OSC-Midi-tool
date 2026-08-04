@@ -12,6 +12,7 @@ import { Power, RefreshCcw, X } from "lucide-react";
 type Props = {
   audioBackends: string[];
   audioDevices: string[];
+  audioReloading: boolean;
   bridgeRunning: boolean;
   bufferMismatch: boolean | null;
   canOpenSelectedVstUi: boolean;
@@ -19,6 +20,7 @@ type Props = {
   config: AppConfig | null;
   currentLatencyMs: number | null;
   isVst3: boolean;
+  midiMessagesPerSec: number | null;
   quickPresets: AudioQuickPreset[];
   selectedPluginKindLabel: string;
   selectedPluginStatusLabel: string;
@@ -52,6 +54,7 @@ type Props = {
 export function AudioConfigCard({
   audioBackends,
   audioDevices,
+  audioReloading,
   bridgeRunning,
   bufferMismatch,
   canOpenSelectedVstUi,
@@ -59,6 +62,7 @@ export function AudioConfigCard({
   config,
   currentLatencyMs,
   isVst3,
+  midiMessagesPerSec,
   quickPresets,
   selectedPluginKindLabel,
   selectedPluginStatusLabel,
@@ -111,13 +115,14 @@ export function AudioConfigCard({
                 (config?.audio.backend || "").toLowerCase().includes(preset.backend) &&
                 config?.audio.bufferSize === preset.bufferSize &&
                 config?.audio.sampleRate === preset.sampleRate;
-              const latency = Number(((preset.bufferSize / preset.sampleRate) * 1000 * 2).toFixed(1));
+              const latency = Number(((preset.bufferSize / preset.sampleRate) * 1000).toFixed(1));
               return (
                 <Button
                   key={preset.id}
                   variant={isActive ? "default" : "outline"}
                   className="flex h-full flex-col items-start gap-1"
                   onClick={() => onApplyPreset(preset.id)}
+                  disabled={audioReloading}
                 >
                   <div className="flex w-full items-center justify-between">
                     <span className="font-semibold">{preset.label}</span>
@@ -140,7 +145,7 @@ export function AudioConfigCard({
         <div className="grid gap-4 md:grid-cols-2">
           <div className="space-y-2">
             <Label>{t("audio.backendLabel")}</Label>
-            <Select value={config?.audio.backend || ""} onValueChange={onBackendChange}>
+            <Select value={config?.audio.backend || ""} onValueChange={onBackendChange} disabled={audioReloading}>
               <SelectTrigger>
                 <SelectValue placeholder={t("audio.backendPlaceholder")} />
               </SelectTrigger>
@@ -159,7 +164,7 @@ export function AudioConfigCard({
             <Select
               value={config?.audio.device || ""}
               onValueChange={(value) => onUpdateAudioConfig({ device: value })}
-              disabled={!config?.audio.backend}
+              disabled={!config?.audio.backend || audioReloading}
             >
               <SelectTrigger>
                 <SelectValue placeholder={t("audio.devicePlaceholder")} />
@@ -181,6 +186,7 @@ export function AudioConfigCard({
             <Select
               value={config?.audio.sampleRate?.toString()}
               onValueChange={(value) => onUpdateAudioConfig({ sampleRate: parseInt(value, 10) })}
+              disabled={audioReloading}
             >
               <SelectTrigger>
                 <SelectValue />
@@ -199,6 +205,7 @@ export function AudioConfigCard({
             <Select
               value={config?.audio.bufferSize?.toString()}
               onValueChange={(value) => onUpdateAudioConfig({ bufferSize: parseInt(value, 10) })}
+              disabled={audioReloading}
             >
               <SelectTrigger>
                 <SelectValue />
@@ -239,7 +246,7 @@ export function AudioConfigCard({
         <div className="flex items-center justify-between text-xs text-muted-foreground">
           <span>{t("audio.estimatedLatency")}</span>
           <span className="font-semibold text-foreground">
-            {currentLatencyMs !== null ? `${currentLatencyMs} ${t("units.ms")}` : "--"}
+            {currentLatencyMs !== null ? `${currentLatencyMs.toFixed(2)} ${t("units.ms")}` : "--"}
           </span>
         </div>
         <div className="flex items-center justify-between text-xs text-muted-foreground">
@@ -306,6 +313,62 @@ export function AudioConfigCard({
             </span>
           </div>
           <div className="flex items-center justify-between gap-3">
+            <span>{t("dashboard.audioBufferPeriod")}</span>
+            <span className="font-semibold text-foreground">
+              {status?.audioBufferPeriodMs !== null && status?.audioBufferPeriodMs !== undefined
+                ? `${status.audioBufferPeriodMs.toFixed(2)} ms`
+                : "--"}
+            </span>
+          </div>
+          <div className="flex items-center justify-between gap-3">
+            <span>{t("dashboard.pluginLatency")}</span>
+            <span className="font-semibold text-foreground">
+              {status?.pluginLatencySamples !== null && status?.pluginLatencySamples !== undefined
+                ? `${status.pluginLatencySamples} ${t("units.samples")}`
+                : "--"}
+            </span>
+          </div>
+          <div className="flex items-center justify-between gap-3">
+            <span>{t("dashboard.dspP99")}</span>
+            <span className="font-semibold text-foreground">
+              {status?.dspProcessP99Us !== null && status?.dspProcessP99Us !== undefined
+                ? `${status.dspProcessP99Us} us`
+                : "--"}
+            </span>
+          </div>
+          <div className="flex items-center justify-between gap-3">
+            <span>{t("dashboard.dspLast")}</span>
+            <span className="font-semibold text-foreground">
+              {status?.dspProcessLastUs !== null && status?.dspProcessLastUs !== undefined
+                ? `${status.dspProcessLastUs} us`
+                : "--"}
+            </span>
+          </div>
+          <div className="flex items-center justify-between gap-3">
+            <span>{t("dashboard.dspMax")}</span>
+            <span className="font-semibold text-foreground">
+              {status?.dspProcessMaxUs !== null && status?.dspProcessMaxUs !== undefined
+                ? `${status.dspProcessMaxUs} us`
+                : "--"}
+            </span>
+          </div>
+          <div className="flex items-center justify-between gap-3">
+            <span>{t("dashboard.midiThroughput")}</span>
+            <span className="font-semibold text-foreground">
+              {midiMessagesPerSec !== null ? `${midiMessagesPerSec.toLocaleString()} msg/s` : "--"}
+            </span>
+          </div>
+          <div className="flex items-center justify-between gap-3">
+            <span>{t("dashboard.midiQueue")}</span>
+            <span className="font-semibold text-foreground">
+              {status?.audioMidiQueueDepth ?? "--"} / {status?.audioMidiQueueMaxDepth ?? "--"}
+            </span>
+          </div>
+          <div className="flex items-center justify-between gap-3">
+            <span>{t("dashboard.consecutiveMisses")}</span>
+            <span className="font-semibold text-foreground">{status?.consecutiveDeadlineMisses ?? "--"}</span>
+          </div>
+          <div className="flex items-center justify-between gap-3">
             <span>{t("dashboard.audioMmcss")}</span>
             <span className="font-semibold text-foreground">
               {status?.audioMmcssEnabled === null || status?.audioMmcssEnabled === undefined
@@ -320,7 +383,7 @@ export function AudioConfigCard({
         <div className="space-y-2">
           <Label>{t("audio.vstInstruments", { path: "Windows VST folders" })}</Label>
           <div className="flex flex-col gap-2 md:flex-row md:flex-wrap md:items-center">
-            <Select value={config?.audio.vstPath || ""} onValueChange={onSelectVst}>
+            <Select value={config?.audio.vstPath || ""} onValueChange={onSelectVst} disabled={audioReloading}>
               <SelectTrigger className="md:flex-1">
                 <SelectValue placeholder={t("audio.vstSelectPlaceholder")} />
               </SelectTrigger>
@@ -339,7 +402,7 @@ export function AudioConfigCard({
                 ))}
               </SelectContent>
             </Select>
-            <Button variant="outline" onClick={onRefreshVstPluginsList} disabled={vstPluginsLoading}>
+            <Button variant="outline" onClick={onRefreshVstPluginsList} disabled={vstPluginsLoading || audioReloading}>
               {vstPluginsLoading ? t("common.loading") : t("common.refresh")}
             </Button>
           </div>
@@ -398,9 +461,9 @@ export function AudioConfigCard({
               <Power className="mr-2 h-4 w-4" />
               {t("audio.pingAudio")}
             </Button>
-            <Button variant="outline" onClick={onReloadVst} disabled={!config?.audio.enabled}>
-              <RefreshCcw className="mr-2 h-4 w-4" />
-              {t("audio.reloadVst")}
+            <Button variant="outline" onClick={onReloadVst} disabled={!config?.audio.enabled || audioReloading}>
+              <RefreshCcw className={`mr-2 h-4 w-4 ${audioReloading ? "animate-spin" : ""}`} />
+              {audioReloading ? t("common.loading") : t("audio.reloadVst")}
             </Button>
           </div>
           <p className="text-xs text-muted-foreground">{t("audio.pingHint")}</p>

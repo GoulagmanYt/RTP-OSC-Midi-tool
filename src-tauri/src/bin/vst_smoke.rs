@@ -1,7 +1,7 @@
 #![allow(deprecated)]
 
 mod types {
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
     pub struct VstPluginEntry {
         pub name: String,
         pub path: String,
@@ -13,6 +13,10 @@ mod types {
         pub midi_compatible: Option<bool>,
         pub has_editor: bool,
         pub channel_layout: Option<String>,
+        pub class_uid: Option<String>,
+        pub file_modified_ms: Option<u64>,
+        pub file_size: Option<u64>,
+        pub host_abi_version: u32,
     }
 }
 #[allow(dead_code)]

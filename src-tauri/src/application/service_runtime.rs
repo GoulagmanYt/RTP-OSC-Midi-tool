@@ -78,12 +78,24 @@ pub fn start_bridge(
     Ok(with_audio_status(status, &state.audio))
 }
 
-pub fn stop_bridge(app: &AppHandle, state: &AppState) -> Result<(), CommandError> {
-    state.audio.stop(Some(app.clone()));
-    state
-        .bridge
-        .stop()
-        .map_err(|err| runtime_error("runtime.stop-failed", err))
+pub async fn stop_bridge(app: &AppHandle, state: &AppState) -> Result<(), CommandError> {
+    let app = app.clone();
+    let audio = state.audio.clone();
+    let bridge = state.bridge.clone();
+    ::tauri::async_runtime::spawn_blocking(move || {
+        // Stop every MIDI producer before removing the audio consumer. This
+        // also keeps all blocking thread joins away from Tokio's async worker.
+        let bridge_result = bridge.stop();
+        audio.stop(Some(app));
+        bridge_result.map_err(|err| runtime_error("runtime.stop-failed", err))
+    })
+    .await
+    .map_err(|error| {
+        runtime_error(
+            "runtime.stop-task-failed",
+            format!("Bridge stop task failed: {error}"),
+        )
+    })?
 }
 
 pub fn reset_keys(state: &AppState) -> Result<(), CommandError> {
@@ -261,6 +273,9 @@ pub enum StressTestMode {
     EndToEnd,
 }
 
+const MAX_STRESS_RATE_MESSAGES_PER_SECOND: u32 = 10_000;
+const MAX_STRESS_DURATION_SECONDS: u32 = 30;
+
 impl StressTestMode {
     fn from_str(s: &str) -> Option<Self> {
         match s {
@@ -280,6 +295,23 @@ pub fn run_stress_test(
     duration: u32,
     state: &AppState,
 ) -> Result<crate::types::StressTestResult, CommandError> {
+    if rate == 0 || rate > MAX_STRESS_RATE_MESSAGES_PER_SECOND {
+        return Err(runtime_error(
+            "stress.invalid-rate",
+            format!(
+                "Stress-test rate must be between 1 and {MAX_STRESS_RATE_MESSAGES_PER_SECOND} MIDI messages/s"
+            ),
+        ));
+    }
+    if duration == 0 || duration > MAX_STRESS_DURATION_SECONDS {
+        return Err(runtime_error(
+            "stress.invalid-duration",
+            format!(
+                "Stress-test duration must be between 1 and {MAX_STRESS_DURATION_SECONDS} seconds"
+            ),
+        ));
+    }
+
     let mode = StressTestMode::from_str(mode)
         .ok_or_else(|| runtime_error("stress.invalid-mode", format!("Invalid mode: {}", mode)))?;
 
@@ -316,14 +348,11 @@ fn run_stress_audio_only(
     let interval = std::time::Duration::from_nanos(1_000_000_000 / rate.max(1) as u64);
 
     let mut next_tick = start;
-    let mut data = smallvec::SmallVec::<[u8; 32]>::new();
-    data.push(0x90);
-    data.push(60);
-    data.push(100);
 
     while start.elapsed() < d {
+        let sequence = sent.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let data = stress_midi_message(sequence);
         state.audio.send_midi(&data);
-        sent.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         next_tick += interval;
         let now = std::time::Instant::now();
@@ -332,12 +361,15 @@ fn run_stress_audio_only(
         }
     }
 
-    std::thread::sleep(std::time::Duration::from_millis(50));
+    let sent_notes = sent.load(std::sync::atomic::Ordering::Relaxed);
+    if let Some(note_off) = stress_trailing_note_off(sent_notes) {
+        state.audio.send_midi(&note_off);
+    }
+    wait_for_stress_queues(&state.audio, false);
 
     let final_drops = state.audio.midi_drop_count().unwrap_or(0);
     let final_xruns = state.audio.xrun_count().unwrap_or(0);
 
-    let sent_notes = sent.load(std::sync::atomic::Ordering::Relaxed);
     let audio_drops = final_drops.saturating_sub(initial_drops);
     let audio_xruns = final_xruns.saturating_sub(initial_xruns);
 
@@ -389,14 +421,9 @@ fn run_stress_bridge_pipeline(
     let mut next_tick = start;
 
     while start.elapsed() < d {
-        // Inject via bridge (same as test note)
-        let ch = 0u8; // Channel 1
-        let note = 60u8;
-        let velocity = 100u8;
-        let data = smallvec::SmallVec::from_slice(&[0x90 | ch, note, velocity]);
+        let sequence = sent.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let data = stress_midi_message(sequence);
         let _ = state.bridge.inject_frame(data, "StressTest".to_string());
-
-        sent.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         next_tick += interval;
         let now = std::time::Instant::now();
@@ -405,13 +432,18 @@ fn run_stress_bridge_pipeline(
         }
     }
 
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    let sent_notes = sent.load(std::sync::atomic::Ordering::Relaxed);
+    if let Some(note_off) = stress_trailing_note_off(sent_notes) {
+        let _ = state
+            .bridge
+            .inject_frame(note_off, "StressTest:cleanup".to_string());
+    }
+    wait_for_stress_queues(&state.audio, true);
 
     let final_audio_drops = state.audio.midi_drop_count().unwrap_or(0);
     let final_xruns = state.audio.xrun_count().unwrap_or(0);
     let (_pipeline_in, pipeline_out, _pipeline_filtered) = pipeline_stats();
 
-    let sent_notes = sent.load(std::sync::atomic::Ordering::Relaxed);
     let audio_drops = final_audio_drops.saturating_sub(initial_audio_drops);
     let audio_xruns = final_xruns.saturating_sub(initial_xruns);
 
@@ -482,13 +514,9 @@ fn run_stress_end_to_end(
     let mut next_tick = start;
 
     while start.elapsed() < d {
-        let ch = 0u8;
-        let note = 60u8;
-        let velocity = 100u8;
-        let data = smallvec::SmallVec::from_slice(&[0x90 | ch, note, velocity]);
+        let sequence = sent.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let data = stress_midi_message(sequence);
         let _ = state.bridge.inject_frame(data, "StressTest".to_string());
-
-        sent.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         next_tick += interval;
         let now = std::time::Instant::now();
@@ -497,14 +525,19 @@ fn run_stress_end_to_end(
         }
     }
 
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    let sent_notes = sent.load(std::sync::atomic::Ordering::Relaxed);
+    if let Some(note_off) = stress_trailing_note_off(sent_notes) {
+        let _ = state
+            .bridge
+            .inject_frame(note_off, "StressTest:cleanup".to_string());
+    }
+    wait_for_stress_queues(&state.audio, true);
 
     let final_audio_drops = state.audio.midi_drop_count().unwrap_or(0);
     let final_xruns = state.audio.xrun_count().unwrap_or(0);
     let final_rtp_drops = rtp_dropped_count();
     let (_pipeline_in, pipeline_out, _filtered) = pipeline_stats();
 
-    let sent_notes = sent.load(std::sync::atomic::Ordering::Relaxed);
     let audio_drops = final_audio_drops.saturating_sub(initial_audio_drops);
     let audio_xruns = final_xruns.saturating_sub(initial_xruns);
     let rtp_drops = final_rtp_drops.saturating_sub(initial_rtp_drops) as u32;
@@ -537,6 +570,41 @@ fn run_stress_end_to_end(
     })
 }
 
+fn stress_midi_message(sequence: u32) -> smallvec::SmallVec<[u8; 32]> {
+    let note = 36 + ((sequence / 2) % 48) as u8;
+    if sequence.is_multiple_of(2) {
+        smallvec::SmallVec::from_slice(&[0x90, note, 100])
+    } else {
+        smallvec::SmallVec::from_slice(&[0x80, note, 0])
+    }
+}
+
+fn stress_trailing_note_off(sent_messages: u32) -> Option<smallvec::SmallVec<[u8; 32]>> {
+    if sent_messages.is_multiple_of(2) {
+        return None;
+    }
+    let note = 36 + (((sent_messages - 1) / 2) % 48) as u8;
+    Some(smallvec::SmallVec::from_slice(&[0x80, note, 0]))
+}
+
+fn wait_for_stress_queues(audio: &crate::audio::AudioEngine, include_bridge: bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while std::time::Instant::now() < deadline {
+        let audio_depth = audio.audio_midi_queue_depth().unwrap_or(0);
+        let bridge_depth = if include_bridge {
+            crate::bridge::pipeline::pipeline_metrics_snapshot().queue_depth
+        } else {
+            0
+        };
+        if audio_depth == 0 && bridge_depth == 0 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    // Give the callback one more period to publish final deadline/drop metrics.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+}
+
 /// Legacy compatibility - runs audio-only mode.
 pub fn _run_automated_stress_test(
     rate: u32,
@@ -548,6 +616,22 @@ pub fn _run_automated_stress_test(
 
 #[cfg(test)]
 mod tests {
+    use super::{stress_midi_message, stress_trailing_note_off};
+
+    #[test]
+    fn stress_messages_are_balanced_note_pairs() {
+        for pair in 0..96 {
+            let note_on = stress_midi_message(pair * 2);
+            let note_off = stress_midi_message(pair * 2 + 1);
+            assert_eq!(note_on[0], 0x90);
+            assert_eq!(note_off[0], 0x80);
+            assert_eq!(note_on[1], note_off[1]);
+            assert!((36..84).contains(&note_on[1]));
+        }
+        assert!(stress_trailing_note_off(100).is_none());
+        assert_eq!(stress_trailing_note_off(101).unwrap()[0], 0x80);
+    }
+
     #[test]
     fn bridge_stress_does_not_double_count_audio_drops() {
         let source = include_str!("service_runtime.rs");

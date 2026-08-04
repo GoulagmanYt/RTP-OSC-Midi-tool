@@ -2,6 +2,7 @@
 
 use std::{
     fs,
+    future::Future,
     path::{Path, PathBuf},
     process::Command,
     sync::Arc,
@@ -12,6 +13,29 @@ use directories::ProjectDirs;
 use tauri::{AppHandle, Manager};
 
 use crate::tauri::state::AppState;
+
+/// Run a Tauri/Tokio future from synchronous lifecycle code without nesting a
+/// runtime on a Tokio worker. Tokio's Runtime::block_on deliberately panics in
+/// that situation; an external scoped thread may safely drive the same runtime.
+pub fn safe_block_on<F>(future: F) -> F::Output
+where
+    F: Future + Send,
+    F::Output: Send,
+{
+    if tokio::runtime::Handle::try_current().is_ok() {
+        std::thread::scope(|scope| {
+            match scope
+                .spawn(move || ::tauri::async_runtime::block_on(future))
+                .join()
+            {
+                Ok(output) => output,
+                Err(payload) => std::panic::resume_unwind(payload),
+            }
+        })
+    } else {
+        ::tauri::async_runtime::block_on(future)
+    }
+}
 
 pub fn config_dir_path() -> Result<PathBuf, String> {
     ProjectDirs::from("com", "OSCMIDI", "OSCMIDI")
@@ -145,4 +169,17 @@ pub fn fallback_vst_path(app: &AppHandle) -> Option<PathBuf> {
                 )
                 .ok()
         })
+}
+
+#[cfg(test)]
+mod async_tests {
+    use super::safe_block_on;
+
+    #[test]
+    fn safe_block_on_does_not_nest_the_current_tokio_runtime() {
+        let runtime = tokio::runtime::Runtime::new().expect("test runtime");
+        runtime.block_on(async {
+            assert_eq!(safe_block_on(async { 42u32 }), 42);
+        });
+    }
 }

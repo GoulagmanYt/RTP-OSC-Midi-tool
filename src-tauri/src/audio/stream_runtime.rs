@@ -6,20 +6,22 @@ use std::{
 };
 
 use cpal::{
-    traits::{DeviceTrait, StreamTrait},
-    BufferSize, Device, SampleFormat, SampleRate, Stream, StreamConfig,
+    traits::DeviceTrait, BufferSize, Device, SampleFormat, SampleRate, Stream, StreamConfig,
 };
+use crossbeam_channel::Sender;
 use parking_lot::Mutex;
 use rtrb::{Producer, RingBuffer};
-use vst::plugin::Plugin;
 
 use crate::logger::FrontendLogger;
+use crate::types::VstParameter;
+use crate::types::VstPluginEntry;
 
 use super::{
     callback::build_output_stream_for_sample,
-    plugin_host::load_plugin_backend,
+    plugin_host::load_plugin_backend_thread_affine,
     runtime_state::{
-        AudioControls, AudioError, AudioTelemetry, MidiPacket, PluginBackend, MIDI_RING_CAPACITY,
+        AudioControls, AudioError, AudioTelemetry, MidiPacket, ParameterCommand, PluginBackend,
+        MIDI_RING_CAPACITY, PARAMETER_COMMAND_CAPACITY,
     },
     stream_config::{choose_buffer_size, max_plugin_block_size, select_output_config},
 };
@@ -31,6 +33,9 @@ pub(super) type BuiltStream = (
     u32,
     Option<u32>,
     bool,
+    u32,
+    Sender<ParameterCommand>,
+    Arc<Mutex<Vec<VstParameter>>>,
 );
 
 #[allow(clippy::too_many_arguments)]
@@ -46,6 +51,7 @@ pub(super) fn build_stream(
     backend_name: &str,
     device_name: &str,
     prefer_low_latency: bool,
+    vst_probe: &VstPluginEntry,
 ) -> Result<BuiltStream, AudioError> {
     let supported: Vec<_> = device
         .supported_output_configs()
@@ -118,32 +124,25 @@ pub(super) fn build_stream(
         }
     };
 
-    let loaded_plugin = load_plugin_backend(
+    let loaded_plugin = load_plugin_backend_thread_affine(
         &vst_path,
         actual_sample_rate,
         initial_block_size,
         plugin_max_block_size as usize,
         logger,
+        Some(vst_probe),
     )?;
     let plugin_inputs = loaded_plugin.input_channels;
     let plugin_outputs = loaded_plugin.output_channels;
     let vst_midi_compatible = loaded_plugin.vst_midi_compatible;
+    let plugin_latency_samples = loaded_plugin.latency_samples;
 
+    let parameter_cache = Arc::new(Mutex::new(loaded_plugin.parameter_cache));
     let plugin = Arc::new(Mutex::new(loaded_plugin.backend));
+    let (parameter_tx, parameter_rx) = crossbeam_channel::bounded(PARAMETER_COMMAND_CAPACITY);
 
     let try_build_stream =
         |cfg: &StreamConfig| -> Result<(Stream, Producer<MidiPacket>), AudioError> {
-            let block_size_for_plugin = match cfg.buffer_size {
-                BufferSize::Fixed(sz) => sz,
-                BufferSize::Default => buffer_size,
-            };
-
-            if let Some(mut guard) = plugin.try_lock() {
-                if let PluginBackend::Vst2 { instance } = &mut *guard {
-                    instance.set_block_size(block_size_for_plugin as i64);
-                }
-            }
-
             let (midi_tx, midi_rx) = RingBuffer::new(MIDI_RING_CAPACITY);
 
             let stream = match desired.sample_format() {
@@ -161,6 +160,7 @@ pub(super) fn build_stream(
                     actual_sample_rate,
                     plugin_max_block_size as usize,
                     device_name,
+                    parameter_rx.clone(),
                 )?,
                 SampleFormat::I16 => build_output_stream_for_sample::<i16>(
                     device,
@@ -176,6 +176,7 @@ pub(super) fn build_stream(
                     actual_sample_rate,
                     plugin_max_block_size as usize,
                     device_name,
+                    parameter_rx.clone(),
                 )?,
                 SampleFormat::U16 => build_output_stream_for_sample::<u16>(
                     device,
@@ -191,6 +192,7 @@ pub(super) fn build_stream(
                     actual_sample_rate,
                     plugin_max_block_size as usize,
                     device_name,
+                    parameter_rx.clone(),
                 )?,
                 other => {
                     return Err(AudioError::Message(format!(
@@ -198,13 +200,6 @@ pub(super) fn build_stream(
                     )))
                 }
             };
-
-            stream.play().map_err(|e| {
-                AudioError::Message(format!(
-                    "Failed to start stream on '{}': {}",
-                    device_name, e
-                ))
-            })?;
 
             Ok((stream, midi_tx))
         };
@@ -217,6 +212,9 @@ pub(super) fn build_stream(
             actual_sample_rate,
             Some(target_buffer_size),
             vst_midi_compatible,
+            plugin_latency_samples,
+            parameter_tx.clone(),
+            parameter_cache.clone(),
         )),
         Err(primary_err) => {
             if prefer_low_latency {
@@ -241,6 +239,9 @@ pub(super) fn build_stream(
                             actual_sample_rate,
                             Some(fallback),
                             vst_midi_compatible,
+                            plugin_latency_samples,
+                            parameter_tx.clone(),
+                            parameter_cache.clone(),
                         ));
                     }
                 }

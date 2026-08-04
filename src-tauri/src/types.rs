@@ -59,6 +59,8 @@ pub struct RuntimeStatus {
     pub last_error: Option<String>,
     pub audio_running: bool,
     pub audio_latency_ms: Option<f32>,
+    pub audio_buffer_period_ms: Option<f32>,
+    pub plugin_latency_samples: Option<u32>,
     pub audio_backend: Option<String>,
     pub audio_device: Option<String>,
     pub audio_sample_rate: Option<u32>,
@@ -75,6 +77,18 @@ pub struct RuntimeStatus {
     pub audio_callback_max_us: Option<u32>,
     pub audio_callback_last_us: Option<u32>,
     pub audio_callback_over_budget_count: Option<u32>,
+    pub consecutive_deadline_misses: Option<u32>,
+    pub dsp_process_last_us: Option<u32>,
+    pub dsp_process_p95_us: Option<u32>,
+    pub dsp_process_p99_us: Option<u32>,
+    pub dsp_process_max_us: Option<u32>,
+    pub audio_midi_queue_depth: Option<u32>,
+    pub audio_midi_queue_max_depth: Option<u32>,
+    pub audio_midi_oldest_us: Option<u64>,
+    pub audio_lifecycle_state: String,
+    pub vst_worker_state: String,
+    pub vst_worker_restarts: u32,
+    pub vst_worker_last_exit: Option<String>,
     pub audio_mmcss_enabled: Option<bool>,
     pub audio_power_throttling_disabled: Option<bool>,
     pub audio_limiter_enabled: Option<bool>,
@@ -86,6 +100,8 @@ pub struct RuntimeMetrics {
     pub audio_peak_l: Option<f32>,
     pub audio_peak_r: Option<f32>,
     pub audio_latency_ms: Option<f32>,
+    pub audio_buffer_period_ms: Option<f32>,
+    pub plugin_latency_samples: Option<u32>,
     pub audio_xruns: Option<u32>,
     pub audio_midi_drops: Option<u32>,
     pub audio_lock_misses: Option<u32>,
@@ -93,6 +109,17 @@ pub struct RuntimeMetrics {
     pub audio_callback_max_us: Option<u32>,
     pub audio_callback_last_us: Option<u32>,
     pub audio_callback_over_budget_count: Option<u32>,
+    pub consecutive_deadline_misses: Option<u32>,
+    pub dsp_process_last_us: Option<u32>,
+    pub dsp_process_p95_us: Option<u32>,
+    pub dsp_process_p99_us: Option<u32>,
+    pub dsp_process_max_us: Option<u32>,
+    pub audio_midi_queue_depth: Option<u32>,
+    pub audio_midi_queue_max_depth: Option<u32>,
+    pub audio_midi_oldest_us: Option<u64>,
+    pub vst_worker_state: String,
+    pub vst_worker_restarts: u32,
+    pub vst_worker_last_exit: Option<String>,
     pub audio_mmcss_enabled: Option<bool>,
     pub audio_power_throttling_disabled: Option<bool>,
     pub midi_messages_per_sec: u32,
@@ -169,6 +196,18 @@ pub struct VstPluginEntry {
     pub midi_compatible: Option<bool>,
     pub has_editor: bool,
     pub channel_layout: Option<String>,
+    #[serde(default)]
+    pub class_uid: Option<String>,
+    #[serde(default)]
+    pub file_modified_ms: Option<u64>,
+    #[serde(default)]
+    pub file_size: Option<u64>,
+    #[serde(default = "default_vst_host_abi_version")]
+    pub host_abi_version: u32,
+}
+
+fn default_vst_host_abi_version() -> u32 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

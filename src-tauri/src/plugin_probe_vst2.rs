@@ -111,6 +111,8 @@ pub fn probe_vst2_plugin(path: &Path) -> VstPluginEntry {
         info.inputs.max(0),
         info.outputs.max(0)
     ));
+    let class_uid = Some(format!("vst2:{:08x}", info.unique_id));
+    let (file_modified_ms, file_size) = super::plugin_file_metadata(path);
 
     if plugin_kind != "instrument" {
         return VstPluginEntry {
@@ -128,6 +130,10 @@ pub fn probe_vst2_plugin(path: &Path) -> VstPluginEntry {
             midi_compatible: Some(midi_compatible),
             has_editor,
             channel_layout,
+            class_uid: class_uid.clone(),
+            file_modified_ms,
+            file_size,
+            host_abi_version: 1,
         };
     }
 
@@ -149,6 +155,10 @@ pub fn probe_vst2_plugin(path: &Path) -> VstPluginEntry {
             midi_compatible: Some(false),
             has_editor,
             channel_layout,
+            class_uid: class_uid.clone(),
+            file_modified_ms,
+            file_size,
+            host_abi_version: 1,
         };
     }
 
@@ -169,6 +179,10 @@ pub fn probe_vst2_plugin(path: &Path) -> VstPluginEntry {
             midi_compatible: Some(true),
             has_editor,
             channel_layout: Some(format!("{inputs} in / {outputs} out")),
+            class_uid: class_uid.clone(),
+            file_modified_ms,
+            file_size,
+            host_abi_version: 1,
         },
         Err(err) => VstPluginEntry {
             name: if info.name.is_empty() {
@@ -185,6 +199,10 @@ pub fn probe_vst2_plugin(path: &Path) -> VstPluginEntry {
             midi_compatible: Some(true),
             has_editor,
             channel_layout,
+            class_uid,
+            file_modified_ms,
+            file_size,
+            host_abi_version: 1,
         },
     }
 }

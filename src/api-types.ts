@@ -141,6 +141,8 @@ export type RuntimeStatus = {
   vstLoaded?: boolean;
   audioRunning?: boolean;
   audioLatencyMs?: number | null;
+  audioBufferPeriodMs?: number | null;
+  pluginLatencySamples?: number | null;
   audioBackend?: string | null;
   audioDevice?: string | null;
   audioSampleRate?: number | null;
@@ -156,6 +158,18 @@ export type RuntimeStatus = {
   audioCallbackMaxUs?: number | null;
   audioCallbackLastUs?: number | null;
   audioCallbackOverBudgetCount?: number | null;
+  consecutiveDeadlineMisses?: number | null;
+  dspProcessLastUs?: number | null;
+  dspProcessP95Us?: number | null;
+  dspProcessP99Us?: number | null;
+  dspProcessMaxUs?: number | null;
+  audioMidiQueueDepth?: number | null;
+  audioMidiQueueMaxDepth?: number | null;
+  audioMidiOldestUs?: number | null;
+  audioLifecycleState?: string;
+  vstWorkerState?: string;
+  vstWorkerRestarts?: number;
+  vstWorkerLastExit?: string | null;
   audioMmcssEnabled?: boolean | null;
   audioPowerThrottlingDisabled?: boolean | null;
   audioLimiterEnabled?: boolean | null;
@@ -167,6 +181,8 @@ export type RuntimeMetrics = {
   audioPeakL?: number | null;
   audioPeakR?: number | null;
   audioLatencyMs?: number | null;
+  audioBufferPeriodMs?: number | null;
+  pluginLatencySamples?: number | null;
   audioXruns?: number | null;
   audioMidiDrops?: number | null;
   audioLockMisses?: number | null;
@@ -174,6 +190,17 @@ export type RuntimeMetrics = {
   audioCallbackMaxUs?: number | null;
   audioCallbackLastUs?: number | null;
   audioCallbackOverBudgetCount?: number | null;
+  consecutiveDeadlineMisses?: number | null;
+  dspProcessLastUs?: number | null;
+  dspProcessP95Us?: number | null;
+  dspProcessP99Us?: number | null;
+  dspProcessMaxUs?: number | null;
+  audioMidiQueueDepth?: number | null;
+  audioMidiQueueMaxDepth?: number | null;
+  audioMidiOldestUs?: number | null;
+  vstWorkerState?: string;
+  vstWorkerRestarts?: number;
+  vstWorkerLastExit?: string | null;
   audioMmcssEnabled?: boolean | null;
   audioPowerThrottlingDisabled?: boolean | null;
   midiMessagesPerSec: number;
@@ -248,6 +275,10 @@ export type VstPluginEntry = {
   midiCompatible?: boolean | null;
   hasEditor: boolean;
   channelLayout?: string | null;
+  classUid?: string | null;
+  fileModifiedMs?: number | null;
+  fileSize?: number | null;
+  hostAbiVersion?: number;
 };
 
 export type VstParameter = {

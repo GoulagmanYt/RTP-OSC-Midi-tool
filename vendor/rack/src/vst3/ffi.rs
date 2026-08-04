@@ -252,6 +252,7 @@ extern "C" {
     /// - `plugin` must be a valid pointer returned by `rack_vst3_plugin_new`
     /// - Should be called after `rack_vst3_plugin_initialize`
     pub fn rack_vst3_plugin_get_output_channels(plugin: *mut RackVST3Plugin) -> c_int;
+    pub fn rack_vst3_plugin_get_latency_samples(plugin: *mut RackVST3Plugin) -> u32;
 
     /// Process audio through the plugin (planar format)
     ///
@@ -280,6 +281,17 @@ extern "C" {
     /// For mono: inputs/outputs = [mono_ptr], num_channels = 1
     pub fn rack_vst3_plugin_process(
         plugin: *mut RackVST3Plugin,
+        inputs: *const *const f32,
+        num_input_channels: u32,
+        outputs: *const *mut f32,
+        num_output_channels: u32,
+        frames: u32,
+    ) -> c_int;
+
+    pub fn rack_vst3_plugin_process_with_midi(
+        plugin: *mut RackVST3Plugin,
+        events: *const RackVST3MidiEvent,
+        event_count: u32,
         inputs: *const *const f32,
         num_input_channels: u32,
         outputs: *const *mut f32,
@@ -330,6 +342,11 @@ extern "C" {
     /// - `index` must be less than parameter count
     /// - `value` should be in range 0.0-1.0 (values outside may be clamped)
     pub fn rack_vst3_plugin_set_parameter(
+        plugin: *mut RackVST3Plugin,
+        index: u32,
+        value: f32,
+    ) -> c_int;
+    pub fn rack_vst3_plugin_set_parameter_audio(
         plugin: *mut RackVST3Plugin,
         index: u32,
         value: f32,

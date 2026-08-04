@@ -114,6 +114,8 @@ pub fn probe_vst3_plugin(path: &Path) -> VstPluginEntry {
     .to_string();
     let has_editor = kind == "instrument";
     let channel_layout = None;
+    let class_uid = Some(info.unique_id.clone());
+    let (file_modified_ms, file_size) = super::plugin_file_metadata(path);
 
     if kind != "instrument" {
         return VstPluginEntry {
@@ -127,6 +129,10 @@ pub fn probe_vst3_plugin(path: &Path) -> VstPluginEntry {
             midi_compatible: None,
             has_editor,
             channel_layout,
+            class_uid,
+            file_modified_ms,
+            file_size,
+            host_abi_version: 1,
         };
     }
 
@@ -141,6 +147,10 @@ pub fn probe_vst3_plugin(path: &Path) -> VstPluginEntry {
         midi_compatible: Some(true),
         has_editor,
         channel_layout,
+        class_uid,
+        file_modified_ms,
+        file_size,
+        host_abi_version: 1,
     }
 }
 

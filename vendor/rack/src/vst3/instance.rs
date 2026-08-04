@@ -1,5 +1,4 @@
 use crate::{Error, MidiEvent, MidiEventKind, ParameterInfo, PluginInfo, PluginInstance, PresetInfo, Result};
-use smallvec::SmallVec;
 use std::ffi::CString;
 use std::marker::PhantomData;
 use std::os::raw::c_void;
@@ -25,6 +24,8 @@ pub struct Vst3Plugin {
     // Channel configuration (queried from VST3 during initialize)
     input_channels: usize,
     output_channels: usize,
+    // Reused by send_midi(); the realtime path never grows this allocation.
+    midi_events: Vec<ffi::RackVST3MidiEvent>,
     // PhantomData<*const ()> makes this type !Sync while keeping it Send
     _not_sync: PhantomData<*const ()>,
 }
@@ -74,6 +75,7 @@ impl Vst3Plugin {
                 output_ptrs: Vec::new(),
                 input_channels: 0,
                 output_channels: 0,
+                midi_events: Vec::with_capacity(512),
                 _not_sync: PhantomData,
             })
         }
@@ -111,6 +113,27 @@ impl Vst3Plugin {
 
     pub fn output_channels(&self) -> usize {
         self.output_channels
+    }
+
+    pub fn latency_samples(&self) -> u32 {
+        unsafe { ffi::rack_vst3_plugin_get_latency_samples(self.inner.as_ptr()) }
+    }
+
+    /// Enqueue a normalized value directly into the current audio block. This
+    /// is only valid from the thread that immediately calls process().
+    pub fn set_parameter_audio(&mut self, index: usize, value: f32) -> Result<()> {
+        let result = unsafe {
+            ffi::rack_vst3_plugin_set_parameter_audio(
+                self.inner.as_ptr(),
+                index as u32,
+                value.clamp(0.0, 1.0),
+            )
+        };
+        if result == ffi::RACK_VST3_OK {
+            Ok(())
+        } else {
+            Err(map_error(result))
+        }
     }
 }
 
@@ -276,14 +299,17 @@ impl PluginInstance for Vst3Plugin {
         }
 
         unsafe {
-            let result = ffi::rack_vst3_plugin_process(
+            let result = ffi::rack_vst3_plugin_process_with_midi(
                 self.inner.as_ptr(),
+                self.midi_events.as_ptr(),
+                self.midi_events.len() as u32,
                 self.input_ptrs.as_ptr(),
                 inputs.len() as u32,
                 self.output_ptrs.as_ptr(),
                 outputs.len() as u32,
                 num_frames as u32,
             );
+            self.midi_events.clear();
 
             if result != ffi::RACK_VST3_OK {
                 return Err(map_error(result));
@@ -401,10 +427,13 @@ impl PluginInstance for Vst3Plugin {
             return Ok(());
         }
 
-        // Convert Rust MIDI events to C MIDI events
-        // Use SmallVec for zero-allocation in typical cases (≤16 events)
-        let mut c_events: SmallVec<[ffi::RackVST3MidiEvent; 16]> = SmallVec::with_capacity(events.len());
-
+        if self.midi_events.len().saturating_add(events.len()) > self.midi_events.capacity() {
+            return Err(Error::Other(format!(
+                "VST3 MIDI batch exceeds preallocated capacity: {} > {}",
+                self.midi_events.len().saturating_add(events.len()),
+                self.midi_events.capacity()
+            )));
+        }
         for event in events {
             let (status, data1, data2, channel) = match &event.kind {
                 MidiEventKind::NoteOn { note, velocity, channel } => (0x90, *note, *velocity, *channel),
@@ -427,7 +456,7 @@ impl PluginInstance for Vst3Plugin {
                 }
             };
 
-            c_events.push(ffi::RackVST3MidiEvent {
+            self.midi_events.push(ffi::RackVST3MidiEvent {
                 sample_offset: event.sample_offset,
                 status,
                 data1,
@@ -436,19 +465,7 @@ impl PluginInstance for Vst3Plugin {
             });
         }
 
-        unsafe {
-            let result = ffi::rack_vst3_plugin_send_midi(
-                self.inner.as_ptr(),
-                c_events.as_ptr(),
-                c_events.len() as u32,
-            );
-
-            if result != ffi::RACK_VST3_OK {
-                return Err(map_error(result));
-            }
-
-            Ok(())
-        }
+        Ok(())
     }
 
     fn preset_count(&self) -> Result<usize> {

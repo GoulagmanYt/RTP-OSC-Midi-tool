@@ -1,9 +1,13 @@
 #![allow(deprecated)]
 
 use std::{
-    fs,
+    fs::{self, OpenOptions},
+    io::Write,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
 };
 
 use directories::ProjectDirs;
@@ -13,6 +17,7 @@ use vst::host::PluginInstance;
 use vst::plugin::Plugin;
 
 use crate::logger::{background_log, FrontendLogger};
+use crate::types::VstPluginEntry;
 
 use super::runtime_state::PluginBackend;
 
@@ -27,11 +32,145 @@ pub(super) enum SavedState {
     Params(Vec<f32>),
 }
 
-pub(super) fn state_path_for_plugin(vst_path: &Path) -> Option<PathBuf> {
+static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn legacy_state_path_for_plugin(vst_path: &Path) -> Option<PathBuf> {
     let file_name = vst_path.file_name()?.to_string_lossy().to_string();
     let base_dir = ProjectDirs::from("com", "OSCMIDI", "OSCMIDI")
         .map(|dirs| dirs.config_dir().join("vst_state"))?;
     Some(base_dir.join(format!("{}.state", file_name)))
+}
+
+fn stable_plugin_identity(vst_path: &Path, include_uid: bool) -> String {
+    let canonical = vst_path
+        .canonicalize()
+        .unwrap_or_else(|_| vst_path.to_path_buf());
+    let format = if crate::vst_scan::is_vst3_path(vst_path) {
+        "vst3"
+    } else {
+        "vst2"
+    };
+    let base = format!("{}:{}", format, canonical.to_string_lossy().to_lowercase());
+    if include_uid {
+        if let Some(uid) = cached_plugin_uid(vst_path) {
+            return format!("{base}:{uid}");
+        }
+    }
+    base
+}
+
+fn cached_plugin_uid(vst_path: &Path) -> Option<String> {
+    let cache_path = ProjectDirs::from("com", "OSCMIDI", "OSCMIDI")?
+        .config_dir()
+        .join("vst_cache.json");
+    let entries: Vec<VstPluginEntry> = serde_json::from_slice(&fs::read(cache_path).ok()?).ok()?;
+    let target = vst_path
+        .canonicalize()
+        .unwrap_or_else(|_| vst_path.to_path_buf())
+        .to_string_lossy()
+        .to_lowercase();
+    entries.into_iter().find_map(|entry| {
+        let candidate = PathBuf::from(&entry.path)
+            .canonicalize()
+            .unwrap_or_else(|_| PathBuf::from(&entry.path))
+            .to_string_lossy()
+            .to_lowercase();
+        (candidate == target).then_some(entry.class_uid).flatten()
+    })
+}
+
+fn legacy_state_is_unambiguous(vst_path: &Path) -> bool {
+    let Some(file_name) = vst_path.file_name() else {
+        return false;
+    };
+    let Some(cache_path) = ProjectDirs::from("com", "OSCMIDI", "OSCMIDI")
+        .map(|dirs| dirs.config_dir().join("vst_cache.json"))
+    else {
+        return false;
+    };
+    let Ok(raw) = fs::read(cache_path) else {
+        return false;
+    };
+    let Ok(entries) = serde_json::from_slice::<Vec<VstPluginEntry>>(&raw) else {
+        return false;
+    };
+    entries
+        .iter()
+        .filter(|entry| Path::new(&entry.path).file_name() == Some(file_name))
+        .count()
+        == 1
+}
+
+fn state_path_for_identity(vst_path: &Path, include_uid: bool) -> Option<PathBuf> {
+    let file_name = vst_path.file_name()?.to_string_lossy().to_string();
+    let base_dir = ProjectDirs::from("com", "OSCMIDI", "OSCMIDI")
+        .map(|dirs| dirs.config_dir().join("vst_state"))?;
+    let hash = fnv1a64(stable_plugin_identity(vst_path, include_uid).as_bytes());
+    Some(base_dir.join(format!("{}-{hash:016x}.state", file_name)))
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+pub(super) fn state_path_for_plugin(vst_path: &Path) -> Option<PathBuf> {
+    state_path_for_identity(vst_path, true)
+}
+
+fn write_state_atomically(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "state path has no parent")
+    })?;
+    fs::create_dir_all(parent)?;
+    let sequence = TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let temp_path = parent.join(format!(
+        ".{}.{}.{}.tmp",
+        path.file_name().unwrap_or_default().to_string_lossy(),
+        std::process::id(),
+        sequence
+    ));
+    let mut temp = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temp_path)?;
+    if let Err(error) = temp.write_all(data).and_then(|_| temp.sync_all()) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error);
+    }
+    drop(temp);
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::core::PCWSTR;
+        use windows::Win32::Storage::FileSystem::{
+            MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+        };
+
+        let temp_wide: Vec<u16> = temp_path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let path_wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let result = unsafe {
+            MoveFileExW(
+                PCWSTR(temp_wide.as_ptr()),
+                PCWSTR(path_wide.as_ptr()),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if let Err(error) = result {
+            let _ = fs::remove_file(&temp_path);
+            return Err(std::io::Error::other(error));
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fs::rename(&temp_path, path)?;
+
+    Ok(())
 }
 
 pub(super) fn encode_state_chunk(data: &[u8]) -> Vec<u8> {
@@ -120,15 +259,7 @@ pub(super) fn apply_vst2_parameters(instance: &mut PluginInstance, values: &[f32
     }
 }
 
-pub(super) fn save_vst_state(plugin: &Arc<Mutex<PluginBackend>>, vst_path: &Path) {
-    save_vst_state_inner(plugin, vst_path, false);
-}
-
 pub(super) fn save_vst_state_blocking(plugin: &Arc<Mutex<PluginBackend>>, vst_path: &Path) {
-    save_vst_state_inner(plugin, vst_path, true);
-}
-
-fn save_vst_state_inner(plugin: &Arc<Mutex<PluginBackend>>, vst_path: &Path, allow_blocking: bool) {
     if is_sforzando_vst3(vst_path) {
         return;
     }
@@ -137,22 +268,9 @@ fn save_vst_state_inner(plugin: &Arc<Mutex<PluginBackend>>, vst_path: &Path, all
         background_log("warn", "Could not determine VST state path");
         return;
     };
-    if let Some(parent) = state_path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-
-    let Some(mut guard) = plugin.try_lock().or_else(|| {
-        if allow_blocking {
-            Some(plugin.lock())
-        } else {
-            None
-        }
-    }) else {
-        background_log("warn", "VST state save skipped because plugin is busy");
-        return;
-    };
-
-    match &mut *guard {
+    // The stream is stopped before this function is called. Capture plugin-owned
+    // state under the lock, then release it before any filesystem operation.
+    let captured = match &mut *plugin.lock() {
         PluginBackend::Vst2 { instance } => {
             let params = instance.get_parameter_object();
             let bank = params.get_bank_data();
@@ -160,49 +278,23 @@ fn save_vst_state_inner(plugin: &Arc<Mutex<PluginBackend>>, vst_path: &Path, all
             let chunk = if !bank.is_empty() { bank } else { preset };
 
             if !chunk.is_empty() {
-                let data = encode_state_chunk(&chunk);
-                if let Err(error) = fs::write(&state_path, &data) {
-                    background_log("error", format!("Failed to save VST state: {}", error));
-                } else {
-                    background_log(
-                        "info",
-                        format!("VST state saved to {:?} (chunk)", state_path),
-                    );
-                }
-                return;
-            }
-
-            let values = capture_vst2_parameters(instance);
-            if values.is_empty() {
-                background_log("debug", "VST state not saved (no chunks or parameters)");
-                return;
-            }
-
-            let data = encode_state_params(&values);
-            if let Err(error) = fs::write(&state_path, &data) {
-                background_log("error", format!("Failed to save VST state: {}", error));
+                Some((encode_state_chunk(&chunk), "chunk".to_string()))
             } else {
-                background_log(
-                    "info",
-                    format!(
-                        "VST state saved to {:?} (params: {})",
-                        state_path,
-                        values.len()
-                    ),
-                );
+                let values = capture_vst2_parameters(instance);
+                if values.is_empty() {
+                    None
+                } else {
+                    let description = format!("params: {}", values.len());
+                    Some((encode_state_params(&values), description))
+                }
             }
         }
         PluginBackend::Vst3 { instance, .. } => match instance.get_state() {
             Ok(data) => {
                 if data.is_empty() {
-                    background_log("debug", "VST3 state not saved (plugin returned empty data)");
-                    return;
-                }
-                let payload = encode_state_chunk(&data);
-                if let Err(error) = fs::write(&state_path, &payload) {
-                    background_log("error", format!("Failed to save VST3 state: {}", error));
+                    None
                 } else {
-                    background_log("info", format!("VST3 state saved to {:?}", state_path));
+                    Some((encode_state_chunk(&data), "VST3 chunk".to_string()))
                 }
             }
             Err(error) => {
@@ -215,8 +307,28 @@ fn save_vst_state_inner(plugin: &Arc<Mutex<PluginBackend>>, vst_path: &Path, all
                 } else {
                     background_log("warn", format!("Failed to read VST3 state: {}", error));
                 }
+                None
             }
         },
+    };
+
+    let Some((payload, description)) = captured else {
+        background_log(
+            "debug",
+            "VST state not saved (plugin returned no persistent state)",
+        );
+        return;
+    };
+    if let Err(error) = write_state_atomically(&state_path, &payload) {
+        background_log("error", format!("Failed to save VST state: {error}"));
+    } else {
+        background_log(
+            "info",
+            format!(
+                "VST state saved atomically to {:?} ({description})",
+                state_path
+            ),
+        );
     }
 }
 
@@ -229,14 +341,24 @@ pub(super) fn load_vst_state(
         return;
     }
 
-    let Some(state_path) = state_path_for_plugin(vst_path) else {
+    let Some(new_state_path) = state_path_for_plugin(vst_path) else {
         logger.warn("Could not determine VST state path");
         return;
     };
-    if !state_path.exists() {
+    let legacy_path = legacy_state_path_for_plugin(vst_path);
+    let path_identity_path = state_path_for_identity(vst_path, false);
+    let (state_path, migrate_legacy) = if new_state_path.exists() {
+        (new_state_path.clone(), false)
+    } else if let Some(path) = path_identity_path.filter(|path| path.exists()) {
+        (path, true)
+    } else if let Some(path) =
+        legacy_path.filter(|path| path.exists() && legacy_state_is_unambiguous(vst_path))
+    {
+        (path, true)
+    } else {
         logger.debug("No saved VST state found");
         return;
-    }
+    };
 
     match fs::read(&state_path) {
         Ok(data) => {
@@ -288,6 +410,14 @@ pub(super) fn load_vst_state(
                         logger.warn("Ignoring parameter-only state for VST3 plugin");
                     }
                 },
+            }
+            drop(guard);
+            if migrate_legacy {
+                if let Err(error) = write_state_atomically(&new_state_path, &data) {
+                    logger.warn(format!("Failed to migrate legacy VST state: {error}"));
+                } else {
+                    logger.info(format!("Migrated legacy VST state to {:?}", new_state_path));
+                }
             }
         }
         Err(error) => logger.warn(format!("Failed to read saved VST state: {}", error)),

@@ -26,6 +26,8 @@
 #include <cstdlib>
 #include <mutex>
 #include <algorithm>
+#include <array>
+#include <atomic>
 
 using namespace VST3;
 using namespace Steinberg;
@@ -34,6 +36,49 @@ using namespace Steinberg::Vst;
 // Global mutex for VST3 lifecycle operations
 // VST3 module loading/unloading is not guaranteed to be thread-safe
 static std::mutex g_vst3_lifecycle_mutex;
+
+static constexpr size_t kRealtimeEventCapacity = 512;
+static constexpr size_t kParameterTransferCapacity = 4096;
+
+struct PendingParameterChange {
+    ParamID id = kNoParamId;
+    ParamValue value = 0.0;
+    int32 sample_offset = 0;
+};
+
+struct ParameterTransferQueue {
+    std::array<PendingParameterChange, kParameterTransferCapacity> entries{};
+    std::atomic<uint64_t> read_index{0};
+    std::atomic<uint64_t> write_index{0};
+    std::atomic<uint64_t> dropped{0};
+    std::mutex producer_mutex;
+
+    bool push(const PendingParameterChange& change) noexcept {
+        // Multiple non-realtime producers (plugin UI and Tauri commands) are
+        // serialized here. The audio consumer never takes this mutex.
+        std::lock_guard<std::mutex> producer_lock(producer_mutex);
+        const uint64_t write = write_index.load(std::memory_order_relaxed);
+        const uint64_t read = read_index.load(std::memory_order_acquire);
+        if (write - read >= kParameterTransferCapacity) {
+            dropped.fetch_add(1, std::memory_order_relaxed);
+            return false;
+        }
+        entries[write % kParameterTransferCapacity] = change;
+        write_index.store(write + 1, std::memory_order_release);
+        return true;
+    }
+
+    bool pop(PendingParameterChange& change) noexcept {
+        const uint64_t read = read_index.load(std::memory_order_relaxed);
+        const uint64_t write = write_index.load(std::memory_order_acquire);
+        if (read == write) {
+            return false;
+        }
+        change = entries[read % kParameterTransferCapacity];
+        read_index.store(read + 1, std::memory_order_release);
+        return true;
+    }
+};
 
 static void trace_free_step(const char* step) {
     if (std::getenv("RACK_VST3_TRACE_FREE")) {
@@ -384,6 +429,10 @@ struct RackVST3Plugin {
     ParameterChanges output_param_changes;
     EventList input_events;
     EventList output_events;
+    ParameterTransferQueue ui_to_audio_parameters;
+    std::array<PendingParameterChange, kRealtimeEventCapacity> audio_parameter_scratch{};
+    std::array<PendingParameterChange, kRealtimeEventCapacity> direct_audio_parameters{};
+    size_t direct_audio_parameter_count = 0;
 
     // Audio buffers (for pointer arrays)
     std::vector<float*> input_ptrs;
@@ -434,21 +483,12 @@ tresult PLUGIN_API RackVST3ComponentHandler::performEdit(ParamID id, ParamValue 
         return kInvalidArgument;
     }
 
-    std::lock_guard<std::mutex> lock(plugin_->state_mutex);
     if (!plugin_->initialized || !plugin_->controller) {
         return kNotInitialized;
     }
-
-    plugin_->controller->setParamNormalized(id, valueNormalized);
-
-    int32 queue_index = 0;
-    IParamValueQueue* queue = plugin_->input_param_changes.addParameterData(id, queue_index);
-    if (queue) {
-        int32 point_index = 0;
-        queue->addPoint(0, valueNormalized, point_index);
-    }
-
-    return kResultOk;
+    return plugin_->ui_to_audio_parameters.push({id, valueNormalized, 0})
+        ? kResultOk
+        : kResultFalse;
 }
 
 // ============================================================================
@@ -559,8 +599,12 @@ RackVST3Plugin* rack_vst3_plugin_new(const char* path, const char* uid) {
         if (plugin->component_handler) {
             plugin->controller->setComponentHandler(plugin->component_handler);
         }
+
         plugin->midi_mapping = U::cast<IMidiMapping>(plugin->controller);
     }
+
+    plugin->input_events.setMaxSize(static_cast<int32>(kRealtimeEventCapacity));
+    plugin->output_events.setMaxSize(static_cast<int32>(kRealtimeEventCapacity));
 
     return plugin;
 }
@@ -571,9 +615,8 @@ void rack_vst3_plugin_free(RackVST3Plugin* plugin) {
     }
 
     std::lock_guard<std::mutex> lock(g_vst3_lifecycle_mutex);
-    // Serialize teardown against process()/state/UI calls.
-    // process() uses try_lock on state_mutex; taking the same mutex here
-    // guarantees we don't free or mutate plugin internals concurrently.
+    // Audio processing is stopped by the host before teardown. This mutex
+    // serializes the remaining state/controller/UI operations.
     std::lock_guard<std::mutex> state_lock(plugin->state_mutex);
     trace_free_step("begin");
 
@@ -737,6 +780,27 @@ int rack_vst3_plugin_initialize(RackVST3Plugin* plugin, double sample_rate, uint
                 }
             }
         }
+
+        const int32 cached_parameter_count = static_cast<int32>(plugin->parameters.size());
+        plugin->input_param_changes.setMaxParameters(cached_parameter_count);
+        plugin->output_param_changes.setMaxParameters(cached_parameter_count);
+        // Pre-grow every value queue once so the first edit of a parameter cannot
+        // allocate from the realtime process() call.
+        for (const auto& parameter : plugin->parameters) {
+            ParameterChanges* changes_list[] = {
+                &plugin->input_param_changes,
+                &plugin->output_param_changes,
+            };
+            for (ParameterChanges* changes : changes_list) {
+                int32 queue_index = 0;
+                if (IParamValueQueue* queue = changes->addParameterData(parameter.id, queue_index)) {
+                    int32 point_index = 0;
+                    queue->addPoint(0, parameter.default_value, point_index);
+                }
+            }
+        }
+        plugin->input_param_changes.clearQueue();
+        plugin->output_param_changes.clearQueue();
     }
 
     // Enumerate factory presets if available
@@ -808,6 +872,13 @@ int rack_vst3_plugin_get_output_channels(RackVST3Plugin* plugin) {
     return plugin->num_output_channels;
 }
 
+uint32_t rack_vst3_plugin_get_latency_samples(RackVST3Plugin* plugin) {
+    if (!plugin || !plugin->initialized || !plugin->processor) {
+        return 0;
+    }
+    return plugin->processor->getLatencySamples();
+}
+
 int rack_vst3_plugin_process(
     RackVST3Plugin* plugin,
     const float* const* inputs,
@@ -818,11 +889,6 @@ int rack_vst3_plugin_process(
 {
     if (!plugin || !plugin->initialized || !plugin->processor) {
         return RACK_VST3_ERROR_NOT_INITIALIZED;
-    }
-
-    std::unique_lock<std::mutex> state_lock(plugin->state_mutex, std::try_to_lock);
-    if (!state_lock.owns_lock()) {
-        return RACK_VST3_ERROR_GENERIC;
     }
 
     // Validate input parameters to prevent buffer overruns
@@ -874,6 +940,40 @@ int rack_vst3_plugin_process(
     plugin->process_data.outputParameterChanges = &plugin->output_param_changes;
     plugin->process_data.inputEvents = &plugin->input_events;
     plugin->process_data.outputEvents = &plugin->output_events;
+
+    // UI/controller changes cross into the processor through a bounded SPSC
+    // queue. Coalescing guarantees at most one point per parameter and therefore
+    // reuses the preallocated ParameterValueQueue storage.
+    size_t pending_count = plugin->direct_audio_parameter_count;
+    for (size_t index = 0; index < pending_count; ++index) {
+        plugin->audio_parameter_scratch[index] = plugin->direct_audio_parameters[index];
+    }
+    plugin->direct_audio_parameter_count = 0;
+    PendingParameterChange pending;
+    while (pending_count < plugin->audio_parameter_scratch.size()
+           && plugin->ui_to_audio_parameters.pop(pending)) {
+        size_t existing = 0;
+        for (; existing < pending_count; ++existing) {
+            if (plugin->audio_parameter_scratch[existing].id == pending.id) {
+                plugin->audio_parameter_scratch[existing] = pending;
+                break;
+            }
+        }
+        if (existing == pending_count) {
+            plugin->audio_parameter_scratch[pending_count++] = pending;
+        }
+    }
+    for (size_t index = 0; index < pending_count; ++index) {
+        const auto& change = plugin->audio_parameter_scratch[index];
+        int32 queue_index = 0;
+        IParamValueQueue* queue =
+            plugin->input_param_changes.addParameterData(change.id, queue_index);
+        if (!queue) {
+            continue;
+        }
+        int32 point_index = 0;
+        queue->addPoint(change.sample_offset, change.value, point_index);
+    }
 
     // Process
     tresult result = plugin->processor->process(plugin->process_data);
@@ -951,16 +1051,30 @@ int rack_vst3_plugin_set_parameter(RackVST3Plugin* plugin, uint32_t index, float
     // Set parameter value on controller (for UI reflection)
     plugin->controller->setParamNormalized(param_id, value);
 
-    // Queue parameter change for component notification in next process() call
-    // This ensures the component receives the parameter change properly
-    int32 queue_index = 0;
-    IParamValueQueue* queue = plugin->input_param_changes.addParameterData(param_id, queue_index);
-    if (queue) {
-        // Add parameter change at sample offset 0 (beginning of next buffer)
-        int32 point_index = 0;
-        queue->addPoint(0, value, point_index);
-    }
+    return plugin->ui_to_audio_parameters.push({param_id, value, 0})
+        ? RACK_VST3_OK
+        : RACK_VST3_ERROR_GENERIC;
+}
 
+int rack_vst3_plugin_set_parameter_audio(RackVST3Plugin* plugin, uint32_t index, float value) {
+    if (!plugin || !plugin->initialized || index >= plugin->parameters.size()) {
+        return RACK_VST3_ERROR_INVALID_PARAM;
+    }
+    const PendingParameterChange change{
+        plugin->parameters[index].id,
+        std::clamp<ParamValue>(value, 0.0, 1.0),
+        0,
+    };
+    for (size_t existing = 0; existing < plugin->direct_audio_parameter_count; ++existing) {
+        if (plugin->direct_audio_parameters[existing].id == change.id) {
+            plugin->direct_audio_parameters[existing] = change;
+            return RACK_VST3_OK;
+        }
+    }
+    if (plugin->direct_audio_parameter_count >= plugin->direct_audio_parameters.size()) {
+        return RACK_VST3_ERROR_GENERIC;
+    }
+    plugin->direct_audio_parameters[plugin->direct_audio_parameter_count++] = change;
     return RACK_VST3_OK;
 }
 
@@ -1643,8 +1757,6 @@ int rack_vst3_plugin_send_midi(
         return RACK_VST3_ERROR_NOT_INITIALIZED;
     }
 
-    std::lock_guard<std::mutex> state_lock(plugin->state_mutex);
-
     // Null events array is only valid if event_count is 0
     if (!events && event_count > 0) {
         return RACK_VST3_ERROR_INVALID_PARAM;
@@ -1656,6 +1768,7 @@ int rack_vst3_plugin_send_midi(
     }
 
     // Convert MIDI events to VST3 events
+    bool event_overflow = false;
     for (uint32_t i = 0; i < event_count; ++i) {
         const auto& midi_event = events[i];
 
@@ -1673,7 +1786,7 @@ int rack_vst3_plugin_send_midi(
                 vst3_event.noteOn.pitch = midi_event.data1;
                 vst3_event.noteOn.velocity = static_cast<float>(midi_event.data2) / 127.0f;
                 vst3_event.noteOn.noteId = -1;  // Not specified
-                plugin->input_events.addEvent(vst3_event);
+                event_overflow |= plugin->input_events.addEvent(vst3_event) != kResultOk;
                 break;
 
             case 0x80:  // Note Off
@@ -1682,7 +1795,7 @@ int rack_vst3_plugin_send_midi(
                 vst3_event.noteOff.pitch = midi_event.data1;
                 vst3_event.noteOff.velocity = static_cast<float>(midi_event.data2) / 127.0f;
                 vst3_event.noteOff.noteId = -1;  // Not specified
-                plugin->input_events.addEvent(vst3_event);
+                event_overflow |= plugin->input_events.addEvent(vst3_event) != kResultOk;
                 break;
 
             case 0xA0:  // Polyphonic Key Pressure (Aftertouch)
@@ -1690,7 +1803,7 @@ int rack_vst3_plugin_send_midi(
                 vst3_event.polyPressure.channel = midi_event.channel;
                 vst3_event.polyPressure.pitch = midi_event.data1;
                 vst3_event.polyPressure.pressure = static_cast<float>(midi_event.data2) / 127.0f;
-                plugin->input_events.addEvent(vst3_event);
+                event_overflow |= plugin->input_events.addEvent(vst3_event) != kResultOk;
                 break;
 
             case 0xB0:  // Control Change
@@ -1706,7 +1819,7 @@ int rack_vst3_plugin_send_midi(
                     vst3_event.midiCCOut.controlNumber = midi_event.data1;
                     vst3_event.midiCCOut.value = midi_event.data2;
                     vst3_event.midiCCOut.value2 = 0;
-                    plugin->input_events.addEvent(vst3_event);
+                    event_overflow |= plugin->input_events.addEvent(vst3_event) != kResultOk;
                 }
                 break;
 
@@ -1719,7 +1832,7 @@ int rack_vst3_plugin_send_midi(
                 vst3_event.midiCCOut.controlNumber = 0x80;  // >= 0x80 indicates non-CC MIDI
                 vst3_event.midiCCOut.value = midi_event.data1;
                 vst3_event.midiCCOut.value2 = 0;
-                plugin->input_events.addEvent(vst3_event);
+                event_overflow |= plugin->input_events.addEvent(vst3_event) != kResultOk;
                 break;
 
             case 0xD0:  // Channel Pressure (Aftertouch)
@@ -1735,7 +1848,7 @@ int rack_vst3_plugin_send_midi(
                     vst3_event.midiCCOut.controlNumber = kAfterTouch;
                     vst3_event.midiCCOut.value = midi_event.data1;
                     vst3_event.midiCCOut.value2 = 0;
-                    plugin->input_events.addEvent(vst3_event);
+                    event_overflow |= plugin->input_events.addEvent(vst3_event) != kResultOk;
                 }
                 break;
 
@@ -1754,7 +1867,7 @@ int rack_vst3_plugin_send_midi(
                     vst3_event.midiCCOut.controlNumber = kPitchBend;
                     vst3_event.midiCCOut.value = midi_event.data1;
                     vst3_event.midiCCOut.value2 = midi_event.data2;
-                    plugin->input_events.addEvent(vst3_event);
+                    event_overflow |= plugin->input_events.addEvent(vst3_event) != kResultOk;
                 }
                 break;
             }
@@ -1765,5 +1878,35 @@ int rack_vst3_plugin_send_midi(
         }
     }
 
-    return RACK_VST3_OK;
+    return event_overflow ? RACK_VST3_ERROR_GENERIC : RACK_VST3_OK;
+}
+
+int rack_vst3_plugin_process_with_midi(
+    RackVST3Plugin* plugin,
+    const RackVST3MidiEvent* events,
+    uint32_t event_count,
+    const float* const* inputs,
+    uint32_t num_input_channels,
+    float* const* outputs,
+    uint32_t num_output_channels,
+    uint32_t frames)
+{
+    if (event_count > kRealtimeEventCapacity) {
+        return RACK_VST3_ERROR_INVALID_PARAM;
+    }
+    const int midi_result = rack_vst3_plugin_send_midi(plugin, events, event_count);
+    if (midi_result != RACK_VST3_OK) {
+        if (plugin) {
+            plugin->input_events.clear();
+            plugin->input_param_changes.clearQueue();
+        }
+        return midi_result;
+    }
+    return rack_vst3_plugin_process(
+        plugin,
+        inputs,
+        num_input_channels,
+        outputs,
+        num_output_channels,
+        frames);
 }

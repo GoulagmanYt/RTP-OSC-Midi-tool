@@ -2,7 +2,10 @@ import { useState } from "react";
 import { Button } from "../../components/ui/Button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../../components/ui/Card";
 import { runAutomatedStressTest, type StressTestResult, type StressTestMode } from "../../api";
-import { Activity, CheckCircle, XCircle, Network, AudioWaveform, Layers, Workflow } from "lucide-react";
+import { Activity, CheckCircle, XCircle, Network, AudioWaveform, Workflow } from "lucide-react";
+
+const STRESS_RATE_MESSAGES_PER_SECOND = 5_000;
+const STRESS_DURATION_SECONDS = 5;
 
 type Props = {
   bridgeRunning: boolean;
@@ -11,23 +14,26 @@ type Props = {
 
 const TEST_MODES: { value: StressTestMode; label: string; icon: React.ReactNode; description: string }[] = [
   { value: "audio-vst", label: "Audio/VST Only", icon: <AudioWaveform className="h-4 w-4" />, description: "Test direct moteur audio (bypass bridge)" },
-  { value: "bridge", label: "Bridge Pipeline", icon: <Workflow className="h-4 w-4" />, description: "Test routage et filtrage MIDI" },
-  { value: "end-to-end", label: "End-to-End", icon: <Layers className="h-4 w-4" />, description: "Test complet de la pipeline" },
+  { value: "bridge", label: "Bridge + Audio/VST", icon: <Workflow className="h-4 w-4" />, description: "Test du bridge jusqu'au VST, sans envoyer le flood vers les sorties MIDI/OSC externes" },
 ];
 
 export function AudioStressTestCard({ bridgeRunning, audioRunning }: Props) {
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<StressTestResult | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [mode, setMode] = useState<StressTestMode>("end-to-end");
+  const [mode, setMode] = useState<StressTestMode>("bridge");
+  const requiresBridge = mode !== "audio-vst";
 
   const handleRunTest = async () => {
     setRunning(true);
     setResult(null);
     setError(null);
     try {
-      // 50,000 messages over 5 seconds
-      const res = await runAutomatedStressTest(50000, 5, mode);
+      const res = await runAutomatedStressTest(
+        STRESS_RATE_MESSAGES_PER_SECOND,
+        STRESS_DURATION_SECONDS,
+        mode
+      );
       setResult(res);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to run stress test");
@@ -44,8 +50,8 @@ export function AudioStressTestCard({ bridgeRunning, audioRunning }: Props) {
           Diagnostic / Stress Test
         </CardTitle>
         <CardDescription>
-          Automated load testing to verify VST and Audio Engine stability.
-          Injects 50,000 notes per second for 5 seconds to detect dropouts or buffer underruns.
+          Test de charge contrôlé du VST et du moteur audio. Injecte 5 000 messages MIDI
+          par seconde pendant 5 secondes, avec des paires note-on/note-off équilibrées.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -76,7 +82,7 @@ export function AudioStressTestCard({ bridgeRunning, audioRunning }: Props) {
         <div className="flex items-center gap-4">
           <Button
             onClick={handleRunTest}
-            disabled={running || !audioRunning || !bridgeRunning}
+            disabled={running || !audioRunning || (requiresBridge && !bridgeRunning)}
             className="w-40"
           >
             {running ? "Testing..." : "Lancer le Test"}
@@ -84,6 +90,11 @@ export function AudioStressTestCard({ bridgeRunning, audioRunning }: Props) {
           {!audioRunning && (
             <span className="text-sm text-amber-600">
               Le moteur audio doit être actif.
+            </span>
+          )}
+          {audioRunning && requiresBridge && !bridgeRunning && (
+            <span className="text-sm text-amber-600">
+              Le bridge doit être actif pour ce mode.
             </span>
           )}
         </div>
@@ -106,7 +117,7 @@ export function AudioStressTestCard({ bridgeRunning, audioRunning }: Props) {
             {/* Global Summary */}
             <div className="grid grid-cols-3 gap-4 text-sm border-b border-border/40 pb-3">
               <div className="flex flex-col">
-                <span className="text-muted-foreground">Notes Envoyées</span>
+                <span className="text-muted-foreground">Messages MIDI envoyés</span>
                 <span className="font-semibold">{result.sentNotes.toLocaleString()}</span>
               </div>
               <div className="flex flex-col">
@@ -193,7 +204,12 @@ export function AudioStressTestCard({ bridgeRunning, audioRunning }: Props) {
                 <p className="font-medium"><XCircle className="h-3 w-3 inline mr-1" />Instabilité détectée :</p>
                 {result.segmentRtp && result.segmentRtp.dropped > 0 && <p>• Segment RTP: pertes réseau ou buffer RTP plein</p>}
                 {result.segmentBridge && result.segmentBridge.dropped > 0 && <p>• Segment Bridge: messages filtrés ou pipeline saturé</p>}
-                {result.segmentAudio && result.segmentAudio.dropped > 0 && <p>• Segment Audio: buffer MIDI audio plein ou VST trop lent</p>}
+                {result.segmentAudio && result.segmentAudio.dropped > 0 && result.segmentAudio.xruns === 0 && (
+                  <p>• Segment Audio: cadence MIDI supérieure à la capacité de la file ; aucun xrun ne prouve un retard DSP du VST</p>
+                )}
+                {result.segmentAudio && result.segmentAudio.dropped > 0 && result.segmentAudio.xruns > 0 && (
+                  <p>• Segment Audio: file MIDI saturée pendant des dépassements audio</p>
+                )}
                 {result.segmentAudio && result.segmentAudio.xruns > 0 && <p>• XRuns: buffer audio trop petit ou VST trop lourd</p>}
               </div>
             )}

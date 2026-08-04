@@ -32,31 +32,50 @@ use windows::core::w;
 use windows::Win32::Media::timeBeginPeriod;
 #[cfg(target_os = "windows")]
 use windows::Win32::System::Threading::{
-    AvSetMmThreadCharacteristicsW, AvSetMmThreadPriority, GetCurrentProcess, GetCurrentThread,
-    ProcessPowerThrottling, SetPriorityClass, SetProcessInformation, SetThreadInformation,
-    SetThreadPriority, SetThreadPriorityBoost, ThreadPowerThrottling, ABOVE_NORMAL_PRIORITY_CLASS,
-    AVRT_PRIORITY_CRITICAL, HIGH_PRIORITY_CLASS, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+    AvRevertMmThreadCharacteristics, AvSetMmThreadCharacteristicsW, AvSetMmThreadPriority,
+    GetCurrentProcess, GetCurrentThread, GetCurrentThreadId, ProcessPowerThrottling,
+    SetPriorityClass, SetProcessInformation, SetThreadInformation, SetThreadPriority,
+    SetThreadPriorityBoost, ThreadPowerThrottling, ABOVE_NORMAL_PRIORITY_CLASS,
+    AVRT_PRIORITY_CRITICAL, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
     PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION,
     PROCESS_POWER_THROTTLING_STATE, THREAD_POWER_THROTTLING_CURRENT_VERSION,
     THREAD_POWER_THROTTLING_EXECUTION_SPEED, THREAD_POWER_THROTTLING_STATE,
-    THREAD_PRIORITY_TIME_CRITICAL,
+    THREAD_PRIORITY_HIGHEST,
 };
 
-/// Windows error code for ERROR_ALREADY_REGISTERED (0x800704DA = HRESULT, raw = 1242).
-/// When the ASIO driver (e.g. Voicemeeter) has already registered the callback thread
-/// with MMCSS, our call fails with this error — but the thread IS getting MMCSS scheduling.
+/// ERROR_THREAD_ALREADY_IN_TASK. ASIO drivers such as Voicemeeter commonly register
+/// their callback thread before CPAL invokes us.
 #[cfg(target_os = "windows")]
-const ERROR_ALREADY_REGISTERED_RAW: u32 = 1242;
+const ERROR_THREAD_ALREADY_IN_TASK_RAW: u32 = 1552;
 
 #[cfg(target_os = "windows")]
-fn is_already_registered_error(err: &windows::core::Error) -> bool {
-    // The windows crate wraps WIN32 errors as HRESULT. Check both the raw code and
-    // the HRESULT-wrapped form.
+fn is_thread_already_in_task_error(err: &windows::core::Error) -> bool {
     let code = err.code().0 as u32;
-    // Raw WIN32 error code
-    code == ERROR_ALREADY_REGISTERED_RAW
-        // HRESULT form: FACILITY_WIN32 (7) << 16 | 0x80000000 | error_code
-        || code == (0x80070000 | ERROR_ALREADY_REGISTERED_RAW)
+    code == ERROR_THREAD_ALREADY_IN_TASK_RAW
+        || code == (0x80070000 | ERROR_THREAD_ALREADY_IN_TASK_RAW)
+}
+
+/// Owns only registrations created by OSCMidi. Driver-owned MMCSS registrations
+/// deliberately do not create this guard and must not be reverted by the app.
+#[cfg(target_os = "windows")]
+pub(super) struct MmcssRegistration {
+    handle: windows::Win32::Foundation::HANDLE,
+    owner_thread_id: u32,
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for MmcssRegistration {
+    fn drop(&mut self) {
+        // MMCSS registrations are thread-affine. CPAL is allowed to destroy its
+        // callback closure from another thread, in which case Windows releases
+        // the registration when the callback thread terminates.
+        if unsafe { GetCurrentThreadId() } != self.owner_thread_id {
+            return;
+        }
+        unsafe {
+            let _ = AvRevertMmThreadCharacteristics(self.handle);
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -81,13 +100,14 @@ pub(super) fn apply_audio_thread_priority(state: &mut AudioCallbackState) {
                         format!("Failed to raise MMCSS audio thread priority: {error}"),
                     );
                 }
+                state.mmcss_registration = Some(MmcssRegistration {
+                    handle,
+                    owner_thread_id: GetCurrentThreadId(),
+                });
             }
             Err((pro_audio_error, audio_error)) => {
-                // Check if the thread is ALREADY registered by the ASIO driver.
-                // This is common with Voicemeeter, ASIO4ALL, etc. In this case,
-                // the thread IS getting MMCSS scheduling from the driver.
-                if is_already_registered_error(&pro_audio_error)
-                    || is_already_registered_error(&audio_error)
+                if is_thread_already_in_task_error(&pro_audio_error)
+                    || is_thread_already_in_task_error(&audio_error)
                 {
                     store_bool(&AUDIO_MMCSS_ENABLED, true);
                     background_log(
@@ -102,15 +122,13 @@ pub(super) fn apply_audio_thread_priority(state: &mut AudioCallbackState) {
                             "Failed to enable MMCSS for audio thread (Pro Audio: {pro_audio_error}; Audio: {audio_error})"
                         ),
                     );
-                    // Fallback: set thread to TIME_CRITICAL priority manually.
+                    // A bounded fallback avoids starving the Tauri, network and driver threads.
                     if let Err(error) =
-                        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL)
+                        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST)
                     {
                         background_log(
                             "warn",
-                            format!(
-                                "Failed to apply TIME_CRITICAL fallback to audio thread: {error}"
-                            ),
+                            format!("Failed to apply HIGHEST fallback to audio thread: {error}"),
                         );
                     }
                 }
@@ -171,14 +189,10 @@ pub(super) fn apply_audio_process_tuning(logger: &FrontendLogger) {
 #[cfg(target_os = "windows")]
 pub fn apply_process_priority(logger: &FrontendLogger) {
     unsafe {
-        if SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS).is_err() {
-            if SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS).is_err() {
-                logger.warn("Failed to raise process priority class for audio stability");
-            } else {
-                logger.warn("HIGH priority failed; raised process priority to ABOVE_NORMAL");
-            }
+        if SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS).is_err() {
+            logger.warn("Failed to raise process priority class to ABOVE_NORMAL");
         } else {
-            logger.debug("Raised process priority to HIGH");
+            logger.debug("Raised process priority to ABOVE_NORMAL");
         }
         let throttle = PROCESS_POWER_THROTTLING_STATE {
             Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
@@ -207,11 +221,7 @@ pub fn apply_process_priority(logger: &FrontendLogger) {
 #[cfg(target_os = "windows")]
 pub fn reapply_process_priority_on_focus_loss() {
     unsafe {
-        // Re-assert HIGH_PRIORITY_CLASS. Windows may have adjusted the effective
-        // scheduling parameters when the process lost the foreground window.
-        if SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS).is_err() {
-            let _ = SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
-        }
+        let _ = SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
 
         // Re-assert power throttling disabled. On Windows 11, focus loss can
         // trigger EcoQoS evaluation that we need to counteract.
@@ -272,15 +282,17 @@ mod tests {
     }
 
     #[test]
-    fn windows_audio_tuning_uses_high_process_and_time_critical_fallback() {
+    fn windows_audio_tuning_uses_bounded_process_and_thread_fallbacks() {
         let source = include_str!("windows_tuning.rs");
-        let high_class = ["HIGH_PRIORITY", "_CLASS"].concat();
-        let time_critical = ["THREAD_PRIORITY", "_TIME_CRITICAL"].concat();
+        let above_normal = ["ABOVE_NORMAL_PRIORITY", "_CLASS"].concat();
+        let highest = ["THREAD_PRIORITY", "_HIGHEST"].concat();
+        let time_critical = ["THREAD_PRIORITY_TIME", "_CRITICAL"].concat();
         let thread_boost = ["SetThreadPriority", "Boost"].concat();
 
-        assert!(source.contains(&high_class));
-        assert!(source.contains(&time_critical));
+        assert!(source.contains(&above_normal));
+        assert!(source.contains(&highest));
         assert!(source.contains(&thread_boost));
+        assert!(!source.contains(&time_critical));
     }
 
     #[test]
@@ -293,7 +305,7 @@ mod tests {
     #[test]
     fn windows_audio_tuning_handles_already_registered_mmcss() {
         let source = include_str!("windows_tuning.rs");
-        let already_registered = ["already_registered", "_error"].concat();
-        assert!(source.contains(&already_registered));
+        assert!(source.contains("ERROR_THREAD_ALREADY_IN_TASK_RAW: u32 = 1552"));
+        assert!(source.contains("is_thread_already_in_task_error"));
     }
 }
