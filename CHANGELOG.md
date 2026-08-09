@@ -14,6 +14,7 @@ All notable changes to OSCMidi are documented here.
 
 - Bundled `OSCMidi.exe` and its required `vst-host-worker.exe` together in portable releases so the isolated host cannot be omitted accidentally.
 - Added SHA-256 checksum generation for release packages and stricter validation that exactly one MSI is produced.
+- Prevented restored CI caches from mixing MSI installers from older versions into the current release.
 
 ## 2.0.0 - 2026-08-09
 
