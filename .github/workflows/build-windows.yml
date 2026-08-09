@@ -94,6 +94,12 @@ jobs:
           cargo fmt --manifest-path tools/diagnostics/Cargo.toml --package oscmidi-diagnostics -- --check
           cargo clippy --manifest-path tools/diagnostics/Cargo.toml --target-dir tools/diagnostics/target --all-targets -- -D warnings
 
+      - name: Remove stale bundle outputs
+        shell: pwsh
+        run: |
+          Remove-Item '.cargo-target/release/bundle' -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item '.cargo-target/release/wix' -Recurse -Force -ErrorAction SilentlyContinue
+
       - name: Build Tauri application and MSI installer
         run: npm run tauri:build -- --bundles msi --ci
 
@@ -109,7 +115,7 @@ jobs:
             -ErrorAction Stop
           $installers = @(
             Get-ChildItem '.cargo-target/release/bundle/msi' `
-              -Filter '*.msi' `
+              -Filter "OSCMidi_${version}_*.msi" `
               -File `
               -ErrorAction SilentlyContinue
           )

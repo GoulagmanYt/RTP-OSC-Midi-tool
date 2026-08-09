@@ -156,10 +156,16 @@ function Remove-GeneratedDirectory {
 }
 
 function Export-BuildArtifacts {
+    $version = (Get-Content (Join-Path $repositoryRoot 'package.json') -Raw | ConvertFrom-Json).version
     $application = Get-Item (Join-Path $cargoTargetDirectory 'release\OSCMidi.exe') -ErrorAction Stop
-    $installers = @(Get-ChildItem (Join-Path $cargoTargetDirectory 'release\bundle\msi') -Filter '*.msi' -File -ErrorAction Stop)
-    if ($installers.Count -eq 0) {
-        throw 'Aucun installateur MSI genere.'
+    $installers = @(
+        Get-ChildItem (Join-Path $cargoTargetDirectory 'release\bundle\msi') `
+            -Filter "OSCMidi_${version}_*.msi" `
+            -File `
+            -ErrorAction Stop
+    )
+    if ($installers.Count -ne 1) {
+        throw "Un seul installateur MSI v$version etait attendu, $($installers.Count) ont ete trouves."
     }
 
     $workerCandidates = @(
@@ -180,7 +186,6 @@ function Export-BuildArtifacts {
             Copy-Item -LiteralPath $installer.FullName -Destination $stagingDirectory
         }
 
-        $version = (Get-Content (Join-Path $repositoryRoot 'package.json') -Raw | ConvertFrom-Json).version
         $portableDirectory = Join-Path $stagingDirectory 'portable'
         New-Item -ItemType Directory -Path $portableDirectory | Out-Null
         Copy-Item -LiteralPath $application.FullName -Destination (Join-Path $portableDirectory 'OSCMidi.exe')
