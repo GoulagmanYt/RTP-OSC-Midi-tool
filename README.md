@@ -12,7 +12,7 @@
   <a href="https://github.com/GoulagmanYt/RTP-OSC-Midi-tool/actions/workflows/build-windows.yml">
     <img src="https://github.com/GoulagmanYt/RTP-OSC-Midi-tool/actions/workflows/build-windows.yml/badge.svg" alt="Windows build status">
   </a>
-  <img src="https://img.shields.io/badge/version-2.0.1-35c2d5" alt="Version 2.0.1">
+  <img src="https://img.shields.io/badge/version-2.0.1--b-35c2d5" alt="Version 2.0.1-b">
   <img src="https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078d4?logo=windows" alt="Windows 10 and 11">
   <img src="https://img.shields.io/badge/backend-Rust-dea584?logo=rust" alt="Rust backend">
   <img src="https://img.shields.io/badge/desktop-Tauri%202-24c8db?logo=tauri" alt="Tauri 2">
@@ -201,8 +201,8 @@ The cleanup runs after both successful and failed builds. It removes `node_modul
 A `v*` tag also creates or updates the corresponding GitHub Release with the MSI, portable ZIP and checksum file:
 
 ```powershell
-git tag v2.0.1
-git push origin v2.0.1
+git tag v2.0.1-b
+git push origin v2.0.1-b
 ```
 
 The tag must exactly match the application version.

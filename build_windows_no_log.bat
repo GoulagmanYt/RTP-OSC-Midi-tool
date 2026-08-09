@@ -1,5 +1,7 @@
 @echo off
-rem Alias conserve pour compatibilite : tous les builds utilisent maintenant
-rem la meme pipeline avec progression, journal et nettoyage automatique.
+setlocal EnableExtensions DisableDelayedExpansion
+rem Runs the same colorful pipeline without keeping a persistent build log.
+set "OSCMIDI_BUILD_NO_LOG=1"
 call "%~dp0build_windows.bat" %*
-exit /b %ERRORLEVEL%
+set "BUILD_EXIT_CODE=%ERRORLEVEL%"
+endlocal & exit /b %BUILD_EXIT_CODE%

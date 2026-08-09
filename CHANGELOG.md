@@ -2,6 +2,21 @@
 
 All notable changes to OSCMidi are documented here.
 
+## 2.0.1-b - 2026-08-09
+
+### Changed
+
+- Redesigned both Windows batch launchers with a colorful, fully English build interface and clearer success and failure summaries.
+- Added automatic selection of a compatible Node.js installation from `NVM_HOME` when the active Node.js version cannot run jsdom 30.
+- Made `build_windows_no_log.bat` preserve the colorful console output without writing a persistent build log.
+- Refreshed the Windows application icons and synchronized the diagnostics lockfile with the current application dependencies.
+
+### Fixed
+
+- Prevented Node.js 20 from reaching the frontend tests and failing with jsdom/undici runtime errors.
+- Stripped ANSI color sequences from persistent logs while retaining colors in the interactive console.
+- Preserved reliable exit codes and actionable error messages across both batch launchers.
+
 ## 2.0.1 - 2026-08-09
 
 ### Changed
