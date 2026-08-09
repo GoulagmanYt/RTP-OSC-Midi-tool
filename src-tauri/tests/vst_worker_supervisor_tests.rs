@@ -4,8 +4,36 @@ use std::time::Duration;
 
 use osc_midi_bridge::{
     audio::AudioSettings,
+    types::VstPluginEntry,
     vst_worker::{VstWorkerState, VstWorkerSupervisor},
 };
+
+#[test]
+fn production_worker_supports_isolated_probe_mode() {
+    let probe_path = std::env::temp_dir().join(format!(
+        "oscmidi-missing-probe-plugin-{}.dll",
+        std::process::id()
+    ));
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vst-host-worker"))
+        .arg("--vst-probe")
+        .arg(&probe_path)
+        .output()
+        .expect("production worker should start in probe mode");
+    assert!(
+        output.status.success(),
+        "worker probe mode failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("probe output should be UTF-8");
+    let json = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("OSCMIDI_PROBE_JSON:"))
+        .expect("worker should emit a probe result");
+    let entry: VstPluginEntry =
+        serde_json::from_str(json).expect("worker should emit a valid probe result");
+    assert_eq!(entry.path, probe_path.to_string_lossy());
+    assert!(!entry.supported);
+}
 
 fn fixture_settings() -> AudioSettings {
     AudioSettings {

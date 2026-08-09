@@ -1,6 +1,7 @@
 #![allow(deprecated)]
 
 use std::collections::HashSet;
+use std::ffi::OsStr;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -103,6 +104,30 @@ pub fn ensure_supported_plugin_in_app(path: &Path) -> Result<VstPluginEntry, Str
             .unsupported_reason
             .clone()
             .unwrap_or_else(|| "Plugin is not supported in this app".to_string()))
+    }
+}
+
+/// Handles the private subprocess mode used to inspect a plug-in without loading it into the
+/// long-lived application or audio worker process.
+pub fn probe_cli_exit_code() -> Option<i32> {
+    let mut args = std::env::args_os().skip(1);
+    if args.next().as_deref() != Some(OsStr::new("--vst-probe")) {
+        return None;
+    }
+    let Some(path) = args.next().map(PathBuf::from) else {
+        eprintln!("Missing plug-in path for --vst-probe");
+        return Some(2);
+    };
+    let entry = probe_plugin(&path);
+    match serde_json::to_string(&entry) {
+        Ok(json) => {
+            println!("OSCMIDI_PROBE_JSON:{json}");
+            Some(0)
+        }
+        Err(error) => {
+            eprintln!("Failed to serialize VST probe result: {error}");
+            Some(1)
+        }
     }
 }
 
