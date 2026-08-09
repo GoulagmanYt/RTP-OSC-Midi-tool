@@ -5,7 +5,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::{audio::AudioSettings, types::VstParameter};
 
-pub const CONTROL_PROTOCOL_VERSION: u32 = 1;
+pub const CONTROL_PROTOCOL_VERSION: u32 = 2;
 pub const HOST_ABI_VERSION: u32 = 1;
 pub const MAX_CONTROL_FRAME_BYTES: usize = 1024 * 1024;
 pub const MAX_MIDI_BYTES: usize = 3;
@@ -152,7 +152,6 @@ impl MidiWireFrame {
         })
     }
 
-    #[allow(dead_code)]
     pub fn bytes(&self) -> &[u8] {
         &self.data[..self.len as usize]
     }
@@ -166,7 +165,6 @@ impl MidiWireFrame {
         encoded
     }
 
-    #[allow(dead_code)]
     pub fn decode(encoded: [u8; MIDI_FRAME_BYTES]) -> io::Result<Self> {
         let len = encoded[16];
         if len == 0 || len as usize > MAX_MIDI_BYTES {
@@ -231,7 +229,6 @@ where
     writer.write_all(&frame.encode()).await
 }
 
-#[allow(dead_code)]
 pub async fn read_midi_frame<R>(reader: &mut R) -> io::Result<MidiWireFrame>
 where
     R: AsyncRead + Unpin,
@@ -255,7 +252,6 @@ pub fn monotonic_qpc() -> u64 {
 }
 
 #[cfg(target_os = "windows")]
-#[allow(dead_code)]
 fn qpc_frequency() -> u64 {
     use windows::Win32::System::Performance::QueryPerformanceFrequency;
     static FREQUENCY: OnceLock<u64> = OnceLock::new();
@@ -276,12 +272,10 @@ pub fn monotonic_qpc() -> u64 {
 }
 
 #[cfg(not(target_os = "windows"))]
-#[allow(dead_code)]
 fn qpc_frequency() -> u64 {
     1_000_000_000
 }
 
-#[allow(dead_code)]
 pub fn qpc_elapsed_us(earlier: u64, later: u64) -> u64 {
     let ticks = later.saturating_sub(earlier) as u128;
     ((ticks * 1_000_000) / u128::from(qpc_frequency())).min(u64::MAX as u128) as u64

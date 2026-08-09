@@ -48,26 +48,6 @@ pub struct RoutingAssignment {
     pub profile_id: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct AvatarConfig {
-    pub path: Option<String>,
-    pub offset_x: f32,
-    pub offset_y: f32,
-    pub scale: f32,
-}
-
-impl Default for AvatarConfig {
-    fn default() -> Self {
-        Self {
-            path: None,
-            offset_x: 50.0,
-            offset_y: 50.0,
-            scale: 1.0,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct MidiConfig {
@@ -142,8 +122,6 @@ impl Default for RtpConfig {
 #[serde(rename_all = "camelCase")]
 pub struct AudioConfig {
     pub enabled: bool,
-    #[serde(default)]
-    pub vst_worker_enabled: bool,
     pub backend: Option<String>,
     pub device: Option<String>,
     pub sample_rate: u32,
@@ -157,7 +135,6 @@ impl Default for AudioConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            vst_worker_enabled: false,
             backend: Some("auto".to_string()),
             device: None,
             sample_rate: 48_000,
@@ -172,45 +149,21 @@ impl Default for AudioConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct UiConfig {
-    pub theme_preset: String,
     pub theme: Theme,
     pub theme_palette: String,
-    pub accent: String,
     pub corner_radius: f32,
-    pub scale: f32,
-    pub content_padding: f32,
-    pub sidebar_width: f32,
-    pub surface_opacity: f32,
-    pub card_opacity: f32,
-    pub aurora_intensity: f32,
-    pub grain_intensity: f32,
-    pub reduce_motion: bool,
     pub auto_start: bool,
-    pub always_on_top: bool,
     pub developer_mode: bool,
-    pub avatar: AvatarConfig,
 }
 
 impl Default for UiConfig {
     fn default() -> Self {
         Self {
-            theme_preset: "studio".to_string(),
             theme: Theme::Light,
             theme_palette: "light".to_string(),
-            accent: "auto".to_string(),
             corner_radius: 12.0,
-            scale: 1.0,
-            content_padding: 24.0,
-            sidebar_width: 256.0,
-            surface_opacity: 0.5,
-            card_opacity: 1.0,
-            aurora_intensity: 0.75,
-            grain_intensity: 0.16,
-            reduce_motion: false,
             auto_start: false,
-            always_on_top: false,
             developer_mode: false,
-            avatar: AvatarConfig::default(),
         }
     }
 }
@@ -220,7 +173,6 @@ impl Default for UiConfig {
 pub struct LoggingConfig {
     pub enabled: bool,
     pub verbose: bool,
-    pub live_logs: bool,
     pub log_all_to_file: bool,
 }
 
@@ -229,7 +181,6 @@ impl Default for LoggingConfig {
         Self {
             enabled: true,
             verbose: false,
-            live_logs: false,
             log_all_to_file: false,
         }
     }
@@ -277,10 +228,22 @@ pub struct ConfigStore {
 
 impl ConfigStore {
     pub fn new() -> Self {
-        let dirs = ProjectDirs::from("com", "OSCMIDI", "OSCMIDI")
-            .expect("Impossible de déterminer le répertoire utilisateur");
-        let cfg_dir = dirs.config_dir();
-        fs::create_dir_all(cfg_dir).ok();
+        let cfg_dir = ProjectDirs::from("com", "OSCMIDI", "OSCMIDI")
+            .map(|dirs| dirs.config_dir().to_path_buf())
+            .unwrap_or_else(|| {
+                let fallback = std::env::temp_dir().join("OSCMidi").join("config");
+                log::warn!(
+                    "User configuration directory is unavailable; falling back to {:?}",
+                    fallback
+                );
+                fallback
+            });
+        if let Err(error) = fs::create_dir_all(&cfg_dir) {
+            log::error!(
+                "Unable to create configuration directory {:?}: {error}",
+                cfg_dir
+            );
+        }
         Self::with_path(cfg_dir.join("config.yaml"))
     }
 
@@ -305,7 +268,7 @@ impl ConfigStore {
 
     pub fn save(&self, cfg: &AppConfig) -> Result<(), String> {
         let raw = serde_yaml::to_string(cfg).map_err(|e| e.to_string())?;
-        fs::write(&self.path, raw).map_err(|e| e.to_string())
+        crate::atomic_file::write_atomically(&self.path, raw.as_bytes()).map_err(|e| e.to_string())
     }
 
     pub fn reset_to_default(&self) -> Result<AppConfig, String> {
@@ -316,13 +279,23 @@ impl ConfigStore {
 
     fn ensure_exists(&self) {
         if !self.path.exists() {
-            let _ = self.save(&AppConfig::default());
+            if let Err(error) = self.save(&AppConfig::default()) {
+                log::error!(
+                    "Unable to initialize configuration {:?}: {error}",
+                    self.path
+                );
+            }
         }
     }
 
     fn write_default(&self) -> AppConfig {
         let default_cfg = AppConfig::default();
-        let _ = self.save(&default_cfg);
+        if let Err(error) = self.save(&default_cfg) {
+            log::error!(
+                "Unable to persist default configuration {:?}: {error}",
+                self.path
+            );
+        }
         default_cfg
     }
 }
@@ -425,5 +398,37 @@ mod tests {
         let config = store.load();
 
         assert_eq!(config.version, AppConfig::CURRENT_VERSION);
+    }
+
+    #[test]
+    fn removed_v2_fields_are_ignored_and_removed_on_next_save() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("config.yaml");
+        let current = serde_yaml::to_string(&AppConfig::default()).expect("serialize config");
+        let legacy = current
+            .replace(
+                "audio:\n  enabled: true",
+                "audio:\n  enabled: true\n  vstWorkerEnabled: false",
+            )
+            .replace(
+                "ui:\n  theme:",
+                "ui:\n  themePreset: studio\n  accent: auto\n  alwaysOnTop: false\n  theme:",
+            )
+            .replace(
+                "logging:\n  enabled: true",
+                "logging:\n  enabled: true\n  liveLogs: false",
+            );
+        std::fs::write(&path, legacy).expect("write legacy config");
+
+        let store = ConfigStore::with_path(path.clone());
+        let config = store.load();
+        assert!(config.audio.enabled);
+
+        store.save(&config).expect("save migrated config");
+        let migrated = std::fs::read_to_string(path).expect("read migrated config");
+        assert!(!migrated.contains("vstWorkerEnabled"));
+        assert!(!migrated.contains("themePreset"));
+        assert!(!migrated.contains("alwaysOnTop"));
+        assert!(!migrated.contains("liveLogs"));
     }
 }

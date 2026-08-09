@@ -12,6 +12,7 @@ export default function AudioPage() {
         <AudioStressTestCard
           bridgeRunning={controller.bridgeRunning}
           audioRunning={controller.status?.audioRunning ?? false}
+          t={controller.t}
         />
       )}
       <AudioConfigCard
@@ -26,7 +27,6 @@ export default function AudioPage() {
         currentLatencyMs={controller.currentLatencyMs}
         isVst3={controller.isVst3}
         midiMessagesPerSec={controller.midiMessagesPerSec}
-        quickPresets={controller.quickPresets}
         selectedPluginKindLabel={controller.selectedPluginKindLabel}
         selectedPluginStatusLabel={controller.selectedPluginStatusLabel}
         selectedVstPlugin={controller.selectedVstPlugin}
@@ -40,7 +40,6 @@ export default function AudioPage() {
         activeBufferSize={controller.activeBufferSize}
         activeSampleRate={controller.activeSampleRate}
         requestedBufferSize={controller.requestedBufferSize}
-        onApplyPreset={controller.applyPreset}
         onBackendChange={controller.handleBackendChange}
         onCloseVstUi={controller.handleCloseVstUi}
         onGainChange={controller.handleGainChange}

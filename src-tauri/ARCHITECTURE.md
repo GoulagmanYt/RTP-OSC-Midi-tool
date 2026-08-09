@@ -1,90 +1,67 @@
-# Architecture OSC-MIDI Bridge
+# OSCMidi v2 architecture
 
-Ce document décrit l'architecture réellement compilée après nettoyage du refactor.
+This document describes the production architecture compiled for Windows.
 
-## Vue d'ensemble
+## Runtime boundaries
 
-L'application est un bridge desktop Tauri entre :
+```text
+React / Tauri desktop process
+  ├─ configuration and diagnostics
+  ├─ local MIDI, RTP-MIDI, OSC routing
+  └─ AudioSupervisor
+       ├─ authenticated control pipe (length-prefixed JSON)
+       └─ bounded binary MIDI pipe
+            ↓
+       vst-host-worker.exe
+         ├─ VST2/VST3 instance
+         ├─ CPAL / ASIO or WASAPI stream
+         ├─ real-time audio callback
+         └─ native plug-in editor window
+```
 
-- MIDI local
-- RTP-MIDI réseau
-- OSC vers VRChat
-- audio/VST côté backend Rust
+The desktop process never loads third-party VST DLLs. A plug-in crash, access violation, or blocked native destructor is contained in the worker. The supervisor monitors heartbeats, applies a bounded restart policy, and reports the last worker exit to the frontend.
 
-Le frontend TypeScript parle uniquement au backend via les commandes définies dans `src/api.ts`.
-
-## Structure backend
+## Backend layout
 
 ```text
 src/
-|-- main.rs            # Bootstrap Tauri
-|-- lib.rs             # Exports publics pour tests et benches
-|-- config.rs          # Configuration persistante + normalisation legacy
-|-- error.rs           # Types d'erreurs applicatifs
-|-- logger.rs          # Logging backend/frontend
-|-- midi.rs            # Types et helpers MIDI
-|-- osc.rs             # Client OSC
-|-- rtp.rs             # Serveur RTP-MIDI + discovery
-|-- plugin_probe.rs    # Détection et filtrage de plugins
-|-- vst_scan.rs        # Scan des chemins VST
-|-- types.rs           # Types sérialisés partagés
-|-- audio/
-|   |-- mod.rs
-|   |-- engine.rs      # Moteur audio/VST de production
-|-- bridge/
-|   |-- mod.rs
-|   |-- runtime.rs     # Runtime bridge de production
-|-- tauri/
-|   |-- commands.rs
-|   |-- state.rs
-|   |-- utils.rs
-|   |-- window.rs
+|-- main.rs                 # Tauri bootstrap and command registration
+|-- application/            # Application services
+|-- audio/                  # Worker-owned audio/VST engine
+|-- bridge/                 # Prioritized MIDI routing pipeline
+|-- vst_worker/             # IPC protocol and process supervision
+|-- bin/vst_host_worker.rs  # Isolated production worker
+|-- plugin_probe*.rs        # Timed, isolated plug-in probing
+|-- reliable_playback.rs    # Deterministic recovery fixtures
+|-- rtp*.rs                 # RTP-MIDI server and discovery
+|-- tauri/commands.rs       # Public frontend command boundary
+|-- config.rs               # Versioned YAML configuration
+`-- types.rs                # Serialized frontend/backend contracts
 ```
 
-## Principes retenus
+## Design constraints
 
-- Le contrat frontend est figé par `src/api.ts`.
-- Le comportement observable de la sauvegarde historique reste la référence fonctionnelle.
-- Le code mort et les façades non branchées ont été retirés du graphe compilé.
-- `audio_legacy.rs` n'est plus dans le chemin de production.
+- Windows x64 is the only supported target.
+- One instrument plug-in owns the configured output device at a time.
+- Audio callbacks use bounded/preallocated queues and never wait on frontend work.
+- Note-off, sustain-off, and reset messages remain recoverable under queue pressure.
+- Control messages are versioned and bounded; each worker session uses unpredictable pipe names and a random authentication token.
+- Plug-in scanning runs out of process with a per-candidate timeout and cached class identity.
+- Frontend commands preserve the v1 API shape while lifecycle operations execute asynchronously.
 
-## Flux principaux
+## Shutdown and recovery
 
-### Configuration
+The supervisor closes MIDI input before asking the worker to stop. A cooperative worker saves state and releases its audio stream; a blocked worker is terminated by the Windows job object. Worker loss leaves the Tauri UI responsive and the bridge returns to a coherent faulted/stopped state instead of silently falling back to in-process hosting.
 
-`ConfigStore` charge et sauvegarde `config.yaml`, puis normalise les anciens champs RTP vers le format courant.
+## Required validation
 
-### Audio
-
-`AudioEngine` gère :
-
-- sélection backend/device CPAL
-- chargement VST2/VST3
-- runtime audio
-- métriques audio exposées au bridge et aux commandes Tauri
-
-### Bridge
-
-`BridgeHandle` orchestre :
-
-- entrée MIDI locale
-- reset/panic/test MIDI
-- routage vers audio, MIDI thru et OSC
-- synchronisation RTP-MIDI et participants
-- émission des événements d'activité et métriques
-
-### Tauri
-
-`tauri/commands.rs` est la seule frontière de commandes publiques. Les commandes intermédiaires ajoutées pendant le refactor mais non consommées par le frontend ont été retirées.
-
-## Vérification attendue
-
-Les commandes suivantes doivent rester vertes :
-
-```bash
+```powershell
 npm run lint
+npm test
 npm run build
-cargo build
-cargo test
-cargo clippy --all-targets --all-features -- -D warnings
+cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
+cargo test --manifest-path src-tauri/Cargo.toml --all-targets --all-features
 ```
+
+Release acceptance additionally requires a manual ASIO/VST campaign because real driver timing and third-party native editors cannot be represented faithfully by unit tests.

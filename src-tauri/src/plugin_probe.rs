@@ -46,7 +46,7 @@ pub fn scan_plugin_candidates(root: &Path) -> Vec<PathBuf> {
     plugin_probe_paths::scan_plugin_candidates(root)
 }
 
-pub(crate) fn detect_vst3_channels(
+pub fn detect_vst3_channels(
     plugin: &mut rack::vst3::Vst3Plugin,
     info: &RackPluginInfo,
     max_block_size: usize,
@@ -104,6 +104,13 @@ pub fn ensure_supported_plugin_in_app(path: &Path) -> Result<VstPluginEntry, Str
             .clone()
             .unwrap_or_else(|| "Plugin is not supported in this app".to_string()))
     }
+}
+
+pub fn smoke_vst2_instance(
+    instance: &mut vst::host::PluginInstance,
+    block_size: usize,
+) -> Result<(usize, usize), String> {
+    plugin_probe_vst2::smoke_vst2_instance(instance, block_size)
 }
 
 pub fn probe_plugin_isolated(path: &Path, timeout: Duration) -> VstPluginEntry {

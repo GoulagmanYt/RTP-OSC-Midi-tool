@@ -1,7 +1,7 @@
 import { useMemo, useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useBridge } from "../providers/BridgeProvider";
-import { resetKeys, sendTestMidi } from "../api";
+import { panicMidi, sendTestMidi } from "../api";
 import type { MidiActivityInfo } from "../api";
 import { useI18n } from "../providers/LanguageProvider";
 import { AdvancedRoutingCard } from "./routing/AdvancedRoutingCard";
@@ -9,6 +9,8 @@ import { BasicRoutingCard } from "./routing/BasicRoutingCard";
 import { RoutingStatusCard } from "./routing/RoutingStatusCard";
 import { TestMidiCard } from "./routing/TestMidiCard";
 import { displayPortName as displayPortNameLabel, formatNote } from "./routing/shared";
+import { toast } from "sonner";
+import { getErrorMessage } from "../api-errors";
 
 export default function RoutingPage() {
   const { config, status, updateConfig, midiInputs, midiOutputs, refreshLists } = useBridge();
@@ -156,6 +158,7 @@ export default function RoutingPage() {
       });
     } catch (e) {
       console.error("Failed to send test note", e);
+      toast.error(getErrorMessage(e) || t("toasts.routing.testMidiFailed"));
     }
   };
 
@@ -171,6 +174,7 @@ export default function RoutingPage() {
       });
     } catch (e) {
       console.error("Failed to send test CC", e);
+      toast.error(getErrorMessage(e) || t("toasts.routing.testMidiFailed"));
     }
   };
 
@@ -190,9 +194,11 @@ export default function RoutingPage() {
 
   const handlePanic = async () => {
     try {
-      await resetKeys();
+      await panicMidi();
+      toast.success(t("toasts.routing.panicSent"));
     } catch (e) {
       console.error("Failed to send MIDI panic", e);
+      toast.error(getErrorMessage(e) || t("toasts.routing.panicFailed"));
     }
   };
 

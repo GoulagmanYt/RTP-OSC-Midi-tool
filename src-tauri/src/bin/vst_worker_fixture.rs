@@ -156,7 +156,8 @@ mod fixture {
 #[cfg(target_os = "windows")]
 #[tokio::main]
 async fn main() {
-    if fixture::run().await.is_err() {
+    if let Err(error) = fixture::run().await {
+        eprintln!("VST worker fixture failed: {error}");
         std::process::exit(1);
     }
 }

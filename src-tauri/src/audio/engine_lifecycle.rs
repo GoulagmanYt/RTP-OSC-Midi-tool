@@ -292,23 +292,41 @@ impl AudioEngine {
 
     pub fn start(
         &self,
-        mut settings: AudioSettings,
+        settings: AudioSettings,
         vst_fallback: Option<PathBuf>,
         logger: FrontendLogger,
     ) -> Result<(), AudioError> {
         #[cfg(target_os = "windows")]
         {
-            if settings.vst_worker_enabled {
-                return self.start_isolated_worker(settings, vst_fallback, logger);
-            }
-            if self.is_worker_enabled() {
-                crate::tauri::utils::safe_block_on(self.worker.stop())
-                    .map_err(AudioError::Message)?;
-                self.worker_enabled.store(false, Ordering::Release);
-            }
+            self.start_isolated_worker(settings, vst_fallback, logger)
         }
-        // The in-process backend must never inherit a supervisor routing flag.
-        settings.vst_worker_enabled = false;
+        #[cfg(not(target_os = "windows"))]
+        {
+            self.start_in_process(settings, vst_fallback, logger)
+        }
+    }
+
+    /// Starts the worker-owned audio runtime without spawning another worker.
+    ///
+    /// This entry point is compiled only into the worker build. Desktop code
+    /// must use [`Self::start`], which always crosses the process boundary.
+    #[cfg(target_os = "windows")]
+    #[doc(hidden)]
+    pub fn start_worker_runtime(
+        &self,
+        settings: AudioSettings,
+        vst_fallback: Option<PathBuf>,
+        logger: FrontendLogger,
+    ) -> Result<(), AudioError> {
+        self.start_in_process(settings, vst_fallback, logger)
+    }
+
+    fn start_in_process(
+        &self,
+        settings: AudioSettings,
+        vst_fallback: Option<PathBuf>,
+        logger: FrontendLogger,
+    ) -> Result<(), AudioError> {
         let Some(_lifecycle_guard) = self.lifecycle_gate.try_lock() else {
             return Err(AudioError::Message(
                 "An audio start/reload/stop operation is already in progress".into(),

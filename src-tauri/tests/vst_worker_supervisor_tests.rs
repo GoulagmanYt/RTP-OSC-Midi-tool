@@ -1,4 +1,4 @@
-#![cfg(target_os = "windows")]
+#![cfg(all(target_os = "windows", feature = "worker-fixtures"))]
 
 use std::time::Duration;
 
@@ -10,7 +10,6 @@ use osc_midi_bridge::{
 fn fixture_settings() -> AudioSettings {
     AudioSettings {
         enabled: true,
-        vst_worker_enabled: true,
         backend: Some("asio".into()),
         device: Some("fixture".into()),
         sample_rate: 48_000,
@@ -18,6 +17,28 @@ fn fixture_settings() -> AudioSettings {
         gain_db: 0.0,
         limiter_enabled: false,
         vst_path: Some("fixture.vst3".into()),
+    }
+}
+
+async fn wait_for_exhausted_restart_budget(supervisor: &VstWorkerSupervisor) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut stable_since = None;
+    loop {
+        let snapshot = supervisor.snapshot();
+        let exhausted = snapshot.restarts == 3 && snapshot.state == VstWorkerState::Faulted;
+        if exhausted {
+            let since = stable_since.get_or_insert_with(tokio::time::Instant::now);
+            if since.elapsed() >= Duration::from_millis(750) {
+                return;
+            }
+        } else {
+            stable_since = None;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "worker restart budget did not settle: {snapshot:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -45,7 +66,7 @@ async fn isolated_worker_survives_midi_and_contains_process_crashes() {
     std::env::set_var("OSCMIDI_VST_FIXTURE_MODE", "crash");
     let crashed = VstWorkerSupervisor::new();
     assert!(crashed.start(fixture_settings(), None).await.is_err());
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    wait_for_exhausted_restart_budget(&crashed).await;
     let snapshot = crashed.snapshot();
     assert_eq!(snapshot.state, VstWorkerState::Faulted);
     assert_eq!(snapshot.restarts, 3);
@@ -64,12 +85,7 @@ async fn isolated_worker_survives_midi_and_contains_process_crashes() {
         detection_started.elapsed() < Duration::from_millis(2_000),
         "hung worker was not detected within the 1.5 second heartbeat budget"
     );
-    let exhaustion_deadline = tokio::time::Instant::now() + Duration::from_secs(8);
-    while (hung.snapshot().restarts < 3 || hung.snapshot().state != VstWorkerState::Faulted)
-        && tokio::time::Instant::now() < exhaustion_deadline
-    {
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    wait_for_exhausted_restart_budget(&hung).await;
     assert_eq!(hung.snapshot().restarts, 3);
     hung.stop().await.ok();
 

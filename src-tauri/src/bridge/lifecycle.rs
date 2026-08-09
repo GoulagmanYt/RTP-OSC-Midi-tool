@@ -127,6 +127,7 @@ pub(super) fn start_runtime(
     let (midi_event_tx, midi_event_rx) = bounded::<MidiNoteEvent>(1024);
     let shared_config = Arc::new(Mutex::new(config.clone()));
     let config_rev = Arc::new(AtomicU64::new(1));
+    let panic_revision = Arc::new(AtomicU64::new(0));
     let activity_tracker = Arc::new(Mutex::new(MidiActivityTracker::default()));
     let osc_counter = Arc::new(AtomicU32::new(0));
     let actual_midi_in = Arc::new(Mutex::new(initial_connected_input(&config)));
@@ -177,6 +178,7 @@ pub(super) fn start_runtime(
     let processing = Some(spawn_processing_loop(
         shared_config.clone(),
         config_rev.clone(),
+        panic_revision.clone(),
         osc,
         midi_rx,
         stop.clone(),
@@ -213,6 +215,7 @@ pub(super) fn start_runtime(
         reliable_playback,
         config: shared_config,
         config_rev,
+        panic_revision,
         actual_midi_in,
         actual_midi_out,
     })

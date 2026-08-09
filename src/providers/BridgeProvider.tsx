@@ -19,6 +19,7 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
   const [midiInputs, setMidiInputs] = useState<string[]>([]);
   const [midiOutputs, setMidiOutputs] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [initializationError, setInitializationError] = useState<string | null>(null);
   const [preflight, setPreflight] = useState<api.PreflightReport | null>(null);
   const { logs, appendLog, clearLogs } = useLogs();
   const { t } = useI18n();
@@ -61,6 +62,7 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
     setStatus,
     setPreflight,
     setIsLoading,
+    setInitializationError,
     refreshStatus,
     refreshLists,
     refreshAudioDevices,
@@ -101,6 +103,7 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
         midiInputs,
         midiOutputs,
         isLoading,
+        initializationError,
         preflight,
         refreshStatus,
         updateConfig,

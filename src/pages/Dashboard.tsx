@@ -8,6 +8,7 @@ import { RTP_VIRTUAL_INPUT, VST_OUTPUT } from "../constants";
 import { DiagnosticsGrid } from "./dashboard/DiagnosticsGrid";
 import { ErrorCard } from "./dashboard/ErrorCard";
 import { OverviewGrid } from "./dashboard/OverviewGrid";
+import { getErrorMessage } from "../api-errors";
 
 export default function Dashboard() {
   const navigate = useNavigate();
@@ -101,7 +102,7 @@ export default function Dashboard() {
       toast.success(t("toasts.audio.pingSent"));
       refreshStatus();
     } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
+      const message = getErrorMessage(e);
       toast.error(message || t("toasts.audio.pingFailed"));
     }
   };
@@ -112,7 +113,7 @@ export default function Dashboard() {
       toast.success(t("toasts.audio.vstReloaded"));
       refreshStatus();
     } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
+      const message = getErrorMessage(e);
       toast.error(message || t("toasts.audio.vstReloadFailed"));
     }
   };

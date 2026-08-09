@@ -478,7 +478,7 @@ impl AudioEngine {
     }
 
     pub fn ping(&self) -> Result<(), AudioError> {
-        if self.runtime.lock().is_none() {
+        if !self.is_running() {
             return Err(AudioError::Message("Audio runtime not started".into()));
         }
 

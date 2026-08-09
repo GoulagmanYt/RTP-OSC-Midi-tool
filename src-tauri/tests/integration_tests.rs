@@ -1,8 +1,7 @@
 use osc_midi_bridge::audio::{AudioEngine, AudioSettings};
 use osc_midi_bridge::bridge::BridgeHandle;
 use osc_midi_bridge::config::{
-    AppConfig, AudioConfig, AvatarConfig, LoggingConfig, MidiConfig, OscConfig, RtpConfig, Theme,
-    UiConfig,
+    AppConfig, AudioConfig, LoggingConfig, MidiConfig, OscConfig, RtpConfig, Theme, UiConfig,
 };
 use osc_midi_bridge::error::CommandError;
 use osc_midi_bridge::midi::MidiFrame;
@@ -22,7 +21,6 @@ fn test_audio_engine_lifecycle() {
     // Test de configuration audio valide
     let settings = AudioSettings {
         enabled: true,
-        vst_worker_enabled: false,
         backend: Some("auto".to_string()),
         device: None,
         sample_rate: 48_000,
@@ -108,12 +106,7 @@ fn test_configuration_validation() {
         },
         ui: UiConfig {
             theme: Theme::Light,
-            avatar: AvatarConfig {
-                path: Some("C:/avatars/test.vrm".to_string()),
-                offset_x: 12.0,
-                offset_y: 18.0,
-                scale: 1.25,
-            },
+            theme_palette: "contrast".to_string(),
             ..UiConfig::default()
         },
         ..AppConfig::default()
@@ -126,10 +119,7 @@ fn test_configuration_validation() {
     assert_eq!(reloaded.audio.sample_rate, 44_100);
     assert_eq!(reloaded.audio.buffer_size, 512);
     assert_eq!(reloaded.audio.gain_db, -6.0);
-    assert_eq!(
-        reloaded.ui.avatar.path.as_deref(),
-        Some("C:/avatars/test.vrm")
-    );
+    assert_eq!(reloaded.ui.theme_palette, "contrast");
 }
 
 /// Test de résistance du bridge sous charge
@@ -301,6 +291,9 @@ fn test_runtime_no_longer_exports_refactor_only_commands() {
         "load_vst_cache,",
         "open_folder,",
         "generate_preflight_report,",
+        "reset_keys,",
+        "start_audio,",
+        "stop_audio,",
     ] {
         assert!(
             !main_rs.contains(forbidden),

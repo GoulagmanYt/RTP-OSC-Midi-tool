@@ -78,6 +78,19 @@ jobs:
 
           Write-Host "Validated OSCMidi version $packageVersion"
 
+      - name: Validate frontend
+        run: |
+          npm run lint
+          npm test
+
+      - name: Validate Rust
+        run: |
+          cargo fmt --manifest-path src-tauri/Cargo.toml --package osc-midi-bridge -- --check
+          cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
+          cargo test --manifest-path src-tauri/Cargo.toml --all-targets --all-features
+          cargo fmt --manifest-path tools/diagnostics/Cargo.toml --package oscmidi-diagnostics -- --check
+          cargo clippy --manifest-path tools/diagnostics/Cargo.toml --target-dir tools/diagnostics/target --all-targets -- -D warnings
+
       - name: Build Tauri application and MSI installer
         run: npm run tauri:build -- --bundles msi --ci
 

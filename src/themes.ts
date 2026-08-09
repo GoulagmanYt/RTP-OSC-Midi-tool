@@ -96,15 +96,4 @@ export function applyTheme(paletteId: string, radius: number) {
   root.classList.toggle("dark", palette.dark);
   root.style.colorScheme = palette.dark ? "dark" : "light";
   root.style.setProperty("--radius", `${clampNumber(radius, 8, 16)}px`);
-
-  // Fixed UI geometry and visual density for readability and predictable layout.
-  root.style.setProperty("--ui-scale", "1");
-  root.style.setProperty("--page-padding", "20px");
-  root.style.setProperty("--sidebar-width", "248px");
-  root.style.setProperty("--surface-opacity", "0.55");
-  root.style.setProperty("--panel-opacity", "0.2");
-  root.style.setProperty("--card-opacity", "0.96");
-  root.style.setProperty("--aurora-opacity", "0.45");
-  root.style.setProperty("--grain-opacity", "0.08");
-  root.classList.remove("reduce-motion");
 }

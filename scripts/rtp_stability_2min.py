@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import os
 import re
 import socket
 import subprocess
@@ -12,10 +13,12 @@ from typing import Dict, Optional
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-PLINK = Path(r"C:\Program Files\PuTTY\plink.exe")
-PI_HOST = "pianoledvisualizer.local"
-PI_USER = "plv"
-PI_PASS = "visualizer"
+DIAGNOSTICS_MANIFEST = REPO_ROOT / "tools" / "diagnostics" / "Cargo.toml"
+DIAGNOSTICS_TARGET = REPO_ROOT / "tools" / "diagnostics" / "target"
+PLINK = Path(os.environ.get("OSCMIDI_PLINK_PATH", r"C:\Program Files\PuTTY\plink.exe"))
+PI_HOST = os.environ.get("OSCMIDI_PI_HOST", "pianoledvisualizer.local")
+PI_USER = os.environ.get("OSCMIDI_PI_USER", "plv")
+PI_PASS = os.environ.get("OSCMIDI_PI_PASSWORD")
 
 
 def now_stamp() -> str:
@@ -39,11 +42,10 @@ def run_pi_python(script: str, timeout: int) -> subprocess.CompletedProcess:
         str(PLINK),
         "-batch",
         "-ssh",
-        "-pw",
-        PI_PASS,
-        f"{PI_USER}@{PI_HOST}",
-        remote,
     ]
+    if PI_PASS:
+        cmd.extend(["-pw", PI_PASS])
+    cmd.extend([f"{PI_USER}@{PI_HOST}", remote])
     return run_cmd(cmd, timeout=timeout)
 
 
@@ -150,11 +152,21 @@ class OscReceiver:
 
 
 def ensure_release_probe_built() -> None:
-    exe = REPO_ROOT / ".cargo-target" / "release" / "rtp_probe.exe"
+    exe = DIAGNOSTICS_TARGET / "release" / "rtp_probe.exe"
     if exe.exists():
         return
-    cmd = ["cargo", "build", "--release", "--bin", "rtp_probe"]
-    result = run_cmd(cmd, timeout=600000, cwd=REPO_ROOT / "src-tauri")
+    cmd = [
+        "cargo",
+        "build",
+        "--manifest-path",
+        str(DIAGNOSTICS_MANIFEST),
+        "--target-dir",
+        str(DIAGNOSTICS_TARGET),
+        "--release",
+        "--bin",
+        "rtp_probe",
+    ]
+    result = run_cmd(cmd, timeout=600000, cwd=REPO_ROOT)
     if result.returncode != 0:
         raise RuntimeError(
             "Failed to build release rtp_probe:\nSTDOUT:\n"
@@ -168,7 +180,7 @@ def run_transport_probe_test(duration_s: int, sleep_s: float, probe_port: int) -
     ensure_release_probe_built()
     probe_name = f"OSCMidiProbe2m_{int(time.time())}"
     probe_cmd = [
-        str(REPO_ROOT / ".cargo-target" / "release" / "rtp_probe.exe"),
+        str(DIAGNOSTICS_TARGET / "release" / "rtp_probe.exe"),
         "--name",
         probe_name,
         "--port",
@@ -433,7 +445,14 @@ print(json.dumps({{
 
 
 def main():
-    parser = argparse.ArgumentParser(description="2-minute RTP stability test (Pi transport + OSC e2e)")
+    parser = argparse.ArgumentParser(
+        description="2-minute RTP stability test (Pi transport + OSC e2e)",
+        epilog=(
+            "Pi connection overrides: OSCMIDI_PI_HOST, OSCMIDI_PI_USER, "
+            "OSCMIDI_PI_PASSWORD and OSCMIDI_PLINK_PATH. Without a password, "
+            "Plink uses the configured SSH key or agent."
+        ),
+    )
     parser.add_argument("--duration", type=int, default=120)
     parser.add_argument("--sleep", type=float, default=0.0015)
     parser.add_argument("--probe-port", type=int, default=5012)

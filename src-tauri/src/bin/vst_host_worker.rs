@@ -202,13 +202,12 @@ mod windows_worker {
                 incoming = read_control_frame(&mut control) => {
                     let message = incoming.map_err(|error| format!("Control pipe failed: {error}"))?;
                     let response = match message {
-                        ControlMessage::Load { request_id, mut settings, class_uid, warmup_ms } => {
-                            settings.vst_worker_enabled = false;
+                        ControlMessage::Load { request_id, settings, class_uid, warmup_ms } => {
                             let audio_for_load = audio.clone();
                             let logger_for_load = logger.clone();
                             let load = execute_blocking(move || {
                                 audio_for_load
-                                    .start(settings, None, logger_for_load)
+                                    .start_worker_runtime(settings, None, logger_for_load)
                                     .map_err(|error| error.to_string())
                             }).await;
                             match load {

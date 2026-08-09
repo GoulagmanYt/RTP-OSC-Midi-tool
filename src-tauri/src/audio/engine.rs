@@ -50,8 +50,6 @@ pub(super) enum MidiSendOutcome {
     AudioStopped,
 }
 
-// FIX #1: Add #[derive(Clone)] — all fields are Arc<T> so Clone is safe and required
-// for audio.clone() calls in bridge.rs and main.rs.
 #[derive(Clone)]
 pub struct AudioEngine {
     pub(super) lifecycle_gate: Arc<Mutex<()>>,
@@ -111,7 +109,6 @@ impl AudioEngine {
         let _ = self.send_midi_with_outcome(bytes);
     }
 
-    #[allow(dead_code)]
     pub fn send_midi_with_age(&self, bytes: &[u8], age_us: u64) {
         let Some(packet) = MidiPacket::from_bytes_with_age(bytes, age_us) else {
             return;

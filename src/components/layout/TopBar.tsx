@@ -5,11 +5,12 @@ import { useBridge } from "../../providers/BridgeProvider";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import Pastille from "../../assets/pastille-96.jpg";
 import { useI18n } from "../../providers/LanguageProvider";
+import { toast } from "sonner";
 
-let _appWindow: ReturnType<typeof getCurrentWebviewWindow> | null = null;
+let appWindow: ReturnType<typeof getCurrentWebviewWindow> | null = null;
 function getAppWindow() {
-  if (!_appWindow) _appWindow = getCurrentWebviewWindow();
-  return _appWindow;
+  if (!appWindow) appWindow = getCurrentWebviewWindow();
+  return appWindow;
 }
 
 export function TopBar({ onOpenCommand }: { onOpenCommand: () => void }) {
@@ -51,51 +52,85 @@ export function TopBar({ onOpenCommand }: { onOpenCommand: () => void }) {
           ? "contrast"
           : "dark"
         : "light";
-    await updateConfig({ ui: { theme: newTheme, themePalette: nextPalette } });
+    try {
+      await updateConfig({ ui: { theme: newTheme, themePalette: nextPalette } });
+    } catch (error) {
+      console.error("Theme update failed", error);
+      toast.error(t("toasts.settings.themeUpdateFailed"));
+    }
   };
 
-  // Use a fixed, packaged image for the avatar.
+  const runWindowAction = (action: () => Promise<void>) => {
+    void action().catch((error) => {
+      console.error("Window action failed", error);
+      toast.error(t("toasts.window.actionFailed"));
+    });
+  };
+
   return (
-    <header 
+    <header
       data-tauri-drag-region
-      className="h-12 border-b flex items-center justify-between px-4 glass-surface backdrop-blur-xl select-none"
+      className="grid h-13 grid-cols-[1fr_auto_1fr] items-center border-b px-3 glass-surface backdrop-blur-xl select-none"
     >
-      {/* Traffic Lights Area */}
-      <div className="flex items-center gap-2 w-20 z-50">
-          <div className="flex gap-2">
-            <button 
-              aria-label={t("window.close")}
-              onClick={() => getAppWindow().close()}
-              className="w-3 h-3 rounded-full bg-red-500 hover:bg-red-600 transition-colors" 
-            />
-            <button 
-              aria-label={t("window.minimize")}
-              onClick={() => getAppWindow().minimize()}
-              className="w-3 h-3 rounded-full bg-yellow-500 hover:bg-yellow-600 transition-colors" 
-            />
-            <button 
-              aria-label={t("window.maximize")}
-              onClick={() => getAppWindow().toggleMaximize()}
-              className="w-3 h-3 rounded-full bg-green-500 hover:bg-green-600 transition-colors" 
-            />
-         </div>
+      <div data-tauri-drag-region className="z-10 flex items-center justify-self-start">
+        <div data-tauri-drag-region className="flex items-center gap-0.5">
+          <button
+            type="button"
+            aria-label={t("window.close")}
+            title={t("window.close")}
+            onClick={() => runWindowAction(() => getAppWindow().close())}
+            className="group grid h-6 w-6 place-items-center rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <span className="h-3 w-3 rounded-full bg-red-500 transition-transform group-hover:scale-110" />
+          </button>
+          <button
+            type="button"
+            aria-label={t("window.minimize")}
+            title={t("window.minimize")}
+            onClick={() => runWindowAction(() => getAppWindow().minimize())}
+            className="group grid h-6 w-6 place-items-center rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <span className="h-3 w-3 rounded-full bg-yellow-500 transition-transform group-hover:scale-110" />
+          </button>
+          <button
+            type="button"
+            aria-label={t("window.maximize")}
+            title={t("window.maximize")}
+            onClick={() => runWindowAction(() => getAppWindow().toggleMaximize())}
+            className="group grid h-6 w-6 place-items-center rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <span className="h-3 w-3 rounded-full bg-green-500 transition-transform group-hover:scale-110" />
+          </button>
+        </div>
       </div>
 
-      {/* Center Title */}
-      <div className="flex-1 flex justify-center items-center font-medium text-sm text-foreground/80" data-tauri-drag-region>
-         {getTitle()}
+      <div className="text-sm font-medium text-foreground/80" data-tauri-drag-region>
+        {getTitle()}
       </div>
 
-      {/* Right Actions */}
-      <div className="flex items-center gap-2 w-auto justify-end">
-        <Button variant="ghost" size="icon" className="h-8 w-8" onClick={onOpenCommand}>
+      <div data-tauri-drag-region className="flex items-center justify-self-end gap-1">
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-8 w-8"
+          onClick={onOpenCommand}
+          aria-label={t("topBar.openCommandPalette")}
+          title={t("topBar.openCommandPalette")}
+        >
           <Search className="w-4 h-4 text-muted-foreground" />
         </Button>
-        <Button variant="ghost" size="icon" className="h-8 w-8" onClick={toggleTheme}>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-8 w-8"
+          onClick={toggleTheme}
+          aria-label={t("topBar.toggleTheme")}
+          title={t("topBar.toggleTheme")}
+        >
           {config?.ui.theme === "dark" ? (
-             <Sun className="w-4 h-4 text-muted-foreground" />
+            <Sun className="w-4 h-4 text-muted-foreground" />
           ) : (
-             <Moon className="w-4 h-4 text-muted-foreground" />
+            <Moon className="w-4 h-4 text-muted-foreground" />
           )}
         </Button>
         <Button
@@ -108,8 +143,9 @@ export function TopBar({ onOpenCommand }: { onOpenCommand: () => void }) {
           {t(`language.short.${language}`)}
         </Button>
         <div
+          role="img"
+          aria-label={t("topBar.avatar")}
           className="w-8 h-8 rounded-full border overflow-hidden bg-primary/10 flex items-center justify-center text-xs font-bold text-primary"
-          title={t("topBar.avatar")}
           style={{
             backgroundImage: `url(${Pastille})`,
             backgroundSize: "cover",

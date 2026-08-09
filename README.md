@@ -8,14 +8,14 @@ OSCMidi is a Windows-only desktop bridge for routing MIDI between RTP-MIDI netwo
 
 - Hosts a Windows desktop app built with Tauri, React, and Rust.
 - Bridges RTP-MIDI sessions to local MIDI devices and OSC endpoints.
-- Hosts VST2 and VST3 instrument plugins.
+- Hosts VST2 and VST3 instruments in a supervised process so plug-in crashes do not take down the desktop interface.
 - Provides low-latency audio output with ASIO or WASAPI.
 - Scans plugins, filters unsupported plugins, and keeps a local plugin cache.
 - Persists routing profiles, runtime state, diagnostics, and YAML configuration.
 
 ## Current Release
 
-Latest intended release tag: `v1.1.0`.
+Latest intended release tag: `v2.0.0`.
 
 For tagged releases, GitHub Actions builds the Windows executable and attaches the generated artifacts to the GitHub Release.
 
@@ -38,7 +38,7 @@ Use Windows 10 or Windows 11.
 
 Required tools:
 
-- Node.js 20 or newer, including npm.
+- Node.js 20.19 or newer (or 22.12+), including npm.
 - Rust stable toolchain through `rustup`.
 - Visual Studio Build Tools with the C++ MSVC toolchain.
 - CMake available on PATH.
@@ -97,14 +97,14 @@ The GitHub workflow is configured in `.github/workflows/build-windows.yml`.
 It runs on:
 
 - every push to `main`;
-- every tag matching `v*`, for example `v1.0.0`;
+- every tag matching `v*`, for example `v2.0.0`;
 - manual workflow dispatch from GitHub Actions.
 
 To create a release build:
 
 ```powershell
-git tag v1.0.0
-git push origin v1.0.0
+git tag v2.0.0
+git push origin v2.0.0
 ```
 
 The tag workflow uploads the build artifact and attaches it to the GitHub Release.
@@ -122,10 +122,15 @@ npm run test
 Rust checks:
 
 ```powershell
-cd src-tauri
-cargo test
-cargo test --release
-cargo clippy --all-targets --all-features
+cargo fmt --manifest-path src-tauri/Cargo.toml --package osc-midi-bridge -- --check
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
+cargo test --manifest-path src-tauri/Cargo.toml --all-targets --all-features
+```
+
+Developer-only diagnostics are isolated from the packaged application:
+
+```powershell
+cargo build --manifest-path tools/diagnostics/Cargo.toml --target-dir tools/diagnostics/target
 ```
 
 ## Project Stack
@@ -157,6 +162,8 @@ Important backend areas:
 - `src-tauri/src/main.rs`: Tauri entry point.
 - `src-tauri/src/bridge/`: MIDI routing pipeline.
 - `src-tauri/src/audio/`: audio engine, plugin lifecycle, and editor handling.
+- `src-tauri/src/vst_worker/`: authenticated IPC protocol and worker supervision.
+- `src-tauri/src/bin/vst_host_worker.rs`: isolated VST/audio worker entry point.
 - `src-tauri/src/plugin_probe*.rs`: plugin scanning and compatibility filtering.
 - `src-tauri/src/rtp*.rs`: RTP-MIDI server and discovery.
 
@@ -173,6 +180,7 @@ OSCMidi stores runtime data under the Windows app data directory:
 ## Plugin Notes
 
 - Only supported instrument plugins are shown.
+- Each active VST is hosted by the supervised `vst-host-worker` sidecar.
 - Effects and incompatible plugins are hidden intentionally.
 - `sforzando.vst3` has a dedicated teardown workaround to avoid plugin unload crashes.
 - Internal VST3 state restore is not applied for sforzando. It keeps state through ARIA files, for example `default.ariax`.

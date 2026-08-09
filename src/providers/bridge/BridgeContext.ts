@@ -11,6 +11,7 @@ export interface BridgeContextType {
   midiInputs: string[];
   midiOutputs: string[];
   isLoading: boolean;
+  initializationError: string | null;
   preflight: api.PreflightReport | null;
   refreshStatus: () => Promise<void>;
   updateConfig: (patch: api.DeepPartial<api.AppConfig>) => Promise<void>;

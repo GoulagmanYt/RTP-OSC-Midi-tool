@@ -4,7 +4,7 @@ import { AudioStressTestCard } from "./AudioStressTestCard";
 
 describe("AudioStressTestCard", () => {
   it("hides stress modes that do not exercise a real RTP input", () => {
-    render(<AudioStressTestCard bridgeRunning audioRunning />);
+    render(<AudioStressTestCard bridgeRunning audioRunning t={(key) => key} />);
 
     expect(screen.queryByRole("button", { name: /RTP Input/i })).toBeNull();
     expect(screen.queryByRole("button", { name: /End-to-End/i })).toBeNull();

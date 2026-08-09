@@ -1,13 +1,9 @@
 #![allow(deprecated)]
 
 use std::{
-    fs::{self, OpenOptions},
-    io::Write,
+    fs,
     path::{Path, PathBuf},
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
+    sync::Arc,
 };
 
 use directories::ProjectDirs;
@@ -31,8 +27,6 @@ pub(super) enum SavedState {
     Chunk(Vec<u8>),
     Params(Vec<f32>),
 }
-
-static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 fn legacy_state_path_for_plugin(vst_path: &Path) -> Option<PathBuf> {
     let file_name = vst_path.file_name()?.to_string_lossy().to_string();
@@ -120,57 +114,6 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 
 pub(super) fn state_path_for_plugin(vst_path: &Path) -> Option<PathBuf> {
     state_path_for_identity(vst_path, true)
-}
-
-fn write_state_atomically(path: &Path, data: &[u8]) -> std::io::Result<()> {
-    let parent = path.parent().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, "state path has no parent")
-    })?;
-    fs::create_dir_all(parent)?;
-    let sequence = TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let temp_path = parent.join(format!(
-        ".{}.{}.{}.tmp",
-        path.file_name().unwrap_or_default().to_string_lossy(),
-        std::process::id(),
-        sequence
-    ));
-    let mut temp = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&temp_path)?;
-    if let Err(error) = temp.write_all(data).and_then(|_| temp.sync_all()) {
-        let _ = fs::remove_file(&temp_path);
-        return Err(error);
-    }
-    drop(temp);
-
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::ffi::OsStrExt;
-        use windows::core::PCWSTR;
-        use windows::Win32::Storage::FileSystem::{
-            MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
-        };
-
-        let temp_wide: Vec<u16> = temp_path.as_os_str().encode_wide().chain(Some(0)).collect();
-        let path_wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-        let result = unsafe {
-            MoveFileExW(
-                PCWSTR(temp_wide.as_ptr()),
-                PCWSTR(path_wide.as_ptr()),
-                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-            )
-        };
-        if let Err(error) = result {
-            let _ = fs::remove_file(&temp_path);
-            return Err(std::io::Error::other(error));
-        }
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    fs::rename(&temp_path, path)?;
-
-    Ok(())
 }
 
 pub(super) fn encode_state_chunk(data: &[u8]) -> Vec<u8> {
@@ -319,7 +262,7 @@ pub(super) fn save_vst_state_blocking(plugin: &Arc<Mutex<PluginBackend>>, vst_pa
         );
         return;
     };
-    if let Err(error) = write_state_atomically(&state_path, &payload) {
+    if let Err(error) = crate::atomic_file::write_atomically(&state_path, &payload) {
         background_log("error", format!("Failed to save VST state: {error}"));
     } else {
         background_log(
@@ -413,7 +356,7 @@ pub(super) fn load_vst_state(
             }
             drop(guard);
             if migrate_legacy {
-                if let Err(error) = write_state_atomically(&new_state_path, &data) {
+                if let Err(error) = crate::atomic_file::write_atomically(&new_state_path, &data) {
                     logger.warn(format!("Failed to migrate legacy VST state: {error}"));
                 } else {
                     logger.info(format!("Migrated legacy VST state to {:?}", new_state_path));

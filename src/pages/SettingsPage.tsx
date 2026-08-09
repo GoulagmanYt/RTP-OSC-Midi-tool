@@ -17,8 +17,11 @@ import {
   openAppDir,
   resetConfigDefaults,
   type AppPaths,
+  type AppConfig,
+  type DeepPartial,
 } from "../api";
 import { useI18n } from "../providers/LanguageProvider";
+import { getErrorMessage } from "../api-errors";
 
 type PaletteChoice = {
   id: "light" | "dark" | "contrast";
@@ -40,8 +43,11 @@ export default function SettingsPage() {
   useEffect(() => {
     getAppPaths()
       .then(setPaths)
-      .catch((e) => console.error("Failed to load app paths", e));
-  }, []);
+      .catch((error) => {
+        console.error("Failed to load app paths", error);
+        toast.error(t("toasts.settings.pathsLoadFailed"));
+      });
+  }, [t]);
 
   const currentPalette = (config?.ui.themePalette as PaletteChoice["id"]) || "light";
 
@@ -50,6 +56,8 @@ export default function SettingsPage() {
     try {
       await saveConfig();
       toast.success(t("toasts.settings.configSaved"));
+    } catch (error) {
+      toast.error(getErrorMessage(error) || t("toasts.settings.configSaveFailed"));
     } finally {
       setBusy(false);
     }
@@ -62,7 +70,7 @@ export default function SettingsPage() {
       clearLogs();
       toast.success(t("toasts.settings.logsCleared"));
     } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
+      const message = getErrorMessage(e);
       toast.error(message || t("toasts.settings.logsClearFailed"));
     } finally {
       setBusy(false);
@@ -70,13 +78,16 @@ export default function SettingsPage() {
   };
 
   const handleReset = async () => {
+    if (!window.confirm(t("settings.general.resetConfirmation"))) {
+      return;
+    }
     setBusy(true);
     try {
       await resetConfigDefaults();
       await reloadConfig();
       toast.success(t("toasts.settings.configReset"));
     } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
+      const message = getErrorMessage(e);
       toast.error(message || t("toasts.settings.configResetFailed"));
     } finally {
       setBusy(false);
@@ -85,12 +96,24 @@ export default function SettingsPage() {
 
   const handlePaletteChange = async (palette: PaletteChoice["id"]) => {
     const nextTheme = palette === "light" ? "light" : "dark";
-    await updateConfig({
-      ui: {
-        themePalette: palette,
-        theme: nextTheme,
-      },
-    });
+    try {
+      await updateConfig({
+        ui: {
+          themePalette: palette,
+          theme: nextTheme,
+        },
+      });
+    } catch (error) {
+      toast.error(getErrorMessage(error) || t("toasts.settings.themeUpdateFailed"));
+    }
+  };
+
+  const handleConfigUpdate = async (patch: DeepPartial<AppConfig>) => {
+    try {
+      await updateConfig(patch);
+    } catch (error) {
+      toast.error(getErrorMessage(error) || t("toasts.settings.configUpdateFailed"));
+    }
   };
 
   const handleExportConfig = async () => {
@@ -105,7 +128,7 @@ export default function SettingsPage() {
       await exportConfig(target.toString());
       toast.success(t("toasts.settings.exportSuccess"));
     } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
+      const message = getErrorMessage(e);
       toast.error(message || t("toasts.settings.exportFailed"));
     } finally {
       setBusy(false);
@@ -124,7 +147,7 @@ export default function SettingsPage() {
       await exportDiagnostics(target.toString());
       toast.success(t("toasts.settings.exportDiagnosticsSuccess"));
     } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
+      const message = getErrorMessage(e);
       toast.error(message || t("toasts.settings.exportDiagnosticsFailed"));
     } finally {
       setBusy(false);
@@ -144,7 +167,7 @@ export default function SettingsPage() {
       await reloadConfig();
       toast.success(t("toasts.settings.importSuccess"));
     } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
+      const message = getErrorMessage(e);
       toast.error(message || t("toasts.settings.importFailed"));
     } finally {
       setBusy(false);
@@ -155,7 +178,7 @@ export default function SettingsPage() {
     try {
       await openAppDir(target);
     } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
+      const message = getErrorMessage(e);
       toast.error(message || t("toasts.settings.openDirFailed"));
     }
   };
@@ -217,14 +240,14 @@ export default function SettingsPage() {
               checked={config?.ui.developerMode || false}
               onCheckedChange={async (checked) => {
                 if (!checked) {
-                  await updateConfig({
+                  await handleConfigUpdate({
                     ui: { developerMode: false },
-                    logging: { enabled: false, verbose: false, logAllToFile: false, liveLogs: false },
+                    logging: { enabled: false, verbose: false, logAllToFile: false },
                     osc: { logMessages: false },
                     rtp: { logMessages: false },
                   });
                 } else {
-                  await updateConfig({ ui: { developerMode: true } });
+                  await handleConfigUpdate({ ui: { developerMode: true } });
                 }
               }}
             />
@@ -235,54 +258,54 @@ export default function SettingsPage() {
               <div className="border-t pt-4" />
               <div className="flex items-center justify-between gap-4">
                 <div className="min-w-0 flex flex-col gap-1">
-              <Label>{t("settings.general.verbose")}</Label>
-              <p className="text-xs text-muted-foreground">{t("settings.general.verboseHint")}</p>
-            </div>
-            <Switch
-              checked={config?.logging.verbose || false}
-              onCheckedChange={(checked) => updateConfig({ logging: { verbose: checked } })}
-            />
-          </div>
+                  <Label>{t("settings.general.verbose")}</Label>
+                  <p className="text-xs text-muted-foreground">{t("settings.general.verboseHint")}</p>
+                </div>
+                <Switch
+                  checked={config?.logging.verbose || false}
+                  onCheckedChange={(checked) => handleConfigUpdate({ logging: { verbose: checked } })}
+                />
+              </div>
 
-          <div className="border-t pt-4" />
+              <div className="border-t pt-4" />
 
-          <div className="flex items-center justify-between gap-4">
-            <div className="min-w-0 flex flex-col gap-1">
-              <Label>{t("settings.general.oscLogs")}</Label>
-              <p className="text-xs text-muted-foreground">{t("settings.general.oscLogsHint")}</p>
-            </div>
-            <Switch
-              checked={config?.osc.logMessages || false}
-              onCheckedChange={(checked) => updateConfig({ osc: { logMessages: checked } })}
-            />
-          </div>
+              <div className="flex items-center justify-between gap-4">
+                <div className="min-w-0 flex flex-col gap-1">
+                  <Label>{t("settings.general.oscLogs")}</Label>
+                  <p className="text-xs text-muted-foreground">{t("settings.general.oscLogsHint")}</p>
+                </div>
+                <Switch
+                  checked={config?.osc.logMessages || false}
+                  onCheckedChange={(checked) => handleConfigUpdate({ osc: { logMessages: checked } })}
+                />
+              </div>
 
-          <div className="border-t pt-4" />
+              <div className="border-t pt-4" />
 
-          <div className="flex items-center justify-between gap-4">
-            <div className="min-w-0 flex flex-col gap-1">
-              <Label>{t("settings.general.logAllToFile")}</Label>
-              <p className="text-xs text-muted-foreground">{t("settings.general.logAllToFileHint")}</p>
-            </div>
-            <Switch
-              checked={config?.logging.logAllToFile || false}
-              onCheckedChange={(checked) => updateConfig({ logging: { logAllToFile: checked } })}
-            />
-          </div>
+              <div className="flex items-center justify-between gap-4">
+                <div className="min-w-0 flex flex-col gap-1">
+                  <Label>{t("settings.general.logAllToFile")}</Label>
+                  <p className="text-xs text-muted-foreground">{t("settings.general.logAllToFileHint")}</p>
+                </div>
+                <Switch
+                  checked={config?.logging.logAllToFile || false}
+                  onCheckedChange={(checked) => handleConfigUpdate({ logging: { logAllToFile: checked } })}
+                />
+              </div>
 
-          <div className="border-t pt-4" />
+              <div className="border-t pt-4" />
 
-          <div className="flex items-center justify-between gap-4">
-            <div className="min-w-0 flex flex-col gap-1">
-              <Label>{t("settings.general.disableLogs")}</Label>
-              <p className="text-xs text-muted-foreground">{t("settings.general.disableLogsHint")}</p>
-            </div>
-            <Switch
-              checked={!(config?.logging.enabled ?? true)}
-              onCheckedChange={(checked) => updateConfig({ logging: { enabled: !checked } })}
-            />
-          </div>
-          </>
+              <div className="flex items-center justify-between gap-4">
+                <div className="min-w-0 flex flex-col gap-1">
+                  <Label>{t("settings.general.disableLogs")}</Label>
+                  <p className="text-xs text-muted-foreground">{t("settings.general.disableLogsHint")}</p>
+                </div>
+                <Switch
+                  checked={!(config?.logging.enabled ?? true)}
+                  onCheckedChange={(checked) => handleConfigUpdate({ logging: { enabled: !checked } })}
+                />
+              </div>
+            </>
           )}
         </CardContent>
       </Card>
@@ -344,22 +367,22 @@ export default function SettingsPage() {
       {config?.ui.developerMode && (
         <Card>
           <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Trash2 className="h-5 w-5 text-orange-500" />
-            {t("settings.logs.title")}
-          </CardTitle>
-          <CardDescription>{t("settings.logs.description")}</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <p className="text-sm text-muted-foreground">{t("settings.logs.hint")}</p>
-          <div className="flex justify-end gap-2">
-            <Button variant="outline" disabled={busy} onClick={handleClearLogs}>
-              <RefreshCcw className="h-4 w-4 mr-2" />
-              {t("settings.logs.clear")}
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
+            <CardTitle className="flex items-center gap-2">
+              <Trash2 className="h-5 w-5 text-orange-500" />
+              {t("settings.logs.title")}
+            </CardTitle>
+            <CardDescription>{t("settings.logs.description")}</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <p className="text-sm text-muted-foreground">{t("settings.logs.hint")}</p>
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" disabled={busy} onClick={handleClearLogs}>
+                <RefreshCcw className="h-4 w-4 mr-2" />
+                {t("settings.logs.clear")}
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
       )}
 
       <div className="flex justify-end gap-2">

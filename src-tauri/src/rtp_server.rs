@@ -40,11 +40,6 @@ pub fn rtp_dropped_count() -> u64 {
     DROPPED_MIDI_COUNT.load(Ordering::Relaxed)
 }
 
-/// Réinitialise le compteur de drops RTP (utile pour les tests).
-pub fn _reset_rtp_dropped_count() {
-    DROPPED_MIDI_COUNT.store(0, Ordering::Relaxed);
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RtpRemoteTarget {
     pub name: String,
@@ -187,10 +182,8 @@ impl RtpServer {
                         });
                     }
 
-                    // Acquisition du verrou uniquement pour cloner le Sender
-                    // (opération très rapide, pas d'IO).
-                    // TODO perf : remplacer Arc<Mutex<Option<Sender>>> par
-                    // arc_swap::ArcSwap<Option<Sender>> pour un accès lock-free.
+                    // Lifecycle changes are rare; the read lock is held only for an Arc clone and
+                    // avoids adding another synchronization dependency to this callback.
                     let Some(tx) = midi_sink.read().as_ref().cloned() else {
                         return;
                     };

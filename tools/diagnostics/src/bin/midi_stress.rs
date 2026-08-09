@@ -1,3 +1,5 @@
+//! High-throughput MIDI and RTP-MIDI load generator for developer diagnostics.
+
 use std::{
     env,
     sync::{
@@ -14,8 +16,12 @@ fn print_usage() {
     println!("  rtp    [--target 127.0.0.1:5004] [--rate 5000] [--duration 10]");
     println!("  local  [--port-name OSCMidi] [--rate 50000] [--duration 10]");
     println!("\nExamples:");
-    println!("  cargo run --release --bin midi_stress -- local --rate 100000");
-    println!("  cargo run --release --bin midi_stress -- rtp --target 127.0.0.1:5004 --rate 5000");
+    println!(
+        "  cargo run --release --manifest-path tools/diagnostics/Cargo.toml --target-dir tools/diagnostics/target --bin midi_stress -- local --rate 100000"
+    );
+    println!(
+        "  cargo run --release --manifest-path tools/diagnostics/Cargo.toml --target-dir tools/diagnostics/target --bin midi_stress -- rtp --target 127.0.0.1:5004 --rate 5000"
+    );
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]

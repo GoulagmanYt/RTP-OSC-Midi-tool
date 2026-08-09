@@ -1,11 +1,13 @@
 import { useEffect } from "react";
 import * as api from "../../api";
+import { getErrorMessage } from "../../api-errors";
 
 type BootstrapOptions = {
   setConfig: (config: api.AppConfig) => void;
   setStatus: (status: api.RuntimeStatus) => void;
   setPreflight: (report: api.PreflightReport | null) => void;
   setIsLoading: (loading: boolean) => void;
+  setInitializationError: (message: string | null) => void;
   refreshStatus: () => Promise<void>;
   refreshLists: () => Promise<void>;
   refreshAudioDevices: (backend?: string | null) => Promise<void>;
@@ -16,6 +18,7 @@ export function useAppBootstrap({
   setStatus,
   setPreflight,
   setIsLoading,
+  setInitializationError,
   refreshStatus,
   refreshLists,
   refreshAudioDevices,
@@ -24,6 +27,7 @@ export function useAppBootstrap({
     let cancelled = false;
 
     const bootstrap = async () => {
+      setInitializationError(null);
       try {
         const config = await api.getConfig();
         if (cancelled) {
@@ -58,6 +62,9 @@ export function useAppBootstrap({
         }
       } catch (error) {
         console.error("Initialization failed", error);
+        if (!cancelled) {
+          setInitializationError(getErrorMessage(error) || "Native initialization failed");
+        }
       } finally {
         if (!cancelled) {
           setIsLoading(false);
@@ -70,5 +77,14 @@ export function useAppBootstrap({
     return () => {
       cancelled = true;
     };
-  }, [refreshAudioDevices, refreshLists, refreshStatus, setConfig, setIsLoading, setPreflight, setStatus]);
+  }, [
+    refreshAudioDevices,
+    refreshLists,
+    refreshStatus,
+    setConfig,
+    setInitializationError,
+    setIsLoading,
+    setPreflight,
+    setStatus,
+  ]);
 }

@@ -26,6 +26,16 @@ export function isCommandError(value: unknown): value is CommandError {
   );
 }
 
+export function getErrorMessage(error: unknown): string {
+  if (isCommandError(error)) {
+    return error.message.trim();
+  }
+  if (error instanceof Error) {
+    return error.message.trim();
+  }
+  return typeof error === "string" ? error.trim() : "";
+}
+
 export function normalizeCommandError(error: unknown): CommandFailure {
   if (isCommandError(error)) {
     return new CommandFailure(error);
@@ -40,6 +50,6 @@ export function normalizeCommandError(error: unknown): CommandFailure {
   return new CommandFailure({
     code: "frontend.unknown-error",
     domain: "frontend",
-    message: String(error),
+    message: getErrorMessage(error) || "Unknown command failure",
   });
 }

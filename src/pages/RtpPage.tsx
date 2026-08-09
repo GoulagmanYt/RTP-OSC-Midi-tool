@@ -15,6 +15,8 @@ import {
   mergeSessionIntoRemotes,
   syncAutoConnectRemotes,
 } from "./rtp/utils";
+import { toast } from "sonner";
+import { getErrorMessage } from "../api-errors";
 
 export default function RtpPage() {
   const { config, updateConfig, saveConfig, status } = useBridge();
@@ -34,9 +36,10 @@ export default function RtpPage() {
       await refreshRtpSessions();
     } catch (e) {
       console.error("Failed to list RTP sessions", e);
+      toast.error(getErrorMessage(e) || t("toasts.rtp.discoveryFailed"));
       setDiscovering(false);
     }
-  }, []);
+  }, [t]);
   
   useEffect(() => {
     const unlistenSessions = listen<RtpSessionInfo[]>("rtp:sessions", (event) => {
@@ -81,6 +84,9 @@ export default function RtpPage() {
     setBusy(true);
     try {
       await saveConfig();
+      toast.success(t("toasts.settings.configSaved"));
+    } catch (error) {
+      toast.error(getErrorMessage(error) || t("toasts.settings.configSaveFailed"));
     } finally {
       setBusy(false);
     }

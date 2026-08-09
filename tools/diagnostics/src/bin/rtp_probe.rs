@@ -1,3 +1,5 @@
+//! Interactive RTP-MIDI probe for developer diagnostics.
+
 use midi_types::MidiMessage as RtMidiMessage;
 use rtpmidi::sessions::{
     events::event_handling::{MidiMessageEvent, ParticipantJoinedEvent, ParticipantLeftEvent},
@@ -95,7 +97,7 @@ fn parse_args() -> Result<ProbeArgs, String> {
             }
             "--help" | "-h" => {
                 println!(
-                    "Usage: cargo run --bin rtp_probe -- \\\n  [--name SESSION_NAME] [--port CONTROL_PORT] [--duration SECONDS] [--idle-timeout SECONDS]"
+                    "Usage: cargo run --manifest-path tools/diagnostics/Cargo.toml --target-dir tools/diagnostics/target --bin rtp_probe -- \\\n  [--name SESSION_NAME] [--port CONTROL_PORT] [--duration SECONDS] [--idle-timeout SECONDS]"
                 );
                 std::process::exit(0);
             }

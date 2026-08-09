@@ -57,6 +57,7 @@ pub(super) struct BridgeRuntime {
     pub(super) reliable_playback: Option<ReliablePlaybackServer>,
     pub(super) config: Arc<Mutex<Config>>,
     pub(super) config_rev: Arc<AtomicU64>,
+    pub(super) panic_revision: Arc<AtomicU64>,
     pub(super) actual_midi_in: Arc<Mutex<Option<String>>>,
     pub(super) actual_midi_out: Arc<Mutex<Option<String>>>,
 }
@@ -121,9 +122,12 @@ impl BridgeHandle {
     pub fn reset_keys(&self) -> Result<(), String> {
         let guard = self.inner.lock();
         if let Some(runtime) = guard.as_ref() {
+            runtime.panic_revision.fetch_add(1, Ordering::Release);
             let cfg = runtime.config.lock().clone();
-            let osc = OscClient::new(&cfg.osc.target_ip, cfg.osc.target_port)?;
-            osc.send_reset_all()?;
+            if cfg.osc.enabled {
+                let osc = OscClient::new(&cfg.osc.target_ip, cfg.osc.target_port)?;
+                osc.send_reset_all()?;
+            }
         }
         Ok(())
     }

@@ -1,33 +1,13 @@
 #![allow(deprecated)]
 
-mod types {
-    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-    pub struct VstPluginEntry {
-        pub name: String,
-        pub path: String,
-        pub format: String,
-        pub kind: String,
-        pub architecture: String,
-        pub supported: bool,
-        pub unsupported_reason: Option<String>,
-        pub midi_compatible: Option<bool>,
-        pub has_editor: bool,
-        pub channel_layout: Option<String>,
-        pub class_uid: Option<String>,
-        pub file_modified_ms: Option<u64>,
-        pub file_size: Option<u64>,
-        pub host_abi_version: u32,
-    }
-}
-#[allow(dead_code)]
-#[path = "../plugin_probe.rs"]
-mod plugin_probe;
+//! Isolated smoke runner for validating third-party VST2 and VST3 binaries.
 
 use std::{
     path::Path,
     sync::{Arc, Mutex},
 };
 
+use osc_midi_bridge::plugin_probe;
 use rack::vst3::Vst3Scanner;
 use rack::{
     prelude::{PluginScanner as RackPluginScanner, PluginType as RackPluginType},
@@ -100,7 +80,7 @@ fn smoke_vst2(path: &Path) -> Result<(), String> {
     let mut instance = loader
         .instance()
         .map_err(|e| format!("VST2 smoke: failed to instantiate plugin: {e}"))?;
-    plugin_probe::plugin_probe_vst2::smoke_vst2_instance(&mut instance, 128)?;
+    plugin_probe::smoke_vst2_instance(&mut instance, 128)?;
     println!("VST2 smoke ok: {}", path.display());
     Ok(())
 }

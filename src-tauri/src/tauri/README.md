@@ -20,11 +20,11 @@ Les commandes exposées au runtime Tauri sont celles consommées par `src/api.ts
 
 - `get_config`, `save_config`, `reset_config_defaults`, `import_config`, `export_config`
 - `list_midi_inputs`, `list_midi_outputs`
-- `start_bridge`, `stop_bridge`, `get_status`, `reset_keys`, `panic_midi`, `send_test_midi`
+- `start_bridge`, `stop_bridge`, `get_status`, `panic_midi`, `send_test_midi`
 - `refresh_rtp_sessions`, `restart_rtp`, `preflight_check`
 - `list_audio_backends`, `list_audio_devices`
 - `list_vst_plugins`, `refresh_vst_plugins`, `list_vst_parameters`, `set_vst_parameter`
-- `start_audio`, `stop_audio`, `open_vst_ui`, `close_vst_ui`, `ping_audio`, `reload_vst`
+- `open_vst_ui`, `close_vst_ui`, `ping_audio`, `reload_vst`
 - `set_master_gain`, `set_audio_limiter`
 - `get_app_paths`, `open_app_dir`, `clear_log_file`, `export_diagnostics`
 

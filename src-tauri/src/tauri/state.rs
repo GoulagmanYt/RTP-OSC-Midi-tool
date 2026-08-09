@@ -20,20 +20,20 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        Ok(Self {
+    pub fn new() -> Self {
+        Self {
             config_store: ConfigStore::new(),
             bridge: BridgeHandle::new(),
             dev_logging: Arc::new(AtomicBool::new(false)),
             audio: AudioEngine::new(),
             vst_cache: Mutex::new(load_vst_cache_from_disk()),
             rtp_discovery: RtpDiscoveryManager::new(),
-        })
+        }
     }
 }
 
 impl Default for AppState {
     fn default() -> Self {
-        Self::new().expect("Failed to create app state")
+        Self::new()
     }
 }

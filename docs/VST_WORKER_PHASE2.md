@@ -2,13 +2,11 @@
 
 ## Runtime boundary
 
-When `audio.vstWorkerEnabled` is true, OSCMidi launches one
-`vst-host-worker.exe` process for the selected instrument. The worker owns the
+OSCMidi always launches one `vst-host-worker.exe` process for the selected
+instrument. The worker owns the
 VST DLL, CPAL/ASIO stream, audio callback, native editor window, parameter
 controller, and state restoration. The main Tauri process never loads that
 plug-in and never silently falls back to in-process hosting.
-
-The stable phase 1 backend remains available by disabling the worker flag.
 
 ## IPC and authentication
 
@@ -83,9 +81,9 @@ worker-owned editors, live VST switching, deliberate worker termination, bridge
 stop, and bridge restart. The host application remained available across the
 injected worker failure.
 
-Before enabling the worker by default, run the release build with Splice,
-Keyzone, and Upright Piano on the target Voicemeeter ASIO device. The required
-campaign remains 30 minutes at 48 kHz/512, repeated editor operations, preset
-changes, zero driver XRuns, zero stuck notes, and no consecutive deadline miss.
-Also terminate the worker from Task Manager once and confirm that OSCMidi stays
-responsive and reports/restarts the failed worker.
+For each release, run the build with Splice, Keyzone, and Upright Piano on the
+target Voicemeeter ASIO device. The required campaign remains 30 minutes at
+48 kHz/512, repeated editor operations, preset changes, zero driver XRuns, zero
+stuck notes, and no consecutive deadline miss. Also terminate the worker from
+Task Manager once and confirm that OSCMidi stays responsive and reports or
+restarts the failed worker.

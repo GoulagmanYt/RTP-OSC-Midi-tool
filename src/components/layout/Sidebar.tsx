@@ -35,7 +35,7 @@ export function Sidebar() {
       <div className="p-6 pb-2">
         <h2 className="font-semibold text-lg tracking-tight">{t("sidebar.navigation")}</h2>
       </div>
-      <nav className="flex-1 px-4 space-y-1">
+      <nav className="flex-1 px-4 space-y-1" aria-label={t("sidebar.navigation")}>
         {navItems.map((item) => (
           <NavLink
             key={item.to}
@@ -57,7 +57,7 @@ export function Sidebar() {
 
       <div className="p-4 border-t glass-panel">
         <div className="flex flex-col gap-4">
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between" aria-live="polite">
             <span className="text-xs font-medium text-muted-foreground">{t("common.status")}</span>
             <Badge variant={status?.running ? "success" : "secondary"}>
               {status?.running ? t("common.running") : t("common.stopped")}
@@ -68,7 +68,8 @@ export function Sidebar() {
             variant={status?.running ? "destructive" : "default"} 
             className="w-full justify-start gap-2"
             onClick={toggleBridge}
-            disabled={isLoading}
+            disabled={isLoading || !config}
+            aria-busy={isLoading}
           >
             {status?.running ? <CircleStop className="w-4 h-4" /> : <CirclePlay className="w-4 h-4" />}
             {status?.running ? t("actions.stopBridge") : t("actions.startBridge")}

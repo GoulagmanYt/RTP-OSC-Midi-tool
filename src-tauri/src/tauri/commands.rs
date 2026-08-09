@@ -4,7 +4,6 @@ use tauri::{AppHandle, Emitter, State, Window};
 
 use crate::{
     application::services,
-    audio::AudioSettings,
     config::Config,
     error::CommandError,
     tauri::state::AppState,
@@ -54,11 +53,6 @@ pub async fn start_bridge(
 #[::tauri::command]
 pub async fn stop_bridge(app: AppHandle, state: State<'_, AppState>) -> Result<(), CommandError> {
     services::stop_bridge(&app, state.inner()).await
-}
-
-#[::tauri::command]
-pub fn reset_keys(state: State<AppState>) -> Result<(), CommandError> {
-    services::reset_keys(state.inner())
 }
 
 #[::tauri::command]
@@ -149,21 +143,6 @@ pub fn set_vst_parameter(
     state: State<'_, AppState>,
 ) -> Result<(), CommandError> {
     services::set_vst_parameter(index, value, state.inner())
-}
-
-#[::tauri::command]
-pub async fn start_audio(
-    app: AppHandle,
-    window: Window,
-    settings: AudioSettings,
-    state: State<'_, AppState>,
-) -> Result<(), CommandError> {
-    services::start_audio(&app, &window, settings, state.inner())
-}
-
-#[::tauri::command]
-pub async fn stop_audio(app: AppHandle, state: State<'_, AppState>) -> Result<(), CommandError> {
-    services::stop_audio(&app, state.inner())
 }
 
 #[::tauri::command]

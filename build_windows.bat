@@ -91,10 +91,19 @@ echo --- Build OSCMidi (%DATE% %TIME%) --- >"%LOG_FILE%"
 where npm >nul 2>nul || goto NONODE
 where cargo >nul 2>nul || where rustup >nul 2>nul || goto NORUST
 
-call :LOG "[1/3] Install deps (npm ci)..."
+call :LOG "[1/4] Install deps (npm ci)..."
 call :RUNCMD npm ci --no-fund --no-audit || goto ERROR
 
-call :LOG "[2/3] Bundle Tauri (.exe + .msi)..."
+call :LOG "[2/4] Validate frontend and Rust..."
+call :RUNCMD npm run lint || goto ERROR
+call :RUNCMD npm test || goto ERROR
+call :RUNCMD cargo fmt --manifest-path src-tauri\Cargo.toml --package osc-midi-bridge -- --check || goto ERROR
+call :RUNCMD cargo clippy --manifest-path src-tauri\Cargo.toml --all-targets --all-features -- -D warnings || goto ERROR
+call :RUNCMD cargo test --manifest-path src-tauri\Cargo.toml --all-targets --all-features || goto ERROR
+call :RUNCMD cargo fmt --manifest-path tools\diagnostics\Cargo.toml --package oscmidi-diagnostics -- --check || goto ERROR
+call :RUNCMD cargo clippy --manifest-path tools\diagnostics\Cargo.toml --target-dir tools\diagnostics\target --all-targets -- -D warnings || goto ERROR
+
+call :LOG "[3/4] Bundle Tauri (.exe + .msi)..."
 call :RUNCMD npm run tauri:build -- --bundles msi --ci || goto ERROR
 
 if not exist "%CARGO_TARGET_DIR%\release\OSCMidi.exe" (
@@ -113,14 +122,7 @@ if not defined MSI_FOUND (
   goto ERROR
 )
 
-if exist "%CARGO_TARGET_DIR%\release\osc-midi-bridge.exe" (
-  del /f /q "%CARGO_TARGET_DIR%\release\osc-midi-bridge.exe" >>"%LOG_FILE%" 2>&1
-)
-if exist "%CARGO_TARGET_DIR%\release\vst_smoke.exe" (
-  del /f /q "%CARGO_TARGET_DIR%\release\vst_smoke.exe" >>"%LOG_FILE%" 2>&1
-)
-
-call :LOG "[3/3] Build termine. Artefacts : %CARGO_TARGET_DIR%\release\bundle\msi\ et %CARGO_TARGET_DIR%\release\OSCMidi.exe"
+call :LOG "[4/4] Build termine. Artefacts : %CARGO_TARGET_DIR%\release\bundle\msi\ et %CARGO_TARGET_DIR%\release\OSCMidi.exe"
 set "BUILD_STATUS=OK"
 set "EXIT_CODE=0"
 goto FINALIZE
@@ -160,7 +162,3 @@ echo %*
 echo %*>>"%LOG_FILE%"
 call %* >>"%LOG_FILE%" 2>&1
 goto :eof
-
-endlocal
-
-rem Maintenir l'affichage live tout en loggant : ne pas sortir des labels au-dessus

@@ -1,7 +1,8 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
-// Vite config tuned for Tauri + React
+// WebView2 is Chromium-based and kept current by the installer, so targeting
+// Chrome avoids shipping Safari/Firefox transforms that desktop users never run.
 export default defineConfig(() => ({
   plugins: [react()],
   clearScreen: false,
@@ -11,15 +12,13 @@ export default defineConfig(() => ({
   },
   envPrefix: ["VITE_", "TAURI_"],
   build: {
-    target: ["es2021", "chrome107", "safari13"],
-    minify: process.env.TAURI_DEBUG ? false : "esbuild",
+    target: "chrome111",
+    minify: process.env.TAURI_DEBUG ? false : "oxc",
     sourcemap: !!process.env.TAURI_DEBUG,
     rolldownOptions: {
       checks: {
         pluginTimings: false,
       },
-    },
-    rollupOptions: {
       output: {
         manualChunks(id) {
           if (!id.includes("node_modules")) {

@@ -2,7 +2,6 @@ import { invokeCommand } from "./api-client";
 import type {
   AppConfig,
   AppPaths,
-  AudioSettings,
   PreflightReport,
   RtpSessionInfo,
   RuntimeStatus,
@@ -37,10 +36,6 @@ export async function startBridge(config: AppConfig): Promise<RuntimeStatus> {
 
 export async function stopBridge(): Promise<void> {
   return invokeCommand("stop_bridge");
-}
-
-export async function resetKeys(): Promise<void> {
-  return invokeCommand("reset_keys");
 }
 
 export async function panicMidi(): Promise<void> {
@@ -85,14 +80,6 @@ export async function listVstParameters(): Promise<VstParameter[]> {
 
 export async function setVstParameter(index: number, value: number): Promise<void> {
   return invokeCommand("set_vst_parameter", { index, value });
-}
-
-export async function startAudio(settings: AudioSettings): Promise<void> {
-  return invokeCommand("start_audio", { settings });
-}
-
-export async function stopAudio(): Promise<void> {
-  return invokeCommand("stop_audio");
 }
 
 export async function openVstUi(): Promise<void> {

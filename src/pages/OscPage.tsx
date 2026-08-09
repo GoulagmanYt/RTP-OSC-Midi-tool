@@ -8,6 +8,8 @@ import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { Radio, Server, RefreshCcw } from "lucide-react";
 import { useI18n } from "../providers/LanguageProvider";
+import { toast } from "sonner";
+import { getErrorMessage } from "../api-errors";
 
 export default function OscPage() {
   const { config, updateConfig, saveConfig } = useBridge();
@@ -18,6 +20,9 @@ export default function OscPage() {
     setBusy(true);
     try {
       await saveConfig();
+      toast.success(t("toasts.settings.configSaved"));
+    } catch (error) {
+      toast.error(getErrorMessage(error) || t("toasts.settings.configSaveFailed"));
     } finally {
       setBusy(false);
     }

@@ -1,7 +1,6 @@
 use tauri::{AppHandle, Window};
 
 use crate::{
-    audio::AudioSettings,
     error::CommandError,
     tauri::{
         state::AppState,
@@ -62,25 +61,6 @@ pub fn set_vst_parameter(index: usize, value: f32, state: &AppState) -> Result<(
         .audio
         .set_vst_parameter(index, value)
         .map_err(|err| audio_error("audio.set-vst-parameter-failed", err.to_string()))
-}
-
-pub fn start_audio(
-    app: &AppHandle,
-    window: &Window,
-    settings: AudioSettings,
-    state: &AppState,
-) -> Result<(), CommandError> {
-    let logger = frontend_logger(window, state);
-    let fallback_vst = fallback_vst_path(app);
-    state
-        .audio
-        .start(settings, fallback_vst, logger)
-        .map_err(|err| audio_error("audio.start-failed", err.to_string()))
-}
-
-pub fn stop_audio(app: &AppHandle, state: &AppState) -> Result<(), CommandError> {
-    state.audio.stop(Some(app.clone()));
-    Ok(())
 }
 
 pub fn open_vst_ui(app: &AppHandle, window: &Window, state: &AppState) -> Result<(), CommandError> {

@@ -75,12 +75,12 @@ without flooding external MIDI or OSC destinations. The former UI "End-to-End"
 mode was hidden because it injected after RTP and therefore did not test RTP at
 all; true RTP end-to-end testing remains external/phase 2 work.
 
-## Phase 2 worker
+## Isolated VST worker
 
-Phase 1 is frozen in commit `e8de779`. The optional phase 2 worker is described
-in `docs/VST_WORKER_PHASE2.md`. It is disabled by default and can be enabled from
-the Audio page for real-plugin validation; no automatic fallback to in-process
-hosting occurs when isolation is selected.
+Phase 1 is frozen in commit `e8de779`. The production worker is described in
+`docs/VST_WORKER_PHASE2.md`. Isolation is mandatory: the desktop process always
+starts the selected plug-in through the supervisor and has no in-process
+fallback. The local hosting entry point exists only inside the worker build.
 
 The 30-minute Splice/Voicemeeter release campaign still requires the target
 audio device. The existing real-plugin smoke tests remain opt-in/ignored.

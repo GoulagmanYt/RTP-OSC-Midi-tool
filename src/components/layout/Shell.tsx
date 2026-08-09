@@ -2,10 +2,12 @@ import { Suspense, lazy, useEffect, useState } from "react";
 import { Outlet } from "react-router-dom";
 import { Sidebar } from "./Sidebar";
 import { TopBar } from "./TopBar";
+import { useI18n } from "../../providers/LanguageProvider";
 
 const CommandPalette = lazy(() => import("./CommandPalette"));
 
 export function Shell() {
+  const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const [commandPaletteRequested, setCommandPaletteRequested] = useState(false);
 
@@ -23,6 +25,9 @@ export function Shell() {
 
   return (
     <div className="page-shell relative flex h-screen w-screen overflow-hidden bg-background text-foreground">
+      <a className="skip-link" href="#main-content">
+        {t("common.skipToContent")}
+      </a>
       <div className="pointer-events-none absolute inset-0 overflow-hidden">
         <div className="aurora -left-24 -top-24" />
         <div className="aurora aurora--alt right-[-8rem] top-6" />
@@ -38,8 +43,10 @@ export function Shell() {
             setOpen(true);
           }}
         />
-        <main className="flex-1 overflow-auto scroll-smooth page-body">
-          <Outlet />
+        <main id="main-content" className="flex-1 overflow-auto scroll-smooth page-body" tabIndex={-1}>
+          <div className="page-content">
+            <Outlet />
+          </div>
         </main>
       </div>
 

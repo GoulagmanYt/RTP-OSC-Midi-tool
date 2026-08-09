@@ -1,8 +1,17 @@
 [package]
 name = "osc-midi-bridge"
-version = "1.1.0"
+version = "2.0.0"
 edition = "2021"
+description = "Low-latency Windows bridge for MIDI, RTP-MIDI, OSC, and isolated VST instruments"
+authors = ["OSCMidi contributors"]
+publish = false
 default-run = "OSCMidi"
+autobins = false
+
+[features]
+default = []
+vst-worker-binary = []
+worker-fixtures = ["vst-worker-binary"]
 
 [lib]
 name = "osc_midi_bridge"
@@ -13,34 +22,20 @@ name = "OSCMidi"
 path = "src/main.rs"
 
 [[bin]]
-name = "rtp_probe"
-path = "src/bin/rtp_probe.rs"
-
-[[bin]]
-name = "vst_smoke"
-path = "src/bin/vst_smoke.rs"
-
-[[bin]]
-name = "vst_probe"
-path = "src/bin/vst_probe.rs"
-
-[[bin]]
 name = "vst-host-worker"
 path = "src/bin/vst_host_worker.rs"
+required-features = ["vst-worker-binary"]
 
 [[bin]]
 name = "vst-worker-fixture"
 path = "src/bin/vst_worker_fixture.rs"
-
-[[bin]]
-name = "midi_stress"
-path = "src/bin/midi_stress.rs"
+required-features = ["worker-fixtures"]
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2.11.5", features = [] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
@@ -66,14 +61,7 @@ vst = "0.4"
 rtrb = "0.3"
 rack = "0.4.8"
 smallvec = { version = "1.15", features = ["serde"] }
-tauri-plugin-os = "2"
-tauri-plugin-shell = "2"
-tauri-plugin-fs = "2"
-tauri-plugin-http = "2"
-tauri-plugin-process = "2"
-tauri-plugin-dialog = "2"
-tauri-plugin-notification = "2"
-tauri-plugin-clipboard-manager = "2"
+tauri-plugin-dialog = "2.7.2"
 
 [dev-dependencies]
 tempfile = "3.27"
@@ -86,17 +74,14 @@ harness = false
 [patch.crates-io]
 rack = { path = "../vendor/rack" }
 
-[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
-tauri-plugin-global-shortcut = "2"
-
-# AJOUTER un profil dédié audio pour les release
+# Thin LTO and a single codegen unit favor predictable callback performance in production.
 [profile.release]
 opt-level = 3
-lto = "thin"        # thin LTO : meilleure perf sans exploser le temps de compile
+lto = "thin"
 codegen-units = 1
-panic = "unwind"    # une panique de worker ne doit pas tuer tout le processus; active catch_unwind audio
+panic = "unwind"
 
-# AJOUTER un profil dev optimisé pour les tests audio (le debug natif est trop lent pour l'audio)
+# Native plug-in diagnostics need optimized DSP code while retaining development symbols.
 [profile.dev-audio]
 inherits = "dev"
-opt-level = 2       # O2 en dev pour que le callback audio ne dropouts pas
+opt-level = 2

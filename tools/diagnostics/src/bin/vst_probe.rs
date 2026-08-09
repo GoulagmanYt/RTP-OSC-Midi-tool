@@ -1,3 +1,5 @@
+//! Standalone JSON probe for inspecting a single VST candidate.
+
 use std::path::PathBuf;
 
 fn main() {

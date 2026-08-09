@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { CommandFailure, normalizeCommandError } from "./api-errors";
+import { CommandFailure, getErrorMessage, normalizeCommandError } from "./api-errors";
 
 describe("normalizeCommandError", () => {
   it("wraps typed backend errors into CommandFailure", () => {
@@ -25,5 +25,11 @@ describe("normalizeCommandError", () => {
     expect(failure.code).toBe("frontend.unknown-error");
     expect(failure.domain).toBe("frontend");
     expect(failure.message).toBe("fatal");
+  });
+
+  it("does not expose meaningless nullish values to the interface", () => {
+    expect(getErrorMessage(null)).toBe("");
+    expect(getErrorMessage(undefined)).toBe("");
+    expect(normalizeCommandError(null).message).toBe("Unknown command failure");
   });
 });

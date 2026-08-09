@@ -141,7 +141,6 @@ impl ReliablePlaybackServer {
         })
     }
 
-    #[allow(dead_code)]
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
     }
@@ -178,7 +177,6 @@ pub fn reliable_playback_metrics_snapshot() -> ReliablePlaybackMetricsSnapshot {
     }
 }
 
-#[allow(dead_code)]
 pub fn reset_reliable_playback_metrics() {
     MESSAGES_IN.store(0, Ordering::Relaxed);
     MESSAGES_OUT.store(0, Ordering::Relaxed);

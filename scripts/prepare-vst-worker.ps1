@@ -7,6 +7,35 @@ $ErrorActionPreference = 'Stop'
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $manifestPath = Join-Path $repositoryRoot 'src-tauri\Cargo.toml'
 
+$cmake = Get-Command cmake.exe -ErrorAction SilentlyContinue
+if (-not $cmake) {
+    $cmakeCandidates = @(
+        (Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\18\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe'),
+        (Join-Path $env:ProgramFiles 'CMake\bin\cmake.exe'),
+        (Join-Path $env:LOCALAPPDATA 'Programs\CMake\bin\cmake.exe'),
+        (Join-Path $env:USERPROFILE '.mozbuild\cmake\bin\cmake.exe')
+    )
+    $cmakePath = $cmakeCandidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+    if (-not $cmakePath) {
+        throw 'CMake is required to build the VST host worker.'
+    }
+    $env:PATH = "$(Split-Path -Parent $cmakePath);$env:PATH"
+}
+
+if (-not $env:LIBCLANG_PATH) {
+    $libclangCandidates = @(
+        (Join-Path $env:ProgramFiles 'LLVM\bin\libclang.dll'),
+        (Join-Path ${env:ProgramFiles(x86)} 'LLVM\bin\libclang.dll'),
+        (Join-Path $env:LOCALAPPDATA 'Programs\LLVM\bin\libclang.dll'),
+        (Join-Path $env:USERPROFILE '.mozbuild\clang\bin\libclang.dll')
+    )
+    $libclangPath = $libclangCandidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+    if (-not $libclangPath) {
+        throw 'libclang.dll is required to generate the ASIO bindings.'
+    }
+    $env:LIBCLANG_PATH = Split-Path -Parent $libclangPath
+}
+
 $hostLine = rustc -vV | Where-Object { $_ -like 'host: *' } | Select-Object -First 1
 if (-not $hostLine) {
     throw 'Unable to determine the Rust host target triple.'
@@ -16,7 +45,12 @@ if ($targetTriple -ne 'x86_64-pc-windows-msvc') {
     throw "The isolated VST worker currently requires x86_64-pc-windows-msvc, found $targetTriple."
 }
 
-$cargoArgs = @('build', '--manifest-path', $manifestPath, '--bin', 'vst-host-worker')
+$cargoArgs = @(
+    'build',
+    '--manifest-path', $manifestPath,
+    '--bin', 'vst-host-worker',
+    '--features', 'vst-worker-binary'
+)
 if ($Profile -eq 'release') {
     $cargoArgs += '--release'
 }

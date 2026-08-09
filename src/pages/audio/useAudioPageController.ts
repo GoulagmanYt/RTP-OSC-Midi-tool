@@ -3,7 +3,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
   closeVstUi,
-  listAudioDevices,
   listVstParameters,
   listVstPlugins,
   openVstUi,
@@ -19,6 +18,7 @@ import type { VstParameter, VstPluginEntry } from "../../api";
 import { useI18n } from "../../providers/LanguageProvider";
 import { useBridge } from "../../providers/BridgeProvider";
 import { mergeLiveAudioMetrics } from "./liveStatus";
+import { getErrorMessage } from "../../api-errors";
 
 export function useAudioPageController() {
   const {
@@ -62,36 +62,6 @@ export function useAudioPageController() {
 
   const bridgeRunning = Boolean(status?.running);
   const isVst3 = (config?.audio.vstPath || "").toLowerCase().endsWith(".vst3");
-
-  const quickPresets = useMemo(
-    () => [
-      {
-        id: "low",
-        label: t("audio.preset.low"),
-        backend: "asio",
-        bufferSize: 64,
-        sampleRate: 48000,
-        hint: t("audio.preset.hint.low"),
-      },
-      {
-        id: "balanced",
-        label: t("audio.preset.balanced"),
-        backend: "asio",
-        bufferSize: 256,
-        sampleRate: 48000,
-        hint: t("audio.preset.hint.balanced"),
-      },
-      {
-        id: "safe",
-        label: t("audio.preset.safe"),
-        backend: "wasapi",
-        bufferSize: 512,
-        sampleRate: 44100,
-        hint: t("audio.preset.hint.safe"),
-      },
-    ],
-    [t]
-  );
 
   const activeSampleRate = status?.audioSampleRate ?? config?.audio.sampleRate ?? null;
   const activeBufferSize = status?.audioBufferSize ?? config?.audio.bufferSize ?? null;
@@ -138,7 +108,6 @@ export function useAudioPageController() {
         "sampleRate",
         "bufferSize",
         "vstPath",
-        "vstWorkerEnabled",
       ];
       const requiresRestart = restartKeys.some((key) => patch[key] !== undefined);
       const shouldRestart = requiresRestart && Boolean(status?.audioRunning) && updated.audio.enabled;
@@ -167,7 +136,7 @@ export function useAudioPageController() {
         } catch (rollbackError) {
           console.error("Failed to restore previous audio runtime", rollbackError);
         }
-        const message = e instanceof Error ? e.message : String(e);
+        const message = getErrorMessage(e);
         toast.error(message || t("toasts.audio.vstReloadFailed"));
       } finally {
         if (shouldRestart) {
@@ -213,26 +182,6 @@ export function useAudioPageController() {
   const handleAudioToggle = async (checked: boolean) => {
     await updateConfig({ audio: { enabled: checked } });
     await persistConfig();
-  };
-
-  const applyPreset = async (presetId: string) => {
-    const preset = quickPresets.find((entry) => entry.id === presetId);
-    if (!preset) return;
-    try {
-      const devices = await listAudioDevices(preset.backend);
-      const chosen = devices.find((device) => device === config?.audio.device) || devices[0] || null;
-      await updateAudioConfig({
-        backend: preset.backend,
-        device: chosen,
-        bufferSize: preset.bufferSize,
-        sampleRate: preset.sampleRate,
-      });
-      await refreshAudioDevices(preset.backend);
-      toast.success(t("toasts.audio.presetApplied", { preset: preset.label }));
-    } catch (e) {
-      console.error("Failed to apply preset", e);
-      toast.error(t("toasts.audio.presetFailed"));
-    }
   };
 
   const handleGainChange = async (value: number) => {
@@ -286,7 +235,7 @@ export function useAudioPageController() {
       setVstUiOpen(true);
       toast.success(t("toasts.audio.vstOpened"));
     } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
+      const message = getErrorMessage(e);
       toast.error(message || t("toasts.audio.vstOpenFailed"));
       setVstUiOpen(false);
     }
@@ -298,7 +247,7 @@ export function useAudioPageController() {
       setVstUiOpen(false);
       toast.success(t("toasts.audio.vstHidden"));
     } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
+      const message = getErrorMessage(e);
       toast.error(message || t("toasts.audio.vstCloseFailed"));
     }
   };
@@ -310,7 +259,7 @@ export function useAudioPageController() {
       setVstParams(params);
       setVstParameterDialogOpen(true);
     } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
+      const message = getErrorMessage(e);
       toast.error(message || t("toasts.audio.vstParamOpenFailed"));
       setVstParameterDialogOpen(false);
     } finally {
@@ -324,7 +273,7 @@ export function useAudioPageController() {
       toast.success(t("toasts.audio.pingSent"));
       refreshStatus();
     } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
+      const message = getErrorMessage(e);
       toast.error(message || t("toasts.audio.pingFailed"));
     }
   };
@@ -338,7 +287,7 @@ export function useAudioPageController() {
       toast.success(t("toasts.audio.vstReloaded"));
       refreshStatus();
     } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
+      const message = getErrorMessage(e);
       toast.error(message || t("toasts.audio.vstReloadFailed"));
     } finally {
       audioReloadInFlight.current = false;
@@ -351,7 +300,7 @@ export function useAudioPageController() {
     try {
       await setVstParameter(index, value);
     } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
+      const message = getErrorMessage(e);
       toast.error(message || t("toasts.audio.vstParamFailed"));
     }
   };
@@ -380,7 +329,6 @@ export function useAudioPageController() {
     currentLatencyMs,
     isVst3,
     midiMessagesPerSec: metrics?.midiMessagesPerSec ?? null,
-    quickPresets,
     requestedBufferSize,
     selectedPluginKindLabel,
     selectedPluginStatusLabel,
@@ -396,7 +344,6 @@ export function useAudioPageController() {
     vstPluginsLoading,
     vstUiOpen,
     handleAudioToggle,
-    applyPreset,
     handleBackendChange,
     handleCloseVstUi,
     handleGainChange,

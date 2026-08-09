@@ -1,10 +1,10 @@
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$smokeExe = Join-Path $env:LOCALAPPDATA "oscMIDI\cargo-target\debug\vst_smoke.exe"
+$smokeExe = Join-Path $repoRoot "tools\diagnostics\target\debug\vst_smoke.exe"
 
 if (-not (Test-Path $smokeExe)) {
-  throw "Missing smoke runner: $smokeExe. Build it first with: cargo build --bin vst_smoke"
+  throw "Missing smoke runner: $smokeExe. Build it first with: cargo build --manifest-path tools/diagnostics/Cargo.toml --target-dir tools/diagnostics/target --bin vst_smoke"
 }
 
 $plugins = @()

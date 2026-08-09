@@ -33,6 +33,7 @@ const FANOUT_QUEUE_CAPACITY: usize = 2048;
 pub(super) fn spawn_processing_loop(
     shared_config: Arc<Mutex<Config>>,
     config_rev: Arc<AtomicU64>,
+    panic_revision: Arc<AtomicU64>,
     osc: OscClient,
     midi_rx: Receiver<MidiFrame>,
     stop: Arc<AtomicBool>,
@@ -48,6 +49,7 @@ pub(super) fn spawn_processing_loop(
         processing_loop(
             shared_config,
             config_rev,
+            panic_revision,
             osc,
             midi_rx,
             stop,
@@ -66,6 +68,7 @@ pub(super) fn spawn_processing_loop(
 fn processing_loop(
     shared_config: Arc<Mutex<Config>>,
     config_rev: Arc<AtomicU64>,
+    panic_revision: Arc<AtomicU64>,
     osc: OscClient,
     midi_rx: Receiver<MidiFrame>,
     stop: Arc<AtomicBool>,
@@ -88,6 +91,7 @@ fn processing_loop(
     let midi_worker = spawn_midi_thru_worker(
         shared_config.clone(),
         config_rev.clone(),
+        panic_revision,
         midi_thru_rx,
         stop.clone(),
         midi_out,
@@ -203,6 +207,7 @@ fn send_fanout(tx: &Sender<MidiFrame>, frame: MidiFrame) {
 fn spawn_midi_thru_worker(
     shared_config: Arc<Mutex<Config>>,
     config_rev: Arc<AtomicU64>,
+    panic_revision: Arc<AtomicU64>,
     rx: Receiver<MidiFrame>,
     stop: Arc<AtomicBool>,
     mut midi_out: Option<MidiOutputConnection>,
@@ -216,12 +221,21 @@ fn spawn_midi_thru_worker(
         let initial = shared_config.lock().clone();
         let mut snapshot = ConfigSnapshot::from(&initial);
         let mut cached_rev = config_rev.load(Ordering::Relaxed);
+        let mut cached_panic_revision = panic_revision.load(Ordering::Acquire);
         let mut midi_out_name = initial.midi.output_device;
         let mut sustain = [None; 16];
         if let Some(out) = midi_out.as_mut() {
             reset_midi_output(out, &logger);
         }
         while !stop.load(Ordering::Relaxed) {
+            let current_panic_revision = panic_revision.load(Ordering::Acquire);
+            if current_panic_revision != cached_panic_revision {
+                if let Some(out) = midi_out.as_mut() {
+                    reset_midi_output(out, &logger);
+                }
+                sustain.fill(None);
+                cached_panic_revision = current_panic_revision;
+            }
             if config_rev.load(Ordering::Relaxed) != cached_rev {
                 let config = shared_config.lock().clone();
                 snapshot = ConfigSnapshot::from(&config);

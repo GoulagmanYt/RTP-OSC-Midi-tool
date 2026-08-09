@@ -1,5 +1,5 @@
 fn main() {
-    // Make sure Cargo reruns the build script when the app icon changes
+    // The icon participates in generated Windows resource metadata.
     println!("cargo:rerun-if-changed=icons");
     tauri_build::build()
 }

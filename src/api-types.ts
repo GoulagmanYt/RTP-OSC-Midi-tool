@@ -44,13 +44,6 @@ export type RoutingAssignment = {
   profileId: string;
 };
 
-export type AvatarConfig = {
-  path?: string | null;
-  offsetX: number;
-  offsetY: number;
-  scale: number;
-};
-
 export type MidiConfig = {
   inputDevice?: string | null;
   outputDevice?: string | null;
@@ -79,7 +72,6 @@ export type RtpConfig = {
 
 export type AudioConfig = {
   enabled: boolean;
-  vstWorkerEnabled: boolean;
   backend?: string | null;
   device?: string | null;
   sampleRate: number;
@@ -90,29 +82,16 @@ export type AudioConfig = {
 };
 
 export type UiConfig = {
-  themePreset: string;
   theme: Theme;
   themePalette: string;
-  accent: string;
   cornerRadius: number;
-  scale: number;
-  contentPadding: number;
-  sidebarWidth: number;
-  surfaceOpacity: number;
-  cardOpacity: number;
-  auroraIntensity: number;
-  grainIntensity: number;
-  reduceMotion: boolean;
   autoStart: boolean;
-  alwaysOnTop: boolean;
   developerMode: boolean;
-  avatar: AvatarConfig;
 };
 
 export type LoggingConfig = {
   enabled: boolean;
   verbose: boolean;
-  liveLogs: boolean;
   logAllToFile: boolean;
 };
 
@@ -125,8 +104,6 @@ export type AppConfig = {
   ui: UiConfig;
   logging: LoggingConfig;
 };
-
-export type Config = AppConfig;
 
 export type RuntimeStatus = {
   running: boolean;
@@ -176,8 +153,6 @@ export type RuntimeStatus = {
   audioLimiterEnabled?: boolean | null;
 };
 
-export type BridgeStatus = RuntimeStatus;
-
 export type RuntimeMetrics = {
   audioPeakL?: number | null;
   audioPeakR?: number | null;
@@ -219,8 +194,6 @@ export type RuntimeMetrics = {
   reliablePlaybackActiveSession?: string | null;
 };
 
-export type BridgeMetrics = RuntimeMetrics;
-
 export type PreflightReport = {
   midiInOk: boolean;
   midiOutOk: boolean;
@@ -241,22 +214,12 @@ export type RtpParticipantInfo = {
   addr: string;
 };
 
-export type MidiActivitySnapshot = {
+export type MidiActivityInfo = {
   source: string;
   messagesPerSec: number;
   lastNote?: number | null;
   lastChannel?: number | null;
   lastSeenMs?: number | null;
-};
-
-export type MidiActivityInfo = MidiActivitySnapshot;
-
-export type MidiNoteEvent = {
-  source: string;
-  note: number;
-  channel: number;
-  pressed: boolean;
-  timestampMs: number;
 };
 
 export type AppPaths = {
@@ -298,11 +261,7 @@ export type LogEntry = {
   timestamp: string;
 };
 
-export type LogEvent = LogEntry;
-
-export type AudioSettings = AudioConfig;
-
-export type StressTestMode = "audio-vst" | "bridge" | "rtp" | "end-to-end";
+export type StressTestMode = "audio-vst" | "bridge";
 
 export interface SegmentMetrics {
   dropped: number;

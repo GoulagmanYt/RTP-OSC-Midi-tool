@@ -23,6 +23,7 @@ import { openVstUi, resetConfigDefaults, restartRtp } from "../../api";
 import { useBridge } from "../../providers/BridgeProvider";
 import { useI18n } from "../../providers/LanguageProvider";
 import { toast } from "sonner";
+import { getErrorMessage } from "../../api-errors";
 
 interface CommandPaletteProps {
   open: boolean;
@@ -37,7 +38,7 @@ export default function CommandPalette({ open, onOpenChange }: CommandPalettePro
   const runCommand = (command: () => void | Promise<void>) => {
     onOpenChange(false);
     Promise.resolve(command()).catch((e) => {
-      const message = e instanceof Error ? e.message : String(e);
+      const message = getErrorMessage(e);
       toast.error(message || t("toasts.bridge.bridgeActionFailed"));
     });
   };

@@ -98,13 +98,6 @@ pub async fn stop_bridge(app: &AppHandle, state: &AppState) -> Result<(), Comman
     })?
 }
 
-pub fn reset_keys(state: &AppState) -> Result<(), CommandError> {
-    state
-        .bridge
-        .reset_keys()
-        .map_err(|err| runtime_error("runtime.reset-keys-failed", err))
-}
-
 pub fn panic_midi(state: &AppState) -> Result<(), CommandError> {
     state
         .audio
@@ -262,15 +255,9 @@ pub fn preflight_check(state: &AppState) -> Result<PreflightReport, CommandError
 }
 
 #[derive(Debug, Clone, Copy)]
-pub enum StressTestMode {
-    /// Test direct audio/VST (bypass bridge)
+enum StressTestMode {
     AudioVstOnly,
-    /// Test bridge pipeline (inject via bridge)
     BridgePipeline,
-    /// Test RTP-MIDI input (via local session)
-    RtpInput,
-    /// Test complet end-to-end
-    EndToEnd,
 }
 
 const MAX_STRESS_RATE_MESSAGES_PER_SECOND: u32 = 10_000;
@@ -281,8 +268,6 @@ impl StressTestMode {
         match s {
             "audio-vst" => Some(Self::AudioVstOnly),
             "bridge" => Some(Self::BridgePipeline),
-            "rtp" => Some(Self::RtpInput),
-            "end-to-end" => Some(Self::EndToEnd),
             _ => None,
         }
     }
@@ -318,8 +303,6 @@ pub fn run_stress_test(
     match mode {
         StressTestMode::AudioVstOnly => run_stress_audio_only(rate, duration, state),
         StressTestMode::BridgePipeline => run_stress_bridge_pipeline(rate, duration, state),
-        StressTestMode::RtpInput => run_stress_rtp_input(rate, duration, state),
-        StressTestMode::EndToEnd => run_stress_end_to_end(rate, duration, state),
     }
 }
 
@@ -470,106 +453,6 @@ fn run_stress_bridge_pipeline(
     })
 }
 
-/// Mode RTP Input: Test RTP-MIDI input layer.
-fn run_stress_rtp_input(
-    _rate: u32,
-    _duration: u32,
-    _state: &AppState,
-) -> Result<crate::types::StressTestResult, CommandError> {
-    // RTP stress test would require setting up a local RTP session as sender
-    // For now, return a placeholder - full implementation would need tokio runtime
-    Err(runtime_error("stress.rtp-not-implemented", "RTP stress test mode requires async runtime integration. Use external midi_stress binary for now."))
-}
-
-/// Mode End-to-End: Test full pipeline with feedback measurement.
-fn run_stress_end_to_end(
-    rate: u32,
-    duration: u32,
-    state: &AppState,
-) -> Result<crate::types::StressTestResult, CommandError> {
-    use crate::bridge::{pipeline_stats, reset_pipeline_stats};
-    use crate::rtp::rtp_dropped_count;
-
-    if !state.audio.is_running() {
-        return Err(runtime_error(
-            "stress.audio-not-running",
-            "Le moteur audio doit être démarré pour le stress test.",
-        ));
-    }
-
-    // Reset all counters
-    reset_pipeline_stats();
-    let initial_rtp_drops = rtp_dropped_count();
-
-    let sent = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
-    let elapsed_ms = duration as u64 * 1000;
-
-    let initial_audio_drops = state.audio.midi_drop_count().unwrap_or(0);
-    let initial_xruns = state.audio.xrun_count().unwrap_or(0);
-
-    let start = std::time::Instant::now();
-    let d = std::time::Duration::from_secs(duration as u64);
-    let interval = std::time::Duration::from_nanos(1_000_000_000 / rate.max(1) as u64);
-
-    let mut next_tick = start;
-
-    while start.elapsed() < d {
-        let sequence = sent.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let data = stress_midi_message(sequence);
-        let _ = state.bridge.inject_frame(data, "StressTest".to_string());
-
-        next_tick += interval;
-        let now = std::time::Instant::now();
-        if now < next_tick {
-            std::thread::sleep(next_tick - now);
-        }
-    }
-
-    let sent_notes = sent.load(std::sync::atomic::Ordering::Relaxed);
-    if let Some(note_off) = stress_trailing_note_off(sent_notes) {
-        let _ = state
-            .bridge
-            .inject_frame(note_off, "StressTest:cleanup".to_string());
-    }
-    wait_for_stress_queues(&state.audio, true);
-
-    let final_audio_drops = state.audio.midi_drop_count().unwrap_or(0);
-    let final_xruns = state.audio.xrun_count().unwrap_or(0);
-    let final_rtp_drops = rtp_dropped_count();
-    let (_pipeline_in, pipeline_out, _filtered) = pipeline_stats();
-
-    let audio_drops = final_audio_drops.saturating_sub(initial_audio_drops);
-    let audio_xruns = final_xruns.saturating_sub(initial_xruns);
-    let rtp_drops = final_rtp_drops.saturating_sub(initial_rtp_drops) as u32;
-
-    // In end-to-end, we don't have separate RTP input (using bridge injection)
-    // but we report the metrics as if coming from respective segments
-    let bridge_drops = sent_notes.saturating_sub(pipeline_out as u32);
-
-    Ok(crate::types::StressTestResult {
-        sent_notes,
-        elapsed_ms,
-        dropped_notes: rtp_drops + bridge_drops + audio_drops,
-        xruns: audio_xruns,
-        segment_rtp: Some(crate::types::SegmentMetrics {
-            dropped: rtp_drops,
-            xruns: 0,
-            latency_ms: None,
-        }),
-        segment_bridge: Some(crate::types::SegmentMetrics {
-            dropped: bridge_drops,
-            xruns: 0,
-            latency_ms: None,
-        }),
-        segment_audio: Some(crate::types::SegmentMetrics {
-            dropped: audio_drops,
-            xruns: audio_xruns,
-            latency_ms: state.audio.current_latency_ms(),
-        }),
-        received_notes: Some(pipeline_out as u32),
-    })
-}
-
 fn stress_midi_message(sequence: u32) -> smallvec::SmallVec<[u8; 32]> {
     let note = 36 + ((sequence / 2) % 48) as u8;
     if sequence.is_multiple_of(2) {
@@ -603,15 +486,6 @@ fn wait_for_stress_queues(audio: &crate::audio::AudioEngine, include_bridge: boo
     }
     // Give the callback one more period to publish final deadline/drop metrics.
     std::thread::sleep(std::time::Duration::from_millis(20));
-}
-
-/// Legacy compatibility - runs audio-only mode.
-pub fn _run_automated_stress_test(
-    rate: u32,
-    duration: u32,
-    state: &AppState,
-) -> Result<crate::types::StressTestResult, CommandError> {
-    run_stress_test("audio-vst", rate, duration, state)
 }
 
 #[cfg(test)]

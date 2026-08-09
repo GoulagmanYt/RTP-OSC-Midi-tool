@@ -102,12 +102,6 @@
   }
 }
 
-/*
-  The directives below are not needed if we use @theme above, 
-  BUT we still need to apply base styles.
-  In v4, @import "tailwindcss" includes base.
-*/
-
 @layer base {
   * {
     @apply border-border;
@@ -117,10 +111,11 @@
   }
   body {
     @apply bg-background text-foreground;
+    min-width: 320px;
+    text-rendering: optimizeLegibility;
   }
 }
 
-/* Custom scrollbar for Webkit */
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
@@ -136,6 +131,26 @@
   .page-shell {
     position: relative;
     isolation: isolate;
+  }
+
+  .skip-link {
+    position: fixed;
+    left: 1rem;
+    top: 1rem;
+    z-index: 100;
+    transform: translateY(-200%);
+    border-radius: 0.5rem;
+    background: hsl(var(--primary));
+    color: hsl(var(--primary-foreground));
+    padding: 0.625rem 0.875rem;
+    font-size: 0.875rem;
+    font-weight: 600;
+  }
+
+  .skip-link:focus {
+    transform: translateY(0);
+    outline: 2px solid hsl(var(--ring));
+    outline-offset: 2px;
   }
 
   .sidebar {
@@ -158,13 +173,11 @@
     opacity: var(--aurora-opacity);
     mix-blend-mode: screen;
     background: radial-gradient(circle at 30% 30%, hsl(var(--primary) / 0.22), transparent 55%);
-    animation: aurora-shift 22s ease-in-out infinite alternate;
   }
 
   .aurora--alt {
     background: radial-gradient(circle at 70% 40%, hsl(var(--accent) / 0.16), transparent 55%);
     opacity: calc(var(--aurora-opacity) * 0.7);
-    animation-delay: -8s;
   }
 
   .aurora--muted {
@@ -172,7 +185,6 @@
     height: 28rem;
     opacity: calc(var(--aurora-opacity) * 0.5);
     background: radial-gradient(circle at 40% 60%, hsl(var(--muted-foreground) / 0.25), transparent 60%);
-    animation-delay: -4s;
   }
 
   .grain {
@@ -183,12 +195,18 @@
     background-size: 24px 24px;
     mix-blend-mode: soft-light;
     pointer-events: none;
-    animation: grain-shift 18s linear infinite;
   }
 
   .page-body {
     padding: var(--page-padding);
     animation: fade-up 0.45s ease;
+    overscroll-behavior: contain;
+  }
+
+  .page-content {
+    width: min(100%, 96rem);
+    min-height: 100%;
+    margin-inline: auto;
   }
 
   .card-surface {
@@ -196,9 +214,8 @@
     min-width: 0;
     overflow: hidden;
     background-color: hsl(var(--card) / var(--card-opacity));
-    transition: transform 240ms ease, box-shadow 240ms ease, border-color 240ms ease, background-color 240ms ease;
+    transition: box-shadow 200ms ease, border-color 200ms ease, background-color 200ms ease;
     animation: float-in 0.45s ease var(--card-delay, 0ms) both;
-    will-change: transform, box-shadow;
   }
 
   .card-surface > * {
@@ -217,9 +234,8 @@
   }
 
   .card-surface:hover {
-    transform: translateY(-4px);
-    box-shadow: 0 22px 64px -38px rgba(0, 0, 0, 0.6), 0 12px 30px -22px rgba(0, 0, 0, 0.35);
-    border-color: hsl(var(--primary) / 0.3);
+    box-shadow: 0 18px 48px -34px rgba(0, 0, 0, 0.55);
+    border-color: hsl(var(--primary) / 0.22);
   }
 
   .card-surface:hover::after {
@@ -260,21 +276,21 @@
   }
 }
 
-@keyframes aurora-shift {
-  from {
-    transform: translate3d(-6%, -4%, 0) rotate(-4deg);
-  }
-  to {
-    transform: translate3d(10%, 8%, 0) rotate(6deg);
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
   }
 }
 
-@keyframes grain-shift {
-  from {
-    transform: translate3d(0, 0, 0);
-  }
-  to {
-    transform: translate3d(-40%, -30%, 0);
+@media (max-width: 1100px) {
+  :root {
+    --page-padding: 16px;
+    --sidebar-width: 14rem;
   }
 }
 
