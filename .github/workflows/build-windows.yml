@@ -102,7 +102,11 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path artifacts | Out-Null
 
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
           $binary = Get-Item '.cargo-target/release/OSCMidi.exe' -ErrorAction Stop
+          $worker = Get-Item `
+            'src-tauri/binaries/vst-host-worker-x86_64-pc-windows-msvc.exe' `
+            -ErrorAction Stop
           $installers = @(
             Get-ChildItem '.cargo-target/release/bundle/msi' `
               -Filter '*.msi' `
@@ -110,13 +114,35 @@ jobs:
               -ErrorAction SilentlyContinue
           )
 
-          if ($installers.Count -eq 0) {
-            throw 'The Tauri build completed without producing an MSI installer.'
+          if ($installers.Count -ne 1) {
+            throw "Expected one MSI installer, found $($installers.Count)."
           }
 
-          foreach ($file in @($binary) + $installers) {
-            Copy-Item -LiteralPath $file.FullName -Destination artifacts/
+          Copy-Item -LiteralPath $binary.FullName -Destination 'artifacts/OSCMidi.exe'
+          Copy-Item -LiteralPath $worker.FullName -Destination 'artifacts/vst-host-worker.exe'
+          Copy-Item -LiteralPath $installers[0].FullName -Destination artifacts/
+
+          $portableDirectory = Join-Path $env:RUNNER_TEMP 'OSCMidi-portable'
+          if (Test-Path -LiteralPath $portableDirectory) {
+            Remove-Item -LiteralPath $portableDirectory -Recurse -Force
           }
+          New-Item -ItemType Directory -Path $portableDirectory | Out-Null
+          Copy-Item -LiteralPath $binary.FullName -Destination (Join-Path $portableDirectory 'OSCMidi.exe')
+          Copy-Item -LiteralPath $worker.FullName -Destination (Join-Path $portableDirectory 'vst-host-worker.exe')
+
+          $portableArchive = "artifacts/OSCMidi_${version}_windows_x64_portable.zip"
+          Compress-Archive -Path (Join-Path $portableDirectory '*') -DestinationPath $portableArchive
+
+          $releaseFiles = @($installers[0], (Get-Item $portableArchive))
+          $hashLines = foreach ($file in $releaseFiles | Sort-Object Name) {
+            $hash = Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256
+            "$($hash.Hash)  $($file.Name)"
+          }
+          [System.IO.File]::WriteAllLines(
+            (Join-Path $env:GITHUB_WORKSPACE 'artifacts/SHA256SUMS.txt'),
+            $hashLines,
+            [System.Text.UTF8Encoding]::new($false)
+          )
 
           Get-ChildItem artifacts -File | Format-Table Name, Length
 
@@ -135,8 +161,13 @@ jobs:
         run: |
           $tag = $env:GITHUB_REF_NAME
           $repository = $env:GITHUB_REPOSITORY
-          $msi = Get-ChildItem artifacts -Filter '*.msi' -File -ErrorAction Stop
-          $assets = @('artifacts/OSCMidi.exe') + @($msi.FullName)
+          $msi = @(Get-ChildItem artifacts -Filter '*.msi' -File -ErrorAction Stop)
+          $portable = @(Get-ChildItem artifacts -Filter '*_portable.zip' -File -ErrorAction Stop)
+          $checksums = Get-Item artifacts/SHA256SUMS.txt -ErrorAction Stop
+          if ($msi.Count -ne 1 -or $portable.Count -ne 1) {
+            throw "Expected one MSI and one portable archive; found $($msi.Count) and $($portable.Count)."
+          }
+          $assets = @($msi[0].FullName, $portable[0].FullName, $checksums.FullName)
 
           gh release view $tag --repo $repository *> $null
           if ($LASTEXITCODE -eq 0) {
