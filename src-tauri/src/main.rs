@@ -9,17 +9,11 @@ use osc_midi_bridge::{
 };
 
 fn main() {
-    if std::env::args().nth(1).as_deref() == Some("--vst-probe") {
-        let path = std::env::args_os().nth(2).map(std::path::PathBuf::from);
-        let Some(path) = path else {
-            std::process::exit(2);
-        };
-        let entry = plugin_probe::probe_plugin(&path);
-        if let Ok(json) = serde_json::to_string(&entry) {
-            println!("OSCMIDI_PROBE_JSON:{json}");
+    if let Some(exit_code) = plugin_probe::probe_cli_exit_code() {
+        if exit_code == 0 {
             return;
         }
-        std::process::exit(1);
+        std::process::exit(exit_code);
     }
     std::panic::set_hook(Box::new(|info| {
         let msg = match info.payload().downcast_ref::<&str>() {

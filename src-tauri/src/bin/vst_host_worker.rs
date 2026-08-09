@@ -3,6 +3,9 @@
 
 #[cfg(not(target_os = "windows"))]
 fn main() {
+    if let Some(exit_code) = osc_midi_bridge::plugin_probe::probe_cli_exit_code() {
+        std::process::exit(exit_code);
+    }
     eprintln!("vst-host-worker is supported on Windows x64 only");
     std::process::exit(2);
 }
@@ -342,6 +345,12 @@ mod windows_worker {
 
 #[cfg(target_os = "windows")]
 fn main() {
+    if let Some(exit_code) = osc_midi_bridge::plugin_probe::probe_cli_exit_code() {
+        if exit_code == 0 {
+            return;
+        }
+        std::process::exit(exit_code);
+    }
     if let Err(error) = windows_worker::run() {
         eprintln!("vst-host-worker: {error}");
         std::process::exit(2);

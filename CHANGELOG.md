@@ -2,6 +2,12 @@
 
 All notable changes to OSCMidi are documented here.
 
+## Unreleased
+
+### Fixed
+
+- Allowed `vst-host-worker.exe` to run the isolated `--vst-probe` subprocess mode instead of misinterpreting probe arguments as a worker IPC session and requiring `--control-pipe`.
+
 ## 2.0.2 - 2026-08-09
 
 ### Changed
