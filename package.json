@@ -1,6 +1,6 @@
 {
   "name": "osc-midi-bridge",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Low-latency Windows bridge for MIDI, RTP-MIDI, OSC, and isolated VST instruments.",
   "private": true,
   "type": "module",

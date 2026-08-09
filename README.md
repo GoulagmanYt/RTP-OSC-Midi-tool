@@ -1,67 +1,123 @@
-# OSCMidi
+<p align="center">
+  <img src="src-tauri/icons/icon.png" width="112" alt="OSCMidi logo">
+</p>
 
-OSCMidi is a Windows-only desktop bridge for routing MIDI between RTP-MIDI network sessions, local MIDI devices, VST instruments, and OSC output.
+<h1 align="center">OSCMidi</h1>
 
-> Platform support: Windows only. macOS and Linux are not supported by this project because the current audio, ASIO, VST hosting, packaging, and runtime assumptions are Windows-specific.
+<p align="center">
+  A low-latency Windows bridge for RTP-MIDI, local MIDI, OSC and isolated VST instruments.
+</p>
 
-## What It Does
+<p align="center">
+  <a href="https://github.com/GoulagmanYt/RTP-OSC-Midi-tool/actions/workflows/build-windows.yml">
+    <img src="https://github.com/GoulagmanYt/RTP-OSC-Midi-tool/actions/workflows/build-windows.yml/badge.svg" alt="Windows build status">
+  </a>
+  <img src="https://img.shields.io/badge/version-2.0.1-35c2d5" alt="Version 2.0.1">
+  <img src="https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078d4?logo=windows" alt="Windows 10 and 11">
+  <img src="https://img.shields.io/badge/backend-Rust-dea584?logo=rust" alt="Rust backend">
+  <img src="https://img.shields.io/badge/desktop-Tauri%202-24c8db?logo=tauri" alt="Tauri 2">
+</p>
 
-- Hosts a Windows desktop app built with Tauri, React, and Rust.
-- Bridges RTP-MIDI sessions to local MIDI devices and OSC endpoints.
-- Hosts VST2 and VST3 instruments in a supervised process so plug-in crashes do not take down the desktop interface.
-- Provides low-latency audio output with ASIO or WASAPI.
-- Scans plugins, filters unsupported plugins, and keeps a local plugin cache.
-- Persists routing profiles, runtime state, diagnostics, and YAML configuration.
+<p align="center">
+  <a href="https://github.com/GoulagmanYt/RTP-OSC-Midi-tool/releases/latest">Download</a>
+  ·
+  <a href="#quick-start">Quick start</a>
+  ·
+  <a href="#architecture">Architecture</a>
+  ·
+  <a href="#development">Development</a>
+  ·
+  <a href="CHANGELOG.md">Changelog</a>
+</p>
 
-## Current Release
+---
 
-Latest intended release tag: `v2.0.0`.
+OSCMidi connects network sessions, physical or virtual MIDI devices, OSC targets and software instruments from one desktop interface. Its Rust routing engine prioritizes the audio path, while every VST runs in a supervised sidecar process so a faulty plug-in cannot take down the main application.
 
-For tagged releases, GitHub Actions builds the Windows executable and attaches the generated artifacts to the GitHub Release.
+> [!IMPORTANT]
+> OSCMidi is designed for **Windows x64 only**. Its ASIO, WASAPI, VST and packaging layers are not intended for macOS or Linux.
 
-## Downloading A Build
+## Highlights
 
-From GitHub:
+| Area | Capabilities |
+| --- | --- |
+| MIDI networking | RTP-MIDI server, participant discovery and mDNS advertisement |
+| Routing | RTP-MIDI and local MIDI input to MIDI Thru, OSC and VST destinations |
+| VST hosting | VST2 and VST3 instruments, plug-in scanning, native editors and persistent state |
+| Process isolation | One supervised `vst-host-worker.exe` process for the active plug-in and audio stream |
+| Low-latency audio | ASIO and WASAPI backends with configurable sample rate and buffer size |
+| Reliability | Bounded real-time queues, deadline metrics, heartbeat supervision and emergency MIDI reset |
+| Diagnostics | Live routing status, logs, stress tests and detailed developer-only audio metrics |
+| Interface | Responsive React desktop UI with English and French translations |
 
-1. Open the repository Actions tab.
-2. Select the `Build Windows App` workflow.
-3. Open the latest successful run.
-4. Download the `OSCMidi-windows-main` artifact.
+## Download
 
-For release builds, open the GitHub Releases page and download the assets attached to the `v*` release.
+Download the latest build from the [GitHub Releases page](https://github.com/GoulagmanYt/RTP-OSC-Midi-tool/releases/latest).
 
-The main generated executable is `OSCMidi.exe`. Installer artifacts, such as `.msi`, are uploaded when Tauri produces them.
+| Package | Recommended use |
+| --- | --- |
+| MSI installer | Normal installation with Windows shortcuts and uninstall support |
+| Portable ZIP | No installation; extract the complete archive and run `OSCMidi.exe` |
 
-## Requirements For Local Development
+The portable package contains both `OSCMidi.exe` and `vst-host-worker.exe`. Keep them in the same directory: the application intentionally does not load VST DLLs in its own process.
 
-Use Windows 10 or Windows 11.
+> [!NOTE]
+> Release binaries are currently unsigned. Windows can therefore display an unknown-publisher or SmartScreen warning when opening a downloaded build.
 
-Required tools:
+## Quick start
 
-- Node.js 20.19 or newer (or 22.12+), including npm.
-- Rust stable toolchain through `rustup`.
-- Visual Studio Build Tools with the C++ MSVC toolchain.
-- CMake available on PATH.
-- LLVM/Clang with `clang.exe` and `libclang.dll` available on PATH or in the standard install locations.
-- Git.
-- The ASIO SDK folder included in this repository.
+1. Install OSCMidi with the MSI, or extract the complete portable ZIP.
+2. Open **RTP-MIDI** and configure the local session name and ports.
+3. Open **Routing** and select the required MIDI, MIDI Thru and OSC destinations.
+4. To use a software instrument, open **Audio**, select an ASIO or WASAPI device, then choose a compatible VST2 or VST3 instrument.
+5. Start the bridge and monitor its state from the dashboard.
 
-The repository configures Cargo to use `.cargo-target` for build output and `ASIOSDK` for CPAL ASIO support.
+For a first audio test, start with **48 kHz / 512 samples**. Reduce the buffer only after the complete route is stable with the selected driver and plug-in.
 
-## Quick Start
+## Architecture
 
-From the repository root:
+```mermaid
+flowchart LR
+    RTP[RTP-MIDI] --> ROUTER[Real-time Rust router]
+    MIDI[Local MIDI input] --> ROUTER
+    UI[React + Tauri UI] <--> ROUTER
 
-```powershell
-npm install
-npm run tauri:dev
+    ROUTER --> THRU[Local MIDI output]
+    ROUTER --> OSC[OSC / UDP]
+    ROUTER --> IPC[Authenticated worker IPC]
+
+    IPC <--> WORKER[vst-host-worker.exe]
+    WORKER --> VST[VST2 / VST3 instrument]
+    VST --> AUDIO[ASIO / WASAPI output]
 ```
 
-## Building Locally
+The desktop process owns configuration, routing and supervision. The worker owns the active VST instance, its native editor, the audio device and the real-time callback. Control and MIDI messages cross a versioned, authenticated local IPC channel. If the worker crashes or stops responding, the desktop interface remains available and can return the audio system to a coherent state.
 
-Recommended Windows build script:
+More detail is available in [src-tauri/ARCHITECTURE.md](src-tauri/ARCHITECTURE.md) and [docs/VST_WORKER_PHASE2.md](docs/VST_WORKER_PHASE2.md).
 
-If you are building on a fresh Windows machine, install the following prerequisites first:
+## System requirements
+
+### Runtime
+
+- Windows 10 or Windows 11, x64.
+- Microsoft Edge WebView2 Runtime.
+- A WASAPI-compatible device or an installed ASIO driver.
+- Optional x64 VST2 or VST3 instrument plug-ins.
+- A local MIDI device or RTP-MIDI peer when using those routes.
+
+OSCMidi scans standard Windows VST locations. Unsupported architectures, effects and plug-ins that fail compatibility probing are excluded from the instrument list.
+
+### Development
+
+- Node.js 20.19+ or 22.12+, with npm.
+- Stable Rust toolchain installed through `rustup`.
+- Visual Studio Build Tools with the x64 MSVC C++ toolchain and a Windows SDK.
+- CMake.
+- LLVM/Clang with `clang.exe` and `libclang.dll`.
+- Git.
+- The `ASIOSDK` directory included in this repository.
+
+Install the main tools on a fresh Windows environment:
 
 ```powershell
 winget install OpenJS.NodeJS.LTS
@@ -71,156 +127,148 @@ winget install Kitware.CMake
 winget install LLVM.LLVM
 ```
 
-Then run:
+## Development
 
-```bat
-build_windows.bat
-```
-
-Manual build:
+Install dependencies and start the Tauri development application:
 
 ```powershell
-npm run build
-npm run tauri:build
+npm ci
+npm run tauri:dev
 ```
 
-Main local output:
+The Tauri development command builds and stages the debug VST worker before starting Vite and the desktop shell.
 
-```text
-.cargo-target\release\OSCMidi.exe
-```
+### Common commands
 
-## GitHub Release Builds
+| Command | Purpose |
+| --- | --- |
+| `npm run tauri:dev` | Build the debug worker and start the desktop application |
+| `npm run lint` | Run ESLint and TypeScript checks |
+| `npm test` | Run the frontend test suite once |
+| `npm run build` | Build the frontend production bundle |
+| `npm run tauri:build` | Build the release application and MSI |
+| `npm run prepare:vst-worker:dev` | Build and stage only the debug VST worker |
+| `npm run prepare:vst-worker:release` | Build and stage only the release VST worker |
 
-The GitHub workflow is configured in `.github/workflows/build-windows.yml`.
-
-It runs on:
-
-- every push to `main`;
-- every tag matching `v*`, for example `v2.0.0`;
-- manual workflow dispatch from GitHub Actions.
-
-To create a release build:
-
-```powershell
-git tag v2.0.0
-git push origin v2.0.0
-```
-
-The tag workflow uploads the build artifact and attaches it to the GitHub Release.
-
-## Verification Commands
-
-Frontend checks:
+### Full validation
 
 ```powershell
 npm run lint
-npm run build
-npm run test
-```
-
-Rust checks:
-
-```powershell
+npm test
 npm run prepare:vst-worker:dev
+
 cargo fmt --manifest-path src-tauri/Cargo.toml --package osc-midi-bridge -- --check
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
 cargo test --manifest-path src-tauri/Cargo.toml --all-targets --all-features
+
+cargo fmt --manifest-path tools/diagnostics/Cargo.toml --package oscmidi-diagnostics -- --check
+cargo clippy --manifest-path tools/diagnostics/Cargo.toml --target-dir tools/diagnostics/target --all-targets -- -D warnings
 ```
 
-Developer-only diagnostics are isolated from the packaged application:
+Developer diagnostics are kept outside the packaged application:
 
 ```powershell
 cargo build --manifest-path tools/diagnostics/Cargo.toml --target-dir tools/diagnostics/target
 ```
 
-## Project Stack
+## Windows release build
 
-- UI: React 19, TypeScript, Vite 8, Tailwind.
-- Desktop shell: Tauri v2.
-- Backend: Rust.
-- Audio and MIDI:
-  - `cpal` with ASIO or WASAPI.
-  - `midir` for local MIDI.
-  - `rtpmidi` and `mdns-sd` for network MIDI.
-  - `vst` for VST2.
-  - patched `vendor/rack` host for VST3.
+Run the complete local build from the repository root:
 
-## Project Layout
-
-```text
-oscMIDI/
-  src/                     React frontend
-  src-tauri/               Rust backend and Tauri commands
-  vendor/rack/             Local VST3 hosting patch
-  ASIOSDK/                 ASIO SDK used by CPAL builds
-  scripts/                 Utility scripts
-  build_windows.bat        Full Windows release build
+```bat
+build_windows.bat
 ```
 
-Important backend areas:
+The script validates the toolchain, installs clean frontend dependencies, runs frontend and Rust checks, builds the worker, application and MSI, exports the deliverables, then removes generated dependencies and compilation caches. Progress and command output remain visible throughout the build.
 
-- `src-tauri/src/main.rs`: Tauri entry point.
-- `src-tauri/src/bridge/`: MIDI routing pipeline.
-- `src-tauri/src/audio/`: audio engine, plugin lifecycle, and editor handling.
-- `src-tauri/src/vst_worker/`: authenticated IPC protocol and worker supervision.
-- `src-tauri/src/bin/vst_host_worker.rs`: isolated VST/audio worker entry point.
-- `src-tauri/src/plugin_probe*.rs`: plugin scanning and compatibility filtering.
-- `src-tauri/src/rtp*.rs`: RTP-MIDI server and discovery.
+Successful outputs are preserved in `artifacts\`:
 
-## Runtime Data Paths
+| Output | Description |
+| --- | --- |
+| `OSCMidi.exe` | Standalone desktop executable |
+| `vst-host-worker.exe` | Required isolated VST/audio worker |
+| `OSCMidi_*_portable.zip` | Complete portable distribution |
+| `OSCMidi_*.msi` | Windows installer |
+| `SHA256SUMS.txt` | Integrity hashes for the generated deliverables |
+| `logs\` | Ten most recent build logs |
 
-OSCMidi stores runtime data under the Windows app data directory:
+The cleanup runs after both successful and failed builds. It removes `node_modules`, Rust target directories, generated VST dependencies, staged sidecars and frontend output; it preserves only deliverables, logs, diagnostic reports and developer-managed Python environments. The next invocation is consequently a full clean build.
 
-```text
-%APPDATA%\OSCMIDI\OSCMIDI\config\config.yaml
-%APPDATA%\OSCMIDI\OSCMIDI\config\app.log
-%APPDATA%\OSCMIDI\OSCMIDI\config\vst_state\
+## Automated releases
+
+[Build Windows App](.github/workflows/build-windows.yml) runs on pushes to `main`, version tags and manual dispatch. It validates that `package.json`, `Cargo.toml` and `tauri.conf.json` use the same version, then publishes a downloadable workflow artifact.
+
+A `v*` tag also creates or updates the corresponding GitHub Release with the MSI, portable ZIP and checksum file:
+
+```powershell
+git tag v2.0.1
+git push origin v2.0.1
 ```
 
-## Plugin Notes
+The tag must exactly match the application version.
 
-- Only supported instrument plugins are shown.
-- Each active VST is hosted by the supervised `vst-host-worker` sidecar.
-- Effects and incompatible plugins are hidden intentionally.
-- `sforzando.vst3` has a dedicated teardown workaround to avoid plugin unload crashes.
-- Internal VST3 state restore is not applied for sforzando. It keeps state through ARIA files, for example `default.ariax`.
+## Project layout
+
+| Path | Responsibility |
+| --- | --- |
+| `src/` | React UI, pages, providers, translations and frontend tests |
+| `src-tauri/src/application/` | Application services exposed to Tauri commands |
+| `src-tauri/src/bridge/` | MIDI routing, lifecycle and metrics |
+| `src-tauri/src/audio/` | Audio engine, callbacks, plug-in lifecycle and editor integration |
+| `src-tauri/src/vst_worker/` | IPC protocol and worker supervision |
+| `src-tauri/src/bin/vst_host_worker.rs` | Isolated VST/audio worker entry point |
+| `vendor/rack/` | Local VST3 host integration and native bridge |
+| `tools/diagnostics/` | Developer-only MIDI, RTP and VST diagnostics |
+| `scripts/` | Worker preparation, build and stability utilities |
+| `ASIOSDK/` | ASIO SDK sources required by CPAL ASIO builds |
+
+## Runtime data
+
+Configuration, logs and VST states are stored under the Windows roaming application-data directory:
+
+| Data | Path |
+| --- | --- |
+| Configuration | `%APPDATA%\OSCMIDI\OSCMIDI\config\config.yaml` |
+| Application log | `%APPDATA%\OSCMIDI\OSCMIDI\config\app.log` |
+| VST state | `%APPDATA%\OSCMIDI\OSCMIDI\config\vst_state\` |
 
 ## Troubleshooting
 
-### `ERR_CONNECTION_REFUSED` On Localhost
+### A plug-in is missing
 
-Typical cause: an old dev binary is running instead of the latest release build.
+Only compatible x64 instrument plug-ins are displayed. Effects, unsupported architectures and candidates that fail or time out during probing are intentionally filtered. Refresh the instrument list after installing or moving a plug-in.
 
-Fix:
+### Audio drops or XRuns are reported
 
-1. Close all `OSCMidi.exe` instances.
-2. Rebuild with `npm run tauri:build` or `build_windows.bat`.
-3. Launch `.cargo-target\release\OSCMidi.exe`.
+- Increase the audio buffer to 512 or 1024 samples.
+- Prefer a native ASIO driver when one is available.
+- Confirm that the selected driver really accepts the requested buffer size.
+- Close other applications competing for the audio device or real-time CPU time.
+- Compare the result with a lightweight known-good instrument.
 
-### Plugin Missing From The List
+If the VST processing time itself exceeds the audio period, the stable solution is a larger buffer or lower plug-in polyphony/quality.
 
-Only supported instrument plugins are displayed. If a plugin is an effect, fails compatibility checks, or crashes during probing, it is filtered out.
+### The portable build cannot start the VST worker
 
-### XRuns Or Audio Dropouts
+Extract the entire ZIP and confirm that `OSCMidi.exe` and `vst-host-worker.exe` are in the same directory. Do not distribute or move the application executable on its own.
 
-- Increase the audio buffer size, for example `256` to `480` or `512`.
-- Prefer ASIO when an ASIO driver is available.
-- Close other real-time audio applications.
-- Test with a known stable instrument plugin.
+### Local development shows `ERR_CONNECTION_REFUSED`
 
-### sforzando SFZ Banks Do Not Load
+Close every stale `OSCMidi.exe` instance, rebuild the worker and restart `npm run tauri:dev`. A previously running binary can keep an outdated WebView development URL.
 
-- Check ARIA and sforzando paths.
-- Avoid stale absolute paths, especially paths from temporary folders or old downloads.
+### sforzando state does not restore
+
+The host intentionally avoids internal VST3 state restoration for sforzando because the plug-in has dedicated teardown behavior. Keep the ARIA resource paths valid and use its ARIA files, such as `default.ariax`, for persistent configuration.
 
 ## Contributing
 
-1. Branch from `main`.
-2. Keep commits focused.
-3. Run relevant verification locally.
-4. Include build or test evidence in PR descriptions.
+1. Create a focused branch from `main`.
+2. Keep changes scoped and preserve the worker isolation boundary.
+3. Run the relevant frontend and Rust checks.
+4. Include test or build evidence in the pull request description.
+
+Please review [CHANGELOG.md](CHANGELOG.md) and the architecture documents before changing the real-time audio or worker lifecycle.
 
 ## License
 
-No explicit license file is currently present in this repository.
+This repository does not currently include an explicit project license. Unless a license is added, the source code remains subject to the default copyright restrictions.
