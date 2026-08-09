@@ -1,5 +1,7 @@
 [CmdletBinding()]
-param()
+param(
+    [switch]$NoLog
+)
 
 $ErrorActionPreference = 'Stop'
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
@@ -10,6 +12,17 @@ $temporaryLog = Join-Path ([System.IO.Path]::GetTempPath()) "oscmidi-build-$buil
 $totalStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 $buildSucceeded = $false
 $exitCode = 1
+$persistBuildLog = -not ($NoLog -or $env:OSCMIDI_BUILD_NO_LOG -eq '1')
+
+function Remove-AnsiSequences {
+    param([AllowNull()][string]$Text)
+
+    if ($null -eq $Text) {
+        return ''
+    }
+    $ansiPattern = "$([char]27)\[[0-?]*[ -/]*[@-~]"
+    return [regex]::Replace($Text, $ansiPattern, '')
+}
 
 function Write-BuildLog {
     param(
@@ -37,9 +50,10 @@ function Show-BuildStage {
     $filled = [Math]::Min($width, [Math]::Floor($Percent * $width / 100))
     $bar = ('#' * $filled) + ('-' * ($width - $filled))
     Write-Host ''
-    Write-Host "[$bar] $Percent%  Etape $Stage/7 - $Title" -ForegroundColor Cyan
-    Write-Progress -Activity 'Build OSCMidi Windows' -Status "Etape $Stage/7 - $Title" -PercentComplete $Percent
-    Add-Content -LiteralPath $temporaryLog -Value "`r`n=== Etape $Stage/7 - $Title ($Percent%) ===" -Encoding UTF8
+    $stageColor = if ($Stage -eq 7) { 'Magenta' } else { 'Cyan' }
+    Write-Host "[$bar] $Percent%  Stage $Stage/7 - $Title" -ForegroundColor $stageColor
+    Write-Progress -Activity 'OSCMidi Windows Build' -Status "Stage $Stage/7 - $Title" -PercentComplete $Percent
+    Add-Content -LiteralPath $temporaryLog -Value "`r`n=== Stage $Stage/7 - $Title ($Percent%) ===" -Encoding UTF8
 }
 
 function Invoke-BuildCommand {
@@ -55,14 +69,14 @@ function Invoke-BuildCommand {
     & $Command @Arguments 2>&1 | ForEach-Object {
         $line = $_.ToString()
         Write-Host $line
-        Add-Content -LiteralPath $temporaryLog -Value $line -Encoding UTF8
+        Add-Content -LiteralPath $temporaryLog -Value (Remove-AnsiSequences $line) -Encoding UTF8
     }
     $commandExitCode = $LASTEXITCODE
     $stopwatch.Stop()
     if ($commandExitCode -ne 0) {
-        throw "La commande a echoue avec le code $commandExitCode apres $([Math]::Round($stopwatch.Elapsed.TotalSeconds, 1)) s : $display"
+        throw "Command failed with exit code $commandExitCode after $([Math]::Round($stopwatch.Elapsed.TotalSeconds, 1)) s: $display"
     }
-    Write-BuildLog "Commande terminee en $([Math]::Round($stopwatch.Elapsed.TotalSeconds, 1)) s." DarkGray
+    Write-BuildLog "Command completed in $([Math]::Round($stopwatch.Elapsed.TotalSeconds, 1)) s." DarkGray
 }
 
 function Find-Executable {
@@ -82,6 +96,60 @@ function Find-Executable {
         }
     }
     return $null
+}
+
+function Get-NodeVersion {
+    param([Parameter(Mandatory)][string]$NodePath)
+
+    try {
+        $rawVersion = (& $NodePath --version 2>$null).Trim().TrimStart('v')
+        if ($LASTEXITCODE -ne 0) {
+            return $null
+        }
+        return [Version]$rawVersion
+    }
+    catch {
+        return $null
+    }
+}
+
+function Test-NodeVersionSupported {
+    param([AllowNull()][Version]$Version)
+
+    if (-not $Version) {
+        return $false
+    }
+    return (
+        ($Version.Major -eq 22 -and $Version -ge [Version]'22.22.2') -or
+        ($Version.Major -eq 24 -and $Version -ge [Version]'24.15.0') -or
+        $Version.Major -ge 26
+    )
+}
+
+function Find-CompatibleNvmNode {
+    if (-not $env:NVM_HOME -or -not (Test-Path -LiteralPath $env:NVM_HOME -PathType Container)) {
+        return $null
+    }
+
+    $candidates = foreach ($directory in Get-ChildItem -LiteralPath $env:NVM_HOME -Directory -ErrorAction SilentlyContinue) {
+        $candidateNode = Join-Path $directory.FullName 'node.exe'
+        $candidateNpm = Join-Path $directory.FullName 'npm.cmd'
+        if (-not (Test-Path -LiteralPath $candidateNode -PathType Leaf) -or
+            -not (Test-Path -LiteralPath $candidateNpm -PathType Leaf)) {
+            continue
+        }
+        $candidateVersion = Get-NodeVersion $candidateNode
+        if (Test-NodeVersionSupported $candidateVersion) {
+            [PSCustomObject]@{
+                Directory = $directory.FullName
+                Node = $candidateNode
+                Npm = $candidateNpm
+                Version = $candidateVersion
+            }
+        }
+    }
+
+    return $candidates | Sort-Object Version -Descending | Select-Object -First 1
 }
 
 function Import-VisualStudioEnvironment {
@@ -120,7 +188,7 @@ function Stop-WorkspaceCargoProcesses {
         })
     if ($processes.Count -gt 0) {
         Stop-Process -Id $processes.ProcessId -Force -ErrorAction SilentlyContinue
-        Write-BuildLog "Arret de $($processes.Count) processus Cargo d'analyse encore attaches au workspace." Yellow
+        Write-BuildLog "Stopped $($processes.Count) Cargo analysis process(es) still attached to the workspace." Yellow
     }
 }
 
@@ -135,7 +203,7 @@ function Remove-GeneratedDirectory {
     $rootPrefix = $repositoryRoot.TrimEnd('\') + '\'
     if (-not $resolved.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase) -or
         $resolved -eq $repositoryRoot.TrimEnd('\')) {
-        throw "Nettoyage refuse hors du repository : $resolved"
+        throw "Cleanup refused outside the repository: $resolved"
     }
 
     for ($attempt = 1; $attempt -le 3; $attempt++) {
@@ -143,12 +211,12 @@ function Remove-GeneratedDirectory {
             Get-ChildItem -LiteralPath $resolved -File -Recurse -Force -ErrorAction SilentlyContinue |
                 ForEach-Object { $_.Attributes = [System.IO.FileAttributes]::Normal }
             [System.IO.Directory]::Delete($resolved, $true)
-            Write-BuildLog "Nettoye : $RelativePath" DarkGray
+            Write-BuildLog "Cleaned: $RelativePath" DarkGray
             return
         }
         catch {
             if ($attempt -eq 3) {
-                throw "Impossible de nettoyer $RelativePath : $($_.Exception.Message)"
+                throw "Unable to clean ${RelativePath}: $($_.Exception.Message)"
             }
             Start-Sleep -Milliseconds 300
         }
@@ -165,7 +233,7 @@ function Export-BuildArtifacts {
             -ErrorAction Stop
     )
     if ($installers.Count -ne 1) {
-        throw "Un seul installateur MSI v$version etait attendu, $($installers.Count) ont ete trouves."
+        throw "Expected exactly one MSI installer for v$version; found $($installers.Count)."
     }
 
     $workerCandidates = @(
@@ -174,7 +242,7 @@ function Export-BuildArtifacts {
     )
     $worker = $workerCandidates | Select-Object -First 1
     if (-not $worker) {
-        throw 'Le worker VST genere est introuvable.'
+        throw 'The generated VST worker could not be found.'
     }
 
     $stagingDirectory = Join-Path ([System.IO.Path]::GetTempPath()) "oscmidi-artifacts-$([guid]::NewGuid().ToString('N'))"
@@ -218,11 +286,11 @@ function Export-BuildArtifacts {
         }
     }
 
-    Write-BuildLog "Artefacts exportes vers $artifactDirectory" Green
+    Write-BuildLog "Artifacts exported to $artifactDirectory" Green
     Get-ChildItem -LiteralPath $artifactDirectory -File |
         Where-Object { $_.Extension -in '.exe', '.msi', '.zip' } |
         ForEach-Object {
-            Write-BuildLog ("  {0,-42} {1,8:N1} Mio" -f $_.Name, ($_.Length / 1MB)) Green
+            Write-BuildLog ("  {0,-42} {1,8:N1} MiB" -f $_.Name, ($_.Length / 1MB)) Green
         }
 }
 
@@ -237,19 +305,21 @@ function Save-BuildLog {
         Sort-Object LastWriteTime -Descending |
         Select-Object -Skip 10 |
         Remove-Item -Force
-    Write-Host "Journal : $finalLog" -ForegroundColor DarkGray
+    Write-Host "Build log: $finalLog" -ForegroundColor DarkGray
 }
 
 Set-Location $repositoryRoot
 $env:CARGO_TARGET_DIR = $cargoTargetDirectory
 $env:CARGO_INCREMENTAL = '0'
-[System.IO.File]::WriteAllText($temporaryLog, "Build OSCMidi demarre le $(Get-Date -Format 'u')`r`n")
+[System.IO.File]::WriteAllText($temporaryLog, "OSCMidi build started at $(Get-Date -Format 'u')`r`n")
 
 try {
-    Show-BuildStage 1 5 'Verification des prerequis'
+    Show-BuildStage 1 5 'Checking prerequisites'
     Import-VisualStudioEnvironment
     $npm = Find-Executable 'npm.cmd'
     if (-not $npm) { $npm = Find-Executable 'npm' }
+    $node = Find-Executable 'node.exe'
+    if (-not $node) { $node = Find-Executable 'node' }
     $cargo = Find-Executable 'cargo.exe'
     if (-not $cargo) { $cargo = Find-Executable 'cargo' }
     $cmake = Find-Executable 'cmake.exe' @(
@@ -270,23 +340,44 @@ try {
         (Join-Path $env:LOCALAPPDATA 'Programs\LLVM\bin\libclang.dll'),
         (Join-Path $env:USERPROFILE '.mozbuild\clang\bin\libclang.dll')
     ) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
-    if (-not $npm) { throw 'Node.js/npm est introuvable.' }
-    if (-not $cargo) { throw 'Rust/Cargo est introuvable.' }
-    if (-not $cmake) { throw 'CMake est introuvable.' }
-    if (-not $clang -or -not $libclang) { throw 'LLVM clang/libclang est introuvable.' }
+    $nodeVersion = if ($node) { Get-NodeVersion $node } else { $null }
+    $nodeSupported = $npm -and (Test-NodeVersionSupported $nodeVersion)
+    $nvmNode = $null
+    if (-not $nodeSupported) {
+        $nvmNode = Find-CompatibleNvmNode
+        if ($nvmNode) {
+            $node = $nvmNode.Node
+            $npm = $nvmNode.Npm
+            $nodeVersion = $nvmNode.Version
+            $env:PATH = "$($nvmNode.Directory);$env:PATH"
+            $nodeSupported = $true
+        }
+    }
+    if (-not $node -or -not $npm) {
+        throw 'Node.js/npm was not found. Install Node 22.22.2+, 24.15+, or 26+.'
+    }
+    if (-not $nodeSupported) {
+        throw "Node.js v$nodeVersion is incompatible with jsdom 30 and no compatible NVM installation was found. Install Node 22.22.2+, 24.15+, or 26+."
+    }
+    if (-not $cargo) { throw 'Rust/Cargo was not found.' }
+    if (-not $cmake) { throw 'CMake was not found.' }
+    if (-not $clang -or -not $libclang) { throw 'LLVM clang/libclang was not found.' }
     $env:PATH = "$(Split-Path -Parent $cmake);$(Split-Path -Parent $clang);$env:PATH"
     $env:CLANG_PATH = $clang
     $env:LIBCLANG_PATH = Split-Path -Parent $libclang
-    Write-BuildLog 'Prerequis Windows, Node, Rust, CMake et LLVM valides.' Green
+    if ($nvmNode) {
+        Write-BuildLog "Automatically selected Node.js v$nodeVersion from NVM_HOME." Yellow
+    }
+    Write-BuildLog "Windows, Node.js v$nodeVersion, Rust, CMake, and LLVM prerequisites are ready." Green
 
-    Show-BuildStage 2 15 'Installation des dependances frontend'
+    Show-BuildStage 2 15 'Installing frontend dependencies'
     Invoke-BuildCommand $npm @('ci', '--no-fund', '--no-audit')
 
-    Show-BuildStage 3 30 'Validation frontend'
+    Show-BuildStage 3 30 'Validating the frontend'
     Invoke-BuildCommand $npm @('run', 'lint')
     Invoke-BuildCommand $npm @('test')
 
-    Show-BuildStage 4 45 'Validation Rust'
+    Show-BuildStage 4 45 'Validating Rust'
     $previousTauriConfig = $env:TAURI_CONFIG
     try {
         $env:TAURI_CONFIG = '{"bundle":{"externalBin":[]}}'
@@ -300,20 +391,20 @@ try {
         $env:TAURI_CONFIG = $previousTauriConfig
     }
 
-    Show-BuildStage 5 75 'Compilation release et creation du MSI'
+    Show-BuildStage 5 75 'Building the release and MSI installer'
     Invoke-BuildCommand $npm @('run', 'tauri:build', '--', '--bundles', 'msi', '--ci')
 
-    Show-BuildStage 6 90 'Verification et export des livrables'
+    Show-BuildStage 6 90 'Verifying and exporting artifacts'
     Export-BuildArtifacts
     $buildSucceeded = $true
     $exitCode = 0
 }
 catch {
-    Write-BuildLog "ECHEC : $($_.Exception.Message)" Red
+    Write-BuildLog "FAILED: $($_.Exception.Message)" Red
     $exitCode = 1
 }
 finally {
-    Show-BuildStage 7 96 'Nettoyage automatique'
+    Show-BuildStage 7 96 'Automatic cleanup'
     try {
         Stop-WorkspaceCargoProcesses
         @(
@@ -326,31 +417,41 @@ finally {
             'dist'
             'build_logs'
         ) | ForEach-Object { Remove-GeneratedDirectory $_ }
-        Write-BuildLog 'Nettoyage termine : seuls les livrables et journaux sont conserves.' Green
+        Write-BuildLog 'Cleanup complete: only artifacts and persistent logs were kept.' Green
     }
     catch {
-        Write-BuildLog "AVERTISSEMENT NETTOYAGE : $($_.Exception.Message)" Yellow
+        Write-BuildLog "CLEANUP WARNING: $($_.Exception.Message)" Yellow
         if ($exitCode -eq 0) { $exitCode = 2 }
     }
 
     $totalStopwatch.Stop()
     $status = if ($buildSucceeded -and $exitCode -eq 0) { 'OK' } else { 'FAIL' }
-    Write-BuildLog "Build $status en $([Math]::Round($totalStopwatch.Elapsed.TotalMinutes, 2)) min." $(if ($status -eq 'OK') { 'Green' } else { 'Red' })
-    Save-BuildLog $status
+    Write-BuildLog "Build $status in $([Math]::Round($totalStopwatch.Elapsed.TotalMinutes, 2)) min." $(if ($status -eq 'OK') { 'Green' } else { 'Red' })
+    if ($persistBuildLog) {
+        Save-BuildLog $status
+    }
+    else {
+        Write-Host 'Persistent build log disabled for this run.' -ForegroundColor DarkGray
+    }
     if (Test-Path -LiteralPath $temporaryLog) {
         Remove-Item -LiteralPath $temporaryLog -Force
     }
-    Write-Progress -Activity 'Build OSCMidi Windows' -Completed
+    Write-Progress -Activity 'OSCMidi Windows Build' -Completed
 }
 
 if ($exitCode -eq 0) {
     Write-Host ''
-    Write-Host '[##############################] 100%  BUILD TERMINE' -ForegroundColor Green
-    Write-Host "Livrables : $artifactDirectory" -ForegroundColor Green
+    Write-Host '[##############################] 100%  BUILD COMPLETE' -ForegroundColor Green
+    Write-Host "Artifacts: $artifactDirectory" -ForegroundColor Cyan
 }
 else {
     Write-Host ''
-    Write-Host "BUILD EN ECHEC (code $exitCode). Consultez le journal dans artifacts\logs." -ForegroundColor Red
+    if ($persistBuildLog) {
+        Write-Host "BUILD FAILED (exit code $exitCode). See the log in artifacts\logs." -ForegroundColor Red
+    }
+    else {
+        Write-Host "BUILD FAILED (exit code $exitCode). Persistent logging was disabled." -ForegroundColor Red
+    }
 }
 
 exit $exitCode
