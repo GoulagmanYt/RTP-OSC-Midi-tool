@@ -97,11 +97,14 @@ call :RUNCMD npm ci --no-fund --no-audit || goto ERROR
 call :LOG "[2/4] Validate frontend and Rust..."
 call :RUNCMD npm run lint || goto ERROR
 call :RUNCMD npm test || goto ERROR
+rem Validation compiles the app as a library before the release sidecar exists.
+set "TAURI_CONFIG={"bundle":{"externalBin":[]}}"
 call :RUNCMD cargo fmt --manifest-path src-tauri\Cargo.toml --package osc-midi-bridge -- --check || goto ERROR
 call :RUNCMD cargo clippy --manifest-path src-tauri\Cargo.toml --all-targets --all-features -- -D warnings || goto ERROR
 call :RUNCMD cargo test --manifest-path src-tauri\Cargo.toml --all-targets --all-features || goto ERROR
 call :RUNCMD cargo fmt --manifest-path tools\diagnostics\Cargo.toml --package oscmidi-diagnostics -- --check || goto ERROR
 call :RUNCMD cargo clippy --manifest-path tools\diagnostics\Cargo.toml --target-dir tools\diagnostics\target --all-targets -- -D warnings || goto ERROR
+set "TAURI_CONFIG="
 
 call :LOG "[3/4] Bundle Tauri (.exe + .msi)..."
 call :RUNCMD npm run tauri:build -- --bundles msi --ci || goto ERROR

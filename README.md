@@ -122,6 +122,7 @@ npm run test
 Rust checks:
 
 ```powershell
+npm run prepare:vst-worker:dev
 cargo fmt --manifest-path src-tauri/Cargo.toml --package osc-midi-bridge -- --check
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
 cargo test --manifest-path src-tauri/Cargo.toml --all-targets --all-features

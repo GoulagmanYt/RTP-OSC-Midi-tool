@@ -84,6 +84,9 @@ jobs:
           npm test
 
       - name: Validate Rust
+        env:
+          # Rust checks compile the app as a library before the release sidecar exists.
+          TAURI_CONFIG: '{"bundle":{"externalBin":[]}}'
         run: |
           cargo fmt --manifest-path src-tauri/Cargo.toml --package osc-midi-bridge -- --check
           cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
