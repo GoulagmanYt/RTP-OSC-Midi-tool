@@ -206,6 +206,21 @@ function Remove-GeneratedDirectory {
         throw "Cleanup refused outside the repository: $resolved"
     }
 
+    $git = Get-Command git.exe -ErrorAction SilentlyContinue
+    if (-not $git) {
+        $git = Get-Command git -ErrorAction SilentlyContinue
+    }
+    if ($git -and (Test-Path -LiteralPath (Join-Path $repositoryRoot '.git'))) {
+        $gitPath = $RelativePath.Replace('\', '/')
+        $trackedFiles = @(& $git.Source -C $repositoryRoot ls-files -- $gitPath 2>$null)
+        if ($LASTEXITCODE -ne 0) {
+            throw "Cleanup could not verify tracked files in ${RelativePath}."
+        }
+        if ($trackedFiles.Count -gt 0) {
+            throw "Cleanup refused to remove ${RelativePath}: it contains Git-tracked files."
+        }
+    }
+
     for ($attempt = 1; $attempt -le 3; $attempt++) {
         try {
             Get-ChildItem -LiteralPath $resolved -File -Recurse -Force -ErrorAction SilentlyContinue |
@@ -248,8 +263,6 @@ function Export-BuildArtifacts {
     $stagingDirectory = Join-Path ([System.IO.Path]::GetTempPath()) "oscmidi-artifacts-$([guid]::NewGuid().ToString('N'))"
     New-Item -ItemType Directory -Path $stagingDirectory | Out-Null
     try {
-        Copy-Item -LiteralPath $application.FullName -Destination (Join-Path $stagingDirectory 'OSCMidi.exe')
-        Copy-Item -LiteralPath $worker.FullName -Destination (Join-Path $stagingDirectory 'vst-host-worker.exe')
         foreach ($installer in $installers) {
             Copy-Item -LiteralPath $installer.FullName -Destination $stagingDirectory
         }
@@ -261,7 +274,6 @@ function Export-BuildArtifacts {
         Compress-Archive `
             -Path (Join-Path $portableDirectory '*') `
             -DestinationPath (Join-Path $stagingDirectory "OSCMidi_${version}_windows_x64_portable.zip")
-        [System.IO.Directory]::Delete($portableDirectory, $true)
 
         $deliverables = @(Get-ChildItem -LiteralPath $stagingDirectory -File)
         $hashLines = foreach ($deliverable in $deliverables) {
@@ -278,7 +290,8 @@ function Export-BuildArtifacts {
         Get-ChildItem -LiteralPath $artifactDirectory -File -ErrorAction SilentlyContinue |
             Where-Object { $_.Extension -in '.exe', '.msi', '.zip' -or $_.Name -eq 'SHA256SUMS.txt' } |
             Remove-Item -Force
-        Copy-Item -Path (Join-Path $stagingDirectory '*') -Destination $artifactDirectory -Force
+        Remove-GeneratedDirectory 'artifacts\portable'
+        Copy-Item -Path (Join-Path $stagingDirectory '*') -Destination $artifactDirectory -Recurse -Force
     }
     finally {
         if (Test-Path -LiteralPath $stagingDirectory) {
@@ -291,6 +304,10 @@ function Export-BuildArtifacts {
         Where-Object { $_.Extension -in '.exe', '.msi', '.zip' } |
         ForEach-Object {
             Write-BuildLog ("  {0,-42} {1,8:N1} MiB" -f $_.Name, ($_.Length / 1MB)) Green
+        }
+    Get-ChildItem -LiteralPath (Join-Path $artifactDirectory 'portable') -File |
+        ForEach-Object {
+            Write-BuildLog ("  portable\{0,-33} {1,8:N1} MiB" -f $_.Name, ($_.Length / 1MB)) Green
         }
 }
 
@@ -415,9 +432,8 @@ finally {
             'vendor\rack\rack-sys\external'
             'src-tauri\binaries'
             'dist'
-            'build_logs'
         ) | ForEach-Object { Remove-GeneratedDirectory $_ }
-        Write-BuildLog 'Cleanup complete: only artifacts and persistent logs were kept.' Green
+        Write-BuildLog 'Cleanup complete: artifacts, logs, tracked files, and developer-managed files were preserved.' Green
     }
     catch {
         Write-BuildLog "CLEANUP WARNING: $($_.Exception.Message)" Yellow

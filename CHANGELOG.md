@@ -16,6 +16,8 @@ All notable changes to OSCMidi are documented here.
 - Prevented Node.js 20 from reaching the frontend tests and failing with jsdom/undici runtime errors.
 - Stripped ANSI color sequences from persistent logs while retaining colors in the interactive console.
 - Preserved reliable exit codes and actionable error messages across both batch launchers.
+- Exported loose Windows executables as one inseparable `artifacts\portable` folder so the required VST worker is not omitted when copying the application.
+- Added a Git-tracked-file guard to automatic cleanup and preserved legacy build logs.
 
 ## 2.0.1 - 2026-08-09
 
