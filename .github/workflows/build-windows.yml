@@ -124,14 +124,9 @@ jobs:
             throw "Expected one MSI installer, found $($installers.Count)."
           }
 
-          Copy-Item -LiteralPath $binary.FullName -Destination 'artifacts/OSCMidi.exe'
-          Copy-Item -LiteralPath $worker.FullName -Destination 'artifacts/vst-host-worker.exe'
           Copy-Item -LiteralPath $installers[0].FullName -Destination artifacts/
 
-          $portableDirectory = Join-Path $env:RUNNER_TEMP 'OSCMidi-portable'
-          if (Test-Path -LiteralPath $portableDirectory) {
-            Remove-Item -LiteralPath $portableDirectory -Recurse -Force
-          }
+          $portableDirectory = Join-Path $env:GITHUB_WORKSPACE 'artifacts/portable'
           New-Item -ItemType Directory -Path $portableDirectory | Out-Null
           Copy-Item -LiteralPath $binary.FullName -Destination (Join-Path $portableDirectory 'OSCMidi.exe')
           Copy-Item -LiteralPath $worker.FullName -Destination (Join-Path $portableDirectory 'vst-host-worker.exe')
@@ -156,7 +151,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: OSCMidi-windows-${{ github.ref_name }}
-          path: artifacts/*
+          path: artifacts
           if-no-files-found: error
 
       - name: Attach artifacts to GitHub Release

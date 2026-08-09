@@ -514,7 +514,7 @@ fn worker_executable_path() -> Result<PathBuf, String> {
         Ok(path)
     } else {
         Err(format!(
-            "VST worker executable not found at {}. Build it with `cargo build --bin vst-host-worker`.",
+            "VST worker executable not found at {}. OSCMidi.exe cannot run by itself: install the MSI or keep OSCMidi.exe and vst-host-worker.exe together from the complete portable folder. Developers can rebuild the worker with `npm run prepare:vst-worker:release`.",
             path.display()
         ))
     }

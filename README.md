@@ -185,14 +185,15 @@ Successful outputs are preserved in `artifacts\`:
 
 | Output | Description |
 | --- | --- |
-| `OSCMidi.exe` | Standalone desktop executable |
-| `vst-host-worker.exe` | Required isolated VST/audio worker |
+| `portable\` | Ready-to-run folder containing both required executables |
 | `OSCMidi_*_portable.zip` | Complete portable distribution |
 | `OSCMidi_*.msi` | Windows installer |
 | `SHA256SUMS.txt` | Integrity hashes for the generated deliverables |
 | `logs\` | Ten most recent build logs |
 
-The cleanup runs after both successful and failed builds. It removes `node_modules`, Rust target directories, generated VST dependencies, staged sidecars and frontend output; it preserves only deliverables, logs, diagnostic reports and developer-managed Python environments. The next invocation is consequently a full clean build.
+Run `artifacts\portable\OSCMidi.exe` directly, install the MSI, or copy/extract the complete portable folder. `OSCMidi.exe` intentionally requires `vst-host-worker.exe` beside it and must never be copied alone.
+
+The cleanup runs after both successful and failed builds. It removes `node_modules`, Rust target directories, generated VST dependencies, staged sidecars and frontend output. Before deleting a generated directory, the script refuses to continue if Git reports any tracked file inside it. Deliverables, current and legacy logs, diagnostic reports and developer-managed Python environments are preserved. The next invocation is consequently a full clean build.
 
 ## Automated releases
 
@@ -250,7 +251,7 @@ If the VST processing time itself exceeds the audio period, the stable solution 
 
 ### The portable build cannot start the VST worker
 
-Extract the entire ZIP and confirm that `OSCMidi.exe` and `vst-host-worker.exe` are in the same directory. Do not distribute or move the application executable on its own.
+Install the MSI, run `artifacts\portable\OSCMidi.exe`, or extract the entire ZIP. Confirm that `OSCMidi.exe` and `vst-host-worker.exe` are in the same directory. Do not distribute or move the application executable on its own.
 
 ### Local development shows `ERR_CONNECTION_REFUSED`
 
