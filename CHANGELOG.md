@@ -2,7 +2,7 @@
 
 All notable changes to OSCMidi are documented here.
 
-## 2.0.1-b - 2026-08-09
+## 2.0.2 - 2026-08-09
 
 ### Changed
 
