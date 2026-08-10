@@ -1,5 +1,7 @@
 // The isolated worker owns the VST DLL, audio driver, and native editor.
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// It is always a background process: neither debug nor release launches may
+// allocate a console window when the supervisor starts it.
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 #[cfg(not(target_os = "windows"))]
 fn main() {
@@ -12,7 +14,11 @@ fn main() {
 
 #[cfg(target_os = "windows")]
 mod windows_worker {
-    use std::{collections::HashMap, time::Duration};
+    use std::{
+        collections::HashMap,
+        sync::atomic::{AtomicU32, Ordering},
+        time::Duration,
+    };
 
     use osc_midi_bridge::{
         logger::{background_log, FrontendLogger},
@@ -29,6 +35,121 @@ mod windows_worker {
     const PIPE_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
     const PIPE_RETRY_DELAY: Duration = Duration::from_millis(25);
     const HEARTBEAT_PERIOD: Duration = Duration::from_millis(500);
+    static WORKER_PROCESS_ID: AtomicU32 = AtomicU32::new(0);
+
+    fn process_is_worker_descendant(process_id: u32, worker_id: u32) -> bool {
+        use windows::Win32::{
+            Foundation::CloseHandle,
+            System::Diagnostics::ToolHelp::{
+                CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+                TH32CS_SNAPPROCESS,
+            },
+        };
+
+        if process_id == 0 || worker_id == 0 || process_id == worker_id {
+            return process_id == worker_id;
+        }
+        let Ok(snapshot) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }) else {
+            return false;
+        };
+        let mut parents = HashMap::new();
+        let mut entry = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+        if unsafe { Process32FirstW(snapshot, &mut entry) }.is_ok() {
+            loop {
+                parents.insert(entry.th32ProcessID, entry.th32ParentProcessID);
+                if unsafe { Process32NextW(snapshot, &mut entry) }.is_err() {
+                    break;
+                }
+            }
+        }
+        let _ = unsafe { CloseHandle(snapshot) };
+
+        let mut current = process_id;
+        for _ in 0..64 {
+            let Some(parent) = parents.get(&current).copied() else {
+                return false;
+            };
+            if parent == worker_id {
+                return true;
+            }
+            if parent == 0 || parent == current {
+                return false;
+            }
+            current = parent;
+        }
+        false
+    }
+
+    unsafe extern "system" fn hide_descendant_console(
+        _hook: windows::Win32::UI::Accessibility::HWINEVENTHOOK,
+        _event: u32,
+        window: windows::Win32::Foundation::HWND,
+        object_id: i32,
+        child_id: i32,
+        _event_thread: u32,
+        _event_time: u32,
+    ) {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetClassNameW, GetWindowThreadProcessId, ShowWindowAsync, OBJID_WINDOW, SW_HIDE,
+        };
+
+        if window.0.is_null() || object_id != OBJID_WINDOW.0 || child_id != 0 {
+            return;
+        }
+        let mut class_name = [0u16; 64];
+        let length = unsafe { GetClassNameW(window, &mut class_name) };
+        if length <= 0 {
+            return;
+        }
+        let class_name = String::from_utf16_lossy(&class_name[..length as usize]);
+        if class_name != "ConsoleWindowClass" && class_name != "CASCADIA_HOSTING_WINDOW_CLASS" {
+            return;
+        }
+        let mut process_id = 0;
+        unsafe { GetWindowThreadProcessId(window, Some(&mut process_id)) };
+        if process_is_worker_descendant(process_id, WORKER_PROCESS_ID.load(Ordering::Relaxed)) {
+            let _ = unsafe { ShowWindowAsync(window, SW_HIDE) };
+        }
+    }
+
+    /// Some third-party plug-ins start console-subsystem helper processes while
+    /// loading or shutting down. Their creation flags are outside our control,
+    /// so hide only console windows belonging to descendants of this worker.
+    pub fn install_descendant_console_guard() {
+        WORKER_PROCESS_ID.store(std::process::id(), Ordering::Relaxed);
+        let _ = std::thread::Builder::new()
+            .name("vst-console-guard".into())
+            .spawn(|| {
+                use windows::Win32::UI::{
+                    Accessibility::{SetWinEventHook, UnhookWinEvent},
+                    WindowsAndMessaging::{
+                        GetMessageW, EVENT_OBJECT_CREATE, EVENT_OBJECT_SHOW, MSG,
+                        WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
+                    },
+                };
+
+                let hook = unsafe {
+                    SetWinEventHook(
+                        EVENT_OBJECT_CREATE,
+                        EVENT_OBJECT_SHOW,
+                        None,
+                        Some(hide_descendant_console),
+                        0,
+                        0,
+                        WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+                    )
+                };
+                if hook.0.is_null() {
+                    return;
+                }
+                let mut message = MSG::default();
+                while unsafe { GetMessageW(&mut message, None, 0, 0) }.as_bool() {}
+                let _ = unsafe { UnhookWinEvent(hook) };
+            });
+    }
 
     #[derive(Clone)]
     struct WorkerArgs {
@@ -311,6 +432,15 @@ mod windows_worker {
         let args = WorkerArgs::parse()?;
         env_logger::init();
 
+        // The shared Tauri configuration declares OSCMidi's main window as
+        // visible. A worker using that context would briefly paint the same
+        // window before `setup` could hide it on every VST switch. Override the
+        // worker context before Tauri creates any native window.
+        let mut context = tauri::generate_context!();
+        for window in &mut context.config_mut().app.windows {
+            window.visible = false;
+        }
+
         tauri::Builder::default()
             .setup(move |app| {
                 let window = app
@@ -338,13 +468,14 @@ mod windows_worker {
                 });
                 Ok(())
             })
-            .run(tauri::generate_context!())
+            .run(context)
             .map_err(|error| error.to_string())
     }
 }
 
 #[cfg(target_os = "windows")]
 fn main() {
+    windows_worker::install_descendant_console_guard();
     if let Some(exit_code) = osc_midi_bridge::plugin_probe::probe_cli_exit_code() {
         if exit_code == 0 {
             return;

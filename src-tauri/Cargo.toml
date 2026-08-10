@@ -1,6 +1,6 @@
 [package]
 name = "osc-midi-bridge"
-version = "2.0.2"
+version = "2.1.0"
 edition = "2021"
 description = "Low-latency Windows bridge for MIDI, RTP-MIDI, OSC, and isolated VST instruments"
 authors = ["OSCMidi contributors"]
@@ -55,7 +55,7 @@ midi-types = "0.2.1"
 mdns-sd = "0.18.2"
 local-ip-address = "0.6.5"
 window-vibrancy = "0.8"
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_UI_HiDpi", "Win32_UI_WindowsAndMessaging", "Win32_System_LibraryLoader", "Win32_Graphics_Gdi", "Win32_System_Threading", "Win32_System_Performance", "Win32_System_JobObjects", "Win32_Security", "Win32_Media", "Win32_Storage_FileSystem"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_UI_Accessibility", "Win32_UI_HiDpi", "Win32_UI_WindowsAndMessaging", "Win32_System_Diagnostics_ToolHelp", "Win32_System_LibraryLoader", "Win32_Graphics_Gdi", "Win32_System_Threading", "Win32_System_Performance", "Win32_System_JobObjects", "Win32_Security", "Win32_Media", "Win32_Storage_FileSystem"] }
 cpal = { version = "0.15.3", features = ["asio"] }
 vst = "0.4"
 rtrb = "0.3"
