@@ -66,12 +66,22 @@ function Invoke-BuildCommand {
     $display = (@($Command) + $Arguments) -join ' '
     Write-BuildLog "> $display" DarkGray
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-    & $Command @Arguments 2>&1 | ForEach-Object {
-        $line = $_.ToString()
-        Write-Host $line
-        Add-Content -LiteralPath $temporaryLog -Value (Remove-AnsiSequences $line) -Encoding UTF8
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        # Native tools commonly use stderr for warnings. PowerShell 5 turns
+        # those lines into ErrorRecord instances when stderr is merged, so the
+        # global Stop policy must not abort before we can inspect LASTEXITCODE.
+        $ErrorActionPreference = 'Continue'
+        & $Command @Arguments 2>&1 | ForEach-Object {
+            $line = $_.ToString()
+            Write-Host $line
+            Add-Content -LiteralPath $temporaryLog -Value (Remove-AnsiSequences $line) -Encoding UTF8
+        }
+        $commandExitCode = $LASTEXITCODE
     }
-    $commandExitCode = $LASTEXITCODE
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
     $stopwatch.Stop()
     if ($commandExitCode -ne 0) {
         throw "Command failed with exit code $commandExitCode after $([Math]::Round($stopwatch.Elapsed.TotalSeconds, 1)) s: $display"
@@ -238,6 +248,58 @@ function Remove-GeneratedDirectory {
     }
 }
 
+function Get-PeSubsystem {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $resolvedPath = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).Path
+    $stream = [System.IO.File]::OpenRead($resolvedPath)
+    $reader = [System.IO.BinaryReader]::new($stream)
+    try {
+        if ($reader.ReadUInt16() -ne 0x5A4D) {
+            throw "Not a Windows PE executable: $resolvedPath"
+        }
+        $stream.Position = 0x3C
+        $peOffset = $reader.ReadUInt32()
+        if ($peOffset -gt ($stream.Length - 92)) {
+            throw "Invalid PE header offset in: $resolvedPath"
+        }
+        $stream.Position = $peOffset
+        if ($reader.ReadUInt32() -ne 0x00004550) {
+            throw "Invalid PE signature in: $resolvedPath"
+        }
+        $stream.Position = $peOffset + 4 + 20 + 68
+        return $reader.ReadUInt16()
+    }
+    finally {
+        $reader.Dispose()
+        $stream.Dispose()
+    }
+}
+
+function Assert-WindowsGuiExecutable {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $subsystem = Get-PeSubsystem $Path
+    if ($subsystem -ne 2) {
+        throw "Console executable refused (PE subsystem $subsystem): $Path"
+    }
+}
+
+function Get-Sha256Hash {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $stream = [System.IO.File]::OpenRead((Resolve-Path -LiteralPath $Path -ErrorAction Stop).Path)
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = $sha256.ComputeHash($stream)
+        return ([System.BitConverter]::ToString($bytes)).Replace('-', '')
+    }
+    finally {
+        $sha256.Dispose()
+        $stream.Dispose()
+    }
+}
+
 function Export-BuildArtifacts {
     $version = (Get-Content (Join-Path $repositoryRoot 'package.json') -Raw | ConvertFrom-Json).version
     $application = Get-Item (Join-Path $cargoTargetDirectory 'release\OSCMidi.exe') -ErrorAction Stop
@@ -260,6 +322,10 @@ function Export-BuildArtifacts {
         throw 'The generated VST worker could not be found.'
     }
 
+    Assert-WindowsGuiExecutable $application.FullName
+    Assert-WindowsGuiExecutable $worker.FullName
+    Write-BuildLog 'Verified GUI subsystem for OSCMidi.exe and vst-host-worker.exe (no console allocation).' Green
+
     $stagingDirectory = Join-Path ([System.IO.Path]::GetTempPath()) "oscmidi-artifacts-$([guid]::NewGuid().ToString('N'))"
     New-Item -ItemType Directory -Path $stagingDirectory | Out-Null
     try {
@@ -277,8 +343,7 @@ function Export-BuildArtifacts {
 
         $deliverables = @(Get-ChildItem -LiteralPath $stagingDirectory -File)
         $hashLines = foreach ($deliverable in $deliverables) {
-            $hash = Get-FileHash -LiteralPath $deliverable.FullName -Algorithm SHA256
-            "$($hash.Hash)  $($deliverable.Name)"
+            "$(Get-Sha256Hash $deliverable.FullName)  $($deliverable.Name)"
         }
         [System.IO.File]::WriteAllLines(
             (Join-Path $stagingDirectory 'SHA256SUMS.txt'),

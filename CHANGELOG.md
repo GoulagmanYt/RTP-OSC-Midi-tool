@@ -4,9 +4,21 @@ All notable changes to OSCMidi are documented here.
 
 ## Unreleased
 
+## 2.1.0 - 2026-08-10
+
+### Changed
+
+- Made isolated VST hosting resilient to incomplete local VST3 SDK checkouts during clean Windows builds.
+- Added release-time PE validation so console-subsystem application or worker binaries cannot be exported.
+
 ### Fixed
 
 - Allowed `vst-host-worker.exe` to run the isolated `--vst-probe` subprocess mode instead of misinterpreting probe arguments as a worker IPC session and requiring `--control-pipe`.
+- Prevented OSCMidi, its VST probe, the worker, and Explorer helpers from allocating transient Windows consoles in every build profile.
+- Created the worker's hidden Tauri host window as invisible from the outset instead of hiding it after its first frame.
+- Hid console windows started by third-party VST helper processes while leaving the plug-in editor and unrelated applications visible.
+- Prevented VST state restoration during audio startup from being reported as real-time lock incidents.
+- Made native-tool warnings non-fatal in Windows PowerShell and generated release checksums without optional PowerShell modules.
 
 ## 2.0.2 - 2026-08-09
 

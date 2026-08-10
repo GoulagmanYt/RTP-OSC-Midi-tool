@@ -1,5 +1,7 @@
-// The desktop build reports failures in its log/UI and must not spawn a second console window.
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// OSCMidi is a GUI application in every build profile. This also keeps the
+// private `--vst-probe` mode, which reuses this executable, from allocating a
+// console window during bridge start or VST changes.
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 use ::tauri::{Emitter, Manager};
 use osc_midi_bridge::{

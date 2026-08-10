@@ -234,6 +234,25 @@ fn ensure_vst3_sdk() -> Option<PathBuf> {
     // Fallback: Clone directly
     eprintln!("Cloning VST3 SDK to {}...", clone_target.display());
 
+    // `git submodule update` can leave an empty or partially populated worktree
+    // behind even when it did not provide the complete SDK. `git clone` refuses
+    // to use that directory, so remove only this known-incomplete generated SDK
+    // before falling back to a recursive clone.
+    if clone_target.exists() {
+        eprintln!(
+            "Removing incomplete VST3 SDK directory at {} before cloning...",
+            clone_target.display()
+        );
+        if let Err(error) = std::fs::remove_dir_all(&clone_target) {
+            eprintln!(
+                "Warning: Failed to remove incomplete VST3 SDK directory: {}",
+                error
+            );
+            eprintln!("VST3 support will be disabled.");
+            return None;
+        }
+    }
+
     // Create parent directory if it doesn't exist
     if let Some(parent) = clone_target.parent() {
         std::fs::create_dir_all(parent).ok();

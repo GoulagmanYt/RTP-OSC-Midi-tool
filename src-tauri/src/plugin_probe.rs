@@ -7,6 +7,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
 use crate::types::VstPluginEntry;
 use rack::PluginInfo as RackPluginInfo;
 use std::path::PathBuf as StdPathBuf;
@@ -169,6 +172,10 @@ fn run_probe_process(path: &Path, timeout: Duration) -> Result<VstPluginEntry, S
     if use_current_exe {
         command.arg("--vst-probe");
     }
+    // The probe runs whenever a VST is selected or the bridge starts. It has
+    // captured stdio, so a console window would only be a distracting flash.
+    #[cfg(target_os = "windows")]
+    command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     let mut child = command
         .arg(path)
         .stdin(Stdio::null())

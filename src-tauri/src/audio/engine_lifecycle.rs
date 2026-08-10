@@ -716,7 +716,18 @@ impl AudioEngine {
             AudioError::Message("Selected audio device handle was lost during startup".into())
         })?;
 
+        // Some ASIO drivers can begin invoking a freshly-built stream before
+        // `play()` is called. Keep it explicitly paused while VST state and
+        // parameters are restored: that work takes the plug-in mutex and must
+        // never be counted as an audio-thread lock miss.
+        stream.pause().map_err(|error| {
+            AudioError::Message(format!(
+                "Failed to pause stream on '{}' before VST state restoration: {}",
+                active_device, error
+            ))
+        })?;
         restore_vst_state_thread_affine(&plugin, &parameter_cache, &vst_path, &logger)?;
+        telemetry.audio_lock_miss_count.store(0, Ordering::Relaxed);
         stream.play().map_err(|error| {
             AudioError::Message(format!(
                 "Failed to start stream on '{}': {}",
@@ -768,5 +779,28 @@ impl AudioEngine {
             .store(true, Ordering::Relaxed);
         reset_all_notes(runtime.plugin.clone());
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn stream_is_paused_before_vst_state_restoration() {
+        let source = include_str!("engine_lifecycle.rs");
+        let pause = source
+            .find("stream.pause().map_err")
+            .expect("startup must explicitly pause the stream");
+        let restore = source
+            .find("restore_vst_state_thread_affine(&plugin")
+            .expect("startup must restore VST state");
+        let reset = source
+            .find(".audio_lock_miss_count.store(0, Ordering::Relaxed)")
+            .expect("startup must reset pre-play lock metrics");
+
+        assert!(
+            pause < restore,
+            "stream must be paused before VST state restoration"
+        );
+        assert!(restore < reset, "only startup lock misses may be reset");
     }
 }

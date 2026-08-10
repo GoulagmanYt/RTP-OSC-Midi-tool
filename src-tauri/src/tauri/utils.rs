@@ -8,6 +8,9 @@ use std::{
     sync::Arc,
 };
 
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
 use crate::{config::Config, types::VstPluginEntry};
 use directories::ProjectDirs;
 use tauri::{AppHandle, Manager};
@@ -101,11 +104,10 @@ pub fn save_vst_cache_to_disk(entries: &[VstPluginEntry]) {
 pub fn open_folder_in_explorer(path: &Path) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        Command::new("explorer")
-            .arg(path)
-            .spawn()
-            .map_err(|e| e.to_string())
-            .map(|_| ())
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let mut command = Command::new("explorer");
+        command.arg(path).creation_flags(CREATE_NO_WINDOW);
+        command.spawn().map_err(|e| e.to_string()).map(|_| ())
     }
     #[cfg(target_os = "macos")]
     {
