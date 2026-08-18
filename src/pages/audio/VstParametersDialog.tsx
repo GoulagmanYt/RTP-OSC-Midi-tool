@@ -4,7 +4,6 @@ import type { VstParameter } from "../../api-types";
 import type { TranslateFn } from "./shared";
 
 type Props = {
-  isVst3: boolean;
   open: boolean;
   params: VstParameter[];
   loading: boolean;
@@ -13,9 +12,9 @@ type Props = {
   onParamChange: (index: number, value: number) => Promise<void>;
 };
 
-export function VstParametersDialog({ isVst3, open, params, loading, t, onOpenChange, onParamChange }: Props) {
+export function VstParametersDialog({ open, params, loading, t, onOpenChange, onParamChange }: Props) {
   return (
-    <Dialog open={open && isVst3} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-2xl">
         <DialogHeader>
           <DialogTitle>{t("audio.vst3Parameters")}</DialogTitle>

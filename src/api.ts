@@ -74,6 +74,14 @@ export async function refreshVstPlugins(): Promise<VstPluginEntry[]> {
   return invokeCommand("refresh_vst_plugins");
 }
 
+export async function retestVstPlugin(id: string): Promise<VstPluginEntry> {
+  return invokeCommand("retest_vst_plugin", { id });
+}
+
+export async function openVstFolder(id: string): Promise<void> {
+  return invokeCommand("open_vst_folder", { id });
+}
+
 export async function listVstParameters(): Promise<VstParameter[]> {
   return invokeCommand("list_vst_parameters");
 }
