@@ -86,6 +86,22 @@ pub fn normalize_path(path: &Path) -> String {
         .to_lowercase()
 }
 
+/// Returns the path spelling passed to third-party plugin loaders.
+///
+/// OSCMidi keeps canonical paths for identity and caching, but some legacy
+/// Windows plugins parse the Win32 verbatim prefix (`\\?\`) themselves and
+/// crash before returning an instance.
+pub fn native_plugin_load_path(path: &Path) -> PathBuf {
+    let value = path.to_string_lossy();
+    if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = value.strip_prefix(r"\\?\") {
+        return PathBuf::from(rest);
+    }
+    path.to_path_buf()
+}
+
 pub fn plugin_name(path: &Path) -> String {
     path.file_stem()
         .map(|stem| stem.to_string_lossy().to_string())
@@ -102,4 +118,32 @@ pub fn unique_existing_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::native_plugin_load_path;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn strips_windows_verbatim_drive_prefix_for_native_loaders() {
+        assert_eq!(
+            native_plugin_load_path(Path::new(r"\\?\C:\VST\Church Organ.dll")),
+            PathBuf::from(r"C:\VST\Church Organ.dll")
+        );
+    }
+
+    #[test]
+    fn converts_windows_verbatim_unc_prefix_for_native_loaders() {
+        assert_eq!(
+            native_plugin_load_path(Path::new(r"\\?\UNC\server\share\Piano.vst3")),
+            PathBuf::from(r"\\server\share\Piano.vst3")
+        );
+    }
+
+    #[test]
+    fn preserves_normal_native_plugin_path() {
+        let path = Path::new(r"C:\VST\Piano.vst3");
+        assert_eq!(native_plugin_load_path(path), path);
+    }
 }

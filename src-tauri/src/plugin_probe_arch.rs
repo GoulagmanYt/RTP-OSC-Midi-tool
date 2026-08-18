@@ -14,16 +14,38 @@ pub fn detect_plugin_architecture(path: &Path) -> String {
     "unknown".to_string()
 }
 
+pub fn available_plugin_architectures(path: &Path) -> Vec<String> {
+    if is_vst3_path(path) && path.is_dir() {
+        let mut architectures = Vec::new();
+        if path.join("Contents").join("x86_64-win").exists() {
+            architectures.push("x64".to_string());
+        }
+        if path.join("Contents").join("x86-win").exists() {
+            architectures.push("x86".to_string());
+        }
+        if !architectures.is_empty() {
+            return architectures;
+        }
+    }
+    vec![detect_plugin_architecture(path)]
+}
+
 pub fn detect_vst3_architecture(path: &Path) -> String {
     if path.is_file() {
         return read_pe_machine(path).unwrap_or("unknown".to_string());
     }
 
+    let x86_dir = path.join("Contents").join("x86-win");
     let x64_dir = path.join("Contents").join("x86_64-win");
+    if cfg!(target_pointer_width = "32") && x86_dir.exists() {
+        return "x86".to_string();
+    }
+    if cfg!(target_pointer_width = "64") && x64_dir.exists() {
+        return "x64".to_string();
+    }
     if x64_dir.exists() {
         return "x64".to_string();
     }
-    let x86_dir = path.join("Contents").join("x86-win");
     if x86_dir.exists() {
         return "x86".to_string();
     }
