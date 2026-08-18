@@ -352,6 +352,15 @@ extern "C" {
         value: f32,
     ) -> c_int;
 
+    pub fn rack_vst3_plugin_tracked_parameter_count(plugin: *mut RackVST3Plugin) -> c_int;
+
+    pub fn rack_vst3_plugin_get_tracked_parameter(
+        plugin: *mut RackVST3Plugin,
+        index: u32,
+        parameter_id: *mut u32,
+        value: *mut f32,
+    ) -> c_int;
+
     /// Get parameter info (name, min, max, default, unit)
     ///
     /// # Returns
@@ -377,6 +386,10 @@ extern "C" {
         min: *mut f32,
         max: *mut f32,
         default_value: *mut f32,
+        parameter_id: *mut u32,
+        flags: *mut u32,
+        step_count: *mut i32,
+        unit_id: *mut i32,
         unit: *mut c_char,
         unit_size: usize,
     ) -> c_int;
@@ -510,6 +523,8 @@ extern "C" {
         width: *mut f32,
         height: *mut f32,
     ) -> c_int;
+
+    pub fn rack_vst3_gui_set_content_scale_factor(gui: *mut RackVST3Gui, factor: f32) -> c_int;
 
     // ============================================================================
     // MIDI API

@@ -2,6 +2,7 @@
 #include "public.sdk/source/vst/hosting/module.h"
 #include "public.sdk/source/vst/hosting/plugprovider.h"
 #include "public.sdk/source/vst/hosting/hostclasses.h"
+#include "public.sdk/source/vst/hosting/pluginterfacesupport.h"
 #include "public.sdk/source/vst/hosting/processdata.h"
 #include "public.sdk/source/vst/hosting/parameterchanges.h"
 #include "public.sdk/source/vst/hosting/eventlist.h"
@@ -10,10 +11,14 @@
 #include "pluginterfaces/vst/ivsteditcontroller.h"
 #include "pluginterfaces/vst/ivstmidicontrollers.h"
 #include "pluginterfaces/vst/ivstprocesscontext.h"
+#include "pluginterfaces/vst/ivstplugview.h"
 #include "pluginterfaces/vst/ivstunits.h"
+#include "pluginterfaces/vst/vstspeaker.h"
 #include "pluginterfaces/gui/iplugview.h"
 #include "pluginterfaces/base/ibstream.h"
 #include "pluginterfaces/vst/ivsthostapplication.h"
+#include "pluginterfaces/gui/iplugviewcontentscalesupport.h"
+#include "public.sdk/source/vst/utility/stringconvert.h"
 
 #if SMTG_OS_WINDOWS
 #include <windows.h>
@@ -28,6 +33,8 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
+#include <cmath>
 
 using namespace VST3;
 using namespace Steinberg;
@@ -77,6 +84,56 @@ struct ParameterTransferQueue {
         change = entries[read % kParameterTransferCapacity];
         read_index.store(read + 1, std::memory_order_release);
         return true;
+    }
+};
+
+// Single producer (audio thread), single consumer (UI/control thread).  Unlike
+// ParameterTransferQueue this queue deliberately contains no producer mutex.
+struct RealtimeParameterQueue {
+    std::array<PendingParameterChange, kParameterTransferCapacity> entries{};
+    std::atomic<uint64_t> read_index{0};
+    std::atomic<uint64_t> write_index{0};
+    std::atomic<uint64_t> dropped{0};
+
+    bool push(const PendingParameterChange& change) noexcept {
+        const uint64_t write = write_index.load(std::memory_order_relaxed);
+        const uint64_t read = read_index.load(std::memory_order_acquire);
+        if (write - read >= kParameterTransferCapacity) {
+            dropped.fetch_add(1, std::memory_order_relaxed);
+            return false;
+        }
+        entries[write % kParameterTransferCapacity] = change;
+        write_index.store(write + 1, std::memory_order_release);
+        return true;
+    }
+
+    bool pop(PendingParameterChange& change) noexcept {
+        const uint64_t read = read_index.load(std::memory_order_relaxed);
+        const uint64_t write = write_index.load(std::memory_order_acquire);
+        if (read == write) {
+            return false;
+        }
+        change = entries[read % kParameterTransferCapacity];
+        read_index.store(read + 1, std::memory_order_release);
+        return true;
+    }
+};
+
+class OscMidiHostApplication final : public HostApplication {
+public:
+    OscMidiHostApplication() {
+        if (auto* support = getPlugInterfaceSupport()) {
+            support->removePlugInterfaceSupported(IEditController2::iid);
+            support->removePlugInterfaceSupported(IParameterFinder::iid);
+            support->removePlugInterfaceSupported(IAudioPresentationLatency::iid);
+            support->removePlugInterfaceSupported(IEditControllerHostEditing::iid);
+            support->removePlugInterfaceSupported(IUnitData::iid);
+            support->removePlugInterfaceSupported(IProgramListData::iid);
+        }
+    }
+
+    tresult PLUGIN_API getName(String128 name) override {
+        return VST3::StringConvert::convert("OSCMidi", name) ? kResultTrue : kInternalError;
     }
 };
 
@@ -307,16 +364,27 @@ tresult PLUGIN_API MemoryStream::queryInterface(const TUID _iid, void** obj) {
 // Internal plugin state
 struct RackVST3Plugin;
 
-class RackVST3ComponentHandler : public IComponentHandler {
+class RackVST3ComponentHandler : public IComponentHandler, public IComponentHandler2,
+                                 public IComponentHandlerBusActivation, public IUnitHandler {
 public:
     explicit RackVST3ComponentHandler(RackVST3Plugin* plugin) : ref_count_(1), plugin_(plugin) {}
 
     DECLARE_FUNKNOWN_METHODS
 
-    tresult PLUGIN_API beginEdit(ParamID /*id*/) override { return kResultOk; }
+    tresult PLUGIN_API beginEdit(ParamID /*id*/) override;
     tresult PLUGIN_API performEdit(ParamID id, ParamValue valueNormalized) override;
-    tresult PLUGIN_API endEdit(ParamID /*id*/) override { return kResultOk; }
-    tresult PLUGIN_API restartComponent(int32 /*flags*/) override { return kResultOk; }
+    tresult PLUGIN_API endEdit(ParamID /*id*/) override;
+    tresult PLUGIN_API restartComponent(int32 flags) override;
+
+    tresult PLUGIN_API setDirty(TBool state) override;
+    tresult PLUGIN_API requestOpenEditor(FIDString name) override;
+    tresult PLUGIN_API startGroupEdit() override { return kResultOk; }
+    tresult PLUGIN_API finishGroupEdit() override { return kResultOk; }
+    tresult PLUGIN_API requestBusActivation(
+        MediaType type, BusDirection dir, int32 index, TBool state) override;
+    tresult PLUGIN_API notifyUnitSelection(UnitID /*unitId*/) override { return kResultOk; }
+    tresult PLUGIN_API notifyProgramListChange(
+        ProgramListID /*listId*/, int32 /*programIndex*/) override;
 
 private:
     uint32 ref_count_;
@@ -328,6 +396,9 @@ IMPLEMENT_REFCOUNT(RackVST3ComponentHandler)
 tresult PLUGIN_API RackVST3ComponentHandler::queryInterface(const TUID _iid, void** obj) {
     QUERY_INTERFACE(_iid, obj, FUnknown::iid, IComponentHandler)
     QUERY_INTERFACE(_iid, obj, IComponentHandler::iid, IComponentHandler)
+    QUERY_INTERFACE(_iid, obj, IComponentHandler2::iid, IComponentHandler2)
+    QUERY_INTERFACE(_iid, obj, IComponentHandlerBusActivation::iid, IComponentHandlerBusActivation)
+    QUERY_INTERFACE(_iid, obj, IUnitHandler::iid, IUnitHandler)
     *obj = nullptr;
     return kNoInterface;
 }
@@ -345,8 +416,17 @@ public:
             return kInvalidArgument;
         }
 
-        const int width = newSize->right - newSize->left;
-        const int height = newSize->bottom - newSize->top;
+        ViewRect constrained = *newSize;
+        const tresult constraint_result = view->checkSizeConstraint(&constrained);
+        if (constraint_result != kResultOk && constraint_result != kResultTrue
+            && constraint_result != kNotImplemented) {
+            return constraint_result;
+        }
+        const int width = constrained.right - constrained.left;
+        const int height = constrained.bottom - constrained.top;
+        if (width <= 0 || height <= 0) {
+            return kInvalidArgument;
+        }
         SetWindowPos(
             container_window_,
             nullptr,
@@ -361,7 +441,8 @@ public:
             RECT rect{0, 0, width, height};
             const auto style = static_cast<DWORD>(GetWindowLongPtrW(host_window_, GWL_STYLE));
             const auto ex_style = static_cast<DWORD>(GetWindowLongPtrW(host_window_, GWL_EXSTYLE));
-            AdjustWindowRectEx(&rect, style, FALSE, ex_style);
+            const UINT dpi = std::max<UINT>(GetDpiForWindow(host_window_), 96);
+            AdjustWindowRectExForDpi(&rect, style, FALSE, ex_style, dpi);
             SetWindowPos(
                 host_window_,
                 nullptr,
@@ -373,7 +454,7 @@ public:
             );
         }
 
-        return view->onSize(newSize);
+        return view->onSize(&constrained);
     }
 
 private:
@@ -403,6 +484,7 @@ struct RackVST3Plugin {
     IPtr<IEditController> controller;
     IPtr<IComponentHandler> component_handler;
     IPtr<IMidiMapping> midi_mapping;
+    bool separate_controller = false;
 
     // Connection proxy (if component != controller)
     IPtr<IConnectionPoint> component_cp;
@@ -416,6 +498,15 @@ struct RackVST3Plugin {
     double sample_rate = 0.0;
     uint32_t max_block_size = 0;
     bool initialized = false;
+    bool processing = false;
+    bool active = false;
+    SymbolicSampleSizes symbolic_sample_size = kSample32;
+    uint32 process_context_requirements = 0;
+    TSamples sample_position = 0;
+    ProcessContext process_context{};
+    std::atomic<int32> pending_restart_flags{0};
+    std::atomic<bool> dirty{false};
+    std::atomic<bool> editor_open_requested{false};
 
     std::mutex state_mutex;
 
@@ -430,6 +521,8 @@ struct RackVST3Plugin {
     EventList input_events;
     EventList output_events;
     ParameterTransferQueue ui_to_audio_parameters;
+    RealtimeParameterQueue audio_to_ui_parameters;
+    RealtimeParameterQueue audio_to_persistent_parameters;
     std::array<PendingParameterChange, kRealtimeEventCapacity> audio_parameter_scratch{};
     std::array<PendingParameterChange, kRealtimeEventCapacity> direct_audio_parameters{};
     size_t direct_audio_parameter_count = 0;
@@ -437,10 +530,15 @@ struct RackVST3Plugin {
     // Audio buffers (for pointer arrays)
     std::vector<float*> input_ptrs;
     std::vector<float*> output_ptrs;
+    std::vector<std::vector<double>> input_f64;
+    std::vector<std::vector<double>> output_f64;
 
     // Parameter cache
     struct ParameterInfo {
         ParamID id;
+        int32 flags;
+        UnitID unit_id;
+        int32 step_count;
         std::string title;
         std::string units;
         ParamValue min_value;
@@ -448,12 +546,18 @@ struct RackVST3Plugin {
         ParamValue default_value;
     };
     std::vector<ParameterInfo> parameters;
+    std::mutex persistent_parameter_mutex;
+    std::vector<PendingParameterChange> persistent_parameters;
     std::vector<ParamID> midi_controller_assignments;
+    std::array<ParamID, 16> midi_program_assignments{};
+    std::array<int32, 16> midi_program_steps{};
 
     // Preset cache (factory presets from IUnitInfo)
     struct PresetInfo {
         int32 program_list_id;
         int32 program_index;
+        ParamID parameter_id = kNoParamId;
+        int32 parameter_steps = 0;
         std::string name;
     };
     std::vector<PresetInfo> presets;
@@ -478,6 +582,120 @@ static bool rack_vst3_try_queue_midi_mapping(
     ParamValue value_normalized,
     int32 sample_offset);
 
+static const RackVST3Plugin::ParameterInfo* rack_vst3_find_parameter(
+    const RackVST3Plugin* plugin, ParamID id) {
+    if (!plugin) return nullptr;
+    auto found = std::find_if(
+        plugin->parameters.begin(), plugin->parameters.end(),
+        [id](const RackVST3Plugin::ParameterInfo& parameter) { return parameter.id == id; });
+    return found == plugin->parameters.end() ? nullptr : &*found;
+}
+
+static bool rack_vst3_is_midi_proxy(const RackVST3Plugin* plugin, ParamID id) {
+    return plugin && std::find(
+        plugin->midi_controller_assignments.begin(),
+        plugin->midi_controller_assignments.end(), id)
+        != plugin->midi_controller_assignments.end();
+}
+
+static bool rack_vst3_parameter_is_persistent(
+    const RackVST3Plugin* plugin, ParamID id, bool explicit_edit) {
+    const auto* parameter = rack_vst3_find_parameter(plugin, id);
+    if (!parameter || (parameter->flags & Vst::ParameterInfo::kIsReadOnly) != 0) {
+        return false;
+    }
+    return explicit_edit || !rack_vst3_is_midi_proxy(plugin, id);
+}
+
+static void rack_vst3_track_parameter_control(
+    RackVST3Plugin* plugin, ParamID id, ParamValue value, bool explicit_edit) {
+    if (!rack_vst3_parameter_is_persistent(plugin, id, explicit_edit)
+        || !std::isfinite(value)) {
+        return;
+    }
+    const PendingParameterChange change{id, std::clamp<ParamValue>(value, 0.0, 1.0), 0};
+    std::lock_guard<std::mutex> lock(plugin->persistent_parameter_mutex);
+    auto found = std::find_if(
+        plugin->persistent_parameters.begin(), plugin->persistent_parameters.end(),
+        [id](const PendingParameterChange& item) { return item.id == id; });
+    if (found != plugin->persistent_parameters.end()) {
+        *found = change;
+    } else if (plugin->persistent_parameters.size() < plugin->parameters.size()) {
+        plugin->persistent_parameters.push_back(change);
+    }
+}
+
+static void rack_vst3_drain_persistent_audio_parameters(RackVST3Plugin* plugin) {
+    if (!plugin) return;
+    PendingParameterChange change;
+    while (plugin->audio_to_persistent_parameters.pop(change)) {
+        rack_vst3_track_parameter_control(plugin, change.id, change.value, true);
+    }
+}
+
+static void rack_vst3_drain_audio_parameters(RackVST3Plugin* plugin) {
+    if (!plugin || !plugin->controller) {
+        return;
+    }
+    PendingParameterChange change;
+    while (plugin->audio_to_ui_parameters.pop(change)) {
+        plugin->controller->setParamNormalized(change.id, change.value);
+        rack_vst3_track_parameter_control(plugin, change.id, change.value, false);
+        plugin->dirty.store(true, std::memory_order_release);
+    }
+    rack_vst3_drain_persistent_audio_parameters(plugin);
+}
+
+tresult PLUGIN_API RackVST3ComponentHandler::beginEdit(ParamID /*id*/) {
+    return plugin_ ? kResultOk : kInvalidArgument;
+}
+
+tresult PLUGIN_API RackVST3ComponentHandler::endEdit(ParamID /*id*/) {
+    if (!plugin_) return kInvalidArgument;
+    plugin_->dirty.store(true, std::memory_order_release);
+    return kResultOk;
+}
+
+tresult PLUGIN_API RackVST3ComponentHandler::restartComponent(int32 flags) {
+    if (!plugin_) return kInvalidArgument;
+    plugin_->pending_restart_flags.fetch_or(flags, std::memory_order_release);
+    if (flags & (kParamValuesChanged | kParamTitlesChanged | kMidiCCAssignmentChanged
+                 | kReloadComponent | kIoChanged)) {
+        plugin_->dirty.store(true, std::memory_order_release);
+    }
+    return kResultOk;
+}
+
+tresult PLUGIN_API RackVST3ComponentHandler::setDirty(TBool state) {
+    if (!plugin_) return kInvalidArgument;
+    plugin_->dirty.store(state != 0, std::memory_order_release);
+    return kResultOk;
+}
+
+tresult PLUGIN_API RackVST3ComponentHandler::requestOpenEditor(FIDString name) {
+    if (!plugin_ || (name && std::strcmp(name, ViewType::kEditor) != 0)) return kInvalidArgument;
+    plugin_->editor_open_requested.store(true, std::memory_order_release);
+    return kResultOk;
+}
+
+tresult PLUGIN_API RackVST3ComponentHandler::requestBusActivation(
+    MediaType type, BusDirection /*dir*/, int32 index, TBool /*state*/) {
+    if (!plugin_ || type != kAudio || index != 0) return kResultFalse;
+    // The graph can only route the main bus.  Queue a controlled reconfiguration
+    // instead of changing buses from inside a plug-in callback.
+    plugin_->pending_restart_flags.fetch_or(kIoChanged, std::memory_order_release);
+    return kResultOk;
+}
+
+tresult PLUGIN_API RackVST3ComponentHandler::notifyProgramListChange(
+    ProgramListID /*listId*/, int32 /*programIndex*/) {
+    if (!plugin_) return kInvalidArgument;
+    plugin_->pending_restart_flags.fetch_or(
+        kParamValuesChanged | kMidiCCAssignmentChanged, std::memory_order_release);
+    plugin_->dirty.store(true, std::memory_order_release);
+    return kResultOk;
+}
+
 tresult PLUGIN_API RackVST3ComponentHandler::performEdit(ParamID id, ParamValue valueNormalized) {
     if (!plugin_) {
         return kInvalidArgument;
@@ -486,6 +704,8 @@ tresult PLUGIN_API RackVST3ComponentHandler::performEdit(ParamID id, ParamValue 
     if (!plugin_->initialized || !plugin_->controller) {
         return kNotInitialized;
     }
+    rack_vst3_track_parameter_control(plugin_, id, valueNormalized, true);
+    plugin_->dirty.store(true, std::memory_order_release);
     return plugin_->ui_to_audio_parameters.push({id, valueNormalized, 0})
         ? kResultOk
         : kResultFalse;
@@ -523,7 +743,7 @@ RackVST3Plugin* rack_vst3_plugin_new(const char* path, const char* uid) {
         return nullptr;
     }
 
-    plugin->host_app = FUnknownPtr<IHostApplication>(new HostApplication());
+    plugin->host_app = FUnknownPtr<IHostApplication>(new OscMidiHostApplication());
     if (!plugin->host_app) {
         delete plugin;
         return nullptr;
@@ -564,6 +784,7 @@ RackVST3Plugin* rack_vst3_plugin_new(const char* path, const char* uid) {
 
         plugin->controller = factory.createInstance<IEditController>(controllerUID);
         if (plugin->controller) {
+            plugin->separate_controller = true;
             // Initialize controller - if this fails, clean up properly
             if (plugin->controller->initialize(plugin->host_app) != kResultOk) {
                 // Controller init failed - terminate component and clean up
@@ -583,7 +804,7 @@ RackVST3Plugin* rack_vst3_plugin_new(const char* path, const char* uid) {
     }
 
     // Set up connection points if controller is separate
-    if (plugin->controller && reinterpret_cast<void*>(plugin->controller.get()) != reinterpret_cast<void*>(plugin->component.get())) {
+    if (plugin->controller && plugin->separate_controller) {
         plugin->component_cp = U::cast<IConnectionPoint>(plugin->component);
         plugin->controller_cp = U::cast<IConnectionPoint>(plugin->controller);
 
@@ -594,13 +815,23 @@ RackVST3Plugin* rack_vst3_plugin_new(const char* path, const char* uid) {
     }
 
     if (plugin->controller) {
-        plugin->component_handler =
-            FUnknownPtr<IComponentHandler>(new RackVST3ComponentHandler(plugin));
+        plugin->component_handler = FUnknownPtr<IComponentHandler>(
+            static_cast<IComponentHandler*>(new RackVST3ComponentHandler(plugin)));
         if (plugin->component_handler) {
             plugin->controller->setComponentHandler(plugin->component_handler);
         }
 
         plugin->midi_mapping = U::cast<IMidiMapping>(plugin->controller);
+
+        // A separately-created controller must receive the processor's current
+        // component state before it is exposed to the host/UI.
+        if (plugin->separate_controller) {
+            IPtr<MemoryStream> component_state(new MemoryStream(), false);
+            if (plugin->component->getState(component_state) == kResultOk) {
+                component_state->seek(0, IBStream::kIBSeekSet, nullptr);
+                plugin->controller->setComponentState(component_state);
+            }
+        }
     }
 
     plugin->input_events.setMaxSize(static_cast<int32>(kRealtimeEventCapacity));
@@ -623,14 +854,16 @@ void rack_vst3_plugin_free(RackVST3Plugin* plugin) {
     // Stop processing before deactivating/terminating the plugin.
     // Many VST3 plugins expect the host teardown sequence to mirror the startup sequence:
     // setProcessing(false) -> setActive(false) -> terminate().
-    if (plugin->initialized && plugin->processor) {
+    if (plugin->processing && plugin->processor) {
         trace_free_step("setProcessing(false)");
         plugin->processor->setProcessing(false);
+        plugin->processing = false;
     }
 
-    if (plugin->initialized && plugin->component) {
+    if (plugin->active && plugin->component) {
         trace_free_step("setActive(false)");
         plugin->component->setActive(false);
+        plugin->active = false;
     }
 
     // Disconnect connection points
@@ -654,7 +887,7 @@ void rack_vst3_plugin_free(RackVST3Plugin* plugin) {
     }
 
     // Terminate controller
-    if (plugin->controller && reinterpret_cast<void*>(plugin->controller.get()) != reinterpret_cast<void*>(plugin->component.get())) {
+    if (plugin->controller && plugin->separate_controller) {
         trace_free_step("controller terminate");
         plugin->controller->terminate();
         plugin->controller = nullptr;
@@ -688,10 +921,76 @@ int rack_vst3_plugin_initialize(RackVST3Plugin* plugin, double sample_rate, uint
     plugin->sample_rate = sample_rate;
     plugin->max_block_size = max_block_size;
 
-    // Setup processing with 32-bit float samples in realtime mode
+    // Negotiate the symbolic sample size before setupProcessing. OSCMidi's
+    // public audio boundary is float32, so float64-only processors use
+    // preallocated conversion buffers below.
+    if (plugin->processor->canProcessSampleSize(kSample32) == kResultTrue) {
+        plugin->symbolic_sample_size = kSample32;
+    } else if (plugin->processor->canProcessSampleSize(kSample64) == kResultTrue) {
+        plugin->symbolic_sample_size = kSample64;
+    } else {
+        return RACK_VST3_ERROR_NOT_SUPPORTED;
+    }
+
+    // Read the current main-bus topology while inactive. Auxiliary buses are
+    // kept inactive; the active main bus must be mono or stereo for OSCMidi's
+    // stereo output graph.
+    const int32 numInputBuses = plugin->component->getBusCount(kAudio, kInput);
+    const int32 numOutputBuses = plugin->component->getBusCount(kAudio, kOutput);
+    const int32 numEventInputBuses = plugin->component->getBusCount(kEvent, kInput);
+    const int32 numEventOutputBuses = plugin->component->getBusCount(kEvent, kOutput);
+
+    std::vector<SpeakerArrangement> input_arrangements(static_cast<size_t>(numInputBuses));
+    std::vector<SpeakerArrangement> output_arrangements(static_cast<size_t>(numOutputBuses));
+    for (int32 index = 0; index < numInputBuses; ++index) {
+        plugin->processor->getBusArrangement(
+            kInput, index, input_arrangements[static_cast<size_t>(index)]);
+    }
+    bool output_arrangement_changed = false;
+    for (int32 index = 0; index < numOutputBuses; ++index) {
+        plugin->processor->getBusArrangement(
+            kOutput, index, output_arrangements[static_cast<size_t>(index)]);
+    }
+    if (!output_arrangements.empty()) {
+        const int32 current_channels = SpeakerArr::getChannelCount(output_arrangements[0]);
+        if (current_channels < 1 || current_channels > 2) {
+            output_arrangements[0] = SpeakerArr::kStereo;
+            output_arrangement_changed = true;
+        }
+    }
+    if (output_arrangement_changed) {
+        const tresult arrangement_result = plugin->processor->setBusArrangements(
+            input_arrangements.empty() ? nullptr : input_arrangements.data(),
+            numInputBuses,
+            output_arrangements.data(),
+            numOutputBuses);
+        if (arrangement_result != kResultOk && arrangement_result != kResultTrue) {
+            return RACK_VST3_ERROR_NOT_SUPPORTED;
+        }
+    }
+
+    plugin->num_input_channels = 0;
+    plugin->num_output_channels = 0;
+    if (numInputBuses > 0) {
+        BusInfo info{};
+        if (plugin->component->getBusInfo(kAudio, kInput, 0, info) == kResultOk) {
+            plugin->num_input_channels = info.channelCount;
+        }
+    }
+    if (numOutputBuses > 0) {
+        BusInfo info{};
+        if (plugin->component->getBusInfo(kAudio, kOutput, 0, info) == kResultOk) {
+            plugin->num_output_channels = info.channelCount;
+        }
+    }
+    if (plugin->num_output_channels < 1 || plugin->num_output_channels > 2) {
+        return RACK_VST3_ERROR_NOT_SUPPORTED;
+    }
+
+    // Setup processing in realtime mode after bus discovery/selection.
     ProcessSetup setup;
     setup.processMode = kRealtime;
-    setup.symbolicSampleSize = kSample32;
+    setup.symbolicSampleSize = plugin->symbolic_sample_size;
     setup.maxSamplesPerBlock = max_block_size;
     setup.sampleRate = sample_rate;
 
@@ -699,42 +998,100 @@ int rack_vst3_plugin_initialize(RackVST3Plugin* plugin, double sample_rate, uint
         return RACK_VST3_ERROR_GENERIC;
     }
 
-    // Get bus configuration
-    int32 numInputBuses = plugin->component->getBusCount(kAudio, kInput);
-    int32 numOutputBuses = plugin->component->getBusCount(kAudio, kOutput);
+    IPtr<IProcessContextRequirements> context_requirements =
+        U::cast<IProcessContextRequirements>(plugin->processor);
+    plugin->process_context_requirements = context_requirements
+        ? context_requirements->getProcessContextRequirements()
+        : (IProcessContextRequirements::kNeedSystemTime
+           | IProcessContextRequirements::kNeedContinousTimeSamples
+           | IProcessContextRequirements::kNeedProjectTimeMusic
+           | IProcessContextRequirements::kNeedBarPositionMusic
+           | IProcessContextRequirements::kNeedTempo
+           | IProcessContextRequirements::kNeedTimeSignature
+           | IProcessContextRequirements::kNeedTransportState);
+    if (std::getenv("RACK_VST3_TRACE_INIT")) {
+        std::fprintf(
+            stderr,
+            "rack_vst3_plugin_initialize: audio=%d/%d event=%d/%d\n",
+            numInputBuses,
+            numOutputBuses,
+            numEventInputBuses,
+            numEventOutputBuses
+        );
+        std::fflush(stderr);
+    }
 
-    // Activate main audio buses
-    if (numInputBuses > 0) {
-        plugin->component->activateBus(kAudio, kInput, 0, true);
-        BusInfo busInfo;
-        if (plugin->component->getBusInfo(kAudio, kInput, 0, busInfo) == kResultOk) {
-            plugin->num_input_channels = busInfo.channelCount;
+    // OSCMidi routes only the main audio bus. Explicitly deactivate auxiliary
+    // buses so multi-output instruments do not render into unconnected buses.
+    for (int32 index = 0; index < numInputBuses; ++index) {
+        plugin->component->activateBus(kAudio, kInput, index, index == 0);
+        if (index == 0) {
+            BusInfo busInfo{};
+            if (plugin->component->getBusInfo(kAudio, kInput, index, busInfo) == kResultOk) {
+                plugin->num_input_channels = busInfo.channelCount;
+            }
         }
     }
 
-    if (numOutputBuses > 0) {
-        plugin->component->activateBus(kAudio, kOutput, 0, true);
-        BusInfo busInfo;
-        if (plugin->component->getBusInfo(kAudio, kOutput, 0, busInfo) == kResultOk) {
-            plugin->num_output_channels = busInfo.channelCount;
+    for (int32 index = 0; index < numOutputBuses; ++index) {
+        plugin->component->activateBus(kAudio, kOutput, index, index == 0);
+        if (index == 0) {
+            BusInfo busInfo{};
+            if (plugin->component->getBusInfo(kAudio, kOutput, index, busInfo) == kResultOk) {
+                plugin->num_output_channels = busInfo.channelCount;
+            }
         }
+    }
+
+    // VST3 event buses are independent from audio buses. A number of plugins
+    // accept events without explicit activation, but conforming instruments
+    // such as Upright Piano ignore NoteOn/NoteOff until their main event input
+    // is active. Activate the main bus plus any bus advertised as active by
+    // default before setActive(true).
+    for (int32 index = 0; index < numEventInputBuses; ++index) {
+        BusInfo busInfo{};
+        const bool hasInfo =
+            plugin->component->getBusInfo(kEvent, kInput, index, busInfo) == kResultOk;
+        const bool activate = index == 0
+            || (hasInfo && (busInfo.flags & BusInfo::kDefaultActive) != 0);
+        plugin->component->activateBus(kEvent, kInput, index, activate);
+    }
+    for (int32 index = 0; index < numEventOutputBuses; ++index) {
+        BusInfo busInfo{};
+        const bool hasInfo =
+            plugin->component->getBusInfo(kEvent, kOutput, index, busInfo) == kResultOk;
+        const bool activate = index == 0
+            || (hasInfo && (busInfo.flags & BusInfo::kDefaultActive) != 0);
+        plugin->component->activateBus(kEvent, kOutput, index, activate);
     }
 
     // Activate component
     if (plugin->component->setActive(true) != kResultOk) {
         return RACK_VST3_ERROR_GENERIC;
     }
+    plugin->active = true;
 
     // Start processing
     if (plugin->processor->setProcessing(true) != kResultOk) {
         plugin->component->setActive(false);
+        plugin->active = false;
         return RACK_VST3_ERROR_GENERIC;
     }
+    plugin->processing = true;
 
     // Prepare process_data once during initialization, but only allocate the bus
     // pointer arrays. The actual sample buffers come from the Rust host on each
     // process() call and must never be owned/freed by HostProcessData.
-    plugin->process_data.prepare(*plugin->component, 0, kSample32);
+    plugin->process_data.prepare(*plugin->component, 0, plugin->symbolic_sample_size);
+    plugin->process_data.processContext = &plugin->process_context;
+    if (plugin->symbolic_sample_size == kSample64) {
+        plugin->input_f64.assign(
+            static_cast<size_t>(plugin->num_input_channels),
+            std::vector<double>(max_block_size, 0.0));
+        plugin->output_f64.assign(
+            static_cast<size_t>(plugin->num_output_channels),
+            std::vector<double>(max_block_size, 0.0));
+    }
 
     // Build parameter cache
     if (plugin->controller) {
@@ -747,6 +1104,9 @@ int rack_vst3_plugin_initialize(RackVST3Plugin* plugin, double sample_rate, uint
             if (plugin->controller->getParameterInfo(i, vst3_param_info) == kResultOk) {
                 RackVST3Plugin::ParameterInfo info;
                 info.id = vst3_param_info.id;
+                info.flags = vst3_param_info.flags;
+                info.unit_id = vst3_param_info.unitId;
+                info.step_count = vst3_param_info.stepCount;
 
                 // Convert UTF-16 to UTF-8 (proper conversion for international characters)
                 info.title = utf16_to_utf8(vst3_param_info.title);
@@ -806,10 +1166,47 @@ int rack_vst3_plugin_initialize(RackVST3Plugin* plugin, double sample_rate, uint
     // Enumerate factory presets if available
     IPtr<IUnitInfo> unit_info = U::cast<IUnitInfo>(plugin->controller);
     if (unit_info) {
+        plugin->midi_program_assignments.fill(kNoParamId);
+        plugin->midi_program_steps.fill(0);
+        for (int32 channel = 0; channel < 16; ++channel) {
+            UnitID unit_id = kRootUnitId;
+            unit_info->getUnitByBus(kEvent, kInput, 0, channel, unit_id);
+            for (const auto& parameter : plugin->parameters) {
+                if ((parameter.flags & Vst::ParameterInfo::kIsProgramChange) != 0
+                    && parameter.unit_id == unit_id && parameter.step_count > 0) {
+                    plugin->midi_program_assignments[static_cast<size_t>(channel)] = parameter.id;
+                    plugin->midi_program_steps[static_cast<size_t>(channel)] = parameter.step_count;
+                    break;
+                }
+            }
+        }
         int32 program_list_count = unit_info->getProgramListCount();
         for (int32 i = 0; i < program_list_count; ++i) {
             ProgramListInfo list_info;
             if (unit_info->getProgramListInfo(i, list_info) == kResultOk) {
+                UnitID program_unit_id = kRootUnitId;
+                for (int32 unit_index = 0; unit_index < unit_info->getUnitCount(); ++unit_index) {
+                    UnitInfo candidate{};
+                    if (unit_info->getUnitInfo(unit_index, candidate) == kResultOk
+                        && candidate.programListId == list_info.id) {
+                        program_unit_id = candidate.id;
+                        break;
+                    }
+                }
+                ParamID program_parameter = kNoParamId;
+                int32 program_steps = 0;
+                for (int32 parameter_index = 0;
+                     parameter_index < plugin->controller->getParameterCount();
+                     ++parameter_index) {
+                    Vst::ParameterInfo candidate{};
+                    if (plugin->controller->getParameterInfo(parameter_index, candidate) == kResultOk
+                        && (candidate.flags & Vst::ParameterInfo::kIsProgramChange) != 0
+                        && candidate.unitId == program_unit_id) {
+                        program_parameter = candidate.id;
+                        program_steps = candidate.stepCount;
+                        break;
+                    }
+                }
                 // Enumerate programs in this list
                 for (int32 j = 0; j < list_info.programCount; ++j) {
                     String128 program_name;
@@ -817,6 +1214,8 @@ int rack_vst3_plugin_initialize(RackVST3Plugin* plugin, double sample_rate, uint
                         RackVST3Plugin::PresetInfo preset;
                         preset.program_list_id = list_info.id;
                         preset.program_index = j;
+                        preset.parameter_id = program_parameter;
+                        preset.parameter_steps = program_steps;
                         preset.name = utf16_to_utf8(program_name);
                         plugin->presets.push_back(preset);
                     }
@@ -831,6 +1230,63 @@ int rack_vst3_plugin_initialize(RackVST3Plugin* plugin, double sample_rate, uint
 
 int rack_vst3_plugin_is_initialized(RackVST3Plugin* plugin) {
     return (plugin && plugin->initialized) ? 1 : 0;
+}
+
+static void rack_vst3_service_restart_notifications(RackVST3Plugin* plugin) {
+    if (!plugin || !plugin->initialized) return;
+    const int32 flags = plugin->pending_restart_flags.exchange(0, std::memory_order_acq_rel);
+    if (flags == 0) return;
+
+    if ((flags & kParamTitlesChanged) && plugin->controller) {
+        const int32 count = std::min<int32>(
+            plugin->controller->getParameterCount(),
+            static_cast<int32>(plugin->parameters.size()));
+        for (int32 index = 0; index < count; ++index) {
+            Vst::ParameterInfo source{};
+            if (plugin->controller->getParameterInfo(index, source) != kResultOk) continue;
+            auto& target = plugin->parameters[static_cast<size_t>(index)];
+            target.id = source.id;
+            target.flags = source.flags;
+            target.unit_id = source.unitId;
+            target.step_count = source.stepCount;
+            target.title = utf16_to_utf8(source.title);
+            target.units = utf16_to_utf8(source.units);
+            target.default_value = source.defaultNormalizedValue;
+        }
+    }
+    if ((flags & kMidiCCAssignmentChanged) && plugin->midi_mapping) {
+        for (int16 channel = 0; channel < 16; ++channel) {
+            for (int32 ctrl = 0; ctrl < kCountCtrlNumber; ++ctrl) {
+                ParamID param_id = kNoParamId;
+                if (plugin->midi_mapping->getMidiControllerAssignment(
+                        0, channel, static_cast<CtrlNumber>(ctrl), param_id) != kResultTrue) {
+                    param_id = kNoParamId;
+                }
+                plugin->midi_controller_assignments[rack_vst3_midi_mapping_index(
+                    channel, static_cast<CtrlNumber>(ctrl))] = param_id;
+            }
+        }
+    }
+    if ((flags & kLatencyChanged) && plugin->processor && plugin->component) {
+        if (plugin->processing) {
+            plugin->processor->setProcessing(false);
+            plugin->processing = false;
+        }
+        if (plugin->active) {
+            plugin->component->setActive(false);
+            plugin->active = false;
+        }
+        if (plugin->component->setActive(true) == kResultOk) {
+            plugin->active = true;
+            if (plugin->processor->setProcessing(true) == kResultOk) {
+                plugin->processing = true;
+            }
+        }
+    }
+    // I/O graph and full component reload requests cannot be applied inside a
+    // plug-in callback.  They are deliberately consumed here at a host safe
+    // point; the outer worker supervisor will perform a state-preserving reload
+    // if subsequent processing reports an incompatible layout.
 }
 
 int rack_vst3_plugin_reset(RackVST3Plugin* plugin) {
@@ -848,12 +1304,25 @@ int rack_vst3_plugin_reset(RackVST3Plugin* plugin) {
         return RACK_VST3_ERROR_NOT_INITIALIZED;
     }
 
-    // VST3 doesn't have a direct "reset" like AudioUnit
-    // We can deactivate and reactivate the component
-    plugin->component->setActive(false);
+    if (plugin->processing && plugin->processor->setProcessing(false) != kResultOk) {
+        return RACK_VST3_ERROR_GENERIC;
+    }
+    plugin->processing = false;
+    if (plugin->active && plugin->component->setActive(false) != kResultOk) {
+        return RACK_VST3_ERROR_GENERIC;
+    }
+    plugin->active = false;
     if (plugin->component->setActive(true) != kResultOk) {
         return RACK_VST3_ERROR_GENERIC;
     }
+    plugin->active = true;
+    if (plugin->processor->setProcessing(true) != kResultOk) {
+        plugin->component->setActive(false);
+        plugin->active = false;
+        return RACK_VST3_ERROR_GENERIC;
+    }
+    plugin->processing = true;
+    plugin->sample_position = 0;
 
     return RACK_VST3_OK;
 }
@@ -876,6 +1345,8 @@ uint32_t rack_vst3_plugin_get_latency_samples(RackVST3Plugin* plugin) {
     if (!plugin || !plugin->initialized || !plugin->processor) {
         return 0;
     }
+    std::lock_guard<std::mutex> state_lock(plugin->state_mutex);
+    rack_vst3_service_restart_notifications(plugin);
     return plugin->processor->getLatencySamples();
 }
 
@@ -915,6 +1386,45 @@ int rack_vst3_plugin_process(
     // Update dynamic fields only (prepare() was called during initialization)
     plugin->process_data.numSamples = frames;
 
+    auto& context = plugin->process_context;
+    context = {};
+    context.sampleRate = plugin->sample_rate;
+    context.projectTimeSamples = plugin->sample_position;
+    context.state = 0;
+    const uint32 requirements = plugin->process_context_requirements;
+    if (requirements & IProcessContextRequirements::kNeedTransportState) {
+        context.state |= ProcessContext::kPlaying;
+    }
+    if (requirements & IProcessContextRequirements::kNeedSystemTime) {
+        context.systemTime = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        context.state |= ProcessContext::kSystemTimeValid;
+    }
+    if (requirements & IProcessContextRequirements::kNeedContinousTimeSamples) {
+        context.continousTimeSamples = plugin->sample_position;
+        context.state |= ProcessContext::kContTimeValid;
+    }
+    const double quarter_notes = plugin->sample_rate > 0.0
+        ? static_cast<double>(plugin->sample_position) / plugin->sample_rate * (120.0 / 60.0)
+        : 0.0;
+    if (requirements & IProcessContextRequirements::kNeedProjectTimeMusic) {
+        context.projectTimeMusic = quarter_notes;
+        context.state |= ProcessContext::kProjectTimeMusicValid;
+    }
+    if (requirements & IProcessContextRequirements::kNeedBarPositionMusic) {
+        context.barPositionMusic = std::floor(quarter_notes / 4.0) * 4.0;
+        context.state |= ProcessContext::kBarPositionValid;
+    }
+    if (requirements & IProcessContextRequirements::kNeedTempo) {
+        context.tempo = 120.0;
+        context.state |= ProcessContext::kTempoValid;
+    }
+    if (requirements & IProcessContextRequirements::kNeedTimeSignature) {
+        context.timeSigNumerator = 4;
+        context.timeSigDenominator = 4;
+        context.state |= ProcessContext::kTimeSigValid;
+    }
+
     // Set input buffers on the pre-allocated HostProcessData bus arrays.
     // Do not replace channelBuffers32 itself: HostProcessData owns those arrays
     // and will free them during teardown.
@@ -922,7 +1432,15 @@ int rack_vst3_plugin_process(
         AudioBusBuffers& bus = plugin->process_data.inputs[0];
         bus.numChannels = num_input_channels;
         for (uint32_t ch = 0; ch < num_input_channels; ++ch) {
-            bus.channelBuffers32[ch] = const_cast<float*>(inputs[ch]);
+            if (plugin->symbolic_sample_size == kSample32) {
+                bus.channelBuffers32[ch] = const_cast<float*>(inputs[ch]);
+            } else {
+                auto& converted = plugin->input_f64[ch];
+                for (uint32_t frame = 0; frame < frames; ++frame) {
+                    converted[frame] = static_cast<double>(inputs[ch][frame]);
+                }
+                bus.channelBuffers64[ch] = converted.data();
+            }
         }
     }
 
@@ -931,7 +1449,11 @@ int rack_vst3_plugin_process(
         AudioBusBuffers& bus = plugin->process_data.outputs[0];
         bus.numChannels = num_output_channels;
         for (uint32_t ch = 0; ch < num_output_channels; ++ch) {
-            bus.channelBuffers32[ch] = outputs[ch];
+            if (plugin->symbolic_sample_size == kSample32) {
+                bus.channelBuffers32[ch] = outputs[ch];
+            } else {
+                bus.channelBuffers64[ch] = plugin->output_f64[ch].data();
+            }
         }
     }
 
@@ -978,6 +1500,29 @@ int rack_vst3_plugin_process(
     // Process
     tresult result = plugin->processor->process(plugin->process_data);
 
+    if (result == kResultOk && plugin->symbolic_sample_size == kSample64) {
+        for (uint32_t ch = 0; ch < num_output_channels; ++ch) {
+            const auto& converted = plugin->output_f64[ch];
+            for (uint32_t frame = 0; frame < frames; ++frame) {
+                outputs[ch][frame] = static_cast<float>(converted[frame]);
+            }
+        }
+    }
+
+    // Parameter changes emitted by the processor may only be reflected into
+    // the edit controller from the control/UI thread.
+    const int32 output_parameter_count = plugin->output_param_changes.getParameterCount();
+    for (int32 parameter_index = 0; parameter_index < output_parameter_count; ++parameter_index) {
+        IParamValueQueue* queue =
+            plugin->output_param_changes.getParameterData(parameter_index);
+        if (!queue || queue->getPointCount() <= 0) continue;
+        int32 sample_offset = 0;
+        ParamValue value = 0.0;
+        if (queue->getPoint(queue->getPointCount() - 1, sample_offset, value) == kResultTrue) {
+            plugin->audio_to_ui_parameters.push({queue->getParameterId(), value, sample_offset});
+        }
+    }
+
     // Clear input/output events and parameter changes for next call
     plugin->input_events.clear();
     plugin->input_param_changes.clearQueue();
@@ -987,15 +1532,19 @@ int rack_vst3_plugin_process(
     if (num_input_channels > 0) {
         AudioBusBuffers& bus = plugin->process_data.inputs[0];
         for (uint32_t ch = 0; ch < num_input_channels; ++ch) {
-            bus.channelBuffers32[ch] = nullptr;
+            if (plugin->symbolic_sample_size == kSample32) bus.channelBuffers32[ch] = nullptr;
+            else bus.channelBuffers64[ch] = nullptr;
         }
     }
     if (num_output_channels > 0) {
         AudioBusBuffers& bus = plugin->process_data.outputs[0];
         for (uint32_t ch = 0; ch < num_output_channels; ++ch) {
-            bus.channelBuffers32[ch] = nullptr;
+            if (plugin->symbolic_sample_size == kSample32) bus.channelBuffers32[ch] = nullptr;
+            else bus.channelBuffers64[ch] = nullptr;
         }
     }
+
+    plugin->sample_position += frames;
 
     return (result == kResultOk) ? RACK_VST3_OK : RACK_VST3_ERROR_GENERIC;
 }
@@ -1017,6 +1566,8 @@ int rack_vst3_plugin_get_parameter(RackVST3Plugin* plugin, uint32_t index, float
     }
 
     std::lock_guard<std::mutex> state_lock(plugin->state_mutex);
+    rack_vst3_drain_audio_parameters(plugin);
+    rack_vst3_service_restart_notifications(plugin);
 
     if (index >= plugin->parameters.size()) {
         return RACK_VST3_ERROR_INVALID_PARAM;
@@ -1050,6 +1601,8 @@ int rack_vst3_plugin_set_parameter(RackVST3Plugin* plugin, uint32_t index, float
 
     // Set parameter value on controller (for UI reflection)
     plugin->controller->setParamNormalized(param_id, value);
+    rack_vst3_track_parameter_control(plugin, param_id, value, true);
+    plugin->dirty.store(true, std::memory_order_release);
 
     return plugin->ui_to_audio_parameters.push({param_id, value, 0})
         ? RACK_VST3_OK
@@ -1068,6 +1621,7 @@ int rack_vst3_plugin_set_parameter_audio(RackVST3Plugin* plugin, uint32_t index,
     for (size_t existing = 0; existing < plugin->direct_audio_parameter_count; ++existing) {
         if (plugin->direct_audio_parameters[existing].id == change.id) {
             plugin->direct_audio_parameters[existing] = change;
+            plugin->audio_to_persistent_parameters.push(change);
             return RACK_VST3_OK;
         }
     }
@@ -1075,6 +1629,37 @@ int rack_vst3_plugin_set_parameter_audio(RackVST3Plugin* plugin, uint32_t index,
         return RACK_VST3_ERROR_GENERIC;
     }
     plugin->direct_audio_parameters[plugin->direct_audio_parameter_count++] = change;
+    plugin->audio_to_persistent_parameters.push(change);
+    return RACK_VST3_OK;
+}
+
+int rack_vst3_plugin_tracked_parameter_count(RackVST3Plugin* plugin) {
+    if (!plugin || !plugin->controller) {
+        return RACK_VST3_ERROR_INVALID_PARAM;
+    }
+    std::lock_guard<std::mutex> state_lock(plugin->state_mutex);
+    rack_vst3_drain_audio_parameters(plugin);
+    std::lock_guard<std::mutex> persistent_lock(plugin->persistent_parameter_mutex);
+    return static_cast<int>(plugin->persistent_parameters.size());
+}
+
+int rack_vst3_plugin_get_tracked_parameter(
+    RackVST3Plugin* plugin,
+    uint32_t index,
+    uint32_t* parameter_id,
+    float* value) {
+    if (!plugin || !parameter_id || !value) {
+        return RACK_VST3_ERROR_INVALID_PARAM;
+    }
+    std::lock_guard<std::mutex> state_lock(plugin->state_mutex);
+    rack_vst3_drain_audio_parameters(plugin);
+    std::lock_guard<std::mutex> persistent_lock(plugin->persistent_parameter_mutex);
+    if (index >= plugin->persistent_parameters.size()) {
+        return RACK_VST3_ERROR_INVALID_PARAM;
+    }
+    const auto& parameter = plugin->persistent_parameters[index];
+    *parameter_id = static_cast<uint32_t>(parameter.id);
+    *value = static_cast<float>(parameter.value);
     return RACK_VST3_OK;
 }
 
@@ -1086,6 +1671,10 @@ int rack_vst3_plugin_parameter_info(
     float* min,
     float* max,
     float* default_value,
+    uint32_t* parameter_id,
+    uint32_t* flags,
+    int32_t* step_count,
+    int32_t* unit_id,
     char* unit,
     size_t unit_size)
 {
@@ -1107,6 +1696,10 @@ int rack_vst3_plugin_parameter_info(
     if (min) *min = static_cast<float>(param_info.min_value);
     if (max) *max = static_cast<float>(param_info.max_value);
     if (default_value) *default_value = static_cast<float>(param_info.default_value);
+    if (parameter_id) *parameter_id = static_cast<uint32_t>(param_info.id);
+    if (flags) *flags = static_cast<uint32_t>(param_info.flags);
+    if (step_count) *step_count = param_info.step_count;
+    if (unit_id) *unit_id = param_info.unit_id;
 
     // Unit
     if (unit && unit_size > 0) {
@@ -1169,152 +1762,22 @@ int rack_vst3_plugin_load_preset(RackVST3Plugin* plugin, int32_t preset_number) 
     }
 
     const auto& preset = plugin->presets[preset_number];
-
-    // VST3 preset loading is complex - requires IProgramListData interface
-    // Get IProgramListData from IUnitInfo
-    IPtr<IUnitInfo> unit_info = U::cast<IUnitInfo>(plugin->controller);
-    if (!unit_info) {
+    if (preset.parameter_id == kNoParamId || preset.parameter_steps <= 0
+        || preset.program_index > preset.parameter_steps) {
+        return RACK_VST3_ERROR_NOT_SUPPORTED;
+    }
+    const ParamValue normalized = static_cast<ParamValue>(preset.program_index)
+        / static_cast<ParamValue>(preset.parameter_steps);
+    const tresult result =
+        plugin->controller->setParamNormalized(preset.parameter_id, normalized);
+    if (result != kResultOk && result != kResultTrue) {
         return RACK_VST3_ERROR_GENERIC;
     }
-
-    // Try to get preset data using IProgramListData
-    IPtr<IProgramListData> program_data = U::cast<IProgramListData>(unit_info);
-    if (program_data) {
-        // Create stream to receive preset data
-        // IPtr<MemoryStream>(new MemoryStream(), false) explanation:
-        //   - new MemoryStream() creates object with refCount=1 (COM convention)
-        //   - IPtr(..., false) takes ownership WITHOUT calling addRef() (false = don't addRef)
-        //   - IPtr destructor calls release() when going out of scope
-        //   - This ensures cleanup on ALL code paths (success, error, early return)
-        IPtr<MemoryStream> stream(new MemoryStream(), false);
-
-        // Get program data
-        tresult result = program_data->getProgramData(preset.program_list_id, preset.program_index, stream);
-        if (result == kResultOk) {
-            // Reset stream and apply the preset data
-            stream->seek(0, IBStream::kIBSeekSet, nullptr);
-            result = program_data->setProgramData(preset.program_list_id, preset.program_index, stream);
-
-            if (result == kResultOk) {
-                return RACK_VST3_OK;
-            }
-        }
-        // IPtr automatically releases stream on scope exit
-    }
-
-    // Fallback 1: Try to find and set a "program" parameter
-    // Some plugins expose preset selection as a regular parameter
-    // Only use discrete/list parameters to avoid false positives
-    int32 param_count = plugin->controller->getParameterCount();
-    for (int32 i = 0; i < param_count; i++) {
-        Vst::ParameterInfo param_info;
-        if (plugin->controller->getParameterInfo(i, param_info) != kResultOk) {
-            continue;
-        }
-
-        // Only consider discrete parameters (stepCount > 0) or parameters with kIsProgramChange flag
-        bool is_discrete = param_info.stepCount > 0;
-        bool is_program_change = (param_info.flags & ParameterInfo::kIsProgramChange) != 0;
-
-        if (!is_discrete && !is_program_change) {
-            continue; // Skip continuous parameters without program change flag
-        }
-
-        // Convert parameter title to UTF-8 and lowercase for comparison
-        std::string param_title = utf16_to_utf8(param_info.title);
-        std::transform(param_title.begin(), param_title.end(), param_title.begin(),
-                      [](unsigned char c) { return std::tolower(c); });
-
-        // More specific matching to reduce false positives:
-        // - Must be discrete or marked as program change
-        // - Title must contain complete words "program", "preset", or "patch"
-        // - Check for word boundaries to avoid matching "programming", "unpresettable", etc.
-        bool is_program_param = false;
-        if (is_program_change) {
-            // Explicitly marked as program change - always use
-            is_program_param = true;
-        } else {
-            // Check for specific keywords as complete words with word boundaries
-            // We need to search for each keyword separately, not use find_first_of
-            const char* keywords[] = {"program", "preset", "patch"};
-            const size_t keyword_lengths[] = {7, 6, 5};
-
-            for (size_t k = 0; k < 3; ++k) {
-                const char* keyword = keywords[k];
-                size_t keyword_len = keyword_lengths[k];
-                size_t pos = 0;
-
-                while ((pos = param_title.find(keyword, pos)) != std::string::npos) {
-                    // Check word boundaries
-                    bool start_ok = (pos == 0 || !std::isalnum(param_title[pos - 1]));
-                    bool end_ok = (pos + keyword_len >= param_title.length() ||
-                                  !std::isalnum(param_title[pos + keyword_len]));
-
-                    if (start_ok && end_ok) {
-                        is_program_param = true;
-                        break;
-                    }
-                    pos++;
-                }
-
-                if (is_program_param) {
-                    break; // Found a match, stop searching
-                }
-            }
-        }
-
-        if (is_program_param) {
-            // Verify program_index is within valid range
-            if (preset.program_index > param_info.stepCount) {
-                continue; // Index out of range for this parameter
-            }
-
-            // Map program_index to normalized value
-            float normalized_value = static_cast<float>(preset.program_index) /
-                                    static_cast<float>(param_info.stepCount);
-
-            // Clamp to 0.0-1.0 range
-            normalized_value = std::max(0.0f, std::min(1.0f, normalized_value));
-
-            // Set the parameter
-            ParamID param_id = param_info.id;
-            if (plugin->controller->setParamNormalized(param_id, normalized_value) == kResultOk) {
-                // Queue the parameter change for the processor
-                int32 queue_index = 0;
-                IParamValueQueue* queue = plugin->input_param_changes.addParameterData(param_id, queue_index);
-                if (queue) {
-                    int32 point_index = 0;
-                    queue->addPoint(0, normalized_value, point_index);
-                }
-
-                // Successfully loaded via parameter-based fallback
-                return RACK_VST3_OK;
-            }
-        }
-    }
-
-    // Fallback 2: Try using IUnitInfo to select the unit containing this program
-    // Some plugins may respond to unit selection by loading the first program in that unit
-    int32 unit_count = unit_info->getUnitCount();
-    for (int32 i = 0; i < unit_count; i++) {
-        UnitInfo unit_info_struct;
-        if (unit_info->getUnitInfo(i, unit_info_struct) == kResultOk) {
-            // Check if this unit's program list matches our preset
-            if (unit_info_struct.programListId == preset.program_list_id) {
-                // Try to select this unit (might trigger program load)
-                tresult result = unit_info->selectUnit(unit_info_struct.id);
-                if (result == kResultOk) {
-                    // Unit selected - this might have loaded a program
-                    // We can't verify, so return success as best effort
-                    return RACK_VST3_OK;
-                }
-            }
-        }
-    }
-
-    // No fallback succeeded - plugin doesn't support programmatic preset loading
-    // This is a plugin limitation, not a runtime error
-    return RACK_VST3_ERROR_NOT_SUPPORTED;
+    rack_vst3_track_parameter_control(plugin, preset.parameter_id, normalized, true);
+    plugin->dirty.store(true, std::memory_order_release);
+    return plugin->ui_to_audio_parameters.push({preset.parameter_id, normalized, 0})
+        ? RACK_VST3_OK
+        : RACK_VST3_ERROR_GENERIC;
 }
 
 int rack_vst3_plugin_get_state_size(RackVST3Plugin* plugin) {
@@ -1323,6 +1786,7 @@ int rack_vst3_plugin_get_state_size(RackVST3Plugin* plugin) {
     }
 
     std::lock_guard<std::mutex> state_lock(plugin->state_mutex);
+    rack_vst3_drain_audio_parameters(plugin);
 
     // VST3 doesn't provide a query method for state size
     // We need to actually serialize the state to determine the size
@@ -1350,7 +1814,7 @@ int rack_vst3_plugin_get_state_size(RackVST3Plugin* plugin) {
     stream->tell(&component_end_pos);
 
     // Get controller state if separate controller
-    if (plugin->controller && reinterpret_cast<void*>(plugin->controller.get()) != reinterpret_cast<void*>(plugin->component.get())) {
+    if (plugin->controller && plugin->separate_controller) {
         result = plugin->controller->getState(stream);
         if (result != kResultOk && result != kResultFalse && result != kNotImplemented) {
             // Controller state failed - return component state size only
@@ -1373,6 +1837,7 @@ int rack_vst3_plugin_get_state(RackVST3Plugin* plugin, uint8_t* data, size_t* si
     }
 
     std::lock_guard<std::mutex> state_lock(plugin->state_mutex);
+    rack_vst3_drain_audio_parameters(plugin);
 
     if (*size == 0) {
         return RACK_VST3_ERROR_INVALID_PARAM;
@@ -1411,7 +1876,7 @@ int rack_vst3_plugin_get_state(RackVST3Plugin* plugin, uint8_t* data, size_t* si
     stream->seek(component_end_pos, IBStream::kIBSeekSet, nullptr);
 
     // Get controller state if separate controller
-    if (plugin->controller && reinterpret_cast<void*>(plugin->controller.get()) != reinterpret_cast<void*>(plugin->component.get())) {
+    if (plugin->controller && plugin->separate_controller) {
         result = plugin->controller->getState(stream);
         if (result != kResultOk && result != kResultFalse && result != kNotImplemented) {
             return RACK_VST3_ERROR_GENERIC;
@@ -1442,10 +1907,7 @@ int rack_vst3_plugin_set_state(RackVST3Plugin* plugin, const uint8_t* data, size
 
     std::lock_guard<std::mutex> state_lock(plugin->state_mutex);
 
-    const bool has_separate_controller =
-        plugin->controller
-        && reinterpret_cast<void*>(plugin->controller.get())
-            != reinterpret_cast<void*>(plugin->component.get());
+    const bool has_separate_controller = plugin->controller && plugin->separate_controller;
 
     auto apply_legacy_sequence = [&]() -> int {
         IPtr<MemoryStream> legacy_stream(new MemoryStream(data, size), false);
@@ -1457,7 +1919,8 @@ int rack_vst3_plugin_set_state(RackVST3Plugin* plugin, const uint8_t* data, size
         }
 
         if (has_separate_controller) {
-            result = plugin->controller->setState(legacy_stream);
+            IPtr<MemoryStream> component_for_controller(new MemoryStream(data, size), false);
+            result = plugin->controller->setComponentState(component_for_controller);
             if (result != kResultOk && result != kResultFalse && result != kNotImplemented) {
                 return RACK_VST3_ERROR_GENERIC;
             }
@@ -1520,7 +1983,8 @@ int rack_vst3_plugin_set_state(RackVST3Plugin* plugin, const uint8_t* data, size
         }
     }
 
-    // IPtr automatically releases stream on scope exit
+    rack_vst3_drain_audio_parameters(plugin);
+    plugin->dirty.store(false, std::memory_order_release);
     return RACK_VST3_OK;
 }
 
@@ -1665,6 +2129,11 @@ int rack_vst3_gui_attach(RackVST3Gui* gui, void* parent) {
 
 #if SMTG_OS_WINDOWS
     HWND parent_hwnd = static_cast<HWND>(parent);
+    const UINT dpi = std::max<UINT>(GetDpiForWindow(parent_hwnd), 96);
+    FUnknownPtr<IPlugViewContentScaleSupport> scale_support(gui->view);
+    if (scale_support) {
+        scale_support->setContentScaleFactor(static_cast<float>(dpi) / 96.0f);
+    }
     float width = 800.0f;
     float height = 600.0f;
     rack_vst3_get_view_size(gui->view, &width, &height);
@@ -1696,6 +2165,11 @@ int rack_vst3_gui_attach(RackVST3Gui* gui, void* parent) {
         gui->frame = nullptr;
         DestroyWindow(container);
         return RACK_VST3_ERROR_GENERIC;
+    }
+
+    ViewRect attached_size{};
+    if (gui->view->getSize(&attached_size) == kResultOk) {
+        gui->frame->resizeView(gui->view, &attached_size);
     }
 
     gui->host_window = parent_hwnd;
@@ -1741,7 +2215,23 @@ int rack_vst3_gui_get_size(RackVST3Gui* gui, float* width, float* height) {
 
     std::lock_guard<std::mutex> state_lock(gui->plugin->state_mutex);
     return rack_vst3_get_view_size(gui->view, width, height) ? RACK_VST3_OK
-                                                              : RACK_VST3_ERROR_GENERIC;
+                                                               : RACK_VST3_ERROR_GENERIC;
+}
+
+int rack_vst3_gui_set_content_scale_factor(RackVST3Gui* gui, float factor) {
+    if (!gui || !gui->plugin || !gui->view || !std::isfinite(factor) || factor <= 0.0f) {
+        return RACK_VST3_ERROR_INVALID_PARAM;
+    }
+
+    std::lock_guard<std::mutex> state_lock(gui->plugin->state_mutex);
+    FUnknownPtr<IPlugViewContentScaleSupport> scale_support(gui->view);
+    if (!scale_support) {
+        return RACK_VST3_OK;
+    }
+    const tresult result = scale_support->setContentScaleFactor(factor);
+    return (result == kResultOk || result == kResultTrue || result == kNotImplemented)
+        ? RACK_VST3_OK
+        : RACK_VST3_ERROR_GENERIC;
 }
 
 // ============================================================================
@@ -1807,68 +2297,52 @@ int rack_vst3_plugin_send_midi(
                 break;
 
             case 0xB0:  // Control Change
-                if (!rack_vst3_try_queue_midi_mapping(
-                        plugin,
-                        midi_event.channel,
-                        static_cast<CtrlNumber>(midi_event.data1),
-                        static_cast<ParamValue>(midi_event.data2) / 127.0,
-                        midi_event.sample_offset))
-                {
-                    vst3_event.type = Event::kLegacyMIDICCOutEvent;
-                    vst3_event.midiCCOut.channel = midi_event.channel;
-                    vst3_event.midiCCOut.controlNumber = midi_event.data1;
-                    vst3_event.midiCCOut.value = midi_event.data2;
-                    vst3_event.midiCCOut.value2 = 0;
-                    event_overflow |= plugin->input_events.addEvent(vst3_event) != kResultOk;
-                }
+                rack_vst3_try_queue_midi_mapping(
+                    plugin,
+                    midi_event.channel,
+                    static_cast<CtrlNumber>(midi_event.data1),
+                    static_cast<ParamValue>(midi_event.data2) / 127.0,
+                    midi_event.sample_offset);
                 break;
 
             case 0xC0:  // Program Change
-                // VST3 doesn't have a dedicated program change event type
-                // Use LegacyMIDICCOutEvent with controlNumber >= 0x80 for non-CC MIDI
-                // Note: Not all plugins may support this encoding
-                vst3_event.type = Event::kLegacyMIDICCOutEvent;
-                vst3_event.midiCCOut.channel = midi_event.channel;
-                vst3_event.midiCCOut.controlNumber = 0x80;  // >= 0x80 indicates non-CC MIDI
-                vst3_event.midiCCOut.value = midi_event.data1;
-                vst3_event.midiCCOut.value2 = 0;
-                event_overflow |= plugin->input_events.addEvent(vst3_event) != kResultOk;
+                if (midi_event.channel < plugin->midi_program_assignments.size()) {
+                    const ParamID program_id =
+                        plugin->midi_program_assignments[midi_event.channel];
+                    const int32 steps = plugin->midi_program_steps[midi_event.channel];
+                    if (program_id != kNoParamId && steps > 0
+                        && static_cast<int32>(midi_event.data1) <= steps) {
+                        int32 queue_index = 0;
+                        if (IParamValueQueue* queue =
+                                plugin->input_param_changes.addParameterData(program_id, queue_index)) {
+                            int32 point_index = 0;
+                            const ParamValue value = static_cast<ParamValue>(midi_event.data1)
+                                / static_cast<ParamValue>(steps);
+                            event_overflow |= queue->addPoint(
+                                midi_event.sample_offset, value, point_index) != kResultTrue;
+                        }
+                    }
+                }
                 break;
 
             case 0xD0:  // Channel Pressure (Aftertouch)
-                if (!rack_vst3_try_queue_midi_mapping(
-                        plugin,
-                        midi_event.channel,
-                        kAfterTouch,
-                        static_cast<ParamValue>(midi_event.data1) / 127.0,
-                        midi_event.sample_offset))
-                {
-                    vst3_event.type = Event::kLegacyMIDICCOutEvent;
-                    vst3_event.midiCCOut.channel = midi_event.channel;
-                    vst3_event.midiCCOut.controlNumber = kAfterTouch;
-                    vst3_event.midiCCOut.value = midi_event.data1;
-                    vst3_event.midiCCOut.value2 = 0;
-                    event_overflow |= plugin->input_events.addEvent(vst3_event) != kResultOk;
-                }
+                rack_vst3_try_queue_midi_mapping(
+                    plugin,
+                    midi_event.channel,
+                    kAfterTouch,
+                    static_cast<ParamValue>(midi_event.data1) / 127.0,
+                    midi_event.sample_offset);
                 break;
 
             case 0xE0: {  // Pitch Bend
                 const uint16_t pitch_bend = static_cast<uint16_t>(midi_event.data1)
                     | (static_cast<uint16_t>(midi_event.data2) << 7);
-                if (!rack_vst3_try_queue_midi_mapping(
-                        plugin,
-                        midi_event.channel,
-                        kPitchBend,
-                        static_cast<ParamValue>(pitch_bend) / 16383.0,
-                        midi_event.sample_offset))
-                {
-                    vst3_event.type = Event::kLegacyMIDICCOutEvent;
-                    vst3_event.midiCCOut.channel = midi_event.channel;
-                    vst3_event.midiCCOut.controlNumber = kPitchBend;
-                    vst3_event.midiCCOut.value = midi_event.data1;
-                    vst3_event.midiCCOut.value2 = midi_event.data2;
-                    event_overflow |= plugin->input_events.addEvent(vst3_event) != kResultOk;
-                }
+                rack_vst3_try_queue_midi_mapping(
+                    plugin,
+                    midi_event.channel,
+                    kPitchBend,
+                    static_cast<ParamValue>(pitch_bend) / 16383.0,
+                    midi_event.sample_offset);
                 break;
             }
 
