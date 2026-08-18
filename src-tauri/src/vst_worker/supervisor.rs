@@ -35,6 +35,7 @@ const RESTART_WINDOW: Duration = Duration::from_secs(60);
 const MAX_RESTARTS_PER_WINDOW: usize = 3;
 const CONTROL_PIPE_BUFFER_BYTES: u32 = 64 * 1024;
 const MIDI_PIPE_BUFFER_BYTES: u32 = 256 * 1024;
+const STATE_AUTOSAVE_DEBOUNCE: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
@@ -97,6 +98,7 @@ struct SupervisorInner {
     session: Mutex<Option<ActiveSession>>,
     request_sequence: AtomicU64,
     midi_sequence: AtomicU64,
+    state_generation: AtomicU64,
     last_load: Mutex<Option<(AudioSettings, Option<String>)>>,
     restart_history: Mutex<VecDeque<Instant>>,
 }
@@ -120,6 +122,7 @@ impl VstWorkerSupervisor {
                 session: Mutex::new(None),
                 request_sequence: AtomicU64::new(1),
                 midi_sequence: AtomicU64::new(1),
+                state_generation: AtomicU64::new(0),
                 last_load: Mutex::new(None),
                 restart_history: Mutex::new(VecDeque::new()),
             }),
@@ -308,6 +311,7 @@ impl VstWorkerSupervisor {
         })
         .await?;
         self.inner.status.lock().snapshot.editor_open = false;
+        self.save_state().await?;
         Ok(())
     }
 
@@ -317,7 +321,29 @@ impl VstWorkerSupervisor {
             index,
             value,
         })
-        .await
+        .await?;
+        self.schedule_state_autosave();
+        Ok(())
+    }
+
+    fn schedule_state_autosave(&self) {
+        let generation = self
+            .inner
+            .state_generation
+            .fetch_add(1, Ordering::AcqRel)
+            .wrapping_add(1);
+        let supervisor = self.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(STATE_AUTOSAVE_DEBOUNCE).await;
+            if supervisor.inner.state_generation.load(Ordering::Acquire) != generation
+                || !supervisor.is_ready()
+            {
+                return;
+            }
+            if let Err(error) = supervisor.save_state().await {
+                background_log("warn", format!("VST parameter autosave failed: {error}"));
+            }
+        });
     }
 
     pub fn try_set_gain(&self, gain_db: f32) -> bool {
@@ -352,6 +378,13 @@ impl VstWorkerSupervisor {
 
     pub async fn panic_all_notes(&self) -> Result<(), String> {
         self.expect_ack(ControlMessage::Panic {
+            request_id: self.next_request_id(),
+        })
+        .await
+    }
+
+    pub async fn save_state(&self) -> Result<(), String> {
+        self.expect_ack(ControlMessage::SaveState {
             request_id: self.next_request_id(),
         })
         .await
@@ -494,7 +527,9 @@ fn create_pipe_server(name: &str, buffer_bytes: u32) -> Result<NamedPipeServer, 
 }
 
 fn worker_executable_path() -> Result<PathBuf, String> {
-    if let Some(path) = std::env::var_os("OSCMIDI_VST_WORKER_PATH") {
+    if let Some(path) = std::env::var_os("OSCMIDI_VST_WORKER_X64_PATH")
+        .or_else(|| std::env::var_os("OSCMIDI_VST_WORKER_PATH"))
+    {
         let path = PathBuf::from(path);
         if path.is_file() {
             return Ok(path);
@@ -509,15 +544,18 @@ fn worker_executable_path() -> Result<PathBuf, String> {
     let directory = current
         .parent()
         .ok_or_else(|| "OSCMidi executable has no parent directory".to_string())?;
-    let path = directory.join("vst-host-worker.exe");
-    if path.is_file() {
-        Ok(path)
-    } else {
-        Err(format!(
-            "VST worker executable not found at {}. OSCMidi.exe cannot run by itself: install the MSI or keep OSCMidi.exe and vst-host-worker.exe together from the complete portable folder. Developers can rebuild the worker with `npm run prepare:vst-worker:release`.",
-            path.display()
-        ))
+    for name in ["vst-host-worker-x64.exe", "vst-host-worker.exe"] {
+        let path = directory.join(name);
+        if path.is_file() {
+            return Ok(path);
+        }
     }
+
+    let path = directory.join("vst-host-worker-x64.exe");
+    Err(format!(
+        "VST x64 worker executable not found at {}. Install the MSI or keep both VST workers beside OSCMidi.exe. Developers can rebuild them with `npm run prepare:vst-worker:release`.",
+        path.display()
+    ))
 }
 
 struct WorkerProcess {

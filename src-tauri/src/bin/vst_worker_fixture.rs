@@ -69,10 +69,13 @@ mod fixture {
         WorkerAudioStatus {
             backend: settings.backend.clone().unwrap_or_else(|| "asio".into()),
             device: settings.device.clone().unwrap_or_else(|| "fixture".into()),
+            device_id: settings.device_id.clone(),
             sample_rate: settings.sample_rate,
             requested_buffer_size: settings.buffer_size,
             stream_buffer_size: settings.buffer_size,
             plugin_latency_samples: 0,
+            bridge_latency_samples: 0,
+            hosting_mode: "directX64".into(),
             vst_midi_compatible: true,
             limiter_enabled: settings.limiter_enabled,
             mmcss_enabled: true,
@@ -99,6 +102,23 @@ mod fixture {
         .await
         .map_err(|error| error.to_string())?;
 
+        // A framed read must never be cancelled after it consumed a prefix.
+        // Use a dedicated reader and deliver only complete frames to the timer
+        // loop, mirroring the production worker.
+        let (mut control_reader, mut control_writer) = tokio::io::split(control);
+        let (control_tx, mut control_rx) = tokio::sync::mpsc::channel(64);
+        tokio::spawn(async move {
+            loop {
+                let event = read_control_frame(&mut control_reader)
+                    .await
+                    .map_err(|error| error.to_string());
+                let terminal = event.is_err();
+                if control_tx.send(event).await.is_err() || terminal {
+                    break;
+                }
+            }
+        });
+
         tokio::spawn(async move { while read_midi_frame(&mut midi).await.is_ok() {} });
 
         let mut heartbeat = tokio::time::interval(Duration::from_millis(100));
@@ -111,14 +131,15 @@ mod fixture {
             tokio::select! {
                 _ = heartbeat.tick() => {
                     sequence = sequence.wrapping_add(1);
-                    write_control_frame(&mut control, &ControlMessage::Heartbeat {
+                    write_control_frame(&mut control_writer, &ControlMessage::Heartbeat {
                         sequence,
                         monotonic_qpc: monotonic_qpc(),
                         metrics: WorkerMetrics::default(),
                     }).await.map_err(|error| error.to_string())?;
                 }
-                message = read_control_frame(&mut control) => {
-                    let message = message.map_err(|error| error.to_string())?;
+                message = control_rx.recv() => {
+                    let message = message
+                        .ok_or_else(|| "control reader exited".to_string())??;
                     let response = match message {
                         ControlMessage::Load { request_id, settings, class_uid, .. } => {
                             match mode.as_str() {
@@ -131,7 +152,7 @@ mod fixture {
                             }
                         }
                         ControlMessage::Stop { request_id } => {
-                            write_control_frame(&mut control, &ControlMessage::Stopped { request_id })
+                            write_control_frame(&mut control_writer, &ControlMessage::Stopped { request_id })
                                 .await.map_err(|error| error.to_string())?;
                             return Ok(());
                         }
@@ -146,7 +167,7 @@ mod fixture {
                         | ControlMessage::Panic { request_id } => ControlMessage::Ack { request_id },
                         _ => ControlMessage::Error { request_id: None, code: "fixture.invalid-command".into(), message: "invalid fixture command".into() },
                     };
-                    write_control_frame(&mut control, &response).await.map_err(|error| error.to_string())?;
+                    write_control_frame(&mut control_writer, &response).await.map_err(|error| error.to_string())?;
                 }
             }
         }

@@ -5,8 +5,8 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::{audio::AudioSettings, types::VstParameter};
 
-pub const CONTROL_PROTOCOL_VERSION: u32 = 2;
-pub const HOST_ABI_VERSION: u32 = 1;
+pub const CONTROL_PROTOCOL_VERSION: u32 = 6;
+pub const HOST_ABI_VERSION: u32 = crate::types::VST_HOST_ABI_VERSION;
 pub const MAX_CONTROL_FRAME_BYTES: usize = 1024 * 1024;
 pub const MAX_MIDI_BYTES: usize = 3;
 const MIDI_FRAME_BYTES: usize = 8 + 8 + 1 + MAX_MIDI_BYTES;
@@ -16,10 +16,13 @@ const MIDI_FRAME_BYTES: usize = 8 + 8 + 1 + MAX_MIDI_BYTES;
 pub struct WorkerAudioStatus {
     pub backend: String,
     pub device: String,
+    pub device_id: Option<String>,
     pub sample_rate: u32,
     pub requested_buffer_size: u32,
     pub stream_buffer_size: u32,
     pub plugin_latency_samples: u32,
+    pub bridge_latency_samples: u32,
+    pub hosting_mode: String,
     pub vst_midi_compatible: bool,
     pub limiter_enabled: bool,
     pub mmcss_enabled: bool,
@@ -33,6 +36,9 @@ pub struct WorkerMetrics {
     pub audio_peak_l: f32,
     pub audio_peak_r: f32,
     pub audio_xruns: u32,
+    pub stream_recovery_requests: u32,
+    pub stream_route_changes: u32,
+    pub backend_latency_us: u64,
     pub audio_midi_drops: u32,
     pub audio_lock_misses: u32,
     pub audio_emergency_resets: u32,
@@ -47,6 +53,9 @@ pub struct WorkerMetrics {
     pub midi_queue_depth: u32,
     pub midi_queue_max_depth: u32,
     pub midi_oldest_us: u64,
+    pub x86_bridge_underruns: u32,
+    pub x86_bridge_overruns: u32,
+    pub x86_worker_alive: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
