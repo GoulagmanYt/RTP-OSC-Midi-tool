@@ -36,7 +36,7 @@ echo.
 if "%BUILD_EXIT_CODE%"=="0" (
   "%POWERSHELL_EXE%" -NoLogo -NoProfile -Command "Write-Host '[OK] Build completed successfully.' -ForegroundColor Green; Write-Host '     Artifacts: %~dp0artifacts' -ForegroundColor Cyan"
 ) else (
-  "%POWERSHELL_EXE%" -NoLogo -NoProfile -Command "Write-Host '[FAIL] Build exited with code %BUILD_EXIT_CODE%.' -ForegroundColor Red; Write-Host '       Check the output above and the artifacts directory.' -ForegroundColor Yellow"
+  "%POWERSHELL_EXE%" -NoLogo -NoProfile -Command "Write-Host '[FAIL] Build exited with code %BUILD_EXIT_CODE%.' -ForegroundColor Red; $log = Get-ChildItem -LiteralPath '%~dp0artifacts\logs' -Filter 'build-*.log' -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1; if ($log) { Write-Host ('       Log: ' + $log.FullName) -ForegroundColor Yellow } elseif ($env:OSCMIDI_BUILD_NO_LOG -eq '1') { Write-Host '       Persistent logging was disabled by build_windows_no_log.bat.' -ForegroundColor Yellow } else { Write-Host '       No log was created; check the PowerShell launch error above.' -ForegroundColor Yellow }"
 )
 
 endlocal & exit /b %BUILD_EXIT_CODE%

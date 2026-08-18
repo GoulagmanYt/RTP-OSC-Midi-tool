@@ -44,7 +44,7 @@ OSCMidi connects network sessions, physical or virtual MIDI devices, OSC targets
 | MIDI networking | RTP-MIDI server, participant discovery and mDNS advertisement |
 | Routing | RTP-MIDI and local MIDI input to MIDI Thru, OSC and VST destinations |
 | VST hosting | VST2 and VST3 instruments, plug-in scanning, native editors and persistent state |
-| Process isolation | One supervised `vst-host-worker.exe` process for the active plug-in and audio stream |
+| Process isolation | Supervised x64 audio worker plus an on-demand x86 DSP worker for 32-bit instruments |
 | Low-latency audio | ASIO and WASAPI backends with configurable sample rate and buffer size |
 | Reliability | Bounded real-time queues, deadline metrics, heartbeat supervision and emergency MIDI reset |
 | Diagnostics | Live routing status, logs, stress tests and detailed developer-only audio metrics |
@@ -59,7 +59,7 @@ Download the latest build from the [GitHub Releases page](https://github.com/Gou
 | MSI installer | Normal installation with Windows shortcuts and uninstall support |
 | Portable ZIP | No installation; extract the complete archive and run `OSCMidi.exe` |
 
-The portable package contains both `OSCMidi.exe` and `vst-host-worker.exe`. Keep them in the same directory: the application intentionally does not load VST DLLs in its own process.
+The portable package contains `OSCMidi.exe`, `vst-host-worker-x64.exe`, and `vst-host-worker-x86.exe`. Keep all three in the same directory: the application intentionally does not load VST DLLs in its own process.
 
 > [!NOTE]
 > Release binaries are currently unsigned. Windows can therefore display an unknown-publisher or SmartScreen warning when opening a downloaded build.
@@ -86,7 +86,8 @@ flowchart LR
     ROUTER --> OSC[OSC / UDP]
     ROUTER --> IPC[Authenticated worker IPC]
 
-    IPC <--> WORKER[vst-host-worker.exe]
+    IPC <--> WORKER64[vst-host-worker-x64.exe]
+    WORKER64 <-- shared memory / one buffer --> WORKER32[vst-host-worker-x86.exe]
     WORKER --> VST[VST2 / VST3 instrument]
     VST --> AUDIO[ASIO / WASAPI output]
 ```
@@ -102,14 +103,19 @@ More detail is available in [src-tauri/ARCHITECTURE.md](src-tauri/ARCHITECTURE.m
 - Windows 10 or Windows 11, x64.
 - Microsoft Edge WebView2 Runtime.
 - A WASAPI-compatible device or an installed ASIO driver.
-- Optional x64 VST2 or VST3 instrument plug-ins.
+- Optional x86 or x64 VST2/VST3 instrument plug-ins.
 - A local MIDI device or RTP-MIDI peer when using those routes.
 
 OSCMidi scans standard Windows VST locations. Unsupported architectures, effects and plug-ins that fail compatibility probing are excluded from the instrument list.
 
+VST3 hosting is built and checked against Steinberg VST3 SDK `v3.8.1_build_84`
+(commit `3cdf9ca5d1f5b1b21e0a86832aa4abe55607bd96`). VST2.4 support is a
+legacy compatibility layer based on its frozen ABI: Steinberg discontinued the
+VST2 SDK, so new host capabilities and conformance work target VST3.
+
 ### Development
 
-- Node.js 20.19+ or 22.12+, with npm.
+- Node.js 22.22.2+, 24.15+ or 26+, with npm.
 - Stable Rust toolchain installed through `rustup`.
 - Visual Studio Build Tools with the x64 MSVC C++ toolchain and a Windows SDK.
 - CMake.
@@ -191,7 +197,7 @@ Successful outputs are preserved in `artifacts\`:
 | `SHA256SUMS.txt` | Integrity hashes for the generated deliverables |
 | `logs\` | Ten most recent build logs |
 
-Run `artifacts\portable\OSCMidi.exe` directly, install the MSI, or copy/extract the complete portable folder. `OSCMidi.exe` intentionally requires `vst-host-worker.exe` beside it and must never be copied alone.
+Run `artifacts\portable\OSCMidi.exe` directly, install the MSI, or copy/extract the complete portable folder. `OSCMidi.exe` requires both architecture-specific VST workers beside it and must never be copied alone.
 
 The cleanup runs after both successful and failed builds. It removes `node_modules`, Rust target directories, generated VST dependencies, staged sidecars and frontend output. Before deleting a generated directory, the script refuses to continue if Git reports any tracked file inside it. Deliverables, current and legacy logs, diagnostic reports and developer-managed Python environments are preserved. The next invocation is consequently a full clean build.
 
@@ -233,11 +239,13 @@ Configuration, logs and VST states are stored under the Windows roaming applicat
 | Application log | `%APPDATA%\OSCMIDI\OSCMIDI\config\app.log` |
 | VST state | `%APPDATA%\OSCMIDI\OSCMIDI\config\vst_state\` |
 
+VST state files are keyed by the selected plug-in class and architecture. Native plug-in state is authoritative. For fingerprinted plug-ins whose native state path is unsafe, OSCMidi stores a sparse fallback containing only parameters actually edited; obsolete exhaustive zero-filled snapshots are preserved with an `.invalid-*` suffix and are not restored. State is autosaved after parameter changes and checkpointed when the editor, plug-in, or application closes.
+
 ## Troubleshooting
 
 ### A plug-in is missing
 
-Only compatible x64 instrument plug-ins are displayed. Effects, unsupported architectures and candidates that fail or time out during probing are intentionally filtered. Refresh the instrument list after installing or moving a plug-in.
+Compatible x64 and bridged x86 instrument plug-ins are displayed. Effects and candidates that fail or time out during probing remain visible in the catalogue with their status but cannot be selected normally. Refresh the instrument list after installing or moving a plug-in.
 
 ### Audio drops or XRuns are reported
 
@@ -251,7 +259,7 @@ If the VST processing time itself exceeds the audio period, the stable solution 
 
 ### The portable build cannot start the VST worker
 
-Install the MSI, run `artifacts\portable\OSCMidi.exe`, or extract the entire ZIP. Confirm that `OSCMidi.exe` and `vst-host-worker.exe` are in the same directory. Do not distribute or move the application executable on its own.
+Install the MSI, run `artifacts\portable\OSCMidi.exe`, or extract the entire ZIP. Confirm that `OSCMidi.exe`, `vst-host-worker-x64.exe`, and `vst-host-worker-x86.exe` are in the same directory. Do not distribute or move the application executable on its own.
 
 ### Local development shows `ERR_CONNECTION_REFUSED`
 
@@ -259,7 +267,7 @@ Close every stale `OSCMidi.exe` instance, rebuild the worker and restart `npm ru
 
 ### sforzando state does not restore
 
-The host intentionally avoids internal VST3 state restoration for sforzando because the plug-in has dedicated teardown behavior. Keep the ARIA resource paths valid and use its ARIA files, such as `default.ariax`, for persistent configuration.
+The host intentionally avoids sforzando's unsafe native VST3 state path, but its writable parameters are still saved and restored. Keep the ARIA resource paths valid and use its ARIA files, such as `default.ariax`, for resource-specific configuration.
 
 ## Contributing
 

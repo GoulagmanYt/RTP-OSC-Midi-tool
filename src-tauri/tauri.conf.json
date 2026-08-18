@@ -15,7 +15,8 @@
       "icons/icon.png"
     ],
     "externalBin": [
-      "binaries/vst-host-worker"
+      "binaries/vst-host-worker-x64",
+      "binaries/vst-host-worker-x86"
     ],
     "targets": [
       "msi"
