@@ -132,6 +132,19 @@ pub async fn refresh_vst_plugins(
 }
 
 #[::tauri::command]
+pub fn retest_vst_plugin(
+    id: String,
+    state: State<AppState>,
+) -> Result<VstPluginEntry, CommandError> {
+    services::retest_vst_plugin(&id, state.inner())
+}
+
+#[::tauri::command]
+pub fn open_vst_folder(id: String, state: State<AppState>) -> Result<(), CommandError> {
+    services::open_vst_folder(&id, state.inner())
+}
+
+#[::tauri::command]
 pub fn list_vst_parameters(state: State<AppState>) -> Result<Vec<VstParameter>, CommandError> {
     services::list_vst_parameters(state.inner())
 }

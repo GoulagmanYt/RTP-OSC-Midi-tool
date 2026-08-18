@@ -3,8 +3,8 @@ use cpal::{SampleFormat, SupportedBufferSize, SupportedStreamConfigRange};
 use super::runtime_state::AudioError;
 
 fn pick_sample_rate(cfg: &SupportedStreamConfigRange, requested: u32) -> (u32, u32) {
-    let min = cfg.min_sample_rate().0;
-    let max = cfg.max_sample_rate().0;
+    let min = cfg.min_sample_rate();
+    let max = cfg.max_sample_rate();
     if requested < min {
         (min, min - requested)
     } else if requested > max {

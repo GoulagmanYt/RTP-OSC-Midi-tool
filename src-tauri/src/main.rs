@@ -94,6 +94,8 @@ fn run_app() -> Result<(), Box<dyn std::error::Error>> {
             list_audio_devices,
             list_vst_plugins,
             refresh_vst_plugins,
+            retest_vst_plugin,
+            open_vst_folder,
             list_vst_parameters,
             set_vst_parameter,
             open_vst_ui,

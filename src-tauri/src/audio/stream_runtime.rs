@@ -6,7 +6,8 @@ use std::{
 };
 
 use cpal::{
-    traits::DeviceTrait, BufferSize, Device, SampleFormat, SampleRate, Stream, StreamConfig,
+    traits::{DeviceTrait, StreamTrait},
+    BufferSize, Device, SampleFormat, Stream, StreamConfig, I24,
 };
 use crossbeam_channel::Sender;
 use parking_lot::Mutex;
@@ -80,13 +81,8 @@ pub(super) fn build_stream(
     ));
     let plugin_max_block_size = max_plugin_block_size(supported_buffer_size, buffer_size);
 
-    let mut config: StreamConfig = desired
-        .with_sample_rate(SampleRate(actual_sample_rate))
-        .config();
-    let mut target_buffer_size = choose_buffer_size(supported_buffer_size, buffer_size);
-    if backend_name.to_lowercase().contains("wasapi") {
-        target_buffer_size = choose_buffer_size(supported_buffer_size, target_buffer_size.max(512));
-    }
+    let mut config: StreamConfig = desired.with_sample_rate(actual_sample_rate).config();
+    let target_buffer_size = choose_buffer_size(supported_buffer_size, buffer_size);
     if target_buffer_size != buffer_size {
         logger.warn(format!(
             "Requested buffer size {} not supported on '{}'. Using {} instead.",
@@ -194,6 +190,54 @@ pub(super) fn build_stream(
                     device_name,
                     parameter_rx.clone(),
                 )?,
+                SampleFormat::F64 => build_output_stream_for_sample::<f64>(
+                    device,
+                    cfg,
+                    channels,
+                    plugin_inputs,
+                    plugin_outputs,
+                    Arc::clone(&controls),
+                    Arc::clone(&telemetry),
+                    midi_rx,
+                    plugin.clone(),
+                    emergency_reset_requested.clone(),
+                    actual_sample_rate,
+                    plugin_max_block_size as usize,
+                    device_name,
+                    parameter_rx.clone(),
+                )?,
+                SampleFormat::I24 => build_output_stream_for_sample::<I24>(
+                    device,
+                    cfg,
+                    channels,
+                    plugin_inputs,
+                    plugin_outputs,
+                    Arc::clone(&controls),
+                    Arc::clone(&telemetry),
+                    midi_rx,
+                    plugin.clone(),
+                    emergency_reset_requested.clone(),
+                    actual_sample_rate,
+                    plugin_max_block_size as usize,
+                    device_name,
+                    parameter_rx.clone(),
+                )?,
+                SampleFormat::I32 => build_output_stream_for_sample::<i32>(
+                    device,
+                    cfg,
+                    channels,
+                    plugin_inputs,
+                    plugin_outputs,
+                    Arc::clone(&controls),
+                    Arc::clone(&telemetry),
+                    midi_rx,
+                    plugin.clone(),
+                    emergency_reset_requested.clone(),
+                    actual_sample_rate,
+                    plugin_max_block_size as usize,
+                    device_name,
+                    parameter_rx.clone(),
+                )?,
                 other => {
                     return Err(AudioError::Message(format!(
                         "Unsupported sample format: {other:?}"
@@ -205,17 +249,20 @@ pub(super) fn build_stream(
         };
 
     match try_build_stream(&config) {
-        Ok((stream, midi_tx)) => Ok((
-            stream,
-            plugin,
-            midi_tx,
-            actual_sample_rate,
-            Some(target_buffer_size),
-            vst_midi_compatible,
-            plugin_latency_samples,
-            parameter_tx.clone(),
-            parameter_cache.clone(),
-        )),
+        Ok((stream, midi_tx)) => {
+            let negotiated_buffer = stream.buffer_size().ok().or(Some(target_buffer_size));
+            Ok((
+                stream,
+                plugin,
+                midi_tx,
+                actual_sample_rate,
+                negotiated_buffer,
+                vst_midi_compatible,
+                plugin_latency_samples,
+                parameter_tx.clone(),
+                parameter_cache.clone(),
+            ))
+        }
         Err(primary_err) => {
             if prefer_low_latency {
                 for fallback in super::stream_config::buffer_fallback_candidates(
@@ -229,15 +276,16 @@ pub(super) fn build_stream(
                         "Retrying '{}' with safer buffer size {} samples after startup failure: {}",
                         device_name, fallback, primary_err
                     ));
-                    let mut fallback_cfg = config.clone();
+                    let mut fallback_cfg = config;
                     fallback_cfg.buffer_size = BufferSize::Fixed(fallback);
                     if let Ok((stream, midi_tx)) = try_build_stream(&fallback_cfg) {
+                        let negotiated_buffer = stream.buffer_size().ok().or(Some(fallback));
                         return Ok((
                             stream,
                             plugin,
                             midi_tx,
                             actual_sample_rate,
-                            Some(fallback),
+                            negotiated_buffer,
                             vst_midi_compatible,
                             plugin_latency_samples,
                             parameter_tx.clone(),
@@ -245,6 +293,26 @@ pub(super) fn build_stream(
                         ));
                     }
                 }
+            }
+            let mut default_cfg = config;
+            default_cfg.buffer_size = BufferSize::Default;
+            logger.warn(format!(
+                "Fixed buffer negotiation failed on '{}'; retrying with the backend default: {}",
+                device_name, primary_err
+            ));
+            if let Ok((stream, midi_tx)) = try_build_stream(&default_cfg) {
+                let negotiated_buffer = stream.buffer_size().ok();
+                return Ok((
+                    stream,
+                    plugin,
+                    midi_tx,
+                    actual_sample_rate,
+                    negotiated_buffer,
+                    vst_midi_compatible,
+                    plugin_latency_samples,
+                    parameter_tx,
+                    parameter_cache,
+                ));
             }
             Err(primary_err)
         }

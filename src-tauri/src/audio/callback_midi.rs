@@ -11,7 +11,25 @@ use vst::{
     plugin::Plugin,
 };
 
-use super::runtime_state::{AudioCallbackState, PluginBackend, RESET_CONTROLLERS};
+use super::runtime_state::{
+    monotonic_us, AudioCallbackState, MidiPacket, PluginBackend, RESET_CONTROLLERS,
+};
+
+fn sample_offset(packet: MidiPacket, state: &AudioCallbackState) -> u32 {
+    let frames = state.last_frames.max(1);
+    let period_us = (frames as u64)
+        .saturating_mul(1_000_000)
+        .checked_div(u64::from(state.sample_rate.max(1)))
+        .unwrap_or(0);
+    let block_start = monotonic_us().saturating_sub(period_us);
+    packet
+        .timestamp_us
+        .saturating_sub(block_start)
+        .saturating_mul(u64::from(state.sample_rate))
+        .checked_div(1_000_000)
+        .unwrap_or(0)
+        .min(frames.saturating_sub(1) as u64) as u32
+}
 
 pub(super) fn midi_to_rack_event(data: [u8; 3]) -> Option<RackMidiEvent> {
     let status = data[0];
@@ -77,11 +95,11 @@ pub(super) fn process_pending_vst2_midi(
         let Some(msg) = state.pending_midi.pop_front() else {
             break;
         };
-        let _ = msg.timestamp_us;
+        let delta_frames = sample_offset(msg, state) as i32;
         state.vst2_midi_events.push(api::MidiEvent {
             event_type: api::EventType::Midi,
             byte_size: std::mem::size_of::<api::MidiEvent>() as i32,
-            delta_frames: 0,
+            delta_frames,
             flags: MidiEventFlags::REALTIME_EVENT.bits(),
             note_length: 0,
             note_offset: 0,
@@ -124,8 +142,8 @@ pub(super) fn process_pending_vst3_midi(
             break;
         };
         consumed += 1;
-        let _ = msg.timestamp_us;
-        if let Some(event) = midi_to_rack_event(msg.data) {
+        if let Some(mut event) = midi_to_rack_event(msg.data) {
+            event.sample_offset = sample_offset(msg, state);
             state.midi_events.push(event);
         }
     }
@@ -144,7 +162,7 @@ pub(super) fn reset_all_notes(plugin: Arc<Mutex<PluginBackend>>) {
 
 pub(super) fn send_reset_messages(plugin: &mut PluginBackend) {
     match plugin {
-        PluginBackend::Vst2 { instance } => {
+        PluginBackend::Vst2 { instance, .. } => {
             for ch in 0..16u8 {
                 for message in reset_messages_for_channel(ch) {
                     let mut midi_event = api::MidiEvent {
@@ -188,6 +206,8 @@ pub(super) fn send_reset_messages(plugin: &mut PluginBackend) {
                 }
             }
         }
+        #[cfg(all(target_os = "windows", target_pointer_width = "64"))]
+        PluginBackend::Remote { instance } => instance.panic_all_notes(),
     }
 }
 

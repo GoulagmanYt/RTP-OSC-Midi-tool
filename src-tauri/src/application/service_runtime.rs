@@ -15,7 +15,9 @@ use crate::{
     types::{BridgeStatus, PreflightReport, RtpSessionInfo},
 };
 
-use super::service_common::{audio_error, frontend_logger, runtime_error, with_audio_status};
+use super::service_common::{
+    audio_error, frontend_logger, persist_resolved_audio_device, runtime_error, with_audio_status,
+};
 
 pub fn list_midi_inputs() -> Result<Vec<String>, CommandError> {
     let input = MidiInput::new("OSCMidi")
@@ -73,6 +75,8 @@ pub fn start_bridge(
             logger.clone(),
         ) {
             logger.error(format!("Audio not started: {err}"));
+        } else {
+            persist_resolved_audio_device(&config, state);
         }
     }
     Ok(with_audio_status(status, &state.audio))

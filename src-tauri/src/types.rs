@@ -60,9 +60,13 @@ pub struct RuntimeStatus {
     pub audio_running: bool,
     pub audio_latency_ms: Option<f32>,
     pub audio_buffer_period_ms: Option<f32>,
+    pub audio_backend_latency_ms: Option<f32>,
     pub plugin_latency_samples: Option<u32>,
+    pub bridge_latency_samples: Option<u32>,
+    pub vst_hosting_mode: Option<String>,
     pub audio_backend: Option<String>,
     pub audio_device: Option<String>,
+    pub audio_device_id: Option<String>,
     pub audio_sample_rate: Option<u32>,
     pub audio_buffer_size: Option<u32>,
     pub audio_requested_buffer_size: Option<u32>,
@@ -71,6 +75,8 @@ pub struct RuntimeStatus {
     pub vst_loaded: bool,
     pub vst_midi_compatible: Option<bool>,
     pub audio_xruns: Option<u32>,
+    pub audio_stream_recovery_requests: Option<u32>,
+    pub audio_stream_route_changes: Option<u32>,
     pub audio_midi_drops: Option<u32>,
     pub audio_lock_misses: Option<u32>,
     pub audio_emergency_resets: Option<u32>,
@@ -92,6 +98,9 @@ pub struct RuntimeStatus {
     pub audio_mmcss_enabled: Option<bool>,
     pub audio_power_throttling_disabled: Option<bool>,
     pub audio_limiter_enabled: Option<bool>,
+    pub x86_bridge_underruns: Option<u32>,
+    pub x86_bridge_overruns: Option<u32>,
+    pub x86_worker_alive: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,8 +110,13 @@ pub struct RuntimeMetrics {
     pub audio_peak_r: Option<f32>,
     pub audio_latency_ms: Option<f32>,
     pub audio_buffer_period_ms: Option<f32>,
+    pub audio_backend_latency_ms: Option<f32>,
     pub plugin_latency_samples: Option<u32>,
+    pub bridge_latency_samples: Option<u32>,
+    pub vst_hosting_mode: Option<String>,
     pub audio_xruns: Option<u32>,
+    pub audio_stream_recovery_requests: Option<u32>,
+    pub audio_stream_route_changes: Option<u32>,
     pub audio_midi_drops: Option<u32>,
     pub audio_lock_misses: Option<u32>,
     pub audio_emergency_resets: Option<u32>,
@@ -122,6 +136,9 @@ pub struct RuntimeMetrics {
     pub vst_worker_last_exit: Option<String>,
     pub audio_mmcss_enabled: Option<bool>,
     pub audio_power_throttling_disabled: Option<bool>,
+    pub x86_bridge_underruns: Option<u32>,
+    pub x86_bridge_overruns: Option<u32>,
+    pub x86_worker_alive: Option<bool>,
     pub midi_messages_per_sec: u32,
     pub osc_messages_per_sec: u32,
     pub bridge_queue_depth: u64,
@@ -183,21 +200,54 @@ pub struct PreflightReport {
     pub messages: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PluginStatus {
+    Probing,
+    Compatible,
+    Unverified,
+    Failed,
+    Quarantined,
+    #[default]
+    Unsupported,
+    OutOfScope,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VstPluginEntry {
+    #[serde(default)]
+    pub id: String,
     pub name: String,
     pub path: String,
     pub format: String,
     pub kind: String,
     pub architecture: String,
+    #[serde(default)]
+    pub available_architectures: Vec<String>,
+    #[serde(default)]
+    pub vendor: Option<String>,
+    #[serde(default)]
+    pub plugin_version: Option<String>,
+    #[serde(default)]
+    pub status: PluginStatus,
     pub supported: bool,
     pub unsupported_reason: Option<String>,
+    #[serde(default)]
+    pub failure_stage: Option<String>,
+    #[serde(default)]
+    pub last_error: Option<String>,
+    #[serde(default)]
+    pub last_probed_ms: Option<u64>,
     pub midi_compatible: Option<bool>,
     pub has_editor: bool,
     pub channel_layout: Option<String>,
     #[serde(default)]
     pub class_uid: Option<String>,
+    #[serde(default)]
+    pub sub_plugin_id: Option<i64>,
+    #[serde(default)]
+    pub hosting_mode: Option<String>,
     #[serde(default)]
     pub file_modified_ms: Option<u64>,
     #[serde(default)]
@@ -206,14 +256,90 @@ pub struct VstPluginEntry {
     pub host_abi_version: u32,
 }
 
+pub const VST_HOST_ABI_VERSION: u32 = 12;
+
 fn default_vst_host_abi_version() -> u32 {
-    1
+    VST_HOST_ABI_VERSION
+}
+
+impl VstPluginEntry {
+    pub fn refresh_derived_fields(&mut self) {
+        if self.available_architectures.is_empty() {
+            self.available_architectures.push(self.architecture.clone());
+        }
+        if self.id.is_empty() {
+            self.id = stable_plugin_id(
+                &self.format,
+                &self.path,
+                self.class_uid.as_deref(),
+                self.sub_plugin_id,
+                &self.architecture,
+            );
+        }
+        if self.supported && matches!(self.status, PluginStatus::Unsupported) {
+            self.status = PluginStatus::Compatible;
+        }
+        if !self.supported && self.kind == "effect" {
+            self.status = PluginStatus::OutOfScope;
+        }
+        if self.last_error.is_none() {
+            self.last_error = self.unsupported_reason.clone();
+        }
+        if self.hosting_mode.is_none() {
+            self.hosting_mode = Some(
+                if self.architecture.eq_ignore_ascii_case("x86") {
+                    "bridgedX86"
+                } else {
+                    "directX64"
+                }
+                .to_string(),
+            );
+        }
+    }
+}
+
+pub fn stable_plugin_id(
+    format: &str,
+    path: &str,
+    class_uid: Option<&str>,
+    sub_plugin_id: Option<i64>,
+    architecture: &str,
+) -> String {
+    let canonical = std::fs::canonicalize(path)
+        .unwrap_or_else(|_| std::path::PathBuf::from(path))
+        .to_string_lossy()
+        .replace('/', "\\")
+        .to_lowercase();
+    let identity = format!(
+        "{}|{}|{}|{}|{}",
+        format.to_lowercase(),
+        canonical,
+        class_uid.unwrap_or_default().to_lowercase(),
+        sub_plugin_id
+            .map(|value| value.to_string())
+            .unwrap_or_default(),
+        architecture.to_lowercase()
+    );
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in identity.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("vst-{hash:016x}")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct VstParameter {
     pub index: usize,
+    #[serde(default)]
+    pub id: u32,
+    #[serde(default)]
+    pub flags: u32,
+    #[serde(default)]
+    pub step_count: i32,
+    #[serde(default)]
+    pub unit_id: i32,
     pub name: String,
     pub min: f32,
     pub max: f32,

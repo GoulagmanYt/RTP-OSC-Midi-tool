@@ -1,7 +1,4 @@
-use cpal::{
-    traits::{DeviceTrait, HostTrait},
-    Device, HostId,
-};
+use cpal::{traits::HostTrait, Device, HostId};
 
 pub(super) fn select_host(name: Option<&str>) -> Option<cpal::Host> {
     if let Some(name) = name {
@@ -32,21 +29,29 @@ pub(super) fn select_host(name: Option<&str>) -> Option<cpal::Host> {
     None
 }
 
-pub(super) fn select_device(host: &cpal::Host, preferred: Option<&str>) -> Option<Device> {
+pub(super) fn select_device(
+    host: &cpal::Host,
+    preferred_id: Option<&str>,
+    preferred_name: Option<&str>,
+) -> Option<Device> {
+    if let Some(id) = preferred_id {
+        let parsed = id.parse::<cpal::DeviceId>().ok()?;
+        return host.device_by_id(&parsed);
+    }
     let mut outputs = match host.output_devices() {
         Ok(devices) => devices,
         Err(_) => return None,
     };
 
-    if let Some(name) = preferred {
-        if let Some(dev) = outputs.find(|d| d.name().ok().is_some_and(|n| n == name)) {
+    if let Some(name) = preferred_name {
+        if let Some(dev) = outputs.find(|d| d.to_string() == name) {
             return Some(dev);
         }
         let mut outputs2 = match host.output_devices() {
             Ok(devices) => devices,
             Err(_) => return None,
         };
-        if let Some(dev) = outputs2.find(|d| d.name().ok().is_some_and(|n| n.contains(name))) {
+        if let Some(dev) = outputs2.find(|d| d.to_string().contains(name)) {
             return Some(dev);
         }
     }
@@ -61,10 +66,8 @@ pub(super) fn select_device(host: &cpal::Host, preferred: Option<&str>) -> Optio
         devices
             .iter()
             .find(|dev| {
-                dev.name().ok().is_some_and(|name| {
-                    let lower = name.to_lowercase();
-                    keywords.iter().any(|keyword| lower.contains(keyword))
-                })
+                let lower = dev.to_string().to_lowercase();
+                keywords.iter().any(|keyword| lower.contains(keyword))
             })
             .cloned()
     };
@@ -88,16 +91,14 @@ pub(super) fn select_device(host: &cpal::Host, preferred: Option<&str>) -> Optio
         return Some(dev);
     }
     for dev in devices.iter() {
-        if let Ok(name) = dev.name() {
-            let lower_name = name.to_lowercase();
-            if (lower_name.contains("speakers") || lower_name.contains("haut-parleurs"))
-                && !lower_name.contains("voicemeeter")
-                && !lower_name.contains("cable")
-                && !lower_name.contains("steam")
-                && !lower_name.contains("microphone")
-            {
-                return Some(dev.clone());
-            }
+        let lower_name = dev.to_string().to_lowercase();
+        if (lower_name.contains("speakers") || lower_name.contains("haut-parleurs"))
+            && !lower_name.contains("voicemeeter")
+            && !lower_name.contains("cable")
+            && !lower_name.contains("steam")
+            && !lower_name.contains("microphone")
+        {
+            return Some(dev.clone());
         }
     }
 

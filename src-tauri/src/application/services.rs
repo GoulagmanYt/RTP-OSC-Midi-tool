@@ -15,8 +15,8 @@ mod service_runtime;
 
 pub use service_audio::{
     close_vst_ui, list_audio_backends, list_audio_devices, list_vst_parameters, list_vst_plugins,
-    open_vst_ui, ping_audio, refresh_vst_plugins, reload_vst, set_audio_limiter, set_master_gain,
-    set_vst_parameter,
+    open_vst_folder, open_vst_ui, ping_audio, refresh_vst_plugins, reload_vst, retest_vst_plugin,
+    set_audio_limiter, set_master_gain, set_vst_parameter,
 };
 pub use service_config::{
     export_config, get_config, import_config, reset_config_defaults, save_config,

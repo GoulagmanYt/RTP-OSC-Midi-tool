@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 
 use crate::logger::{background_log, FrontendLogger};
 
@@ -29,7 +29,7 @@ fn load_bool(cell: &AtomicU8) -> Option<bool> {
 #[cfg(target_os = "windows")]
 use windows::core::w;
 #[cfg(target_os = "windows")]
-use windows::Win32::Media::timeBeginPeriod;
+use windows::Win32::Media::{timeBeginPeriod, timeEndPeriod};
 #[cfg(target_os = "windows")]
 use windows::Win32::System::Threading::{
     AvRevertMmThreadCharacteristics, AvSetMmThreadCharacteristicsW, AvSetMmThreadPriority,
@@ -166,21 +166,31 @@ pub(super) fn apply_audio_thread_priority(state: &mut AudioCallbackState) {
 pub(super) fn apply_audio_thread_priority(_state: &mut AudioCallbackState) {}
 
 #[cfg(target_os = "windows")]
-pub(super) fn apply_audio_process_tuning(logger: &FrontendLogger) {
-    static PROCESS_TUNING_APPLIED: AtomicBool = AtomicBool::new(false);
-    if PROCESS_TUNING_APPLIED.swap(true, Ordering::Relaxed) {
-        return;
-    }
+pub(super) struct AudioProcessTuning {
+    timer_period_ms: u32,
+}
 
+#[cfg(target_os = "windows")]
+impl Drop for AudioProcessTuning {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = timeEndPeriod(self.timer_period_ms);
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub(super) fn apply_audio_process_tuning(logger: &FrontendLogger) -> AudioProcessTuning {
     // Request 1ms timer resolution. This is CRITICAL for audio apps — without it,
     // Windows uses a 15.6ms default resolution and coarsens scheduling when the app
     // loses focus, causing the ASIO callback to miss deadlines.
     unsafe {
-        timeBeginPeriod(1);
+        let _ = timeBeginPeriod(1);
     }
     logger.debug("Requested 1ms system timer resolution (timeBeginPeriod)");
 
     apply_process_priority(logger);
+    AudioProcessTuning { timer_period_ms: 1 }
 }
 
 /// Re-apply process priority class and power throttling.
@@ -241,7 +251,12 @@ pub fn reapply_process_priority_on_focus_loss() {
 }
 
 #[cfg(not(target_os = "windows"))]
-pub(super) fn apply_audio_process_tuning(_logger: &FrontendLogger) {}
+pub(super) struct AudioProcessTuning;
+
+#[cfg(not(target_os = "windows"))]
+pub(super) fn apply_audio_process_tuning(_logger: &FrontendLogger) -> AudioProcessTuning {
+    AudioProcessTuning
+}
 
 #[cfg(not(target_os = "windows"))]
 pub fn apply_process_priority(_logger: &FrontendLogger) {}
@@ -299,7 +314,9 @@ mod tests {
     fn windows_audio_tuning_calls_time_begin_period() {
         let source = include_str!("windows_tuning.rs");
         let begin_period = ["timeBegin", "Period"].concat();
+        let end_period = ["timeEnd", "Period"].concat();
         assert!(source.contains(&begin_period));
+        assert!(source.contains(&end_period));
     }
 
     #[test]

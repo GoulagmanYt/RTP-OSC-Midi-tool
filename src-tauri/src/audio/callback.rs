@@ -7,7 +7,8 @@ use std::sync::{
 use std::time::Instant;
 
 use cpal::{
-    traits::DeviceTrait, FromSample, OutputCallbackInfo, Sample, SizedSample, Stream, StreamConfig,
+    traits::DeviceTrait, ErrorKind, FromSample, OutputCallbackInfo, Sample, SizedSample, Stream,
+    StreamConfig,
 };
 use crossbeam_channel::Receiver;
 use parking_lot::Mutex;
@@ -57,20 +58,49 @@ pub(super) fn build_output_stream_for_sample<T: Sample + SizedSample + FromSampl
         channels,
         Arc::clone(&controls),
         Arc::clone(&telemetry),
-        emergency_reset_requested,
+        Arc::clone(&emergency_reset_requested),
         sample_rate,
         parameter_rx,
     );
     let error_telemetry = Arc::clone(&telemetry);
+    let error_reset = Arc::clone(&emergency_reset_requested);
     device
         .build_output_stream(
-            cfg,
+            *cfg,
             move |data: &mut [T], info: &OutputCallbackInfo| {
                 audio_callback(data, channels, &mut state, &plugin, info)
             },
             move |err| {
-                error_telemetry.xruns.fetch_add(1, Ordering::Relaxed);
-                background_log("warn", format!("Audio stream error: {}", err));
+                match err.kind() {
+                    ErrorKind::Xrun => {
+                        error_telemetry.xruns.fetch_add(1, Ordering::Relaxed);
+                    }
+                    ErrorKind::DeviceChanged => {
+                        error_telemetry
+                            .stream_route_changes
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
+                    ErrorKind::RealtimeDenied => {}
+                    kind => {
+                        error_reset.store(true, Ordering::Release);
+                        error_telemetry
+                            .stream_recovery_requests
+                            .fetch_add(1, Ordering::Relaxed);
+                        error_telemetry
+                            .stream_fatal_error
+                            .compare_exchange(
+                                0,
+                                stream_error_code(kind),
+                                Ordering::AcqRel,
+                                Ordering::Relaxed,
+                            )
+                            .ok();
+                    }
+                }
+                background_log(
+                    "warn",
+                    format!("Audio stream error ({:?}): {}", err.kind(), err),
+                );
             },
             None,
         )
@@ -82,14 +112,42 @@ pub(super) fn build_output_stream_for_sample<T: Sample + SizedSample + FromSampl
         })
 }
 
+fn stream_error_code(kind: ErrorKind) -> u32 {
+    match kind {
+        ErrorKind::DeviceBusy => 1,
+        ErrorKind::DeviceNotAvailable => 2,
+        ErrorKind::HostUnavailable => 3,
+        ErrorKind::StreamInvalidated => 4,
+        ErrorKind::UnsupportedConfig => 5,
+        ErrorKind::ResourceExhausted => 6,
+        ErrorKind::PermissionDenied => 7,
+        ErrorKind::BackendError => 8,
+        ErrorKind::UnsupportedOperation => 9,
+        ErrorKind::InvalidInput => 10,
+        ErrorKind::Other => 11,
+        ErrorKind::Xrun | ErrorKind::DeviceChanged | ErrorKind::RealtimeDenied => 0,
+        _ => 11,
+    }
+}
+
 fn audio_callback<T: Sample + FromSample<f32>>(
     data: &mut [T],
     device_channels: usize,
     state: &mut AudioCallbackState,
     plugin: &Arc<Mutex<PluginBackend>>,
-    _info: &OutputCallbackInfo,
+    info: &OutputCallbackInfo,
 ) {
     let callback_started = Instant::now();
+    let timestamp = info.timestamp();
+    let backend_latency = timestamp
+        .playback
+        .checked_duration_since(timestamp.callback)
+        .map(|duration| duration.as_micros().min(u64::MAX as u128) as u64)
+        .unwrap_or(0);
+    state
+        .telemetry
+        .backend_latency_us
+        .store(backend_latency, Ordering::Relaxed);
     let silence = T::from_sample(0.0f32);
     if device_channels == 0 {
         state
@@ -158,7 +216,7 @@ fn audio_callback<T: Sample + FromSample<f32>>(
     }
 
     match &mut *plugin {
-        PluginBackend::Vst2 { instance } => {
+        PluginBackend::Vst2 { instance, time } => {
             if state.last_frames != frames {
                 // instance.set_block_size(frames as i64); // Removed to prevent VST reset during playback
                 state
@@ -183,6 +241,7 @@ fn audio_callback<T: Sample + FromSample<f32>>(
 
                 let dsp_started = Instant::now();
                 instance.process(&mut buffer);
+                time.advance(frames);
                 record_dsp_timing(&state.telemetry, dsp_started);
             }));
 
@@ -242,6 +301,30 @@ fn audio_callback<T: Sample + FromSample<f32>>(
                     return;
                 }
             }
+        }
+        #[cfg(all(target_os = "windows", target_pointer_width = "64"))]
+        PluginBackend::Remote { instance } => {
+            state.drain_parameter_commands();
+            if state.last_frames != frames {
+                state
+                    .telemetry
+                    .block_size_frames
+                    .store(frames as u32, Ordering::Relaxed);
+                state.last_frames = frames;
+            }
+            let dsp_started = Instant::now();
+            if !instance.process(
+                &mut state.pending_midi,
+                &state.parameter_commands,
+                &mut state.outputs,
+                frames,
+            ) {
+                state.telemetry.xruns.fetch_add(1, Ordering::Relaxed);
+                replay_output_or_silence(data, device_channels, silence, state);
+                finish_callback_timing(state, frames, callback_started);
+                return;
+            }
+            record_dsp_timing(&state.telemetry, dsp_started);
         }
     }
 

@@ -2,8 +2,17 @@
 
 use std::{
     path::{Path, PathBuf},
-    sync::mpsc,
+    sync::{
+        atomic::{AtomicIsize, Ordering},
+        mpsc,
+    },
     time::Duration,
+};
+
+#[cfg(target_os = "windows")]
+use windows::Win32::{
+    Foundation::{HWND, LPARAM, WPARAM},
+    UI::WindowsAndMessaging::{PostMessageW, WM_APP},
 };
 
 use rack::{prelude::PluginScanner as _, vst3::Vst3Scanner, PluginInstance as _};
@@ -22,7 +31,20 @@ use crate::{
     vst_scan::{is_vst2_path, is_vst3_path},
 };
 
-use super::runtime_state::{AudioError, AudioSettings, PluginBackend};
+use super::runtime_state::{AudioError, AudioSettings, PluginBackend, Vst2TimeContext};
+
+#[cfg(target_os = "windows")]
+pub(super) const VST2_RESIZE_MESSAGE: u32 = WM_APP + 0x317;
+#[cfg(target_os = "windows")]
+static ACTIVE_VST2_EDITOR_HWND: AtomicIsize = AtomicIsize::new(0);
+
+#[cfg(target_os = "windows")]
+pub(super) fn set_active_vst2_editor_window(hwnd: Option<HWND>) {
+    ACTIVE_VST2_EDITOR_HWND.store(
+        hwnd.map(|window| window.0 as isize).unwrap_or_default(),
+        Ordering::Release,
+    );
+}
 
 pub(super) struct LoadedPluginBackend {
     pub(super) backend: PluginBackend,
@@ -83,6 +105,29 @@ pub(super) fn load_plugin_backend(
     logger: &FrontendLogger,
     probe: Option<&VstPluginEntry>,
 ) -> Result<LoadedPluginBackend, AudioError> {
+    #[cfg(all(target_os = "windows", target_pointer_width = "64"))]
+    if let Some(probe) = probe.filter(|entry| entry.architecture.eq_ignore_ascii_case("x86")) {
+        let remote =
+            super::remote_bridge::RemotePlugin::spawn(vst_path, sample_rate, max_block_size, probe)
+                .map_err(AudioError::Message)?;
+        let input_channels = remote.input_channels();
+        let output_channels = remote.output_channels();
+        let latency_samples = remote.latency_samples().saturating_add(initial_block_size);
+        let parameter_cache = remote.parameters().to_vec();
+        logger.info(format!(
+            "VST x86 bridge '{}': {} inputs / {} outputs, bridge latency={} samples",
+            probe.name, input_channels, output_channels, initial_block_size
+        ));
+        return Ok(LoadedPluginBackend {
+            backend: PluginBackend::Remote { instance: remote },
+            input_channels,
+            output_channels,
+            vst_midi_compatible: probe.midi_compatible.unwrap_or(true),
+            latency_samples,
+            parameter_cache,
+        });
+    }
+
     if is_vst3_path(vst_path) {
         let (mut plugin, inputs, outputs) =
             load_vst3_plugin(vst_path, sample_rate, max_block_size, logger, probe)?;
@@ -106,8 +151,20 @@ pub(super) fn load_plugin_backend(
         });
     }
 
-    let host = std::sync::Arc::new(std::sync::Mutex::new(SimpleHost));
-    let mut loader = PluginLoader::load(vst_path, host).map_err(|error| {
+    let plugin_id = probe
+        .and_then(|entry| entry.class_uid.as_deref())
+        .and_then(|uid| uid.strip_prefix("vst2shell:"))
+        .and_then(|value| i32::from_str_radix(value, 16).ok())
+        .unwrap_or(0);
+    let time = std::sync::Arc::new(Vst2TimeContext::new());
+    let host = std::sync::Arc::new(std::sync::Mutex::new(SimpleHost::new(
+        plugin_id,
+        sample_rate,
+        initial_block_size,
+        std::sync::Arc::clone(&time),
+    )));
+    let load_path = crate::plugin_probe::native_plugin_load_path(vst_path);
+    let mut loader = PluginLoader::load(&load_path, host).map_err(|error| {
         AudioError::Message(format!(
             "Failed to load VST plugin: {} ({:?})",
             error, vst_path
@@ -143,15 +200,37 @@ pub(super) fn load_plugin_backend(
         ));
     }
 
+    let parameters = instance.get_parameter_object();
+    let parameter_cache = (0..info.parameters.max(0) as usize)
+        .map(|index| {
+            let index_i32 = index as i32;
+            let value = parameters.get_parameter(index_i32);
+            VstParameter {
+                index,
+                id: index as u32,
+                flags: 0,
+                step_count: 0,
+                unit_id: 0,
+                name: parameters.get_parameter_name(index_i32),
+                min: 0.0,
+                max: 1.0,
+                default: value,
+                unit: parameters.get_parameter_label(index_i32),
+                value,
+            }
+        })
+        .collect();
+
     instance.resume();
+    instance.start_process();
 
     Ok(LoadedPluginBackend {
-        backend: PluginBackend::Vst2 { instance },
+        backend: PluginBackend::Vst2 { instance, time },
         input_channels,
         output_channels,
         vst_midi_compatible,
         latency_samples,
-        parameter_cache: Vec::new(),
+        parameter_cache,
     })
 }
 
@@ -167,6 +246,10 @@ fn cache_vst3_parameters(
         let value = instance.get_parameter(index).unwrap_or(info.default);
         parameters.push(VstParameter {
             index,
+            id: info.id,
+            flags: info.flags,
+            step_count: info.step_count,
+            unit_id: info.unit_id,
             name: info.name,
             min: info.min,
             max: info.max,
@@ -187,6 +270,24 @@ pub(super) fn load_plugin_backend_thread_affine(
     logger: &FrontendLogger,
     probe: Option<&VstPluginEntry>,
 ) -> Result<LoadedPluginBackend, AudioError> {
+    #[cfg(all(target_os = "windows", target_pointer_width = "64"))]
+    if probe.is_some_and(|entry| entry.architecture.eq_ignore_ascii_case("x86")) {
+        // No third-party DLL is loaded in this process for bridged x86
+        // plugins. Waiting for the child DSP process on Tauri's UI thread can
+        // deadlock legacy plugins which synchronously message host windows
+        // during startup. Keep the UI message pump alive and perform only the
+        // bridge handshake on the serialized lifecycle thread.
+        logger.debug("Starting the x86 DSP bridge without blocking the x64 UI thread");
+        return load_plugin_backend(
+            vst_path,
+            sample_rate,
+            initial_block_size,
+            max_block_size,
+            logger,
+            probe,
+        );
+    }
+
     if super::thread_affinity::is_main_ui_thread() {
         logger.debug("Creating and initializing VST directly on the main UI thread");
         return load_plugin_backend(
@@ -236,7 +337,9 @@ fn load_vst3_plugin(
     let scanner = Vst3Scanner::new().map_err(|error| {
         AudioError::Message(format!("Failed to initialise VST3 scanner: {}", error))
     })?;
-    let info = if let Some(entry) = probe.filter(|entry| entry.host_abi_version == 1) {
+    let info = if let Some(entry) =
+        probe.filter(|entry| entry.host_abi_version == crate::types::VST_HOST_ABI_VERSION)
+    {
         if let Some(class_uid) = entry.class_uid.as_ref() {
             logger.debug(format!(
                 "Loading cached VST3 class UID {} without rescanning parent directory",
@@ -247,7 +350,7 @@ fn load_vst3_plugin(
                 String::new(),
                 0,
                 rack::PluginType::Instrument,
-                vst_path.to_path_buf(),
+                crate::plugin_probe::native_plugin_load_path(vst_path),
                 class_uid.clone(),
             )
         } else {
@@ -292,6 +395,115 @@ fn scan_vst3_info(scanner: &Vst3Scanner, vst_path: &Path) -> Result<rack::Plugin
     })
 }
 
-pub(super) struct SimpleHost;
+pub(super) struct SimpleHost {
+    plugin_id: i32,
+    sample_rate: u32,
+    block_size: u32,
+    started: std::time::Instant,
+    time: std::sync::Arc<Vst2TimeContext>,
+}
 
-impl Host for SimpleHost {}
+impl Default for SimpleHost {
+    fn default() -> Self {
+        Self::new(0, 48_000, 256, std::sync::Arc::new(Vst2TimeContext::new()))
+    }
+}
+
+impl SimpleHost {
+    fn new(
+        plugin_id: i32,
+        sample_rate: u32,
+        block_size: u32,
+        time: std::sync::Arc<Vst2TimeContext>,
+    ) -> Self {
+        Self {
+            plugin_id,
+            sample_rate,
+            block_size,
+            started: std::time::Instant::now(),
+            time,
+        }
+    }
+}
+
+impl Host for SimpleHost {
+    fn get_plugin_id(&self) -> i32 {
+        self.plugin_id
+    }
+
+    fn get_block_size(&self) -> isize {
+        self.block_size as isize
+    }
+
+    fn get_info(&self) -> (isize, String, String) {
+        (2_400, "OSCMidi".to_string(), "OSCMidi VST Host".to_string())
+    }
+
+    fn get_time_info(&self, mask: i32) -> Option<vst::api::TimeInfo> {
+        let sample_pos = self.time.sample_position() as f64;
+        let tempo = 120.0;
+        let ppq_pos = sample_pos / f64::from(self.sample_rate) * tempo / 60.0;
+        Some(vst::api::TimeInfo {
+            sample_pos,
+            sample_rate: f64::from(self.sample_rate),
+            nanoseconds: self.started.elapsed().as_nanos() as f64,
+            ppq_pos,
+            tempo,
+            bar_start_pos: (ppq_pos / 4.0).floor() * 4.0,
+            time_sig_numerator: 4,
+            time_sig_denominator: 4,
+            flags: ((vst::api::TimeInfoFlags::NANOSECONDS_VALID
+                | vst::api::TimeInfoFlags::PPQ_POS_VALID
+                | vst::api::TimeInfoFlags::TEMPO_VALID
+                | vst::api::TimeInfoFlags::BARS_VALID
+                | vst::api::TimeInfoFlags::TIME_SIG_VALID
+                | vst::api::TimeInfoFlags::TRANSPORT_PLAYING)
+                .bits()
+                & (mask | vst::api::TimeInfoFlags::TRANSPORT_PLAYING.bits())),
+            ..Default::default()
+        })
+    }
+
+    fn get_sample_rate(&self) -> isize {
+        self.sample_rate as isize
+    }
+    fn get_input_latency(&self) -> isize {
+        0
+    }
+    fn get_output_latency(&self) -> isize {
+        self.block_size as isize
+    }
+    fn get_current_process_level(&self) -> isize {
+        vst::api::ProcessLevel::Realtime as isize
+    }
+    fn get_automation_state(&self) -> isize {
+        1
+    }
+    fn can_do(&self, capability: &str) -> Supported {
+        match capability {
+            "sendVstEvents" | "sendVstMidiEvent" | "receiveVstTimeInfo" => Supported::Yes,
+            _ => Supported::No,
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn size_window(&self, width: i32, height: i32) -> bool {
+        if !(1..=8192).contains(&width) || !(1..=8192).contains(&height) {
+            return false;
+        }
+        let raw = ACTIVE_VST2_EDITOR_HWND.load(Ordering::Acquire);
+        if raw == 0 {
+            return false;
+        }
+        let hwnd = HWND(raw as *mut std::ffi::c_void);
+        unsafe {
+            PostMessageW(
+                Some(hwnd),
+                VST2_RESIZE_MESSAGE,
+                WPARAM(width as usize),
+                LPARAM(height as isize),
+            )
+        }
+        .is_ok()
+    }
+}

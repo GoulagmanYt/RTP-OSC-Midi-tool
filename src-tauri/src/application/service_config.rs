@@ -14,7 +14,9 @@ use crate::{
     },
 };
 
-use super::service_common::{config_error, frontend_logger, io_to_error, runtime_error};
+use super::service_common::{
+    config_error, frontend_logger, io_to_error, persist_resolved_audio_device, runtime_error,
+};
 
 pub fn get_config(app: &AppHandle, state: &AppState) -> Config {
     let cfg = state.config_store.load();
@@ -115,6 +117,8 @@ pub fn import_config(
             logger.clone(),
         ) {
             logger.error(format!("Audio not restarted after import: {err}"));
+        } else {
+            persist_resolved_audio_device(&cfg, state);
         }
     } else {
         state.audio.stop(Some(app.clone()));

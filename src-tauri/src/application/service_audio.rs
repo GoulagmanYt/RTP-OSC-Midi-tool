@@ -2,6 +2,7 @@ use tauri::{AppHandle, Window};
 
 use crate::{
     error::CommandError,
+    plugin_probe::probe_plugins_isolated,
     tauri::{
         state::AppState,
         utils::{
@@ -10,10 +11,12 @@ use crate::{
         },
     },
     types::{BridgeStatus, VstParameter, VstPluginEntry},
-    vst_scan::{default_vst_scan_roots, scan_vst_plugins_in_roots},
+    vst_scan::{default_vst_scan_roots, scan_vst_plugins_in_roots_cached},
 };
 
-use super::service_common::{audio_error, frontend_logger, with_audio_status};
+use super::service_common::{
+    audio_error, frontend_logger, persist_resolved_audio_device, with_audio_status,
+};
 
 pub fn list_audio_backends(state: &AppState) -> Vec<String> {
     state.audio.list_backends()
@@ -33,7 +36,14 @@ pub fn list_vst_plugins(state: &AppState) -> Vec<VstPluginEntry> {
 }
 
 pub fn refresh_vst_plugins(state: &AppState) -> Vec<VstPluginEntry> {
-    let roots = default_vst_scan_roots();
+    let mut roots = default_vst_scan_roots();
+    let cfg = state.config_store.load();
+    for custom in &cfg.audio.vst_scan_paths {
+        let path = std::path::PathBuf::from(custom);
+        if path.exists() && !roots.iter().any(|root| root == &path) {
+            roots.push(path);
+        }
+    }
     if roots.is_empty() {
         return state
             .vst_cache
@@ -43,10 +53,68 @@ pub fn refresh_vst_plugins(state: &AppState) -> Vec<VstPluginEntry> {
             .unwrap_or_default();
     }
 
-    let plugins = retain_instrument_entries(scan_vst_plugins_in_roots(&roots));
+    let cached = state.vst_cache.lock().clone().unwrap_or_default();
+    let plugins =
+        retain_instrument_entries(scan_vst_plugins_in_roots_cached(&roots, &cached, false));
     *state.vst_cache.lock() = Some(plugins.clone());
     save_vst_cache_to_disk(&plugins);
+    if cfg.audio.vst_plugin_id.is_none() {
+        if let Some(path) = cfg.audio.vst_path.as_deref() {
+            if let Some(entry) = plugins
+                .iter()
+                .find(|entry| entry.path.eq_ignore_ascii_case(path) && entry.supported)
+            {
+                let mut migrated = cfg;
+                migrated.audio.vst_plugin_id = Some(entry.id.clone());
+                migrated.version = crate::config::AppConfig::CURRENT_VERSION;
+                let _ = state.config_store.save(&migrated);
+            }
+        }
+    }
     plugins
+}
+
+pub fn retest_vst_plugin(id: &str, state: &AppState) -> Result<VstPluginEntry, CommandError> {
+    let cached = state.vst_cache.lock().clone().unwrap_or_default();
+    let previous = cached
+        .iter()
+        .find(|entry| entry.id == id)
+        .cloned()
+        .ok_or_else(|| audio_error("audio.vst-not-found", "VST catalogue entry not found"))?;
+    let tested_entries = probe_plugins_isolated(
+        std::path::Path::new(&previous.path),
+        std::time::Duration::from_secs(60),
+    );
+    let tested = tested_entries
+        .iter()
+        .find(|entry| entry.id == id)
+        .or_else(|| tested_entries.iter().find(|entry| entry.supported))
+        .or_else(|| tested_entries.first())
+        .cloned()
+        .ok_or_else(|| audio_error("audio.vst-probe-empty", "VST probe returned no classes"))?;
+    let mut updated = cached;
+    updated.retain(|entry| !entry.path.eq_ignore_ascii_case(&previous.path));
+    updated.extend(tested_entries);
+    updated.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    *state.vst_cache.lock() = Some(updated.clone());
+    save_vst_cache_to_disk(&updated);
+    Ok(tested)
+}
+
+pub fn open_vst_folder(id: &str, state: &AppState) -> Result<(), CommandError> {
+    let entry = state
+        .vst_cache
+        .lock()
+        .as_ref()
+        .and_then(|entries| entries.iter().find(|entry| entry.id == id).cloned())
+        .ok_or_else(|| audio_error("audio.vst-not-found", "VST catalogue entry not found"))?;
+    #[cfg(target_os = "windows")]
+    std::process::Command::new("explorer.exe")
+        .arg("/select,")
+        .arg(&entry.path)
+        .spawn()
+        .map_err(|error| audio_error("audio.open-vst-folder-failed", error.to_string()))?;
+    Ok(())
 }
 
 pub fn list_vst_parameters(state: &AppState) -> Result<Vec<VstParameter>, CommandError> {
@@ -82,6 +150,7 @@ pub fn open_vst_ui(app: &AppHandle, window: &Window, state: &AppState) -> Result
                 logger.clone(),
             )
             .map_err(|err| audio_error("audio.start-failed", err.to_string()))?;
+        persist_resolved_audio_device(&cfg, state);
     }
     state
         .audio
@@ -124,6 +193,7 @@ pub fn ping_audio(app: &AppHandle, window: &Window, state: &AppState) -> Result<
                 logger.clone(),
             )
             .map_err(|err| audio_error("audio.start-failed", err.to_string()))?;
+        persist_resolved_audio_device(&cfg, state);
     }
     state
         .audio
@@ -152,6 +222,7 @@ pub fn reload_vst(
             logger,
         )
         .map_err(|err| audio_error("audio.reload-failed", err.to_string()))?;
+    persist_resolved_audio_device(&cfg, state);
     let status = state.bridge.status(&cfg);
     Ok(with_audio_status(status, &state.audio))
 }

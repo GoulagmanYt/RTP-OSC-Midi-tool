@@ -40,9 +40,13 @@ pub(crate) fn with_audio_status(mut status: BridgeStatus, audio: &AudioEngine) -
     status.vst_loaded = audio.is_vst_loaded();
     status.audio_latency_ms = audio.current_latency_ms();
     status.audio_buffer_period_ms = audio.audio_buffer_period_ms();
+    status.audio_backend_latency_ms = audio.backend_latency_ms();
     status.plugin_latency_samples = audio.plugin_latency_samples();
+    status.bridge_latency_samples = audio.bridge_latency_samples();
+    status.vst_hosting_mode = audio.vst_hosting_mode();
     status.audio_backend = audio.current_backend();
     status.audio_device = audio.current_device();
+    status.audio_device_id = audio.current_device_id();
     status.audio_sample_rate = audio.current_sample_rate();
     status.audio_buffer_size = audio.current_buffer_size();
     status.audio_requested_buffer_size = audio.requested_buffer_size();
@@ -50,6 +54,8 @@ pub(crate) fn with_audio_status(mut status: BridgeStatus, audio: &AudioEngine) -
     status.audio_buffer_mismatch = audio.buffer_size_mismatch();
     status.vst_midi_compatible = audio.vst_midi_compatible();
     status.audio_xruns = audio.xrun_count();
+    status.audio_stream_recovery_requests = audio.stream_recovery_requests();
+    status.audio_stream_route_changes = audio.stream_route_changes();
     status.audio_midi_drops = audio.midi_drop_count();
     status.audio_lock_misses = audio.audio_lock_miss_count();
     status.audio_emergency_resets = audio.emergency_reset_count();
@@ -71,7 +77,42 @@ pub(crate) fn with_audio_status(mut status: BridgeStatus, audio: &AudioEngine) -
     status.audio_mmcss_enabled = audio.mmcss_enabled();
     status.audio_power_throttling_disabled = audio.power_throttling_disabled();
     status.audio_limiter_enabled = audio.limiter_enabled();
+    let (underruns, overruns, worker_alive) = audio.x86_bridge_metrics();
+    status.x86_bridge_underruns = Some(underruns);
+    status.x86_bridge_overruns = Some(overruns);
+    status.x86_worker_alive = Some(worker_alive);
     status
+}
+
+pub(crate) fn persist_resolved_audio_device(config: &Config, state: &AppState) {
+    if config.audio.device_id.is_some() || config.audio.device.is_none() {
+        return;
+    }
+    let (Some(device_id), Some(active_name)) = (
+        state.audio.current_device_id(),
+        state.audio.current_device(),
+    ) else {
+        return;
+    };
+    if config
+        .audio
+        .device
+        .as_deref()
+        .is_some_and(|configured| configured != active_name)
+    {
+        return;
+    }
+    let mut migrated = state.config_store.load();
+    if migrated.audio.device_id.is_none() && migrated.audio.device == config.audio.device {
+        migrated.audio.device_id = Some(device_id);
+        migrated.version = crate::config::AppConfig::CURRENT_VERSION;
+        if let Err(error) = state.config_store.save(&migrated) {
+            crate::logger::background_log(
+                "warn",
+                format!("Failed to persist stable audio device identity: {error}"),
+            );
+        }
+    }
 }
 
 pub(crate) fn frontend_logger(window: &Window, state: &AppState) -> FrontendLogger {
