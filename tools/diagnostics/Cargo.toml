@@ -1,6 +1,6 @@
 [package]
 name = "oscmidi-diagnostics"
-version = "2.1.0"
+version = "2.5.0"
 edition = "2021"
 description = "Developer-only diagnostics for OSCMidi"
 publish = false
