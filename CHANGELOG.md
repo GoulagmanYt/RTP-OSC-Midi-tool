@@ -9,6 +9,7 @@ All notable changes to OSCMidi are documented here.
 - Split pull-request validation into parallel frontend, dependency-audit and Windows Rust jobs while reserving MSI packaging for release-producing events.
 - Made pull requests restore the shared Rust cache without creating isolated multi-gigabyte cache entries.
 - Consolidated the pending React, Radix UI, Vite, PostCSS, CPAL, Criterion, Chrono and Serde JSON maintenance updates.
+- Pinned the Rust Analyzer component to the workspace Rust toolchain for compatible editor diagnostics.
 
 ### Fixed
 

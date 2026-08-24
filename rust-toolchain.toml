@@ -2,4 +2,4 @@
 channel = "1.90.0"
 targets = ["x86_64-pc-windows-msvc", "i686-pc-windows-msvc"]
 profile = "minimal"
-components = ["clippy", "rustfmt"]
+components = ["clippy", "rustfmt", "rust-analyzer"]
