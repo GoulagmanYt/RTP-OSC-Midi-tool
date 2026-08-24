@@ -98,8 +98,8 @@ pub use vst3::{Vst3Plugin as Plugin, Vst3Scanner as Scanner};
 /// Prelude module for convenient imports
 pub mod prelude {
     pub use crate::{
-        Error, MidiEvent, MidiEventKind, ParameterInfo, PluginInfo, PluginInstance,
-        PluginScanner, PluginType, PresetInfo, Result,
+        Error, MidiEvent, MidiEventKind, ParameterInfo, PluginInfo, PluginInstance, PluginScanner,
+        PluginType, PresetInfo, Result,
     };
 
     // Platform-specific exports

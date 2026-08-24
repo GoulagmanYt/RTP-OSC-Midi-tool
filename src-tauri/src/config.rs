@@ -124,11 +124,17 @@ pub struct AudioConfig {
     pub enabled: bool,
     pub backend: Option<String>,
     pub device: Option<String>,
+    #[serde(default)]
+    pub device_id: Option<String>,
     pub sample_rate: u32,
     pub buffer_size: u32,
     pub gain_db: f32,
     pub limiter_enabled: bool,
+    #[serde(default)]
+    pub vst_plugin_id: Option<String>,
     pub vst_path: Option<String>,
+    #[serde(default)]
+    pub vst_scan_paths: Vec<String>,
 }
 
 impl Default for AudioConfig {
@@ -137,11 +143,14 @@ impl Default for AudioConfig {
             enabled: true,
             backend: Some("auto".to_string()),
             device: None,
+            device_id: None,
             sample_rate: 48_000,
             buffer_size: 256,
             gain_db: 0.0,
             limiter_enabled: false,
+            vst_plugin_id: None,
             vst_path: None,
+            vst_scan_paths: Vec::new(),
         }
     }
 }
@@ -199,7 +208,7 @@ pub struct AppConfig {
 }
 
 impl AppConfig {
-    pub const CURRENT_VERSION: u32 = 2;
+    pub const CURRENT_VERSION: u32 = 4;
 }
 
 impl Default for AppConfig {
@@ -254,14 +263,52 @@ impl ConfigStore {
     }
 
     pub fn load(&self) -> AppConfig {
-        let Ok(raw) = fs::read_to_string(&self.path) else {
-            return self.write_default();
+        let raw = match fs::read_to_string(&self.path) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return self.write_default();
+            }
+            Err(error) => {
+                log::error!("Unable to read configuration {:?}: {error}", self.path);
+                return AppConfig::default();
+            }
         };
-        let Ok(cfg) = serde_yaml::from_str::<AppConfig>(&raw) else {
-            return self.write_default();
+        let Ok(mut value) = serde_yaml::from_str::<serde_yaml::Value>(&raw) else {
+            log::error!(
+                "Invalid YAML configuration preserved at {:?}; using defaults for this session",
+                self.path
+            );
+            return AppConfig::default();
         };
-        if cfg.version != AppConfig::CURRENT_VERSION {
-            return self.write_default();
+        let version = value
+            .get("version")
+            .and_then(serde_yaml::Value::as_u64)
+            .unwrap_or_default() as u32;
+        if matches!(version, 2 | 3) {
+            if let Some(mapping) = value.as_mapping_mut() {
+                mapping.insert(
+                    serde_yaml::Value::String("version".into()),
+                    serde_yaml::Value::Number(AppConfig::CURRENT_VERSION.into()),
+                );
+            }
+        } else if version != AppConfig::CURRENT_VERSION {
+            log::error!(
+                "Unsupported configuration version {version} preserved at {:?}; using defaults for this session",
+                self.path
+            );
+            return AppConfig::default();
+        }
+        let Ok(cfg) = serde_yaml::from_value::<AppConfig>(value) else {
+            log::error!(
+                "Invalid configuration schema preserved at {:?}; using defaults for this session",
+                self.path
+            );
+            return AppConfig::default();
+        };
+        if matches!(version, 2 | 3) {
+            if let Err(error) = self.save(&cfg) {
+                log::warn!("Unable to persist migrated configuration: {error}");
+            }
         }
         cfg
     }
@@ -329,9 +376,13 @@ impl From<&AppConfig> for RuntimeStatus {
             audio_running: false,
             audio_latency_ms: None,
             audio_buffer_period_ms: None,
+            audio_backend_latency_ms: None,
             plugin_latency_samples: None,
+            bridge_latency_samples: None,
+            vst_hosting_mode: None,
             audio_backend: None,
             audio_device: None,
+            audio_device_id: None,
             audio_sample_rate: None,
             audio_buffer_size: None,
             audio_requested_buffer_size: None,
@@ -340,6 +391,8 @@ impl From<&AppConfig> for RuntimeStatus {
             vst_loaded: false,
             vst_midi_compatible: None,
             audio_xruns: None,
+            audio_stream_recovery_requests: None,
+            audio_stream_route_changes: None,
             audio_midi_drops: None,
             audio_lock_misses: None,
             audio_emergency_resets: None,
@@ -361,6 +414,9 @@ impl From<&AppConfig> for RuntimeStatus {
             audio_mmcss_enabled: None,
             audio_power_throttling_disabled: None,
             audio_limiter_enabled: None,
+            x86_bridge_underruns: None,
+            x86_bridge_overruns: None,
+            x86_worker_alive: None,
         }
     }
 }
@@ -371,7 +427,7 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn store_resets_invalid_payload_to_defaults() {
+    fn store_preserves_invalid_payload_while_using_defaults() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("config.yaml");
         std::fs::write(&path, "legacy: true").expect("write legacy");
@@ -380,12 +436,12 @@ mod tests {
         let config = store.load();
 
         assert_eq!(config.version, AppConfig::CURRENT_VERSION);
-        let raw = std::fs::read_to_string(path).expect("read rewritten");
-        assert!(raw.contains("version:"));
+        let raw = std::fs::read_to_string(path).expect("read preserved");
+        assert_eq!(raw, "legacy: true");
     }
 
     #[test]
-    fn store_resets_wrong_version_to_defaults() {
+    fn store_preserves_future_version_while_using_defaults() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("config.yaml");
         let legacy = AppConfig {
@@ -394,10 +450,34 @@ mod tests {
         };
         std::fs::write(&path, serde_yaml::to_string(&legacy).expect("yaml")).expect("write");
 
-        let store = ConfigStore::with_path(path);
+        let original = serde_yaml::to_string(&legacy).expect("yaml");
+        let store = ConfigStore::with_path(path.clone());
         let config = store.load();
 
         assert_eq!(config.version, AppConfig::CURRENT_VERSION);
+        assert_eq!(std::fs::read_to_string(path).expect("preserved"), original);
+    }
+
+    #[test]
+    fn v2_audio_config_migrates_without_losing_legacy_vst_path() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("config.yaml");
+        let mut legacy = serde_yaml::to_string(&AppConfig::default()).expect("serialize");
+        legacy = legacy
+            .replace("version: 3", "version: 2")
+            .replace("  vstPluginId: null\n", "")
+            .replace("  vstScanPaths: []\n", "")
+            .replace("  vstPath: null", "  vstPath: C:\\Legacy\\Organ.dll");
+        std::fs::write(&path, legacy).expect("write legacy");
+
+        let migrated = ConfigStore::with_path(path).load();
+        assert_eq!(migrated.version, AppConfig::CURRENT_VERSION);
+        assert_eq!(migrated.audio.vst_plugin_id, None);
+        assert!(migrated.audio.vst_scan_paths.is_empty());
+        assert_eq!(
+            migrated.audio.vst_path.as_deref(),
+            Some("C:\\Legacy\\Organ.dll")
+        );
     }
 
     #[test]

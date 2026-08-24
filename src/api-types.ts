@@ -74,11 +74,19 @@ export type AudioConfig = {
   enabled: boolean;
   backend?: string | null;
   device?: string | null;
+  deviceId?: string | null;
   sampleRate: number;
   bufferSize: number;
   gainDb: number;
   limiterEnabled: boolean;
+  vstPluginId?: string | null;
   vstPath?: string | null;
+  vstScanPaths: string[];
+};
+
+export type AudioDeviceEntry = {
+  id?: string | null;
+  name: string;
 };
 
 export type UiConfig = {
@@ -120,9 +128,13 @@ export type RuntimeStatus = {
   audioRunning?: boolean;
   audioLatencyMs?: number | null;
   audioBufferPeriodMs?: number | null;
+  audioBackendLatencyMs?: number | null;
   pluginLatencySamples?: number | null;
+  bridgeLatencySamples?: number | null;
+  vstHostingMode?: "directX64" | "bridgedX86" | null;
   audioBackend?: string | null;
   audioDevice?: string | null;
+  audioDeviceId?: string | null;
   audioSampleRate?: number | null;
   audioBufferSize?: number | null;
   audioRequestedBufferSize?: number | null;
@@ -130,6 +142,8 @@ export type RuntimeStatus = {
   audioBufferMismatch?: boolean | null;
   vstMidiCompatible?: boolean | null;
   audioXruns?: number | null;
+  audioStreamRecoveryRequests?: number | null;
+  audioStreamRouteChanges?: number | null;
   audioMidiDrops?: number | null;
   audioLockMisses?: number | null;
   audioEmergencyResets?: number | null;
@@ -151,6 +165,9 @@ export type RuntimeStatus = {
   audioMmcssEnabled?: boolean | null;
   audioPowerThrottlingDisabled?: boolean | null;
   audioLimiterEnabled?: boolean | null;
+  x86BridgeUnderruns?: number | null;
+  x86BridgeOverruns?: number | null;
+  x86WorkerAlive?: boolean | null;
 };
 
 export type RuntimeMetrics = {
@@ -158,8 +175,13 @@ export type RuntimeMetrics = {
   audioPeakR?: number | null;
   audioLatencyMs?: number | null;
   audioBufferPeriodMs?: number | null;
+  audioBackendLatencyMs?: number | null;
   pluginLatencySamples?: number | null;
+  bridgeLatencySamples?: number | null;
+  vstHostingMode?: "directX64" | "bridgedX86" | null;
   audioXruns?: number | null;
+  audioStreamRecoveryRequests?: number | null;
+  audioStreamRouteChanges?: number | null;
   audioMidiDrops?: number | null;
   audioLockMisses?: number | null;
   audioEmergencyResets?: number | null;
@@ -179,6 +201,9 @@ export type RuntimeMetrics = {
   vstWorkerLastExit?: string | null;
   audioMmcssEnabled?: boolean | null;
   audioPowerThrottlingDisabled?: boolean | null;
+  x86BridgeUnderruns?: number | null;
+  x86BridgeOverruns?: number | null;
+  x86WorkerAlive?: boolean | null;
   midiMessagesPerSec: number;
   oscMessagesPerSec: number;
   bridgeQueueDepth: number;
@@ -229,17 +254,27 @@ export type AppPaths = {
 };
 
 export type VstPluginEntry = {
+  id: string;
   name: string;
   path: string;
   format: string;
   kind: string;
   architecture: string;
+  availableArchitectures: string[];
+  vendor?: string | null;
+  pluginVersion?: string | null;
+  status: "probing" | "compatible" | "unverified" | "failed" | "quarantined" | "unsupported" | "outOfScope";
   supported: boolean;
   unsupportedReason?: string | null;
+  failureStage?: string | null;
+  lastError?: string | null;
+  lastProbedMs?: number | null;
   midiCompatible?: boolean | null;
   hasEditor: boolean;
   channelLayout?: string | null;
   classUid?: string | null;
+  subPluginId?: number | null;
+  hostingMode?: "directX64" | "bridgedX86" | null;
   fileModifiedMs?: number | null;
   fileSize?: number | null;
   hostAbiVersion?: number;
@@ -247,6 +282,10 @@ export type VstPluginEntry = {
 
 export type VstParameter = {
   index: number;
+  id: number;
+  flags: number;
+  stepCount: number;
+  unitId: number;
   name: string;
   min: number;
   max: number;

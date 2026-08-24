@@ -103,6 +103,7 @@ struct PreparedSession {
 
 pub struct ReliablePlaybackServer {
     local_addr: SocketAddr,
+    tx: Sender<MidiFrame>,
     stop: Arc<AtomicBool>,
     handle: Mutex<Option<thread::JoinHandle<()>>>,
     workers: Arc<Mutex<Vec<thread::JoinHandle<()>>>>,
@@ -130,11 +131,13 @@ impl ReliablePlaybackServer {
         let stop_for_thread = Arc::clone(&stop);
         let workers = Arc::new(Mutex::new(Vec::new()));
         let workers_for_thread = Arc::clone(&workers);
+        let tx_for_server = tx.clone();
         let handle =
             thread::spawn(move || accept_loop(listener, tx, stop_for_thread, workers_for_thread));
 
         Ok(Self {
             local_addr,
+            tx: tx_for_server,
             stop,
             handle: Mutex::new(Some(handle)),
             workers,
@@ -164,6 +167,8 @@ impl ReliablePlaybackServer {
                 let _ = handle.join();
             }
         }
+        inject_all_notes_off(&self.tx, "ReliablePLV:server-stop");
+        *ACTIVE_SESSION.lock() = None;
     }
 }
 
@@ -374,7 +379,9 @@ fn handle_connection(
 
     if started && !done.load(Ordering::Relaxed) {
         cancel.store(true, Ordering::Relaxed);
-        inject_all_notes_off(&tx, &format!("ReliablePLV:{}:stop", prepared.song));
+        if !server_stop.load(Ordering::Relaxed) {
+            inject_all_notes_off(&tx, &format!("ReliablePLV:{}:stop", prepared.song));
+        }
         *ACTIVE_SESSION.lock() = None;
         done.store(true, Ordering::Relaxed);
     }

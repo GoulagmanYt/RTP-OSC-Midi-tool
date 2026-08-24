@@ -1,4 +1,6 @@
-use crate::{Error, MidiEvent, MidiEventKind, ParameterInfo, PluginInfo, PluginInstance, PresetInfo, Result};
+use crate::{
+    Error, MidiEvent, MidiEventKind, ParameterInfo, PluginInfo, PluginInstance, PresetInfo, Result,
+};
 use std::ffi::CString;
 use std::marker::PhantomData;
 use std::os::raw::c_void;
@@ -50,7 +52,9 @@ impl Vst3Plugin {
     pub(crate) fn new(info: &PluginInfo) -> Result<Self> {
         unsafe {
             // Convert path to CString
-            let path_str = info.path.to_str()
+            let path_str = info
+                .path
+                .to_str()
                 .ok_or_else(|| Error::Other("Plugin path contains invalid UTF-8".to_string()))?;
             let path = CString::new(path_str)
                 .map_err(|_| Error::Other("Plugin path contains null byte".to_string()))?;
@@ -98,7 +102,10 @@ impl Vst3Plugin {
         unsafe {
             let ptr = ffi::rack_vst3_plugin_create_gui(self.inner.as_ptr());
             let inner = NonNull::new(ptr).ok_or_else(|| {
-                Error::Other(format!("Plugin '{}' does not expose a VST3 editor", self.info.name))
+                Error::Other(format!(
+                    "Plugin '{}' does not expose a VST3 editor",
+                    self.info.name
+                ))
             })?;
             Ok(Vst3PluginGui {
                 inner,
@@ -135,6 +142,35 @@ impl Vst3Plugin {
             Err(map_error(result))
         }
     }
+
+    /// Returns the sparse set of persistent parameters explicitly modified by
+    /// the host, the native editor, a program change, or the processor.
+    pub fn tracked_parameters(&mut self) -> Result<Vec<(u32, f32)>> {
+        let count = unsafe { ffi::rack_vst3_plugin_tracked_parameter_count(self.inner.as_ptr()) };
+        if count < 0 {
+            return Err(map_error(count));
+        }
+        let mut tracked = Vec::with_capacity(count as usize);
+        for index in 0..count as usize {
+            let mut id = 0u32;
+            let mut value = 0.0f32;
+            let result = unsafe {
+                ffi::rack_vst3_plugin_get_tracked_parameter(
+                    self.inner.as_ptr(),
+                    index as u32,
+                    &mut id,
+                    &mut value,
+                )
+            };
+            if result != ffi::RACK_VST3_OK {
+                return Err(map_error(result));
+            }
+            if value.is_finite() {
+                tracked.push((id, value.clamp(0.0, 1.0)));
+            }
+        }
+        Ok(tracked)
+    }
 }
 
 impl Vst3PluginGui {
@@ -167,6 +203,24 @@ impl Vst3PluginGui {
                 return Err(map_error(result));
             }
             Ok((width, height))
+        }
+    }
+
+    /// Notify the native view after the host window moves to a monitor with a
+    /// different DPI. A plug-in that does not implement content scaling treats
+    /// this as a successful no-op.
+    pub fn set_content_scale_factor(&mut self, factor: f32) -> Result<()> {
+        if !factor.is_finite() || factor <= 0.0 {
+            return Err(Error::Other(
+                "Invalid VST3 content scale factor".to_string(),
+            ));
+        }
+        let result =
+            unsafe { ffi::rack_vst3_gui_set_content_scale_factor(self.inner.as_ptr(), factor) };
+        if result == ffi::RACK_VST3_OK {
+            Ok(())
+        } else {
+            Err(map_error(result))
         }
     }
 }
@@ -205,7 +259,9 @@ impl PluginInstance for Vst3Plugin {
             let output_channels = ffi::rack_vst3_plugin_get_output_channels(self.inner.as_ptr());
 
             if input_channels < 0 || output_channels < 0 {
-                return Err(Error::Other("Failed to query channel configuration".to_string()));
+                return Err(Error::Other(
+                    "Failed to query channel configuration".to_string(),
+                ));
             }
 
             self.input_channels = input_channels as usize;
@@ -217,8 +273,10 @@ impl PluginInstance for Vst3Plugin {
             self.output_ptrs = Vec::with_capacity(self.output_channels.max(8));
 
             // Initialize with null pointers (will be filled in process())
-            self.input_ptrs.resize(self.input_channels, std::ptr::null());
-            self.output_ptrs.resize(self.output_channels, std::ptr::null_mut());
+            self.input_ptrs
+                .resize(self.input_channels, std::ptr::null());
+            self.output_ptrs
+                .resize(self.output_channels, std::ptr::null_mut());
 
             Ok(())
         }
@@ -250,13 +308,15 @@ impl PluginInstance for Vst3Plugin {
         if inputs.len() != self.input_channels {
             return Err(Error::Other(format!(
                 "Input channel count mismatch: plugin expects {}, got {}",
-                self.input_channels, inputs.len()
+                self.input_channels,
+                inputs.len()
             )));
         }
         if outputs.len() != self.output_channels {
             return Err(Error::Other(format!(
                 "Output channel count mismatch: plugin expects {}, got {}",
-                self.output_channels, outputs.len()
+                self.output_channels,
+                outputs.len()
             )));
         }
 
@@ -341,6 +401,10 @@ impl PluginInstance for Vst3Plugin {
             let mut min = 0.0f32;
             let mut max = 0.0f32;
             let mut default_value = 0.0f32;
+            let mut parameter_id = 0u32;
+            let mut flags = 0u32;
+            let mut step_count = 0i32;
+            let mut unit_id = 0i32;
 
             let result = ffi::rack_vst3_plugin_parameter_info(
                 self.inner.as_ptr(),
@@ -350,6 +414,10 @@ impl PluginInstance for Vst3Plugin {
                 &mut min,
                 &mut max,
                 &mut default_value,
+                &mut parameter_id,
+                &mut flags,
+                &mut step_count,
+                &mut unit_id,
                 unit.as_mut_ptr(),
                 unit.len(),
             );
@@ -374,6 +442,10 @@ impl PluginInstance for Vst3Plugin {
 
             Ok(ParameterInfo {
                 index,
+                id: parameter_id,
+                flags,
+                step_count,
+                unit_id,
                 name: name_str,
                 min,
                 max,
@@ -436,12 +508,30 @@ impl PluginInstance for Vst3Plugin {
         }
         for event in events {
             let (status, data1, data2, channel) = match &event.kind {
-                MidiEventKind::NoteOn { note, velocity, channel } => (0x90, *note, *velocity, *channel),
-                MidiEventKind::NoteOff { note, velocity, channel } => (0x80, *note, *velocity, *channel),
-                MidiEventKind::PolyphonicAftertouch { note, pressure, channel } => (0xA0, *note, *pressure, *channel),
-                MidiEventKind::ControlChange { controller, value, channel } => (0xB0, *controller, *value, *channel),
+                MidiEventKind::NoteOn {
+                    note,
+                    velocity,
+                    channel,
+                } => (0x90, *note, *velocity, *channel),
+                MidiEventKind::NoteOff {
+                    note,
+                    velocity,
+                    channel,
+                } => (0x80, *note, *velocity, *channel),
+                MidiEventKind::PolyphonicAftertouch {
+                    note,
+                    pressure,
+                    channel,
+                } => (0xA0, *note, *pressure, *channel),
+                MidiEventKind::ControlChange {
+                    controller,
+                    value,
+                    channel,
+                } => (0xB0, *controller, *value, *channel),
                 MidiEventKind::ProgramChange { program, channel } => (0xC0, *program, 0, *channel),
-                MidiEventKind::ChannelAftertouch { pressure, channel } => (0xD0, *pressure, 0, *channel),
+                MidiEventKind::ChannelAftertouch { pressure, channel } => {
+                    (0xD0, *pressure, 0, *channel)
+                }
                 MidiEventKind::PitchBend { value, channel } => {
                     // Pitch bend is 14-bit (0-16383), centered at 8192
                     let lsb = (value & 0x7F) as u8;
@@ -450,8 +540,12 @@ impl PluginInstance for Vst3Plugin {
                 }
                 // System messages don't have a channel - skip them for now
                 // VST3 doesn't have a standard way to send system real-time messages
-                MidiEventKind::TimingClock | MidiEventKind::Start | MidiEventKind::Continue |
-                MidiEventKind::Stop | MidiEventKind::ActiveSensing | MidiEventKind::SystemReset => {
+                MidiEventKind::TimingClock
+                | MidiEventKind::Start
+                | MidiEventKind::Continue
+                | MidiEventKind::Stop
+                | MidiEventKind::ActiveSensing
+                | MidiEventKind::SystemReset => {
                     continue; // Skip system messages
                 }
             };
@@ -550,25 +644,33 @@ impl PluginInstance for Vst3Plugin {
                 return Err(Error::Other("Failed to get plugin state size".to_string()));
             }
 
-            // Allocate buffer
+            // Some plug-ins change their controller state between the size query
+            // and serialization. The C ABI reports the required size so retry
+            // with the larger buffer instead of discarding an otherwise valid state.
             let mut data = vec![0u8; size as usize];
-            let mut actual_size = data.len();
-
-            // Get state data
-            let result = ffi::rack_vst3_plugin_get_state(
-                self.inner.as_ptr(),
-                data.as_mut_ptr(),
-                &mut actual_size,
-            );
-
-            if result != ffi::RACK_VST3_OK {
+            for _ in 0..3 {
+                let mut actual_size = data.len();
+                let result = ffi::rack_vst3_plugin_get_state(
+                    self.inner.as_ptr(),
+                    data.as_mut_ptr(),
+                    &mut actual_size,
+                );
+                if result == ffi::RACK_VST3_OK {
+                    data.resize(actual_size, 0);
+                    return Ok(data);
+                }
+                if result == ffi::RACK_VST3_ERROR_INVALID_PARAM
+                    && actual_size > data.len()
+                    && actual_size <= 256 * 1024 * 1024
+                {
+                    data.resize(actual_size, 0);
+                    continue;
+                }
                 return Err(map_error(result));
             }
-
-            // Resize to actual size
-            data.resize(actual_size, 0);
-
-            Ok(data)
+            Err(Error::Other(
+                "VST3 state kept changing size during serialization".to_string(),
+            ))
         }
     }
 
@@ -582,11 +684,8 @@ impl PluginInstance for Vst3Plugin {
         }
 
         unsafe {
-            let result = ffi::rack_vst3_plugin_set_state(
-                self.inner.as_ptr(),
-                data.as_ptr(),
-                data.len(),
-            );
+            let result =
+                ffi::rack_vst3_plugin_set_state(self.inner.as_ptr(), data.as_ptr(), data.len());
 
             if result != ffi::RACK_VST3_OK {
                 return Err(map_error(result));
@@ -618,7 +717,9 @@ mod tests {
         let plugins = scanner.scan()?;
 
         if plugins.is_empty() {
-            return Err(Error::Other("No VST3 plugins found for testing".to_string()));
+            return Err(Error::Other(
+                "No VST3 plugins found for testing".to_string(),
+            ));
         }
 
         Ok((scanner, plugins[0].clone()))

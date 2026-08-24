@@ -2,7 +2,8 @@ use super::{
     activity::{record_activity, MidiActivityTracker},
     midi_io::{open_output, reset_midi_output},
     pipeline::{
-        handle_midi_frame, record_fanout_drop, update_pipeline_queue_depth, ConfigSnapshot,
+        handle_midi_frame, record_fanout_drop, take_critical_midi_reset_request,
+        update_pipeline_queue_depth, ConfigSnapshot,
     },
 };
 use crate::{
@@ -91,7 +92,7 @@ fn processing_loop(
     let midi_worker = spawn_midi_thru_worker(
         shared_config.clone(),
         config_rev.clone(),
-        panic_revision,
+        Arc::clone(&panic_revision),
         midi_thru_rx,
         stop.clone(),
         midi_out,
@@ -119,6 +120,10 @@ fn processing_loop(
     let mut unused_midi_out = None;
 
     while !stop.load(Ordering::Relaxed) {
+        if take_critical_midi_reset_request() {
+            audio.request_emergency_midi_reset();
+            panic_revision.fetch_add(1, Ordering::AcqRel);
+        }
         let rev_now = config_rev.load(Ordering::Relaxed);
         if rev_now != cached_rev {
             let cfg = shared_config.lock().clone();
@@ -223,6 +228,8 @@ fn spawn_midi_thru_worker(
         let mut cached_rev = config_rev.load(Ordering::Relaxed);
         let mut cached_panic_revision = panic_revision.load(Ordering::Acquire);
         let mut midi_out_name = initial.midi.output_device;
+        let mut next_output_reconnect = std::time::Instant::now();
+        let mut output_reconnect_backoff = Duration::from_millis(500);
         let mut sustain = [None; 16];
         if let Some(out) = midi_out.as_mut() {
             reset_midi_output(out, &logger);
@@ -245,7 +252,29 @@ fn spawn_midi_thru_worker(
                     midi_out = connection;
                     *actual_midi_out.lock() = connected;
                     midi_out_name = config.midi.output_device;
+                    output_reconnect_backoff = Duration::from_millis(500);
+                    next_output_reconnect = std::time::Instant::now() + Duration::from_millis(500);
                 }
+            }
+            if midi_out.is_none()
+                && snapshot.midi_thru
+                && midi_out_name.as_deref().is_some_and(|name| {
+                    name != crate::config::VST_INTERNAL_OUTPUT
+                        && name != crate::config::VST_INTERNAL_OUTPUT_LEGACY
+                })
+                && std::time::Instant::now() >= next_output_reconnect
+            {
+                let config = shared_config.lock().clone();
+                let (connection, connected) = open_output(&config, &logger);
+                midi_out = connection;
+                *actual_midi_out.lock() = connected;
+                if midi_out.is_some() {
+                    output_reconnect_backoff = Duration::from_millis(500);
+                } else {
+                    output_reconnect_backoff =
+                        (output_reconnect_backoff * 2).min(Duration::from_secs(10));
+                }
+                next_output_reconnect = std::time::Instant::now() + output_reconnect_backoff;
             }
             match rx.recv_timeout(Duration::from_millis(5)) {
                 Ok(frame) => {
@@ -263,7 +292,12 @@ fn spawn_midi_thru_worker(
                         false,
                         deliver_external,
                         false,
-                    )
+                    );
+                    if midi_out.is_none() {
+                        *actual_midi_out.lock() = None;
+                        next_output_reconnect =
+                            std::time::Instant::now() + output_reconnect_backoff;
+                    }
                 }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break,

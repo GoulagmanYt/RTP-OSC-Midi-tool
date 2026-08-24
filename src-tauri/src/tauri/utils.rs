@@ -76,7 +76,10 @@ pub fn is_instrument_entry(entry: &VstPluginEntry) -> bool {
 pub fn retain_instrument_entries(entries: Vec<VstPluginEntry>) -> Vec<VstPluginEntry> {
     entries
         .into_iter()
-        .filter(is_instrument_entry)
+        .map(|mut entry| {
+            entry.refresh_derived_fields();
+            entry
+        })
         .collect::<Vec<_>>()
 }
 
@@ -150,10 +153,12 @@ pub fn audio_settings_from_config(config: &Config) -> crate::audio::AudioSetting
         enabled: config.audio.enabled,
         backend: config.audio.backend.clone(),
         device: config.audio.device.clone(),
+        device_id: config.audio.device_id.clone(),
         sample_rate: config.audio.sample_rate,
         buffer_size: config.audio.buffer_size,
         gain_db: config.audio.gain_db,
         limiter_enabled: config.audio.limiter_enabled,
+        vst_plugin_id: config.audio.vst_plugin_id.clone(),
         vst_path: config.audio.vst_path.clone(),
     }
 }

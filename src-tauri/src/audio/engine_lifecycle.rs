@@ -15,7 +15,8 @@ use cpal::{
 use windows::Win32::UI::WindowsAndMessaging::DestroyWindow;
 
 use crate::logger::{background_log, FrontendLogger};
-use crate::plugin_probe::ensure_supported_plugin_in_app;
+use crate::plugin_probe::ensure_plugin_reference_in_app;
+use crate::types::AudioDeviceEntry;
 
 use super::{
     callback_midi::reset_all_notes,
@@ -36,6 +37,7 @@ struct RetainedAudioDevice {
     device: cpal::Device,
     backend: String,
     name: String,
+    id: Option<String>,
 }
 
 // CPAL intentionally makes platform devices !Send for the most restrictive
@@ -47,13 +49,18 @@ unsafe impl Send for MainThreadAudioDevice {}
 
 fn acquire_asio_device_on_main_thread(
     backend: Option<String>,
-    preferred: Option<String>,
+    preferred_id: Option<String>,
+    preferred_name: Option<String>,
     logger: &FrontendLogger,
 ) -> Result<Option<cpal::Device>, AudioError> {
     let acquire = move || {
         let host = select_host(backend.as_deref())
             .ok_or_else(|| AudioError::Message("ASIO host not available".into()))?;
-        Ok(select_device(&host, preferred.as_deref()).or_else(|| host.default_output_device()))
+        Ok(select_device(
+            &host,
+            preferred_id.as_deref(),
+            preferred_name.as_deref(),
+        ))
     };
 
     if super::thread_affinity::is_main_ui_thread() {
@@ -81,26 +88,26 @@ fn acquire_asio_device_on_main_thread(
 fn restore_vst_state_thread_affine(
     plugin: &Arc<parking_lot::Mutex<super::runtime_state::PluginBackend>>,
     parameter_cache: &Arc<parking_lot::Mutex<Vec<crate::types::VstParameter>>>,
-    vst_path: &std::path::Path,
+    vst_plugin: &crate::types::VstPluginEntry,
     logger: &FrontendLogger,
 ) -> Result<(), AudioError> {
     if super::thread_affinity::is_main_ui_thread() {
-        load_vst_state(plugin, vst_path, logger);
-        refresh_vst3_parameter_cache(plugin, parameter_cache);
+        load_vst_state(plugin, vst_plugin, logger);
+        refresh_vst_parameter_cache(plugin, parameter_cache);
         return Ok(());
     }
 
     let plugin = plugin.clone();
     let parameter_cache = parameter_cache.clone();
-    let path = vst_path.to_path_buf();
+    let vst_plugin = vst_plugin.clone();
     let logger_for_main = logger.clone();
     let (tx, rx) = mpsc::sync_channel(1);
     logger.debug("Scheduling VST state restoration on the main UI thread");
     logger
         .app_handle()
         .run_on_main_thread(move || {
-            load_vst_state(&plugin, &path, &logger_for_main);
-            refresh_vst3_parameter_cache(&plugin, &parameter_cache);
+            load_vst_state(&plugin, &vst_plugin, &logger_for_main);
+            refresh_vst_parameter_cache(&plugin, &parameter_cache);
             let _ = tx.send(());
         })
         .map_err(|_| {
@@ -110,24 +117,84 @@ fn restore_vst_state_thread_affine(
         .map_err(|_| AudioError::Message("Timed out restoring VST state on main thread".into()))
 }
 
-fn refresh_vst3_parameter_cache(
+fn refresh_vst_parameter_cache(
     plugin: &Arc<parking_lot::Mutex<super::runtime_state::PluginBackend>>,
     parameter_cache: &Arc<parking_lot::Mutex<Vec<crate::types::VstParameter>>>,
 ) {
     use rack::PluginInstance as _;
+    use vst::plugin::Plugin as _;
 
     let mut plugin_guard = plugin.lock();
-    if let super::runtime_state::PluginBackend::Vst3 { instance, .. } = &mut *plugin_guard {
-        let mut cache = parameter_cache.lock();
-        for parameter in cache.iter_mut() {
-            if let Ok(value) = instance.get_parameter(parameter.index) {
-                parameter.value = value;
+    let mut cache = parameter_cache.lock();
+    match &mut *plugin_guard {
+        super::runtime_state::PluginBackend::Vst2 { instance, .. } => {
+            let parameters = instance.get_parameter_object();
+            for parameter in cache.iter_mut() {
+                parameter.value = parameters
+                    .get_parameter(parameter.index as i32)
+                    .clamp(0.0, 1.0);
             }
         }
+        super::runtime_state::PluginBackend::Vst3 { instance, .. } => {
+            for parameter in cache.iter_mut() {
+                if let Ok(value) = instance.get_parameter(parameter.index) {
+                    parameter.value = value.clamp(0.0, 1.0);
+                }
+            }
+        }
+        #[cfg(all(target_os = "windows", target_pointer_width = "64"))]
+        super::runtime_state::PluginBackend::Remote { .. } => {}
     }
 }
 
 impl AudioEngine {
+    pub fn checkpoint_vst_state(&self, app_handle: tauri::AppHandle) -> Result<(), AudioError> {
+        #[cfg(target_os = "windows")]
+        if self.is_worker_enabled() {
+            return crate::tauri::utils::safe_block_on(self.worker.save_state())
+                .map_err(AudioError::Message);
+        }
+
+        let Some(_lifecycle_guard) = self.lifecycle_gate.try_lock() else {
+            return Err(AudioError::Message(
+                "An audio start/reload/stop operation is already in progress".into(),
+            ));
+        };
+        let (plugin, vst_plugin) = {
+            let mut runtime_guard = self.runtime.lock();
+            let runtime = runtime_guard
+                .as_mut()
+                .ok_or_else(|| AudioError::Message("Audio not started".into()))?;
+            runtime._stream.pause().map_err(|error| {
+                AudioError::Message(format!("Failed to pause audio for VST state save: {error}"))
+            })?;
+            (runtime.plugin.clone(), runtime.vst_plugin.clone())
+        };
+
+        let plugin_for_main = plugin.clone();
+        let (tx, rx) = mpsc::sync_channel(1);
+        let scheduled = app_handle.run_on_main_thread(move || {
+            save_vst_state_blocking(&plugin_for_main, &vst_plugin);
+            let _ = tx.send(());
+        });
+        let saved = match scheduled {
+            Ok(()) => rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .map_err(|_| AudioError::Message("Timed out saving VST state".into())),
+            Err(_) => Err(AudioError::Message(
+                "Failed to schedule VST state save on main thread".into(),
+            )),
+        };
+        if let Some(runtime) = self.runtime.lock().as_mut() {
+            if let Err(error) = runtime._stream.play() {
+                return Err(AudioError::Message(format!(
+                    "Failed to resume audio after VST state save: {error}"
+                )));
+            }
+        }
+        saved
+    }
+
     pub fn stop(&self, app_handle: Option<tauri::AppHandle>) {
         #[cfg(target_os = "windows")]
         if self.is_worker_enabled() {
@@ -169,12 +236,15 @@ impl AudioEngine {
                     device: runtime._device.clone(),
                     backend: runtime.backend.clone(),
                     name: runtime.device.clone(),
+                    id: runtime.device_id.clone(),
                 });
             }
             let plugin = runtime.plugin.clone();
             let vst_path = runtime.vst_path.clone();
+            let vst_plugin = runtime.vst_plugin.clone();
             let editor_window_arc = runtime.editor_window.clone();
-            let quarantine_destructor = requires_vst3_destructor_quarantine(&vst_path);
+            let quarantine_destructor =
+                requires_vst3_destructor_quarantine(&vst_path, runtime.vst_class_uid.as_deref());
 
             if let Some(handle) = app_handle {
                 let (tx, rx) = mpsc::channel();
@@ -231,7 +301,21 @@ impl AudioEngine {
             }
             reset_all_notes(plugin.clone());
             drop(runtime);
-            save_vst_state_blocking(&plugin, &vst_path);
+            if let Some(handle) = app_handle_for_drop.as_ref() {
+                let plugin_for_save = plugin.clone();
+                let vst_plugin_for_save = vst_plugin.clone();
+                let (tx, rx) = mpsc::sync_channel(1);
+                let scheduled = handle.run_on_main_thread(move || {
+                    save_vst_state_blocking(&plugin_for_save, &vst_plugin_for_save);
+                    let _ = tx.send(());
+                });
+                if scheduled.is_err() || rx.recv_timeout(std::time::Duration::from_secs(5)).is_err()
+                {
+                    background_log("warn", "Timed out saving VST state on the main thread");
+                }
+            } else {
+                save_vst_state_blocking(&plugin, &vst_plugin);
+            }
             if quarantine_destructor {
                 background_log(
                     "warn",
@@ -283,10 +367,16 @@ impl AudioEngine {
             .collect()
     }
 
-    pub fn list_devices(&self, backend: Option<String>) -> Vec<String> {
+    pub fn list_devices(&self, backend: Option<String>) -> Vec<AudioDeviceEntry> {
         let host = select_host(backend.as_deref());
         host.and_then(|h| h.output_devices().ok())
-            .map(|iter| iter.filter_map(|d| d.name().ok()).collect::<Vec<String>>())
+            .map(|iter| {
+                iter.map(|device| AudioDeviceEntry {
+                    id: device.id().ok().map(|id| id.to_string()),
+                    name: device.to_string(),
+                })
+                .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -387,14 +477,15 @@ impl AudioEngine {
                 return Err(error);
             }
         };
-        let vst_probe = match ensure_supported_plugin_in_app(&vst_path) {
-            Ok(probe) => probe,
-            Err(error) => {
-                self.lifecycle_state
-                    .store(AudioLifecycleState::Faulted as u8, Ordering::Release);
-                return Err(AudioError::Message(error));
-            }
-        };
+        let vst_probe =
+            match ensure_plugin_reference_in_app(&vst_path, settings.vst_plugin_id.as_deref()) {
+                Ok(probe) => probe,
+                Err(error) => {
+                    self.lifecycle_state
+                        .store(AudioLifecycleState::Faulted as u8, Ordering::Release);
+                    return Err(AudioError::Message(error));
+                }
+            };
         settings.vst_path = Some(vst_path.to_string_lossy().to_string());
         logger.info(format!(
             "Launching isolated VST worker for '{}' ({}, {})",
@@ -434,10 +525,12 @@ impl AudioEngine {
             return Ok(());
         }
 
-        apply_audio_process_tuning(&logger);
+        let process_tuning = apply_audio_process_tuning(&logger);
 
         let vst_path = super::plugin_host::resolve_vst_path(&settings, vst_fallback, &logger)?;
-        let vst_probe = ensure_supported_plugin_in_app(&vst_path).map_err(AudioError::Message)?;
+        let vst_probe =
+            ensure_plugin_reference_in_app(&vst_path, settings.vst_plugin_id.as_deref())
+                .map_err(AudioError::Message)?;
         logger.info(format!(
             "Selected plugin '{}' ({}, {}, editor={})",
             vst_probe.name, vst_probe.format, vst_probe.architecture, vst_probe.has_editor
@@ -447,6 +540,7 @@ impl AudioEngine {
         let mut stream_opt = None;
         let mut selected_backend: Option<String> = None;
         let mut selected_device: Option<String> = None;
+        let mut selected_device_id: Option<String> = None;
         let mut selected_device_handle: Option<cpal::Device> = None;
         let controls = Arc::new(AudioControls {
             gain_bits: AtomicU32::new(db_to_linear(settings.gain_db).to_bits()),
@@ -510,10 +604,16 @@ impl AudioEngine {
             let backend_matches = retained.backend.eq_ignore_ascii_case(&preferred_backend)
                 || (preferred_backend == "auto" && retained.backend.eq_ignore_ascii_case("asio"));
             let device_matches = settings
-                .device
+                .device_id
                 .as_deref()
-                .map(|requested| requested == retained.name)
-                .unwrap_or(true);
+                .map(|requested| retained.id.as_deref() == Some(requested))
+                .unwrap_or_else(|| {
+                    settings
+                        .device
+                        .as_deref()
+                        .map(|requested| requested == retained.name)
+                        .unwrap_or(true)
+                });
             backend_matches && device_matches
         });
 
@@ -546,6 +646,7 @@ impl AudioEngine {
             } else if backend_name.contains("asio") {
                 match acquire_asio_device_on_main_thread(
                     backend.clone(),
+                    settings.device_id.clone(),
                     device_pref.clone(),
                     &logger,
                 ) {
@@ -577,8 +678,7 @@ impl AudioEngine {
                         continue;
                     }
                 };
-                select_device(&host, device_pref.as_deref())
-                    .or_else(|| host.default_output_device())
+                select_device(&host, settings.device_id.as_deref(), device_pref.as_deref())
             };
             let Some(device) = device else {
                 logger.warn(format!(
@@ -598,7 +698,8 @@ impl AudioEngine {
                 continue;
             };
 
-            let dev_name = device.name().unwrap_or_else(|_| "unknown".into());
+            let dev_name = device.to_string();
+            let dev_id = device.id().ok().map(|id| id.to_string());
 
             let has_stereo = device
                 .supported_output_configs()
@@ -656,6 +757,7 @@ impl AudioEngine {
                     ));
                     selected_backend = Some(backend_name.to_string());
                     selected_device = Some(dev_name);
+                    selected_device_id = dev_id;
                     selected_device_handle = Some(device.clone());
                     if !vst_midi_compatible {
                         logger.warn(
@@ -712,6 +814,7 @@ impl AudioEngine {
 
         let active_backend = selected_backend.unwrap_or_else(|| "unknown".to_string());
         let active_device = selected_device.unwrap_or_else(|| "unknown".to_string());
+        let active_device_id = selected_device_id;
         let active_device_handle = selected_device_handle.ok_or_else(|| {
             AudioError::Message("Selected audio device handle was lost during startup".into())
         })?;
@@ -726,7 +829,14 @@ impl AudioEngine {
                 active_device, error
             ))
         })?;
-        restore_vst_state_thread_affine(&plugin, &parameter_cache, &vst_path, &logger)?;
+        restore_vst_state_thread_affine(&plugin, &parameter_cache, &vst_probe, &logger)?;
+        #[cfg(all(target_os = "windows", target_pointer_width = "64"))]
+        let is_x86_bridge = matches!(
+            &*plugin.lock(),
+            super::runtime_state::PluginBackend::Remote { .. }
+        );
+        #[cfg(not(all(target_os = "windows", target_pointer_width = "64")))]
+        let is_x86_bridge = false;
         telemetry.audio_lock_miss_count.store(0, Ordering::Relaxed);
         stream.play().map_err(|error| {
             AudioError::Message(format!(
@@ -741,8 +851,10 @@ impl AudioEngine {
 
         let runtime = AudioRuntime {
             _stream: stream,
+            _process_tuning: process_tuning,
             _device: active_device_handle,
             plugin: plugin.clone(),
+            is_x86_bridge,
             editor_window: Arc::new(parking_lot::Mutex::new(None)),
             controls,
             telemetry,
@@ -755,7 +867,10 @@ impl AudioEngine {
             vst_midi_compatible,
             backend: active_backend,
             device: active_device,
+            device_id: active_device_id,
             vst_path: vst_path.clone(),
+            vst_class_uid: vst_probe.class_uid.clone(),
+            vst_plugin: vst_probe.clone(),
         };
 
         *self.last_vst.lock() = Some(vst_path);

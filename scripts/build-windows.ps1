@@ -8,11 +8,18 @@ $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $cargoTargetDirectory = Join-Path $repositoryRoot '.cargo-target'
 $artifactDirectory = Join-Path $repositoryRoot 'artifacts'
 $buildId = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
-$temporaryLog = Join-Path ([System.IO.Path]::GetTempPath()) "oscmidi-build-$buildId-$([guid]::NewGuid().ToString('N')).log"
+$persistBuildLog = -not ($NoLog -or $env:OSCMIDI_BUILD_NO_LOG -eq '1')
+$logDirectory = Join-Path $artifactDirectory 'logs'
+$temporaryLog = if ($persistBuildLog) {
+    New-Item -ItemType Directory -Force -Path $logDirectory | Out-Null
+    Join-Path $logDirectory "build-$buildId-RUNNING.log"
+}
+else {
+    Join-Path ([System.IO.Path]::GetTempPath()) "oscmidi-build-$buildId-$([guid]::NewGuid().ToString('N')).log"
+}
 $totalStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 $buildSucceeded = $false
 $exitCode = 1
-$persistBuildLog = -not ($NoLog -or $env:OSCMIDI_BUILD_NO_LOG -eq '1')
 
 function Remove-AnsiSequences {
     param([AllowNull()][string]$Text)
@@ -285,6 +292,37 @@ function Assert-WindowsGuiExecutable {
     }
 }
 
+function Get-PeMachine {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $resolvedPath = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).Path
+    $stream = [System.IO.File]::OpenRead($resolvedPath)
+    $reader = [System.IO.BinaryReader]::new($stream)
+    try {
+        if ($reader.ReadUInt16() -ne 0x5A4D) { throw "Not a Windows PE executable: $resolvedPath" }
+        $stream.Position = 0x3C
+        $peOffset = $reader.ReadUInt32()
+        $stream.Position = $peOffset
+        if ($reader.ReadUInt32() -ne 0x00004550) { throw "Invalid PE signature: $resolvedPath" }
+        return $reader.ReadUInt16()
+    }
+    finally {
+        $reader.Dispose()
+        $stream.Dispose()
+    }
+}
+
+function Assert-PeMachine {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][int]$Expected
+    )
+    $actual = Get-PeMachine $Path
+    if ($actual -ne $Expected) {
+        throw "Wrong PE architecture for $Path (expected 0x$($Expected.ToString('X4')), got 0x$($actual.ToString('X4')))."
+    }
+}
+
 function Get-Sha256Hash {
     param([Parameter(Mandatory)][string]$Path)
 
@@ -313,18 +351,15 @@ function Export-BuildArtifacts {
         throw "Expected exactly one MSI installer for v$version; found $($installers.Count)."
     }
 
-    $workerCandidates = @(
-        Get-ChildItem (Join-Path $cargoTargetDirectory 'release') -Filter 'vst-host-worker*.exe' -File -ErrorAction SilentlyContinue
-        Get-ChildItem (Join-Path $repositoryRoot 'src-tauri\binaries') -Filter 'vst-host-worker*.exe' -File -ErrorAction SilentlyContinue
-    )
-    $worker = $workerCandidates | Select-Object -First 1
-    if (-not $worker) {
-        throw 'The generated VST worker could not be found.'
-    }
+    $workerX64 = Get-Item (Join-Path $cargoTargetDirectory 'release\vst-host-worker-x64.exe') -ErrorAction Stop
+    $workerX86 = Get-Item (Join-Path $cargoTargetDirectory 'release\vst-host-worker-x86.exe') -ErrorAction Stop
 
     Assert-WindowsGuiExecutable $application.FullName
-    Assert-WindowsGuiExecutable $worker.FullName
-    Write-BuildLog 'Verified GUI subsystem for OSCMidi.exe and vst-host-worker.exe (no console allocation).' Green
+    Assert-WindowsGuiExecutable $workerX64.FullName
+    Assert-WindowsGuiExecutable $workerX86.FullName
+    Assert-PeMachine $workerX64.FullName 0x8664
+    Assert-PeMachine $workerX86.FullName 0x014C
+    Write-BuildLog 'Verified GUI subsystem and PE architecture for both VST workers.' Green
 
     $stagingDirectory = Join-Path ([System.IO.Path]::GetTempPath()) "oscmidi-artifacts-$([guid]::NewGuid().ToString('N'))"
     New-Item -ItemType Directory -Path $stagingDirectory | Out-Null
@@ -336,7 +371,8 @@ function Export-BuildArtifacts {
         $portableDirectory = Join-Path $stagingDirectory 'portable'
         New-Item -ItemType Directory -Path $portableDirectory | Out-Null
         Copy-Item -LiteralPath $application.FullName -Destination (Join-Path $portableDirectory 'OSCMidi.exe')
-        Copy-Item -LiteralPath $worker.FullName -Destination (Join-Path $portableDirectory 'vst-host-worker.exe')
+        Copy-Item -LiteralPath $workerX64.FullName -Destination (Join-Path $portableDirectory 'vst-host-worker-x64.exe')
+        Copy-Item -LiteralPath $workerX86.FullName -Destination (Join-Path $portableDirectory 'vst-host-worker-x86.exe')
         Compress-Archive `
             -Path (Join-Path $portableDirectory '*') `
             -DestinationPath (Join-Path $stagingDirectory "OSCMidi_${version}_windows_x64_portable.zip")
@@ -379,10 +415,21 @@ function Export-BuildArtifacts {
 function Save-BuildLog {
     param([Parameter(Mandatory)][string]$Status)
 
-    $logDirectory = Join-Path $artifactDirectory 'logs'
     New-Item -ItemType Directory -Force -Path $logDirectory | Out-Null
     $finalLog = Join-Path $logDirectory "build-$buildId-$Status.log"
-    Copy-Item -LiteralPath $temporaryLog -Destination $finalLog -Force
+    $sourceLog = (Resolve-Path -LiteralPath $temporaryLog).Path
+    $destinationLog = [System.IO.Path]::GetFullPath($finalLog)
+    if ($sourceLog.Equals($destinationLog, [System.StringComparison]::OrdinalIgnoreCase)) {
+        $finalLog = $sourceLog
+    }
+    elseif ((Split-Path -Parent $sourceLog).Equals($logDirectory, [System.StringComparison]::OrdinalIgnoreCase)) {
+        Move-Item -LiteralPath $sourceLog -Destination $destinationLog -Force
+        $finalLog = $destinationLog
+    }
+    else {
+        Copy-Item -LiteralPath $sourceLog -Destination $destinationLog -Force
+        $finalLog = $destinationLog
+    }
     Get-ChildItem -LiteralPath $logDirectory -Filter 'build-*.log' -File |
         Sort-Object LastWriteTime -Descending |
         Select-Object -Skip 10 |
@@ -494,7 +541,6 @@ finally {
             'src-tauri\target'
             'tools\diagnostics\target'
             'node_modules'
-            'vendor\rack\rack-sys\external'
             'src-tauri\binaries'
             'dist'
         ) | ForEach-Object { Remove-GeneratedDirectory $_ }

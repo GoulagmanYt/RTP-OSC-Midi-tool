@@ -29,8 +29,11 @@ fn production_worker_supports_isolated_probe_mode() {
         .lines()
         .find_map(|line| line.strip_prefix("OSCMIDI_PROBE_JSON:"))
         .expect("worker should emit a probe result");
-    let entry: VstPluginEntry =
+    let entries: Vec<VstPluginEntry> =
         serde_json::from_str(json).expect("worker should emit a valid probe result");
+    let entry = entries
+        .first()
+        .expect("probe should return one failure entry");
     assert_eq!(entry.path, probe_path.to_string_lossy());
     assert!(!entry.supported);
 }
@@ -40,10 +43,12 @@ fn fixture_settings() -> AudioSettings {
         enabled: true,
         backend: Some("asio".into()),
         device: Some("fixture".into()),
+        device_id: None,
         sample_rate: 48_000,
         buffer_size: 512,
         gain_db: 0.0,
         limiter_enabled: false,
+        vst_plugin_id: None,
         vst_path: Some("fixture.vst3".into()),
     }
 }

@@ -1,7 +1,7 @@
 mod ffi;
-mod util;
-mod scanner;
 mod instance;
+mod scanner;
+mod util;
 
-pub use scanner::Vst3Scanner;
 pub use instance::{Vst3Plugin, Vst3PluginGui};
+pub use scanner::Vst3Scanner;

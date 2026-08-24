@@ -5,13 +5,14 @@ import { Input } from "../../components/ui/Input";
 import { Label } from "../../components/ui/Label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../components/ui/Select";
 import { Switch } from "../../components/ui/Switch";
-import type { AppConfig, RuntimeStatus, VstPluginEntry } from "../../api-types";
+import type { AppConfig, AudioDeviceEntry, RuntimeStatus, VstPluginEntry } from "../../api-types";
 import type { TranslateFn } from "./shared";
 import { Power, RefreshCcw, X } from "lucide-react";
+import { useMemo, useState } from "react";
 
 type Props = {
   audioBackends: string[];
-  audioDevices: string[];
+  audioDevices: AudioDeviceEntry[];
   audioReloading: boolean;
   bridgeRunning: boolean;
   bufferMismatch: boolean | null;
@@ -19,7 +20,6 @@ type Props = {
   canOpenVstParameterFallback: boolean;
   config: AppConfig | null;
   currentLatencyMs: number | null;
-  isVst3: boolean;
   midiMessagesPerSec: number | null;
   selectedPluginKindLabel: string;
   selectedPluginStatusLabel: string;
@@ -44,7 +44,9 @@ type Props = {
   onRefreshVstPluginsList: () => Promise<void>;
   onReloadVst: () => Promise<void>;
   onSaveConfig: () => Promise<void>;
-  onSelectVst: (path: string) => Promise<void>;
+  onSelectVst: (pluginId: string) => Promise<void>;
+  onRetestVst: (pluginId: string) => Promise<void>;
+  onOpenVstFolder: (pluginId: string) => Promise<void>;
   onToggleAudio: (checked: boolean) => Promise<void>;
   onUpdateAudioConfig: (patch: Partial<AppConfig["audio"]>) => Promise<void>;
 };
@@ -59,7 +61,6 @@ export function AudioConfigCard({
   canOpenVstParameterFallback,
   config,
   currentLatencyMs,
-  isVst3,
   midiMessagesPerSec,
   selectedPluginKindLabel,
   selectedPluginStatusLabel,
@@ -85,9 +86,43 @@ export function AudioConfigCard({
   onReloadVst,
   onSaveConfig,
   onSelectVst,
+  onRetestVst,
+  onOpenVstFolder,
   onToggleAudio,
   onUpdateAudioConfig,
 }: Props) {
+  const [vstSearch, setVstSearch] = useState("");
+  const [vstFormat, setVstFormat] = useState("all");
+  const [vstArchitecture, setVstArchitecture] = useState("all");
+  const [vstStatus, setVstStatus] = useState("all");
+  const [vstVendor, setVstVendor] = useState("all");
+  const selectedAudioDeviceValue =
+    audioDevices.find((device) => device.id && device.id === config?.audio.deviceId)?.id ||
+    audioDevices.find((device) => device.name === config?.audio.device)?.id ||
+    config?.audio.device ||
+    "";
+  const showVstTechnicalDetails = config?.ui.developerMode === true;
+  const vstVendors = useMemo(
+    () =>
+      Array.from(
+        new Set(vstPlugins.map((plugin) => plugin.vendor).filter((vendor): vendor is string => Boolean(vendor)))
+      ).sort(),
+    [vstPlugins]
+  );
+  const filteredVstPlugins = useMemo(() => {
+    const query = vstSearch.trim().toLocaleLowerCase();
+    return vstPlugins.filter((plugin) => {
+      const haystack = `${plugin.name} ${plugin.vendor || ""} ${plugin.path}`.toLocaleLowerCase();
+      return (
+        (!query || haystack.includes(query)) &&
+        (vstFormat === "all" || plugin.format === vstFormat) &&
+        (vstArchitecture === "all" || plugin.architecture === vstArchitecture) &&
+        (vstStatus === "all" || plugin.status === vstStatus) &&
+        (!showVstTechnicalDetails || vstVendor === "all" || plugin.vendor === vstVendor)
+      );
+    });
+  }, [showVstTechnicalDetails, vstArchitecture, vstFormat, vstPlugins, vstSearch, vstStatus, vstVendor]);
+
   return (
     <Card>
       <CardHeader>
@@ -123,17 +158,22 @@ export function AudioConfigCard({
           <div className="space-y-2">
             <Label>{t("audio.deviceLabel")}</Label>
             <Select
-              value={config?.audio.device || ""}
-              onValueChange={(value) => onUpdateAudioConfig({ device: value })}
+              value={selectedAudioDeviceValue}
+              onValueChange={(value) => {
+                const device = audioDevices.find((candidate) => (candidate.id || candidate.name) === value);
+                if (device) {
+                  void onUpdateAudioConfig({ device: device.name, deviceId: device.id || null });
+                }
+              }}
               disabled={!config?.audio.backend || audioReloading}
             >
               <SelectTrigger>
                 <SelectValue placeholder={t("audio.devicePlaceholder")} />
               </SelectTrigger>
               <SelectContent>
-                {audioDevices.map((device) => (
-                  <SelectItem key={device} value={device}>
-                    {device}
+                {audioDevices.map((device, index) => (
+                  <SelectItem key={`${device.id || device.name}-${index}`} value={device.id || device.name}>
+                    {device.name}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -347,22 +387,66 @@ export function AudioConfigCard({
 
         <div className="space-y-2">
           <Label>{t("audio.vstInstruments", { path: "Windows VST folders" })}</Label>
+          <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-5">
+            <Input
+              value={vstSearch}
+              onChange={(event) => setVstSearch(event.target.value)}
+              placeholder={t("audio.vstSearch")}
+              aria-label={t("audio.vstSearch")}
+            />
+            <Select value={vstFormat} onValueChange={setVstFormat}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">{t("audio.vstAllFormats")}</SelectItem>
+                <SelectItem value="VST2">VST2</SelectItem>
+                <SelectItem value="VST3">VST3</SelectItem>
+              </SelectContent>
+            </Select>
+            <Select value={vstArchitecture} onValueChange={setVstArchitecture}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">{t("audio.vstAllArchitectures")}</SelectItem>
+                <SelectItem value="x64">x64</SelectItem>
+                <SelectItem value="x86">x86</SelectItem>
+              </SelectContent>
+            </Select>
+            <Select value={vstStatus} onValueChange={setVstStatus}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">{t("audio.vstAllStatuses")}</SelectItem>
+                <SelectItem value="compatible">{t("audio.vstStatusCompatible")}</SelectItem>
+                <SelectItem value="unverified">{t("audio.vstStatusUnverified")}</SelectItem>
+                <SelectItem value="quarantined">{t("audio.vstStatusQuarantined")}</SelectItem>
+                <SelectItem value="outOfScope">{t("audio.vstStatusOutOfScope")}</SelectItem>
+                <SelectItem value="failed">{t("audio.vstStatusFailed")}</SelectItem>
+              </SelectContent>
+            </Select>
+            {showVstTechnicalDetails ? (
+              <Select value={vstVendor} onValueChange={setVstVendor}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">{t("audio.vstAllVendors")}</SelectItem>
+                  {vstVendors.map((vendor) => (
+                    <SelectItem key={vendor} value={vendor}>{vendor}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            ) : null}
+          </div>
           <div className="flex flex-col gap-2 md:flex-row md:flex-wrap md:items-center">
-            <Select value={config?.audio.vstPath || ""} onValueChange={onSelectVst} disabled={audioReloading}>
+            <Select value={config?.audio.vstPluginId || selectedVstPlugin?.id || ""} onValueChange={onSelectVst} disabled={audioReloading}>
               <SelectTrigger className="md:flex-1">
                 <SelectValue placeholder={t("audio.vstSelectPlaceholder")} />
               </SelectTrigger>
               <SelectContent>
-                {vstPlugins.length === 0 ? (
+                {filteredVstPlugins.length === 0 ? (
                   <SelectItem value="__empty" disabled>
                     {t("audio.vstNoCached")}
                   </SelectItem>
                 ) : null}
-                {vstPlugins.map((plugin) => (
-                  <SelectItem key={plugin.path} value={plugin.path} disabled={!plugin.supported}>
-                    {`${plugin.name} - ${plugin.format} - ${plugin.architecture} - ${
-                      plugin.supported ? t("audio.vstStatusCompatible") : plugin.unsupportedReason || t("audio.vstStatusUnsupported")
-                    }`}
+                {filteredVstPlugins.map((plugin) => (
+                  <SelectItem key={plugin.id} value={plugin.id} disabled={!plugin.supported}>
+                    {`${plugin.name} · ${plugin.format} · ${plugin.architecture} · ${plugin.status}`}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -376,6 +460,9 @@ export function AudioConfigCard({
               <div className="flex flex-wrap gap-2">
                 <Badge variant="secondary">{selectedVstPlugin.format}</Badge>
                 <Badge variant="outline">{selectedVstPlugin.architecture}</Badge>
+                <Badge variant="outline">
+                  {selectedVstPlugin.hostingMode === "bridgedX86" ? t("audio.vstModeBridged") : t("audio.vstModeDirect")}
+                </Badge>
                 <Badge variant={selectedVstPlugin.supported ? "success" : "warning"}>
                   {selectedVstPlugin.supported ? t("audio.vstStatusCompatible") : t("audio.vstStatusUnsupported")}
                 </Badge>
@@ -392,14 +479,52 @@ export function AudioConfigCard({
                 ) : null}
               </div>
               <p className="break-all text-xs text-muted-foreground">{selectedVstPlugin.path}</p>
-              {selectedVstPlugin.channelLayout ? (
-                <p className="text-xs text-muted-foreground">
-                  {t("audio.vstChannelLayout", { layout: selectedVstPlugin.channelLayout })}
+              {showVstTechnicalDetails && selectedVstPlugin.vendor ? (
+                <p className="text-xs text-muted-foreground">{selectedVstPlugin.vendor}</p>
+              ) : null}
+              {showVstTechnicalDetails && selectedVstPlugin.channelLayout ? (
+                  <p className="text-xs text-muted-foreground">
+                    {t("audio.vstChannelLayout", { layout: selectedVstPlugin.channelLayout })}
+                  </p>
+                ) : null}
+              {selectedVstPlugin.lastError || !selectedVstPlugin.supported ? (
+                <p className="text-xs text-amber-600">
+                  {selectedVstPlugin.failureStage ? `${selectedVstPlugin.failureStage}: ` : ""}
+                  {selectedVstPlugin.lastError || selectedPluginStatusLabel}
                 </p>
               ) : null}
-              {!selectedVstPlugin.supported ? <p className="text-xs text-amber-600">{selectedPluginStatusLabel}</p> : null}
+              {showVstTechnicalDetails && selectedVstPlugin.hostingMode === "bridgedX86" ? (
+                <div className="grid gap-1 text-xs text-muted-foreground md:grid-cols-2">
+                  <span>{t("audio.vstBridgeWorker")}: {status?.x86WorkerAlive ? "OK" : t("common.off")}</span>
+                  <span>{t("audio.vstBridgeLatency")}: {status?.bridgeLatencySamples ?? config?.audio.bufferSize ?? "--"} {t("units.samples")}</span>
+                  <span>{t("audio.vstPluginLatency")}: {status?.pluginLatencySamples ?? "--"} {t("units.samples")}</span>
+                  <span>{t("audio.vstBridgeUnderruns")}: {status?.x86BridgeUnderruns ?? 0} / {status?.x86BridgeOverruns ?? 0}</span>
+                </div>
+              ) : null}
+              <div className="flex flex-wrap gap-2">
+                <Button variant="outline" onClick={() => onRetestVst(selectedVstPlugin.id)} disabled={vstPluginsLoading}>
+                  {t("audio.vstRetest")}
+                </Button>
+                <Button variant="outline" onClick={() => onOpenVstFolder(selectedVstPlugin.id)}>
+                  {t("audio.vstOpenFolder")}
+                </Button>
+              </div>
             </div>
           ) : null}
+          <div className="space-y-2 rounded-md border border-border/60 p-3">
+            <Label htmlFor="vst-scan-paths">{t("audio.vstCustomPaths")}</Label>
+            <Input
+              id="vst-scan-paths"
+              value={(config?.audio.vstScanPaths || []).join(";")}
+              onChange={(event) =>
+                onUpdateAudioConfig({
+                  vstScanPaths: event.target.value.split(";").map((path) => path.trim()).filter(Boolean),
+                })
+              }
+              placeholder={t("audio.vstCustomPathsPlaceholder")}
+            />
+            <p className="text-xs text-muted-foreground">{t("audio.vstCustomPathsHint")}</p>
+          </div>
           <div className="flex flex-wrap gap-2">
             <Button variant="outline" onClick={onOpenVstUi} disabled={vstUiOpen || !canOpenSelectedVstUi}>
               {t("audio.openVstUi")}
@@ -410,7 +535,7 @@ export function AudioConfigCard({
                 {t("audio.hideUi")}
               </Button>
             ) : null}
-            {isVst3 ? (
+            {selectedVstPlugin?.supported ? (
               <Button variant="outline" onClick={onOpenVstParameters} disabled={!canOpenVstParameterFallback}>
                 {t("audio.openVstParameters")}
               </Button>
@@ -419,7 +544,7 @@ export function AudioConfigCard({
           <p className="text-xs text-muted-foreground">{t("audio.vstSettingsSaved")}</p>
           <p className="text-xs text-muted-foreground">{t("audio.vstMidiOnly")}</p>
           <p className="text-xs text-muted-foreground">{t("audio.vstFormats")}</p>
-          {isVst3 ? <p className="text-xs text-muted-foreground">{t("audio.vstParameterFallback")}</p> : null}
+          {selectedVstPlugin?.supported ? <p className="text-xs text-muted-foreground">{t("audio.vstParameterFallback")}</p> : null}
           {!bridgeRunning ? <p className="text-xs text-amber-600">{t("audio.startBridgeHint")}</p> : null}
           <div className="flex flex-wrap gap-2 pt-2">
             <Button variant="outline" onClick={onPingAudio} disabled={!bridgeRunning || !config?.audio.enabled}>

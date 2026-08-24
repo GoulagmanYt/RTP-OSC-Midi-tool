@@ -10,7 +10,7 @@ use crossbeam_channel::{Sender, TrySendError};
 use midir::MidiOutputConnection;
 use std::{
     collections::HashMap,
-    sync::atomic::{AtomicU32, AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
 };
 
 use super::activity::now_ms;
@@ -25,6 +25,15 @@ static PIPELINE_QUEUE_DEPTH: AtomicU64 = AtomicU64::new(0);
 static PIPELINE_QUEUE_MAX_DEPTH: AtomicU64 = AtomicU64::new(0);
 static PIPELINE_DROPPED_COUNT: AtomicU64 = AtomicU64::new(0);
 static MIDI_DEBUG_SAMPLE_LAST_MS: AtomicU64 = AtomicU64::new(0);
+static CRITICAL_MIDI_RESET_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+pub(super) fn take_critical_midi_reset_request() -> bool {
+    CRITICAL_MIDI_RESET_REQUESTED.swap(false, Ordering::AcqRel)
+}
+
+pub(crate) fn request_critical_midi_reset() {
+    CRITICAL_MIDI_RESET_REQUESTED.store(true, Ordering::Release);
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnqueueOutcome {
@@ -222,7 +231,10 @@ pub(super) fn handle_midi_frame(
 
     if deliver_midi_thru && config.midi_thru {
         if let Some(out) = midi_out.as_mut() {
-            let _ = out.send(frame.data.as_slice());
+            if let Err(error) = out.send(frame.data.as_slice()) {
+                logger.warn(format!("Sortie MIDI déconnectée: {error}"));
+                *midi_out = None;
+            }
         }
     }
 
@@ -467,16 +479,25 @@ pub fn try_enqueue_midi_frame(
                     Ok(()) => Ok(EnqueueOutcome::Enqueued),
                     Err(TrySendError::Full(_)) => {
                         PIPELINE_DROPPED_COUNT.fetch_add(1, Ordering::Relaxed);
+                        CRITICAL_MIDI_RESET_REQUESTED.store(true, Ordering::Release);
                         Err(EnqueueError::CriticalReleaseDropped)
                     }
-                    Err(TrySendError::Disconnected(_)) => Err(EnqueueError::Disconnected),
+                    Err(TrySendError::Disconnected(_)) => {
+                        CRITICAL_MIDI_RESET_REQUESTED.store(true, Ordering::Release);
+                        Err(EnqueueError::Disconnected)
+                    }
                 }
             } else {
                 PIPELINE_DROPPED_COUNT.fetch_add(1, Ordering::Relaxed);
                 Ok(EnqueueOutcome::DroppedNonCritical)
             }
         }
-        Err(TrySendError::Disconnected(_)) => Err(EnqueueError::Disconnected),
+        Err(TrySendError::Disconnected(frame)) => {
+            if is_critical_release_message(frame.data.as_slice()) {
+                CRITICAL_MIDI_RESET_REQUESTED.store(true, Ordering::Release);
+            }
+            Err(EnqueueError::Disconnected)
+        }
     }
 }
 
@@ -488,6 +509,7 @@ pub fn reset_pipeline_stats() {
     PIPELINE_QUEUE_DEPTH.store(0, Ordering::Relaxed);
     PIPELINE_QUEUE_MAX_DEPTH.store(0, Ordering::Relaxed);
     PIPELINE_DROPPED_COUNT.store(0, Ordering::Relaxed);
+    CRITICAL_MIDI_RESET_REQUESTED.store(false, Ordering::Relaxed);
 }
 
 #[cfg(test)]
@@ -557,5 +579,7 @@ mod tests {
             .expect_err("critical release must not look successfully queued");
 
         assert_eq!(error, EnqueueError::CriticalReleaseDropped);
+        assert!(take_critical_midi_reset_request());
+        assert!(!take_critical_midi_reset_request());
     }
 }

@@ -54,17 +54,23 @@ use windows::Win32::Foundation::HWND;
 
 use crate::types::VstParameter;
 
+pub(super) const MAX_PLUGIN_CHANNELS: usize = 256;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioSettings {
     pub enabled: bool,
     pub backend: Option<String>,
     pub device: Option<String>,
+    #[serde(default)]
+    pub device_id: Option<String>,
     pub sample_rate: u32,
     pub buffer_size: u32,
     pub gain_db: f32,
     #[serde(default)]
     pub limiter_enabled: bool,
+    #[serde(default)]
+    pub vst_plugin_id: Option<String>,
     pub vst_path: Option<String>,
 }
 
@@ -74,10 +80,12 @@ impl Default for AudioSettings {
             enabled: true,
             backend: Some("auto".to_string()),
             device: None,
+            device_id: None,
             sample_rate: 48_000,
             buffer_size: 256,
             gain_db: 0.0,
             limiter_enabled: false,
+            vst_plugin_id: None,
             vst_path: None,
         }
     }
@@ -92,12 +100,38 @@ pub enum AudioError {
 pub(super) enum PluginBackend {
     Vst2 {
         instance: PluginInstance,
+        time: Arc<Vst2TimeContext>,
     },
     Vst3 {
         instance: rack::vst3::Vst3Plugin,
         input_channels: usize,
         output_channels: usize,
     },
+    #[cfg(all(target_os = "windows", target_pointer_width = "64"))]
+    Remote {
+        instance: Box<super::remote_bridge::RemotePlugin>,
+    },
+}
+
+pub(super) struct Vst2TimeContext {
+    sample_position: AtomicU64,
+}
+
+impl Vst2TimeContext {
+    pub(super) fn new() -> Self {
+        Self {
+            sample_position: AtomicU64::new(0),
+        }
+    }
+
+    pub(super) fn sample_position(&self) -> u64 {
+        self.sample_position.load(Ordering::Acquire)
+    }
+
+    pub(super) fn advance(&self, frames: usize) {
+        self.sample_position
+            .fetch_add(frames as u64, Ordering::Release);
+    }
 }
 
 #[repr(align(64))]
@@ -109,6 +143,10 @@ pub(super) struct AudioControls {
 #[repr(align(64))]
 pub(super) struct AudioTelemetry {
     pub(super) xruns: AtomicU32,
+    pub(super) stream_fatal_error: AtomicU32,
+    pub(super) stream_recovery_requests: AtomicU32,
+    pub(super) stream_route_changes: AtomicU32,
+    pub(super) backend_latency_us: AtomicU64,
     pub(super) meter_left: AtomicU32,
     pub(super) meter_right: AtomicU32,
     pub(super) block_size_frames: AtomicU32,
@@ -134,6 +172,10 @@ impl AudioTelemetry {
     pub(super) fn new() -> Self {
         Self {
             xruns: AtomicU32::new(0),
+            stream_fatal_error: AtomicU32::new(0),
+            stream_recovery_requests: AtomicU32::new(0),
+            stream_route_changes: AtomicU32::new(0),
+            backend_latency_us: AtomicU64::new(0),
             meter_left: AtomicU32::new(0.0f32.to_bits()),
             meter_right: AtomicU32::new(0.0f32.to_bits()),
             block_size_frames: AtomicU32::new(0),
@@ -176,11 +218,16 @@ impl AudioTelemetry {
 
 pub(super) struct AudioRuntime {
     pub(super) _stream: Stream,
+    pub(super) _process_tuning: super::windows_tuning::AudioProcessTuning,
     // Keep the CPAL device (and therefore the ASIO driver) alive for the whole
     // runtime. Hot VST reloads can transfer this handle to the next runtime
     // instead of unloading/re-enumerating the exclusive ASIO driver.
     pub(super) _device: cpal::Device,
     pub(super) plugin: Arc<Mutex<PluginBackend>>,
+    // This is immutable for the lifetime of the runtime. Status/heartbeat
+    // readers can therefore identify a remote x86 plug-in without contending
+    // with the real-time callback for the plug-in mutex.
+    pub(super) is_x86_bridge: bool,
     pub(super) editor_window: Arc<Mutex<Option<EditorWindow>>>,
     pub(super) controls: Arc<AudioControls>,
     pub(super) telemetry: Arc<AudioTelemetry>,
@@ -193,7 +240,10 @@ pub(super) struct AudioRuntime {
     pub(super) vst_midi_compatible: bool,
     pub(super) backend: String,
     pub(super) device: String,
+    pub(super) device_id: Option<String>,
     pub(super) vst_path: PathBuf,
+    pub(super) vst_class_uid: Option<String>,
+    pub(super) vst_plugin: crate::types::VstPluginEntry,
 }
 
 pub(super) enum EditorWindow {
@@ -227,8 +277,12 @@ pub(super) const VST_EDITOR_IDLE_TIMER_MS: u32 = 50;
 pub(super) const PARAMETER_COMMAND_CAPACITY: usize = 4096;
 
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(target_pointer_width = "32", allow(dead_code))]
 pub(super) struct ParameterCommand {
     pub(super) index: usize,
+    pub(super) id: u32,
+    pub(super) flags: u32,
+    pub(super) step_count: i32,
     pub(super) value: f32,
 }
 

@@ -21,9 +21,13 @@ pub(super) fn build_initial_status(
         audio_running: audio.is_running(),
         audio_latency_ms: audio.current_latency_ms(),
         audio_buffer_period_ms: audio.audio_buffer_period_ms(),
+        audio_backend_latency_ms: audio.backend_latency_ms(),
         plugin_latency_samples: audio.plugin_latency_samples(),
+        bridge_latency_samples: audio.bridge_latency_samples(),
+        vst_hosting_mode: audio.vst_hosting_mode(),
         audio_backend: audio.current_backend(),
         audio_device: audio.current_device(),
+        audio_device_id: audio.current_device_id(),
         audio_sample_rate: audio.current_sample_rate(),
         audio_buffer_size: audio.current_buffer_size(),
         audio_requested_buffer_size: audio.requested_buffer_size(),
@@ -32,6 +36,8 @@ pub(super) fn build_initial_status(
         vst_loaded: audio.is_running(),
         vst_midi_compatible: audio.vst_midi_compatible(),
         audio_xruns: audio.xrun_count(),
+        audio_stream_recovery_requests: audio.stream_recovery_requests(),
+        audio_stream_route_changes: audio.stream_route_changes(),
         audio_midi_drops: audio.midi_drop_count(),
         audio_lock_misses: audio.audio_lock_miss_count(),
         audio_emergency_resets: audio.emergency_reset_count(),
@@ -53,6 +59,9 @@ pub(super) fn build_initial_status(
         audio_mmcss_enabled: audio.mmcss_enabled(),
         audio_power_throttling_disabled: audio.power_throttling_disabled(),
         audio_limiter_enabled: audio.limiter_enabled(),
+        x86_bridge_underruns: Some(audio.x86_bridge_metrics().0),
+        x86_bridge_overruns: Some(audio.x86_bridge_metrics().1),
+        x86_worker_alive: Some(audio.x86_bridge_metrics().2),
     }
 }
 

@@ -4,6 +4,18 @@ All notable changes to OSCMidi are documented here.
 
 ## Unreleased
 
+## 2.5.0 - 2026-08-24
+
+### Changed
+
+- Made successful `main` builds create a missing version tag automatically and publish Windows packages, with Authenticode enabled when the repository signing secrets are configured.
+- Made same-version maintenance builds replace the existing release assets while recording their exact commit in `BUILDINFO.json`.
+- Extended Windows CI to build and test the application, diagnostics, RTP-MIDI, Rack VST3 library and every VST2 crate target.
+
+### Fixed
+
+- Repaired the vendored VST2 example test and made its plug-in destruction test race-free and compatible with current Rust diagnostics.
+
 ## 2.1.0 - 2026-08-10
 
 ### Changed

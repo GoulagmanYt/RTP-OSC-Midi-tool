@@ -109,6 +109,17 @@ impl AudioEngine {
         let _ = self.send_midi_with_outcome(bytes);
     }
 
+    /// Requests a panic without blocking the bridge or an input callback.
+    pub fn request_emergency_midi_reset(&self) {
+        #[cfg(target_os = "windows")]
+        if self.is_worker_enabled() {
+            self.worker.request_emergency_reset();
+            return;
+        }
+        self.midi_emergency_reset_requested
+            .store(true, Ordering::Release);
+    }
+
     pub fn send_midi_with_age(&self, bytes: &[u8], age_us: u64) {
         let Some(packet) = MidiPacket::from_bytes_with_age(bytes, age_us) else {
             return;
@@ -121,6 +132,9 @@ impl AudioEngine {
         if self.is_worker_enabled() {
             return if self.worker.try_send_midi(bytes) {
                 MidiSendOutcome::Sent
+            } else if crate::midi::is_critical_release_message(bytes) {
+                self.worker.request_emergency_reset();
+                MidiSendOutcome::CriticalFallbackReset
             } else {
                 MidiSendOutcome::DroppedNonCritical
             };
@@ -267,13 +281,35 @@ pub(super) fn is_sforzando_vst3(vst_path: &Path) -> bool {
     path.ends_with("sforzando.vst3") || path.contains("\\sforzando.vst3")
 }
 
-pub(super) fn requires_vst3_destructor_quarantine(vst_path: &Path) -> bool {
+const UPRIGHT_PIANO_VST3_CLASS_UID: &str = "5653545F474B64757072696768742070";
+
+pub(crate) fn requires_vst3_destructor_quarantine(
+    vst_path: &Path,
+    class_uid: Option<&str>,
+) -> bool {
+    if !vst_path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("vst3"))
+    {
+        return false;
+    }
+
+    // Upright Piano completes initialization and audio processing, but the
+    // currently distributed Windows VST3 raises an access violation from its
+    // native destructor. Identify it by its VST3 class when available; retain
+    // the filename fallback for migrated caches created before class IDs were
+    // persisted.
+    if class_uid.is_some_and(|uid| uid.eq_ignore_ascii_case(UPRIGHT_PIANO_VST3_CLASS_UID)) {
+        return true;
+    }
+
     if is_sforzando_vst3(vst_path) {
         return true;
     }
     let path = vst_path.to_string_lossy().to_lowercase();
-    path.ends_with(".vst3")
-        && (path.contains("\\splice\\") || path.ends_with("splice instrument.vst3"))
+    path.contains("\\splice\\")
+        || path.ends_with("splice instrument.vst3")
+        || path.ends_with("upright piano.vst3")
 }
 
 pub(super) fn db_to_linear(db: f32) -> f32 {
@@ -610,18 +646,30 @@ mod tests {
 
     #[test]
     fn quarantines_known_blocking_vst3_destructors_only() {
-        assert!(requires_vst3_destructor_quarantine(Path::new(
-            r"C:\Program Files\Common Files\VST3\Splice\Splice INSTRUMENT.vst3"
-        )));
-        assert!(requires_vst3_destructor_quarantine(Path::new(
-            r"C:\VST3\sforzando.vst3"
-        )));
-        assert!(!requires_vst3_destructor_quarantine(Path::new(
-            r"C:\VST3\Other Instrument.vst3"
-        )));
-        assert!(!requires_vst3_destructor_quarantine(Path::new(
-            r"C:\VST2\Splice.dll"
-        )));
+        assert!(requires_vst3_destructor_quarantine(
+            Path::new(r"C:\Program Files\Common Files\VST3\Splice\Splice INSTRUMENT.vst3"),
+            None,
+        ));
+        assert!(requires_vst3_destructor_quarantine(
+            Path::new(r"C:\VST3\sforzando.vst3"),
+            None,
+        ));
+        assert!(requires_vst3_destructor_quarantine(
+            Path::new(r"D:\Plugins\Renamed Upright.vst3"),
+            Some(UPRIGHT_PIANO_VST3_CLASS_UID),
+        ));
+        assert!(requires_vst3_destructor_quarantine(
+            Path::new(r"C:\VST3\Upright Piano.vst3"),
+            None,
+        ));
+        assert!(!requires_vst3_destructor_quarantine(
+            Path::new(r"C:\VST3\Other Instrument.vst3"),
+            None,
+        ));
+        assert!(!requires_vst3_destructor_quarantine(
+            Path::new(r"C:\VST2\Splice.dll"),
+            Some(UPRIGHT_PIANO_VST3_CLASS_UID),
+        ));
     }
 
     #[test]
@@ -632,9 +680,10 @@ mod tests {
         };
 
         let vst_path = PathBuf::from(path);
-        let host = std::sync::Arc::new(std::sync::Mutex::new(SimpleHost));
+        let host = std::sync::Arc::new(std::sync::Mutex::new(SimpleHost::default()));
+        let load_path = crate::plugin_probe::native_plugin_load_path(&vst_path);
         let mut loader =
-            PluginLoader::load(&vst_path, host).expect("VST2 smoke: failed to load plugin");
+            PluginLoader::load(&load_path, host).expect("VST2 smoke: failed to load plugin");
         let mut instance = loader
             .instance()
             .expect("VST2 smoke: failed to instantiate plugin");
@@ -656,12 +705,12 @@ mod tests {
 
         let vst_path = PathBuf::from(path);
         let scanner = Vst3Scanner::new().expect("VST3 smoke: failed to create scanner");
+        let scan_root = crate::plugin_probe::vst3_scan_root_for_path(&vst_path);
         let plugins = scanner
-            .scan_path(&vst_path)
+            .scan_path(&scan_root)
             .expect("VST3 smoke: failed to scan plugin path");
-        let info = plugins
-            .into_iter()
-            .find(|plugin| {
+        let info = crate::plugin_probe::select_vst3_plugin_info_for_path(&plugins, &vst_path)
+            .filter(|plugin| {
                 matches!(
                     plugin.plugin_type,
                     RackPluginType::Instrument | RackPluginType::Effect

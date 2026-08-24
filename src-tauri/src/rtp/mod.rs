@@ -1,10 +1,6 @@
-#[path = "rtp_advertisement.rs"]
 pub mod rtp_advertisement;
-#[path = "rtp_discovery.rs"]
 pub mod rtp_discovery;
-#[path = "rtp_midi.rs"]
 pub mod rtp_midi;
-#[path = "rtp_server.rs"]
 pub mod rtp_server;
 
 pub use rtp_discovery::RtpDiscoveryManager;

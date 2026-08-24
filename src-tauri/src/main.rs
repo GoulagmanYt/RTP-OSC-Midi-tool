@@ -31,10 +31,16 @@ fn main() {
             .unwrap_or("unknown location".into());
         let err_msg = format!("PANIC: '{}' at {}", msg, location);
         eprintln!("{}", err_msg);
+        let panic_path = directories::ProjectDirs::from("com", "OSCMIDI", "OSCMIDI")
+            .map(|dirs| dirs.config_dir().join("panic.log"))
+            .unwrap_or_else(|| std::path::PathBuf::from("panic.log"));
+        if let Some(parent) = panic_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
         if let Ok(mut file) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open("panic.log")
+            .open(panic_path)
         {
             use std::io::Write;
             let _ = writeln!(
@@ -94,6 +100,8 @@ fn run_app() -> Result<(), Box<dyn std::error::Error>> {
             list_audio_devices,
             list_vst_plugins,
             refresh_vst_plugins,
+            retest_vst_plugin,
+            open_vst_folder,
             list_vst_parameters,
             set_vst_parameter,
             open_vst_ui,

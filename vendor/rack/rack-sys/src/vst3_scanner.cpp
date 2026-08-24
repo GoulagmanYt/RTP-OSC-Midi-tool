@@ -32,6 +32,39 @@ struct RackVST3Scanner {
     std::vector<std::string> search_paths;
 };
 
+#if defined(_WIN32)
+static std::wstring utf8_to_wide(const std::string& value) {
+    if (value.empty()) return {};
+    const int count = MultiByteToWideChar(
+        CP_UTF8, MB_ERR_INVALID_CHARS, value.data(), static_cast<int>(value.size()), nullptr, 0);
+    if (count <= 0) return {};
+    std::wstring result(static_cast<size_t>(count), L'\0');
+    MultiByteToWideChar(
+        CP_UTF8, MB_ERR_INVALID_CHARS, value.data(), static_cast<int>(value.size()),
+        result.data(), count);
+    return result;
+}
+
+static std::string wide_to_utf8(const std::wstring& value) {
+    if (value.empty()) return {};
+    const int count = WideCharToMultiByte(
+        CP_UTF8, WC_ERR_INVALID_CHARS, value.data(), static_cast<int>(value.size()),
+        nullptr, 0, nullptr, nullptr);
+    if (count <= 0) return {};
+    std::string result(static_cast<size_t>(count), '\0');
+    WideCharToMultiByte(
+        CP_UTF8, WC_ERR_INVALID_CHARS, value.data(), static_cast<int>(value.size()),
+        result.data(), count, nullptr, nullptr);
+    return result;
+}
+
+static std::wstring extended_path(std::wstring path) {
+    if (path.rfind(L"\\\\?\\", 0) == 0 || path.size() < MAX_PATH - 16) return path;
+    if (path.rfind(L"\\\\", 0) == 0) return L"\\\\?\\UNC\\" + path.substr(2);
+    return L"\\\\?\\" + path;
+}
+#endif
+
 // Helper: Scan a directory for .vst3 bundles/folders
 // Returns list of full paths to .vst3 bundles found
 static std::vector<std::string> scan_directory_for_vst3(const std::string& dir_path) {
@@ -39,17 +72,21 @@ static std::vector<std::string> scan_directory_for_vst3(const std::string& dir_p
 
 #if defined(_WIN32)
     // Windows implementation
-    std::string search_path = dir_path + "\\*.vst3";
-    WIN32_FIND_DATAA find_data;
-    HANDLE find_handle = FindFirstFileA(search_path.c_str(), &find_data);
+    std::wstring directory = extended_path(utf8_to_wide(dir_path));
+    if (directory.empty()) return vst3_paths;
+    if (directory.back() != L'\\' && directory.back() != L'/') directory.push_back(L'\\');
+    const std::wstring search_path = directory + L"*.vst3";
+    WIN32_FIND_DATAW find_data{};
+    HANDLE find_handle = FindFirstFileW(search_path.c_str(), &find_data);
 
     if (find_handle != INVALID_HANDLE_VALUE) {
         do {
-            if (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-                std::string full_path = dir_path + "\\" + find_data.cFileName;
-                vst3_paths.push_back(full_path);
-            }
-        } while (FindNextFileA(find_handle, &find_data));
+            // Windows VST3 modules may be either directory bundles or a
+            // single PE DLL whose extension is .vst3. Both are valid and are
+            // accepted by Steinberg's Hosting::Module loader.
+            const std::wstring full_path = directory + find_data.cFileName;
+            vst3_paths.push_back(wide_to_utf8(full_path));
+        } while (FindNextFileW(find_handle, &find_data));
         FindClose(find_handle);
     }
 #else
@@ -103,10 +140,9 @@ static std::vector<std::string> get_default_vst3_paths() {
 
 #elif defined(_WIN32)
     // Windows paths
-    char common_files[MAX_PATH];
-    if (SUCCEEDED(SHGetFolderPathA(NULL, CSIDL_PROGRAM_FILES_COMMON, NULL, 0, common_files))) {
-        std::string path = std::string(common_files) + "\\VST3";
-        paths.push_back(path);
+    wchar_t common_files[MAX_PATH]{};
+    if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_PROGRAM_FILES_COMMON, NULL, 0, common_files))) {
+        paths.push_back(wide_to_utf8(std::wstring(common_files) + L"\\VST3"));
     }
 
 #else

@@ -25,7 +25,6 @@ export default function AudioPage() {
         canOpenVstParameterFallback={controller.canOpenVstParameterFallback}
         config={controller.config}
         currentLatencyMs={controller.currentLatencyMs}
-        isVst3={controller.isVst3}
         midiMessagesPerSec={controller.midiMessagesPerSec}
         selectedPluginKindLabel={controller.selectedPluginKindLabel}
         selectedPluginStatusLabel={controller.selectedPluginStatusLabel}
@@ -51,11 +50,12 @@ export default function AudioPage() {
         onReloadVst={controller.handleReloadVst}
         onSaveConfig={controller.persistConfig}
         onSelectVst={controller.handleSelectVst}
+        onRetestVst={controller.handleRetestVst}
+        onOpenVstFolder={controller.handleOpenVstFolder}
         onToggleAudio={controller.handleAudioToggle}
         onUpdateAudioConfig={controller.updateAudioConfig}
       />
       <VstParametersDialog
-        isVst3={controller.isVst3}
         open={controller.vstParameterDialogOpen}
         params={controller.vstParams}
         loading={controller.vstParamsLoading}

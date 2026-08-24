@@ -8,7 +8,8 @@ use crate::{
     error::CommandError,
     tauri::state::AppState,
     types::{
-        AppPaths, BridgeStatus, PreflightReport, RtpSessionInfo, VstParameter, VstPluginEntry,
+        AppPaths, AudioDeviceEntry, BridgeStatus, PreflightReport, RtpSessionInfo, VstParameter,
+        VstPluginEntry,
     },
 };
 
@@ -105,7 +106,10 @@ pub fn list_audio_backends(state: State<AppState>) -> Vec<String> {
 }
 
 #[::tauri::command]
-pub fn list_audio_devices(backend: Option<String>, state: State<AppState>) -> Vec<String> {
+pub fn list_audio_devices(
+    backend: Option<String>,
+    state: State<AppState>,
+) -> Vec<AudioDeviceEntry> {
     services::list_audio_devices(backend, state.inner())
 }
 
@@ -129,6 +133,19 @@ pub async fn refresh_vst_plugins(
         serde_json::json!({ "state": "finished", "count": plugins.len() }),
     );
     Ok(plugins)
+}
+
+#[::tauri::command]
+pub fn retest_vst_plugin(
+    id: String,
+    state: State<AppState>,
+) -> Result<VstPluginEntry, CommandError> {
+    services::retest_vst_plugin(&id, state.inner())
+}
+
+#[::tauri::command]
+pub fn open_vst_folder(id: String, state: State<AppState>) -> Result<(), CommandError> {
+    services::open_vst_folder(&id, state.inner())
 }
 
 #[::tauri::command]

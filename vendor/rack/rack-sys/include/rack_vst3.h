@@ -178,6 +178,18 @@ int rack_vst3_plugin_get_parameter(RackVST3Plugin* plugin, uint32_t index, float
 int rack_vst3_plugin_set_parameter(RackVST3Plugin* plugin, uint32_t index, float value);
 int rack_vst3_plugin_set_parameter_audio(RackVST3Plugin* plugin, uint32_t index, float value);
 
+// Parameters explicitly changed since initialization/state restore. This sparse
+// snapshot is intended for compatibility profiles whose native VST3 state is
+// unavailable or unsafe. MIDI controller proxies and read-only telemetry are
+// not included unless the host/editor explicitly changed them.
+int rack_vst3_plugin_tracked_parameter_count(RackVST3Plugin* plugin);
+int rack_vst3_plugin_get_tracked_parameter(
+    RackVST3Plugin* plugin,
+    uint32_t index,
+    uint32_t* parameter_id,
+    float* value
+);
+
 // Get parameter info
 // name: output buffer for parameter name (allocated by caller)
 // name_size: size of name buffer
@@ -192,6 +204,10 @@ int rack_vst3_plugin_parameter_info(
     float* min,
     float* max,
     float* default_value,
+    uint32_t* parameter_id,
+    uint32_t* flags,
+    int32_t* step_count,
+    int32_t* unit_id,
     char* unit,
     size_t unit_size
 );
@@ -284,6 +300,10 @@ int rack_vst3_gui_detach(RackVST3Gui* gui);
 // Returns 0 on success, negative error code on failure
 int rack_vst3_gui_get_size(RackVST3Gui* gui, float* width, float* height);
 
+// Notify a VST3 editor that the host window DPI scale changed.
+// The factor is relative to 96 DPI (1.0 at 96 DPI).
+int rack_vst3_gui_set_content_scale_factor(RackVST3Gui* gui, float factor);
+
 // ============================================================================
 // MIDI API
 // ============================================================================
@@ -312,10 +332,10 @@ struct RackVST3MidiEvent {
 // events: array of MIDI events
 // event_count: number of events in array
 //
-// NOTE: VST3 has native support for Note On/Off, Polyphonic Aftertouch, and Control Change.
-//       Program Change, Channel Aftertouch, and Pitch Bend use custom encoding via
-//       LegacyMIDICCOutEvent with controlNumber >= 0x80. Not all VST3 plugins support
-//       these non-native event types. If a plugin doesn't respond to Program Change,
+// NOTE: Note On/Off and Polyphonic Aftertouch use VST3 events. Control Change,
+//       Channel Aftertouch and Pitch Bend use IMidiMapping. Program Change uses
+//       the parameter marked kIsProgramChange for the matching unit/channel.
+//       If a plugin does not expose the corresponding mapping,
 //       Channel Aftertouch, or Pitch Bend, it's a limitation of the plugin itself.
 //
 // Returns 0 on success, negative error code on failure

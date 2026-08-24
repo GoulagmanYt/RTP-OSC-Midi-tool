@@ -15,14 +15,15 @@
       "icons/icon.png"
     ],
     "externalBin": [
-      "binaries/vst-host-worker"
+      "binaries/vst-host-worker-x64",
+      "binaries/vst-host-worker-x86"
     ],
     "targets": [
       "msi"
     ]
   },
   "productName": "OSCMidi",
-  "version": "2.1.0",
+  "version": "2.5.0",
   "identifier": "com.oscmidi.desktop",
   "plugins": {},
   "app": {

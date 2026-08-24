@@ -11,17 +11,19 @@ use windows::Win32::Graphics::Gdi::HBRUSH;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowLongPtrW, IsWindowVisible, KillTimer,
-    RegisterClassW, SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-    CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, GWLP_USERDATA, HCURSOR, HICON,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SW_HIDE, SW_SHOW, WINDOW_EX_STYLE, WM_CLOSE,
-    WM_CREATE, WM_DESTROY, WM_TIMER, WNDCLASSW, WS_OVERLAPPEDWINDOW,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetWindowLongPtrW,
+    IsWindowVisible, KillTimer, RegisterClassW, SetForegroundWindow, SetTimer, SetWindowLongPtrW,
+    SetWindowPos, ShowWindow, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, GWLP_USERDATA,
+    HCURSOR, HICON, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SW_HIDE, SW_SHOW, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WM_CLOSE, WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_TIMER, WNDCLASSW, WS_CAPTION,
+    WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU,
 };
 
 use crate::{logger::background_log, types::VstParameter};
 
 use super::{
     engine::AudioEngine,
+    plugin_host::{set_active_vst2_editor_window, VST2_RESIZE_MESSAGE},
     runtime_state::{AudioError, EditorWindow, PluginBackend, VST_EDITOR_IDLE_TIMER_MS},
 };
 
@@ -29,6 +31,9 @@ struct WindowData {
     state: std::sync::Weak<Mutex<Option<EditorWindow>>>,
     app_handle: Option<tauri::AppHandle>,
 }
+
+const EDITOR_WINDOW_STYLE: WINDOW_STYLE =
+    WINDOW_STYLE(WS_OVERLAPPED.0 | WS_CAPTION.0 | WS_SYSMENU.0 | WS_MINIMIZEBOX.0);
 
 unsafe extern "system" fn vst_window_proc(
     hwnd: HWND,
@@ -43,7 +48,14 @@ unsafe extern "system" fn vst_window_proc(
             // SAFETY: lpCreateParams is the Box<WindowData> pointer passed in CreateWindowExW.
             let data_ptr = unsafe { (*create_struct).lpCreateParams as *mut WindowData };
             // SAFETY: hwnd is valid during WM_CREATE and we store our user data pointer there.
-            unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, data_ptr as isize) };
+            #[cfg(target_pointer_width = "64")]
+            unsafe {
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, data_ptr as isize)
+            };
+            #[cfg(target_pointer_width = "32")]
+            unsafe {
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, data_ptr as i32)
+            };
             // SAFETY: starting a UI timer on a live window is valid.
             unsafe { SetTimer(Some(hwnd), 1, VST_EDITOR_IDLE_TIMER_MS, None) };
             LRESULT(0)
@@ -82,12 +94,50 @@ unsafe extern "system" fn vst_window_proc(
             LRESULT(0)
         }
         WM_DESTROY => {
+            set_active_vst2_editor_window(None);
             let _ = unsafe { KillTimer(Some(hwnd), 1) };
             let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WindowData };
             if !ptr.is_null() {
                 // SAFETY: ptr was allocated with Box::into_raw and is owned by this window.
                 let _ = unsafe { Box::from_raw(ptr) };
                 unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) };
+            }
+            LRESULT(0)
+        }
+        VST2_RESIZE_MESSAGE => {
+            let _ = resize_vst_window_to_client(hwnd, _wparam.0 as i32, lparam.0 as i32);
+            LRESULT(0)
+        }
+        WM_DPICHANGED => {
+            // SAFETY: lparam is the suggested RECT supplied by Windows for
+            // WM_DPICHANGED and remains valid for the duration of this call.
+            let suggested = unsafe { &*(lparam.0 as *const RECT) };
+            let _ = unsafe {
+                SetWindowPos(
+                    hwnd,
+                    None,
+                    suggested.left,
+                    suggested.top,
+                    suggested.right - suggested.left,
+                    suggested.bottom - suggested.top,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                )
+            };
+            let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WindowData };
+            if !ptr.is_null() {
+                // HIWORD(wParam) is the new Y-axis DPI; Windows currently sends
+                // identical X/Y values for a top-level window.
+                let dpi = ((_wparam.0 >> 16) & 0xffff).max(96) as f32;
+                if let Some(state) = unsafe { (*ptr).state.upgrade() } {
+                    if let Some(EditorWindow::Vst3 { gui, .. }) = state.lock().as_mut() {
+                        if let Err(error) = gui.set_content_scale_factor(dpi / 96.0) {
+                            background_log(
+                                "warn",
+                                format!("VST3 editor DPI update failed: {error}"),
+                            );
+                        }
+                    }
+                }
             }
             LRESULT(0)
         }
@@ -127,7 +177,7 @@ fn create_vst_window(
             WINDOW_EX_STYLE(0),
             class_name,
             PCWSTR(title_wide.as_ptr()),
-            WS_OVERLAPPEDWINDOW,
+            EDITOR_WINDOW_STYLE,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             if width > 0 { width } else { CW_USEDEFAULT },
@@ -168,7 +218,7 @@ fn resize_vst_window_to_client(hwnd: HWND, width: i32, height: i32) -> Result<()
         let dpi = GetDpiForWindow(hwnd).max(96);
         AdjustWindowRectExForDpi(
             &mut rect,
-            WS_OVERLAPPEDWINDOW,
+            EDITOR_WINDOW_STYLE,
             false,
             WINDOW_EX_STYLE(0),
             dpi,
@@ -184,6 +234,22 @@ fn resize_vst_window_to_client(hwnd: HWND, width: i32, height: i32) -> Result<()
             SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
         )
         .map_err(|error| error.to_string())?;
+        let mut actual = RECT::default();
+        GetClientRect(hwnd, &mut actual).map_err(|error| error.to_string())?;
+        let actual_width = actual.right - actual.left;
+        let actual_height = actual.bottom - actual.top;
+        if actual_width != width || actual_height != height {
+            SetWindowPos(
+                hwnd,
+                None,
+                0,
+                0,
+                rect.right - rect.left + (width - actual_width),
+                rect.bottom - rect.top + (height - actual_height),
+                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+            )
+            .map_err(|error| error.to_string())?;
+        }
     }
     Ok(())
 }
@@ -227,7 +293,7 @@ impl AudioEngine {
 
                     let mut plugin = plugin_arc.lock();
                     match &mut *plugin {
-                        PluginBackend::Vst2 { instance } => {
+                        PluginBackend::Vst2 { instance, .. } => {
                             background_log("debug", "VST2 editor: requesting editor object");
                             let editor = instance.get_editor();
                             let Some(mut editor) = editor else {
@@ -250,7 +316,9 @@ impl AudioEngine {
 
                             let hwnd_ptr = hwnd.0;
                             background_log("debug", "VST2 editor: calling effEditOpen");
+                            set_active_vst2_editor_window(Some(hwnd));
                             if editor.open(hwnd_ptr) {
+                                editor.idle();
                                 let (width, height) = editor.size();
                                 match resize_vst_window_to_client(hwnd, width, height) {
                                     Ok(()) => background_log(
@@ -266,14 +334,31 @@ impl AudioEngine {
                                         ),
                                     ),
                                 }
-                                *editor_window_arc.lock() =
-                                    Some(EditorWindow::Vst2 { editor, hwnd });
                                 unsafe {
                                     let _ = ShowWindow(hwnd, SW_SHOW);
                                     let _ = SetForegroundWindow(hwnd);
                                 }
+                                editor.idle();
+                                let settled_size = editor.size();
+                                if settled_size != (width, height) {
+                                    if let Err(error) = resize_vst_window_to_client(
+                                        hwnd,
+                                        settled_size.0,
+                                        settled_size.1,
+                                    ) {
+                                        background_log(
+                                            "warn",
+                                            format!(
+                                                "VST2 editor: settled size correction failed: {error}"
+                                            ),
+                                        );
+                                    }
+                                }
+                                *editor_window_arc.lock() =
+                                    Some(EditorWindow::Vst2 { editor, hwnd });
                                 Ok(())
                             } else {
+                                set_active_vst2_editor_window(None);
                                 unsafe {
                                     let _ = DestroyWindow(hwnd);
                                 }
@@ -335,6 +420,10 @@ impl AudioEngine {
                             }
                             Ok(())
                         }
+                        #[cfg(all(target_os = "windows", target_pointer_width = "64"))]
+                        PluginBackend::Remote { instance } => {
+                            instance.open_editor().map_err(AudioError::Message)
+                        }
                     }
                 })();
 
@@ -356,12 +445,12 @@ impl AudioEngine {
             return crate::tauri::utils::safe_block_on(self.worker.close_editor())
                 .map_err(AudioError::Message);
         }
-        let editor_window_arc = {
+        let (editor_window_arc, plugin_arc) = {
             let mut guard = self.runtime.lock();
             let Some(runtime) = guard.as_mut() else {
                 return Err(AudioError::Message("Audio not started".into()));
             };
-            runtime.editor_window.clone()
+            (runtime.editor_window.clone(), runtime.plugin.clone())
         };
 
         app_handle
@@ -374,6 +463,15 @@ impl AudioEngine {
                         let _ = ShowWindow(*hwnd, SW_HIDE);
                     }
                 }
+                #[cfg(all(target_os = "windows", target_pointer_width = "64"))]
+                {
+                    let mut plugin_guard = plugin_arc.lock();
+                    if let PluginBackend::Remote { instance } = &mut *plugin_guard {
+                        let _ = instance.close_editor();
+                    }
+                }
+                #[cfg(not(all(target_os = "windows", target_pointer_width = "64")))]
+                let _ = plugin_arc;
             })
             .map_err(|_| {
                 AudioError::Message("Failed to schedule VST close on main thread".into())
@@ -408,18 +506,22 @@ impl AudioEngine {
             return Err(AudioError::Message("Audio not started".into()));
         };
         let normalized = value.clamp(0.0, 1.0);
-        if index >= runtime.parameter_cache.lock().len() {
-            return Err(AudioError::Message(
-                "VST3 parameter index out of range".into(),
-            ));
-        }
+        let metadata = runtime
+            .parameter_cache
+            .lock()
+            .get(index)
+            .cloned()
+            .ok_or_else(|| AudioError::Message("VST parameter index out of range".into()))?;
         runtime
             .parameter_tx
             .try_send(super::runtime_state::ParameterCommand {
                 index,
+                id: metadata.id,
+                flags: metadata.flags,
+                step_count: metadata.step_count,
                 value: normalized,
             })
-            .map_err(|_| AudioError::Message("VST3 parameter queue is full".into()))?;
+            .map_err(|_| AudioError::Message("VST parameter queue is full".into()))?;
         if let Some(parameter) = runtime.parameter_cache.lock().get_mut(index) {
             parameter.value = normalized;
         }

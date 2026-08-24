@@ -28,6 +28,7 @@ pub use error::{
 };
 pub use midi::MidiFrame;
 pub use types::{
-    AppPaths, BridgeMetrics, BridgeStatus, LogEntry, MidiActivityInfo, MidiActivitySnapshot,
-    PreflightReport, RuntimeMetrics, RuntimeStatus, VstParameter, VstPluginEntry,
+    AppPaths, AudioDeviceEntry, BridgeMetrics, BridgeStatus, LogEntry, MidiActivityInfo,
+    MidiActivitySnapshot, PreflightReport, RuntimeMetrics, RuntimeStatus, VstParameter,
+    VstPluginEntry,
 };

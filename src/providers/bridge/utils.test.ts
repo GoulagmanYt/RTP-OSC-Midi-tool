@@ -4,7 +4,7 @@ import { mergeConfig } from "./utils";
 
 function makeConfig(): AppConfig {
   return {
-    version: 2,
+    version: 3,
     midi: {
       inputDevice: "Input A",
       outputDevice: "Output A",
@@ -36,7 +36,9 @@ function makeConfig(): AppConfig {
       bufferSize: 256,
       gainDb: 0,
       limiterEnabled: false,
+      vstPluginId: null,
       vstPath: null,
+      vstScanPaths: [],
     },
     ui: {
       theme: "light",

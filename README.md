@@ -12,7 +12,7 @@
   <a href="https://github.com/GoulagmanYt/RTP-OSC-Midi-tool/actions/workflows/build-windows.yml">
     <img src="https://github.com/GoulagmanYt/RTP-OSC-Midi-tool/actions/workflows/build-windows.yml/badge.svg" alt="Windows build status">
   </a>
-  <img src="https://img.shields.io/badge/version-2.1.0-35c2d5" alt="Version 2.1.0">
+  <img src="https://img.shields.io/github/v/release/GoulagmanYt/RTP-OSC-Midi-tool?label=version&color=35c2d5" alt="Latest release version">
   <img src="https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078d4?logo=windows" alt="Windows 10 and 11">
   <img src="https://img.shields.io/badge/backend-Rust-dea584?logo=rust" alt="Rust backend">
   <img src="https://img.shields.io/badge/desktop-Tauri%202-24c8db?logo=tauri" alt="Tauri 2">
@@ -44,7 +44,7 @@ OSCMidi connects network sessions, physical or virtual MIDI devices, OSC targets
 | MIDI networking | RTP-MIDI server, participant discovery and mDNS advertisement |
 | Routing | RTP-MIDI and local MIDI input to MIDI Thru, OSC and VST destinations |
 | VST hosting | VST2 and VST3 instruments, plug-in scanning, native editors and persistent state |
-| Process isolation | One supervised `vst-host-worker.exe` process for the active plug-in and audio stream |
+| Process isolation | Supervised x64 audio worker plus an on-demand x86 DSP worker for 32-bit instruments |
 | Low-latency audio | ASIO and WASAPI backends with configurable sample rate and buffer size |
 | Reliability | Bounded real-time queues, deadline metrics, heartbeat supervision and emergency MIDI reset |
 | Diagnostics | Live routing status, logs, stress tests and detailed developer-only audio metrics |
@@ -59,10 +59,10 @@ Download the latest build from the [GitHub Releases page](https://github.com/Gou
 | MSI installer | Normal installation with Windows shortcuts and uninstall support |
 | Portable ZIP | No installation; extract the complete archive and run `OSCMidi.exe` |
 
-The portable package contains both `OSCMidi.exe` and `vst-host-worker.exe`. Keep them in the same directory: the application intentionally does not load VST DLLs in its own process.
+The portable package contains `OSCMidi.exe`, `vst-host-worker-x64.exe`, and `vst-host-worker-x86.exe`. Keep all three in the same directory: the application intentionally does not load VST DLLs in its own process.
 
 > [!NOTE]
-> Release binaries are currently unsigned. Windows can therefore display an unknown-publisher or SmartScreen warning when opening a downloaded build.
+> GitHub Releases are Authenticode-signed and timestamped when the signing secrets are configured. Without them, the workflow publishes unsigned packages with an explicit warning; local builds are also unsigned by default.
 
 ## Quick start
 
@@ -86,7 +86,8 @@ flowchart LR
     ROUTER --> OSC[OSC / UDP]
     ROUTER --> IPC[Authenticated worker IPC]
 
-    IPC <--> WORKER[vst-host-worker.exe]
+    IPC <--> WORKER64[vst-host-worker-x64.exe]
+    WORKER64 <-- shared memory / one buffer --> WORKER32[vst-host-worker-x86.exe]
     WORKER --> VST[VST2 / VST3 instrument]
     VST --> AUDIO[ASIO / WASAPI output]
 ```
@@ -102,14 +103,19 @@ More detail is available in [src-tauri/ARCHITECTURE.md](src-tauri/ARCHITECTURE.m
 - Windows 10 or Windows 11, x64.
 - Microsoft Edge WebView2 Runtime.
 - A WASAPI-compatible device or an installed ASIO driver.
-- Optional x64 VST2 or VST3 instrument plug-ins.
+- Optional x86 or x64 VST2/VST3 instrument plug-ins.
 - A local MIDI device or RTP-MIDI peer when using those routes.
 
 OSCMidi scans standard Windows VST locations. Unsupported architectures, effects and plug-ins that fail compatibility probing are excluded from the instrument list.
 
+VST3 hosting is built and checked against Steinberg VST3 SDK `v3.8.1_build_84`
+(commit `3cdf9ca5d1f5b1b21e0a86832aa4abe55607bd96`). VST2.4 support is a
+legacy compatibility layer based on its frozen ABI: Steinberg discontinued the
+VST2 SDK, so new host capabilities and conformance work target VST3.
+
 ### Development
 
-- Node.js 20.19+ or 22.12+, with npm.
+- Node.js 22.22.2+, 24.15+ or 26+, with npm.
 - Stable Rust toolchain installed through `rustup`.
 - Visual Studio Build Tools with the x64 MSVC C++ toolchain and a Windows SDK.
 - CMake.
@@ -163,6 +169,10 @@ cargo test --manifest-path src-tauri/Cargo.toml --all-targets --all-features
 
 cargo fmt --manifest-path tools/diagnostics/Cargo.toml --package oscmidi-diagnostics -- --check
 cargo clippy --manifest-path tools/diagnostics/Cargo.toml --target-dir tools/diagnostics/target --all-targets -- -D warnings
+
+cargo test --manifest-path vendor/rtpmidi/Cargo.toml --all-targets
+cargo test --manifest-path vendor/rack/Cargo.toml --lib --features vst3 --no-run
+cargo test --manifest-path vendor/vst/Cargo.toml --all-targets --features disable_deprecation_warning
 ```
 
 Developer diagnostics are kept outside the packaged application:
@@ -189,24 +199,24 @@ Successful outputs are preserved in `artifacts\`:
 | `OSCMidi_*_portable.zip` | Complete portable distribution |
 | `OSCMidi_*.msi` | Windows installer |
 | `SHA256SUMS.txt` | Integrity hashes for the generated deliverables |
+| `BUILDINFO.json` | Exact source commit and workflow run used for the packages |
 | `logs\` | Ten most recent build logs |
 
-Run `artifacts\portable\OSCMidi.exe` directly, install the MSI, or copy/extract the complete portable folder. `OSCMidi.exe` intentionally requires `vst-host-worker.exe` beside it and must never be copied alone.
+Run `artifacts\portable\OSCMidi.exe` directly, install the MSI, or copy/extract the complete portable folder. `OSCMidi.exe` requires both architecture-specific VST workers beside it and must never be copied alone.
 
 The cleanup runs after both successful and failed builds. It removes `node_modules`, Rust target directories, generated VST dependencies, staged sidecars and frontend output. Before deleting a generated directory, the script refuses to continue if Git reports any tracked file inside it. Deliverables, current and legacy logs, diagnostic reports and developer-managed Python environments are preserved. The next invocation is consequently a full clean build.
 
 ## Automated releases
 
-[Build Windows App](.github/workflows/build-windows.yml) runs on pushes to `main`, version tags and manual dispatch. It validates that `package.json`, `Cargo.toml` and `tauri.conf.json` use the same version, then publishes a downloadable workflow artifact.
+[Build Windows App](.github/workflows/build-windows.yml) runs on pushes to `main`, version tags, pull requests and manual dispatch. It validates the frontend, application, diagnostics and all three vendored Rust crates before building both worker architectures, the Tauri application, the MSI and the portable archive.
 
-A `v*` tag also creates or updates the corresponding GitHub Release with the MSI, portable ZIP and checksum file:
+On a successful push to `main`, the workflow reads the common version from `package.json`, `package-lock.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml` and `tools/diagnostics/Cargo.toml`:
 
-```powershell
-git tag v2.1.0
-git push origin v2.1.0
-```
+- If `v<version>` does not exist, the workflow creates the annotated tag and creates the GitHub Release.
+- If the tag and release already exist, the tag remains immutable while the MSI, portable ZIP, checksums and `BUILDINFO.json` are replaced with packages built from the new commit.
+- `BUILDINFO.json` records the exact commit SHA, so same-version maintenance builds remain traceable even though the version tag is not moved.
 
-The tag must exactly match the application version.
+When the repository secrets `WINDOWS_CERTIFICATE`, `WINDOWS_CERTIFICATE_PASSWORD` and `WINDOWS_TIMESTAMP_URL` are all present, the workflow verifies the Authenticode signature of the application, both VST workers and the MSI before changing a release. If all three are absent, publication continues unsigned and emits a warning; a partial signing configuration is rejected. A manual workflow run publishes only when its `publish_release` option is selected; otherwise it performs a normal unsigned validation build.
 
 ## Project layout
 
@@ -233,11 +243,13 @@ Configuration, logs and VST states are stored under the Windows roaming applicat
 | Application log | `%APPDATA%\OSCMIDI\OSCMIDI\config\app.log` |
 | VST state | `%APPDATA%\OSCMIDI\OSCMIDI\config\vst_state\` |
 
+VST state files are keyed by the selected plug-in class and architecture. Native plug-in state is authoritative. For fingerprinted plug-ins whose native state path is unsafe, OSCMidi stores a sparse fallback containing only parameters actually edited; obsolete exhaustive zero-filled snapshots are preserved with an `.invalid-*` suffix and are not restored. State is autosaved after parameter changes and checkpointed when the editor, plug-in, or application closes.
+
 ## Troubleshooting
 
 ### A plug-in is missing
 
-Only compatible x64 instrument plug-ins are displayed. Effects, unsupported architectures and candidates that fail or time out during probing are intentionally filtered. Refresh the instrument list after installing or moving a plug-in.
+Compatible x64 and bridged x86 instrument plug-ins are displayed. Effects and candidates that fail or time out during probing remain visible in the catalogue with their status but cannot be selected normally. Refresh the instrument list after installing or moving a plug-in.
 
 ### Audio drops or XRuns are reported
 
@@ -251,7 +263,7 @@ If the VST processing time itself exceeds the audio period, the stable solution 
 
 ### The portable build cannot start the VST worker
 
-Install the MSI, run `artifacts\portable\OSCMidi.exe`, or extract the entire ZIP. Confirm that `OSCMidi.exe` and `vst-host-worker.exe` are in the same directory. Do not distribute or move the application executable on its own.
+Install the MSI, run `artifacts\portable\OSCMidi.exe`, or extract the entire ZIP. Confirm that `OSCMidi.exe`, `vst-host-worker-x64.exe`, and `vst-host-worker-x86.exe` are in the same directory. Do not distribute or move the application executable on its own.
 
 ### Local development shows `ERR_CONNECTION_REFUSED`
 
@@ -259,7 +271,7 @@ Close every stale `OSCMidi.exe` instance, rebuild the worker and restart `npm ru
 
 ### sforzando state does not restore
 
-The host intentionally avoids internal VST3 state restoration for sforzando because the plug-in has dedicated teardown behavior. Keep the ARIA resource paths valid and use its ARIA files, such as `default.ariax`, for persistent configuration.
+The host intentionally avoids sforzando's unsafe native VST3 state path, but its writable parameters are still saved and restored. Keep the ARIA resource paths valid and use its ARIA files, such as `default.ariax`, for resource-specific configuration.
 
 ## Contributing
 

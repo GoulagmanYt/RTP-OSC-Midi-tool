@@ -203,11 +203,16 @@ mod windows_worker {
     }
 
     fn metrics(audio: &AudioEngine) -> WorkerMetrics {
+        let (x86_bridge_underruns, x86_bridge_overruns, x86_worker_alive) =
+            audio.x86_bridge_metrics();
         let (audio_peak_l, audio_peak_r) = audio.peak_levels().unwrap_or((0.0, 0.0));
         WorkerMetrics {
             audio_peak_l,
             audio_peak_r,
             audio_xruns: audio.xrun_count().unwrap_or(0),
+            stream_recovery_requests: audio.stream_recovery_requests().unwrap_or(0),
+            stream_route_changes: audio.stream_route_changes().unwrap_or(0),
+            backend_latency_us: audio.backend_latency_us().unwrap_or(0),
             audio_midi_drops: audio.midi_drop_count().unwrap_or(0),
             audio_lock_misses: audio.audio_lock_miss_count().unwrap_or(0),
             audio_emergency_resets: audio.emergency_reset_count().unwrap_or(0),
@@ -222,6 +227,9 @@ mod windows_worker {
             midi_queue_depth: audio.audio_midi_queue_depth().unwrap_or(0),
             midi_queue_max_depth: audio.audio_midi_queue_max_depth().unwrap_or(0),
             midi_oldest_us: audio.audio_midi_oldest_us().unwrap_or(0),
+            x86_bridge_underruns,
+            x86_bridge_overruns,
+            x86_worker_alive,
         }
     }
 
@@ -236,12 +244,17 @@ mod windows_worker {
             device: audio
                 .current_device()
                 .ok_or_else(|| "worker audio device unavailable".to_string())?,
+            device_id: audio.current_device_id(),
             sample_rate: audio
                 .current_sample_rate()
                 .ok_or_else(|| "worker sample rate unavailable".to_string())?,
             requested_buffer_size: audio.requested_buffer_size().unwrap_or(0),
             stream_buffer_size: audio.current_buffer_size().unwrap_or(0),
             plugin_latency_samples: audio.plugin_latency_samples().unwrap_or(0),
+            bridge_latency_samples: audio.bridge_latency_samples().unwrap_or(0),
+            hosting_mode: audio
+                .vst_hosting_mode()
+                .unwrap_or_else(|| "directX64".to_string()),
             vst_midi_compatible: audio.vst_midi_compatible().unwrap_or(false),
             limiter_enabled: audio.limiter_enabled().unwrap_or(false),
             mmcss_enabled: audio.mmcss_enabled().unwrap_or(false),
@@ -292,6 +305,23 @@ mod windows_worker {
         .await
         .map_err(|error| format!("Failed to send worker hello: {error}"))?;
 
+        // read_exact-based framed reads are not cancellation-safe. Keeping one
+        // dedicated reader task prevents heartbeat ticks from cancelling a
+        // partially consumed frame and permanently desynchronizing the pipe.
+        let (mut control_reader, mut control_writer) = tokio::io::split(control);
+        let (control_event_tx, mut control_event_rx) = tokio::sync::mpsc::channel(64);
+        tauri::async_runtime::spawn(async move {
+            loop {
+                let event = read_control_frame(&mut control_reader)
+                    .await
+                    .map_err(|error| format!("Control pipe failed: {error}"));
+                let terminal = event.is_err();
+                if control_event_tx.send(event).await.is_err() || terminal {
+                    break;
+                }
+            }
+        });
+
         let midi_audio = audio.clone();
         let midi_pipe = args.midi_pipe;
         tauri::async_runtime::spawn(async move {
@@ -312,19 +342,47 @@ mod windows_worker {
             tokio::select! {
                 _ = heartbeat.tick() => {
                     heartbeat_sequence = heartbeat_sequence.wrapping_add(1);
+                    let heartbeat_metrics = metrics(&audio);
+                    if let Some(reason) = audio.stream_fault_reason() {
+                        let audio_for_save = audio.clone();
+                        let app_for_save = app.clone();
+                        if let Err(error) = execute_blocking(move || {
+                            audio_for_save
+                                .checkpoint_vst_state(app_for_save)
+                                .map_err(|error| error.to_string())
+                        }).await {
+                            background_log(
+                                "warn",
+                                format!("State checkpoint before audio recovery failed: {error}"),
+                            );
+                        }
+                        return Err(format!("Audio stream recovery requested: {reason}"));
+                    }
+                    if audio.vst_hosting_mode().as_deref() == Some("bridgedX86")
+                        && !heartbeat_metrics.x86_worker_alive
+                    {
+                        #[cfg(target_pointer_width = "64")]
+                        let detail = audio
+                            .x86_bridge_fault_reason()
+                            .unwrap_or_else(|| "health check failed without a bridge diagnostic".to_string());
+                        #[cfg(target_pointer_width = "32")]
+                        let detail = "health check failed without a bridge diagnostic".to_string();
+                        return Err(format!("Nested x86 DSP worker failed: {detail}"));
+                    }
                     write_control_frame(
-                        &mut control,
+                        &mut control_writer,
                         &ControlMessage::Heartbeat {
                             sequence: heartbeat_sequence,
                             monotonic_qpc: monotonic_qpc(),
-                            metrics: metrics(&audio),
+                            metrics: heartbeat_metrics,
                         },
                     )
                     .await
                     .map_err(|error| format!("Heartbeat failed: {error}"))?;
                 }
-                incoming = read_control_frame(&mut control) => {
-                    let message = incoming.map_err(|error| format!("Control pipe failed: {error}"))?;
+                incoming = control_event_rx.recv() => {
+                    let message = incoming
+                        .ok_or_else(|| "Control pipe reader exited".to_string())??;
                     let response = match message {
                         ControlMessage::Load { request_id, settings, class_uid, warmup_ms } => {
                             let audio_for_load = audio.clone();
@@ -388,10 +446,13 @@ mod windows_worker {
                             }
                         }
                         ControlMessage::Ping { sequence } => ControlMessage::Pong { sequence },
-                        ControlMessage::SaveState { request_id } => ControlMessage::Error {
-                            request_id: Some(request_id),
-                            code: "worker.save-requires-stop".into(),
-                            message: "State capture is performed during the serialized worker stop/reload transition".into(),
+                        ControlMessage::SaveState { request_id } => {
+                            let audio = audio.clone();
+                            let app = app.clone();
+                            match execute_blocking(move || audio.checkpoint_vst_state(app).map_err(|error| error.to_string())).await {
+                                Ok(()) => ControlMessage::Ack { request_id },
+                                Err(message) => ControlMessage::Error { request_id: Some(request_id), code: "worker.state-save-failed".into(), message },
+                            }
                         },
                         ControlMessage::Stop { request_id } => {
                             let audio = audio.clone();
@@ -400,7 +461,7 @@ mod windows_worker {
                                 audio.stop(Some(app_for_stop));
                                 Ok(())
                             }).await?;
-                            write_control_frame(&mut control, &ControlMessage::Stopped { request_id })
+                            write_control_frame(&mut control_writer, &ControlMessage::Stopped { request_id })
                                 .await
                                 .map_err(|error| format!("Failed to acknowledge stop: {error}"))?;
                             app.exit(0);
@@ -412,7 +473,7 @@ mod windows_worker {
                             message: "Message is not a supervisor command".into(),
                         },
                     };
-                    write_control_frame(&mut control, &response)
+                    write_control_frame(&mut control_writer, &response)
                         .await
                         .map_err(|error| format!("Failed to send worker response: {error}"))?;
                 }
@@ -420,7 +481,16 @@ mod windows_worker {
                     if hidden.is_none() {
                         continue;
                     }
-                    write_control_frame(&mut control, &ControlMessage::EditorHidden)
+                    let audio_for_save = audio.clone();
+                    let app_for_save = app.clone();
+                    if let Err(error) = execute_blocking(move || {
+                        audio_for_save
+                            .checkpoint_vst_state(app_for_save)
+                            .map_err(|error| error.to_string())
+                    }).await {
+                        background_log("warn", format!("VST editor-close state save failed: {error}"));
+                    }
+                    write_control_frame(&mut control_writer, &ControlMessage::EditorHidden)
                         .await
                         .map_err(|error| format!("Failed to report hidden editor: {error}"))?;
                 }
@@ -429,7 +499,12 @@ mod windows_worker {
     }
 
     pub fn run() -> Result<(), String> {
-        let args = WorkerArgs::parse()?;
+        let dsp_mode = std::env::args().any(|arg| arg == "--dsp-bridge");
+        let args = if dsp_mode {
+            None
+        } else {
+            Some(WorkerArgs::parse()?)
+        };
         env_logger::init();
 
         // The shared Tauri configuration declares OSCMidi's main window as
@@ -453,6 +528,20 @@ mod windows_worker {
                 );
                 let app_handle = app.handle().clone();
                 let exit_handle = app_handle.clone();
+                if dsp_mode {
+                    tauri::async_runtime::spawn_blocking(move || {
+                        let result = osc_midi_bridge::audio::run_dsp_bridge_from_env(logger)
+                            .unwrap_or_else(|| Err("Missing DSP bridge arguments".to_string()));
+                        if let Err(error) = result {
+                            background_log("error", format!("VST x86 DSP bridge stopped: {error}"));
+                            exit_handle.exit(1);
+                        } else {
+                            exit_handle.exit(0);
+                        }
+                    });
+                    return Ok(());
+                }
+                let args = args.expect("normal worker arguments");
                 let audio = AudioEngine::new();
                 let (editor_hidden_tx, editor_hidden_rx) = tokio::sync::mpsc::channel(4);
                 app_handle.listen("audio:vst-editor-hidden", move |_| {

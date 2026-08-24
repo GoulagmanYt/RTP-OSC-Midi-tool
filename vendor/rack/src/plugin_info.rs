@@ -84,6 +84,19 @@ pub struct ParameterInfo {
     /// Parameter index
     pub index: usize,
 
+    /// Stable native parameter identifier when the format exposes one.
+    /// VST3 hosts must persist this value instead of relying on enumeration order.
+    pub id: u32,
+
+    /// Native format flags (for example VST3 kIsReadOnly/kCanAutomate).
+    pub flags: u32,
+
+    /// Number of discrete steps (0 for a continuous parameter).
+    pub step_count: i32,
+
+    /// Native unit identifier, or 0 when the format does not expose units.
+    pub unit_id: i32,
+
     /// Parameter name
     pub name: String,
 
@@ -102,16 +115,13 @@ pub struct ParameterInfo {
 
 impl ParameterInfo {
     /// Create a new ParameterInfo
-    pub fn new(
-        index: usize,
-        name: String,
-        min: f32,
-        max: f32,
-        default: f32,
-        unit: String,
-    ) -> Self {
+    pub fn new(index: usize, name: String, min: f32, max: f32, default: f32, unit: String) -> Self {
         Self {
             index,
+            id: index as u32,
+            flags: 0,
+            step_count: 0,
+            unit_id: 0,
             name,
             min,
             max,

@@ -6,8 +6,10 @@ import {
   listVstParameters,
   listVstPlugins,
   openVstUi,
+  openVstFolder,
   pingAudio,
   refreshVstPlugins,
+  retestVstPlugin,
   reloadVst,
   saveConfig as saveConfigApi,
   setAudioLimiter,
@@ -61,7 +63,6 @@ export function useAudioPageController() {
   }, []);
 
   const bridgeRunning = Boolean(status?.running);
-  const isVst3 = (config?.audio.vstPath || "").toLowerCase().endsWith(".vst3");
 
   const activeSampleRate = status?.audioSampleRate ?? config?.audio.sampleRate ?? null;
   const activeBufferSize = status?.audioBufferSize ?? config?.audio.bufferSize ?? null;
@@ -73,8 +74,11 @@ export function useAudioPageController() {
   const vstMidiCompatible = status?.vstMidiCompatible ?? null;
 
   const selectedVstPlugin = useMemo(
-    () => vstPlugins.find((plugin) => plugin.path === (config?.audio.vstPath || "")) ?? null,
-    [config?.audio.vstPath, vstPlugins]
+    () =>
+      vstPlugins.find((plugin) => plugin.id === config?.audio.vstPluginId) ??
+      vstPlugins.find((plugin) => plugin.path === (config?.audio.vstPath || "")) ??
+      null,
+    [config?.audio.vstPath, config?.audio.vstPluginId, vstPlugins]
   );
 
   const canOpenSelectedVstUi =
@@ -86,7 +90,6 @@ export function useAudioPageController() {
   const canOpenVstParameterFallback =
     Boolean(config?.audio.enabled) &&
     bridgeRunning &&
-    isVst3 &&
     Boolean(selectedVstPlugin?.supported);
 
   const currentLatencyMs = useMemo(() => {
@@ -107,6 +110,7 @@ export function useAudioPageController() {
         "device",
         "sampleRate",
         "bufferSize",
+        "vstPluginId",
         "vstPath",
       ];
       const requiresRestart = restartKeys.some((key) => patch[key] !== undefined);
@@ -175,7 +179,7 @@ export function useAudioPageController() {
   }, [loadCachedVstPlugins]);
 
   const handleBackendChange = async (value: string) => {
-    await updateAudioConfig({ backend: value, device: null });
+    await updateAudioConfig({ backend: value, device: null, deviceId: null });
     await refreshAudioDevices(value);
   };
 
@@ -202,31 +206,55 @@ export function useAudioPageController() {
     }
   };
 
-  const applyVstPath = useCallback(
-    async (path: string) => {
+  const applyVstPlugin = useCallback(
+    async (plugin: VstPluginEntry) => {
       if (!config) return;
       setVstUiOpen(false);
       setVstParameterDialogOpen(false);
       setVstParams([]);
-      const updated = { ...config, audio: { ...config.audio, vstPath: path } };
-      await updateAudioConfig({ vstPath: path });
+      const updated = {
+        ...config,
+        audio: { ...config.audio, vstPluginId: plugin.id, vstPath: plugin.path },
+      };
+      await updateAudioConfig({ vstPluginId: plugin.id, vstPath: plugin.path });
       try {
         await saveConfigApi(updated);
       } catch (e) {
-        console.error("Failed to save VST path", e);
+        console.error("Failed to save VST selection", e);
       }
     },
     [config, updateAudioConfig]
   );
 
-  const handleSelectVst = async (path: string) => {
-    if (!path || path === "__empty") return;
-    const plugin = vstPlugins.find((entry) => entry.path === path);
+  const handleSelectVst = async (pluginId: string) => {
+    if (!pluginId || pluginId === "__empty") return;
+    const plugin = vstPlugins.find((entry) => entry.id === pluginId);
+    if (!plugin) return;
     if (plugin && !plugin.supported) {
       toast.error(plugin.unsupportedReason || t("toasts.audio.vstUnsupported"));
       return;
     }
-    await applyVstPath(path);
+    await applyVstPlugin(plugin);
+  };
+
+  const handleRetestVst = async (pluginId: string) => {
+    setVstPluginsLoading(true);
+    try {
+      const tested = await retestVstPlugin(pluginId);
+      setVstPlugins((entries) => [...entries.filter((entry) => entry.id !== pluginId), tested]);
+    } catch (e) {
+      toast.error(getErrorMessage(e) || t("toasts.audio.vstListFailed"));
+    } finally {
+      setVstPluginsLoading(false);
+    }
+  };
+
+  const handleOpenVstFolder = async (pluginId: string) => {
+    try {
+      await openVstFolder(pluginId);
+    } catch (e) {
+      toast.error(getErrorMessage(e));
+    }
   };
 
   const handleOpenVstUi = async () => {
@@ -327,7 +355,6 @@ export function useAudioPageController() {
     canOpenVstParameterFallback,
     config,
     currentLatencyMs,
-    isVst3,
     midiMessagesPerSec: metrics?.midiMessagesPerSec ?? null,
     requestedBufferSize,
     selectedPluginKindLabel,
@@ -355,6 +382,8 @@ export function useAudioPageController() {
     refreshVstPluginsList,
     persistConfig,
     handleSelectVst,
+    handleRetestVst,
+    handleOpenVstFolder,
     updateConfig,
     updateAudioConfig,
     setVstParameterDialogOpen,

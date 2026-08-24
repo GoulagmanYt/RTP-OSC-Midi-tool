@@ -7,7 +7,7 @@ export interface BridgeContextType {
   metrics: api.RuntimeMetrics | null;
   logs: api.LogEntry[];
   audioBackends: string[];
-  audioDevices: string[];
+  audioDevices: api.AudioDeviceEntry[];
   midiInputs: string[];
   midiOutputs: string[];
   isLoading: boolean;
