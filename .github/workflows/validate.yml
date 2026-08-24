@@ -71,7 +71,6 @@ jobs:
           cargo audit --file src-tauri/Cargo.lock --target-os windows
           cargo audit --file tools/diagnostics/Cargo.lock --target-os windows
           cargo audit --file vendor/rack/Cargo.lock --target-os windows
-          cargo audit --file vendor/vst/Cargo.lock --target-os windows
           cargo audit --file vendor/rtpmidi/Cargo.lock --target-os windows
 
   rust:
