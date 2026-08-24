@@ -4,6 +4,15 @@ All notable changes to OSCMidi are documented here.
 
 ## Unreleased
 
+### Changed
+
+- Split pull-request validation into parallel frontend, dependency-audit and Windows Rust jobs while reserving MSI packaging for release-producing events.
+- Made pull requests restore the shared Rust cache without creating isolated multi-gigabyte cache entries.
+
+### Fixed
+
+- Prevented pull-request artifact uploads from failing when GitHub exposes merge refs containing `/`.
+
 ## 2.5.0 - 2026-08-24
 
 ### Changed

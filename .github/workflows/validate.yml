@@ -1,0 +1,168 @@
+name: Validate
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: oscmidi-validate-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install locked dependencies
+        run: npm ci --no-fund --no-audit
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev
+
+      - name: Lint, type-check and test
+        run: |
+          npm run lint
+          npm test
+
+  dependency-audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.90.0
+
+      - name: Cache cargo-audit
+        id: cargo-audit-cache
+        uses: actions/cache@v6
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: cargo-audit-${{ runner.os }}-0.22.0
+
+      - name: Install cargo-audit
+        if: steps.cargo-audit-cache.outputs.cache-hit != 'true'
+        run: cargo install cargo-audit --version 0.22.0 --locked
+
+      - name: Audit every Rust lockfile
+        run: |
+          cargo audit --file src-tauri/Cargo.lock --target-os windows
+          cargo audit --file tools/diagnostics/Cargo.lock --target-os windows
+          cargo audit --file vendor/rack/Cargo.lock --target-os windows
+          cargo audit --file vendor/rtpmidi/Cargo.lock --target-os windows
+
+  rust:
+    name: Rust workspace
+    runs-on: windows-latest
+    timeout-minutes: 35
+
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: '0'
+      CI: 'true'
+      ASIOSDK_DIR: ${{ github.workspace }}\ASIOSDK
+      ASIO_SDK_DIR: ${{ github.workspace }}\ASIOSDK
+      CPAL_ASIO_DIR: ${{ github.workspace }}\ASIOSDK
+      # Rust checks compile the app as a library before the release sidecar exists.
+      TAURI_CONFIG: '{"bundle":{"externalBin":[]}}'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.90.0
+          targets: x86_64-pc-windows-msvc
+
+      - name: Restore Rust cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            .cargo-target
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: rust-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            rust-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Validate application version
+        shell: pwsh
+        run: |
+          $packageVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $packageLock = Get-Content package-lock.json -Raw | ConvertFrom-Json -AsHashtable
+          $packageLockVersion = $packageLock['version']
+          $packageLockRootVersion = $packageLock['packages']['']['version']
+          $tauriVersion = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $cargoMetadata = cargo metadata `
+            --manifest-path src-tauri/Cargo.toml `
+            --format-version 1 `
+            --no-deps | ConvertFrom-Json
+          $cargoVersion = $cargoMetadata.packages[0].version
+          $diagnosticsMetadata = cargo metadata `
+            --manifest-path tools/diagnostics/Cargo.toml `
+            --format-version 1 `
+            --no-deps | ConvertFrom-Json
+          $diagnosticsVersion = $diagnosticsMetadata.packages[0].version
+
+          $versions = @(
+            $packageVersion,
+            $packageLockVersion,
+            $packageLockRootVersion,
+            $tauriVersion,
+            $cargoVersion,
+            $diagnosticsVersion
+          ) | Sort-Object -Unique
+          if ($versions.Count -ne 1) {
+            throw "Version mismatch: package.json=$packageVersion, package-lock.json=$packageLockVersion/$packageLockRootVersion, tauri.conf.json=$tauriVersion, app Cargo.toml=$cargoVersion, diagnostics Cargo.toml=$diagnosticsVersion"
+          }
+          Write-Host "Validated OSCMidi version $packageVersion"
+
+      - name: Validate application and diagnostics
+        run: |
+          cargo fmt --manifest-path src-tauri/Cargo.toml --package osc-midi-bridge -- --check
+          cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
+          cargo test --manifest-path src-tauri/Cargo.toml --all-targets --all-features
+          cargo fmt --manifest-path tools/diagnostics/Cargo.toml --package oscmidi-diagnostics -- --check
+          cargo clippy --manifest-path tools/diagnostics/Cargo.toml --target-dir tools/diagnostics/target --all-targets -- -D warnings
+          cargo test --manifest-path tools/diagnostics/Cargo.toml --target-dir tools/diagnostics/target --all-targets
+
+      - name: Validate vendored RTP-MIDI
+        run: |
+          cargo fmt --manifest-path vendor/rtpmidi/Cargo.toml -- --check
+          cargo clippy --manifest-path vendor/rtpmidi/Cargo.toml --all-targets -- -D warnings
+          cargo test --manifest-path vendor/rtpmidi/Cargo.toml --all-targets
+
+      - name: Validate vendored VST hosts
+        run: |
+          cargo check --manifest-path vendor/rack/Cargo.toml --lib --features vst3
+          cargo test --manifest-path vendor/rack/Cargo.toml --lib --features vst3 --no-run
+          cargo test --manifest-path vendor/rack/Cargo.toml --lib --features vst3 midi::tests
+          cargo test --manifest-path vendor/rack/Cargo.toml --lib --features vst3 vst3::scanner::tests
+          cargo fmt --manifest-path vendor/vst/Cargo.toml -- --check
+          cargo check --manifest-path vendor/vst/Cargo.toml --all-targets --features disable_deprecation_warning
+          cargo test --manifest-path vendor/vst/Cargo.toml --all-targets --features disable_deprecation_warning

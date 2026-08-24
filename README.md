@@ -208,7 +208,9 @@ The cleanup runs after both successful and failed builds. It removes `node_modul
 
 ## Automated releases
 
-[Build Windows App](.github/workflows/build-windows.yml) runs on pushes to `main`, version tags, pull requests and manual dispatch. It validates the frontend, application, diagnostics and all three vendored Rust crates before building both worker architectures, the Tauri application, the MSI and the portable archive.
+[Validate](.github/workflows/validate.yml) checks every pull request in three parallel jobs: frontend lint/tests and npm audit on Linux, Rust dependency auditing on Linux, and the complete Windows Rust workspace validation. Pull requests restore the trusted `main` Rust cache without writing branch-specific multi-gigabyte caches.
+
+[Build Windows App](.github/workflows/build-windows.yml) is reserved for pushes to `main`, version tags and manual dispatch. It builds both worker architectures, the Tauri application, the MSI and the portable archive without repeating the pull-request test matrix.
 
 On a successful push to `main`, the workflow reads the common version from `package.json`, `package-lock.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml` and `tools/diagnostics/Cargo.toml`:
 
