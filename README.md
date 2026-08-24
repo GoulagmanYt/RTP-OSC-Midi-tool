@@ -12,7 +12,7 @@
   <a href="https://github.com/GoulagmanYt/RTP-OSC-Midi-tool/actions/workflows/build-windows.yml">
     <img src="https://github.com/GoulagmanYt/RTP-OSC-Midi-tool/actions/workflows/build-windows.yml/badge.svg" alt="Windows build status">
   </a>
-  <img src="https://img.shields.io/badge/version-2.1.0-35c2d5" alt="Version 2.1.0">
+  <img src="https://img.shields.io/github/v/release/GoulagmanYt/RTP-OSC-Midi-tool?label=version&color=35c2d5" alt="Latest release version">
   <img src="https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078d4?logo=windows" alt="Windows 10 and 11">
   <img src="https://img.shields.io/badge/backend-Rust-dea584?logo=rust" alt="Rust backend">
   <img src="https://img.shields.io/badge/desktop-Tauri%202-24c8db?logo=tauri" alt="Tauri 2">
@@ -62,7 +62,7 @@ Download the latest build from the [GitHub Releases page](https://github.com/Gou
 The portable package contains `OSCMidi.exe`, `vst-host-worker-x64.exe`, and `vst-host-worker-x86.exe`. Keep all three in the same directory: the application intentionally does not load VST DLLs in its own process.
 
 > [!NOTE]
-> Release binaries are currently unsigned. Windows can therefore display an unknown-publisher or SmartScreen warning when opening a downloaded build.
+> GitHub Releases are Authenticode-signed and timestamped when the signing secrets are configured. Without them, the workflow publishes unsigned packages with an explicit warning; local builds are also unsigned by default.
 
 ## Quick start
 
@@ -169,6 +169,10 @@ cargo test --manifest-path src-tauri/Cargo.toml --all-targets --all-features
 
 cargo fmt --manifest-path tools/diagnostics/Cargo.toml --package oscmidi-diagnostics -- --check
 cargo clippy --manifest-path tools/diagnostics/Cargo.toml --target-dir tools/diagnostics/target --all-targets -- -D warnings
+
+cargo test --manifest-path vendor/rtpmidi/Cargo.toml --all-targets
+cargo test --manifest-path vendor/rack/Cargo.toml --lib --features vst3 --no-run
+cargo test --manifest-path vendor/vst/Cargo.toml --all-targets --features disable_deprecation_warning
 ```
 
 Developer diagnostics are kept outside the packaged application:
@@ -195,6 +199,7 @@ Successful outputs are preserved in `artifacts\`:
 | `OSCMidi_*_portable.zip` | Complete portable distribution |
 | `OSCMidi_*.msi` | Windows installer |
 | `SHA256SUMS.txt` | Integrity hashes for the generated deliverables |
+| `BUILDINFO.json` | Exact source commit and workflow run used for the packages |
 | `logs\` | Ten most recent build logs |
 
 Run `artifacts\portable\OSCMidi.exe` directly, install the MSI, or copy/extract the complete portable folder. `OSCMidi.exe` requires both architecture-specific VST workers beside it and must never be copied alone.
@@ -203,16 +208,15 @@ The cleanup runs after both successful and failed builds. It removes `node_modul
 
 ## Automated releases
 
-[Build Windows App](.github/workflows/build-windows.yml) runs on pushes to `main`, version tags and manual dispatch. It validates that `package.json`, `Cargo.toml` and `tauri.conf.json` use the same version, then publishes a downloadable workflow artifact.
+[Build Windows App](.github/workflows/build-windows.yml) runs on pushes to `main`, version tags, pull requests and manual dispatch. It validates the frontend, application, diagnostics and all three vendored Rust crates before building both worker architectures, the Tauri application, the MSI and the portable archive.
 
-A `v*` tag also creates or updates the corresponding GitHub Release with the MSI, portable ZIP and checksum file:
+On a successful push to `main`, the workflow reads the common version from `package.json`, `package-lock.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml` and `tools/diagnostics/Cargo.toml`:
 
-```powershell
-git tag v2.1.0
-git push origin v2.1.0
-```
+- If `v<version>` does not exist, the workflow creates the annotated tag and creates the GitHub Release.
+- If the tag and release already exist, the tag remains immutable while the MSI, portable ZIP, checksums and `BUILDINFO.json` are replaced with packages built from the new commit.
+- `BUILDINFO.json` records the exact commit SHA, so same-version maintenance builds remain traceable even though the version tag is not moved.
 
-The tag must exactly match the application version.
+When the repository secrets `WINDOWS_CERTIFICATE`, `WINDOWS_CERTIFICATE_PASSWORD` and `WINDOWS_TIMESTAMP_URL` are all present, the workflow verifies the Authenticode signature of the application, both VST workers and the MSI before changing a release. If all three are absent, publication continues unsigned and emits a warning; a partial signing configuration is rejected. A manual workflow run publishes only when its `publish_release` option is selected; otherwise it performs a normal unsigned validation build.
 
 ## Project layout
 

@@ -6,7 +6,21 @@ on:
       - main
     tags:
       - 'v*'
+  pull_request:
+    branches:
+      - main
+      - 'release/**'
   workflow_dispatch:
+    inputs:
+      publish_release:
+        description: Build, sign and publish the current version
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: oscmidi-windows-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: write
@@ -27,6 +41,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -38,7 +54,7 @@ jobs:
       - name: Setup Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
+          toolchain: 1.90.0
           targets: x86_64-pc-windows-msvc, i686-pc-windows-msvc
 
       - name: Cache Rust dependencies
@@ -56,27 +72,65 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci --no-fund --no-audit
 
-      - name: Validate application version
+      - name: Audit locked dependencies
         shell: pwsh
         run: |
+          npm audit --omit=dev
+          cargo install cargo-audit --version 0.22.0 --locked
+          cargo audit --file src-tauri/Cargo.lock --target-os windows
+          cargo audit --file tools/diagnostics/Cargo.lock --target-os windows
+          cargo audit --file vendor/rack/Cargo.lock --target-os windows
+          cargo audit --file vendor/vst/Cargo.lock --target-os windows
+          cargo audit --file vendor/rtpmidi/Cargo.lock --target-os windows
+
+      - name: Validate application version
+        id: release
+        shell: pwsh
+        env:
+          REQUEST_PUBLISH: ${{ inputs.publish_release }}
+        run: |
           $packageVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $packageLock = Get-Content package-lock.json -Raw | ConvertFrom-Json -AsHashtable
+          $packageLockVersion = $packageLock['version']
+          $packageLockRootVersion = $packageLock['packages']['']['version']
           $tauriVersion = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
           $cargoMetadata = cargo metadata `
             --manifest-path src-tauri/Cargo.toml `
             --format-version 1 `
             --no-deps | ConvertFrom-Json
           $cargoVersion = $cargoMetadata.packages[0].version
+          $diagnosticsMetadata = cargo metadata `
+            --manifest-path tools/diagnostics/Cargo.toml `
+            --format-version 1 `
+            --no-deps | ConvertFrom-Json
+          $diagnosticsVersion = $diagnosticsMetadata.packages[0].version
 
-          $versions = @($packageVersion, $tauriVersion, $cargoVersion) | Sort-Object -Unique
+          $versions = @(
+            $packageVersion,
+            $packageLockVersion,
+            $packageLockRootVersion,
+            $tauriVersion,
+            $cargoVersion,
+            $diagnosticsVersion
+          ) | Sort-Object -Unique
           if ($versions.Count -ne 1) {
-            throw "Version mismatch: package.json=$packageVersion, tauri.conf.json=$tauriVersion, Cargo.toml=$cargoVersion"
+            throw "Version mismatch: package.json=$packageVersion, package-lock.json=$packageLockVersion/$packageLockRootVersion, tauri.conf.json=$tauriVersion, app Cargo.toml=$cargoVersion, diagnostics Cargo.toml=$diagnosticsVersion"
           }
 
           if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne "v$packageVersion") {
             throw "Release tag $env:GITHUB_REF_NAME does not match application version v$packageVersion"
           }
 
-          Write-Host "Validated OSCMidi version $packageVersion"
+          $isMainPush = $env:GITHUB_EVENT_NAME -eq 'push' -and $env:GITHUB_REF -eq 'refs/heads/main'
+          $isVersionTagPush = $env:GITHUB_EVENT_NAME -eq 'push' -and $env:GITHUB_REF -like 'refs/tags/v*'
+          $isManualPublish = $env:GITHUB_EVENT_NAME -eq 'workflow_dispatch' -and $env:REQUEST_PUBLISH -eq 'true'
+          $publish = $isMainPush -or $isVersionTagPush -or $isManualPublish
+          $publishText = $publish.ToString().ToLowerInvariant()
+
+          "version=$packageVersion" >> $env:GITHUB_OUTPUT
+          "tag=v$packageVersion" >> $env:GITHUB_OUTPUT
+          "publish=$publishText" >> $env:GITHUB_OUTPUT
+          Write-Host "Validated OSCMidi version $packageVersion (publish=$publishText)"
 
       - name: Validate frontend
         run: |
@@ -93,6 +147,17 @@ jobs:
           cargo test --manifest-path src-tauri/Cargo.toml --all-targets --all-features
           cargo fmt --manifest-path tools/diagnostics/Cargo.toml --package oscmidi-diagnostics -- --check
           cargo clippy --manifest-path tools/diagnostics/Cargo.toml --target-dir tools/diagnostics/target --all-targets -- -D warnings
+          cargo test --manifest-path tools/diagnostics/Cargo.toml --target-dir tools/diagnostics/target --all-targets
+          cargo fmt --manifest-path vendor/rtpmidi/Cargo.toml -- --check
+          cargo clippy --manifest-path vendor/rtpmidi/Cargo.toml --all-targets -- -D warnings
+          cargo test --manifest-path vendor/rtpmidi/Cargo.toml --all-targets
+          cargo check --manifest-path vendor/rack/Cargo.toml --lib --features vst3
+          cargo test --manifest-path vendor/rack/Cargo.toml --lib --features vst3 --no-run
+          cargo test --manifest-path vendor/rack/Cargo.toml --lib --features vst3 midi::tests
+          cargo test --manifest-path vendor/rack/Cargo.toml --lib --features vst3 vst3::scanner::tests
+          cargo fmt --manifest-path vendor/vst/Cargo.toml -- --check
+          cargo check --manifest-path vendor/vst/Cargo.toml --all-targets --features disable_deprecation_warning
+          cargo test --manifest-path vendor/vst/Cargo.toml --all-targets --features disable_deprecation_warning
 
       - name: Remove stale bundle outputs
         shell: pwsh
@@ -100,8 +165,93 @@ jobs:
           Remove-Item '.cargo-target/release/bundle' -Recurse -Force -ErrorAction SilentlyContinue
           Remove-Item '.cargo-target/release/wix' -Recurse -Force -ErrorAction SilentlyContinue
 
+      - name: Resolve release signing mode
+        id: signing
+        if: steps.release.outputs.publish == 'true'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL }}
+        run: |
+          $configured = @(
+            -not [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE),
+            -not [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PASSWORD),
+            -not [string]::IsNullOrWhiteSpace($env:WINDOWS_TIMESTAMP_URL)
+          )
+          $configuredCount = @($configured | Where-Object { $_ }).Count
+          if ($configuredCount -eq 0) {
+            'enabled=false' >> $env:GITHUB_OUTPUT
+            Write-Warning 'Publishing unsigned packages because no Windows signing secrets are configured.'
+          } elseif ($configuredCount -eq 3) {
+            'enabled=true' >> $env:GITHUB_OUTPUT
+            Write-Host 'Windows release signing is enabled.'
+          } else {
+            throw 'Windows release signing is partially configured. Set all three signing secrets or remove all three.'
+          }
+
+      - name: Import release signing certificate
+        if: steps.signing.outputs.enabled == 'true'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL }}
+        run: |
+          $certificatePath = Join-Path $env:RUNNER_TEMP 'oscmidi-release.pfx'
+          [IO.File]::WriteAllBytes(
+            $certificatePath,
+            [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE)
+          )
+          try {
+            $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+            $certificate = Import-PfxCertificate `
+              -FilePath $certificatePath `
+              -CertStoreLocation Cert:\CurrentUser\My `
+              -Password $password `
+              -Exportable:$false
+            if ($null -eq $certificate -or [string]::IsNullOrWhiteSpace($certificate.Thumbprint)) {
+              throw 'The Windows release certificate could not be imported.'
+            }
+            "WINDOWS_CERTIFICATE_THUMBPRINT=$($certificate.Thumbprint)" >> $env:GITHUB_ENV
+            "WINDOWS_TIMESTAMP_URL=$env:WINDOWS_TIMESTAMP_URL" >> $env:GITHUB_ENV
+          } finally {
+            Remove-Item -LiteralPath $certificatePath -Force -ErrorAction SilentlyContinue
+          }
+
       - name: Build Tauri application and MSI installer
-        run: npm run tauri:build -- --bundles msi --ci
+        shell: pwsh
+        run: |
+          if ('${{ steps.signing.outputs.enabled }}' -eq 'true') {
+            $override = @{
+              bundle = @{
+                windows = @{
+                  certificateThumbprint = $env:WINDOWS_CERTIFICATE_THUMBPRINT
+                  digestAlgorithm = 'sha256'
+                  timestampUrl = $env:WINDOWS_TIMESTAMP_URL
+                }
+              }
+            } | ConvertTo-Json -Depth 5 -Compress
+            $env:TAURI_CONFIG = $override
+          }
+          npm run tauri:build -- --bundles msi --ci
+
+      - name: Verify release Authenticode signatures
+        if: steps.signing.outputs.enabled == 'true'
+        shell: pwsh
+        run: |
+          $files = @(
+            Get-Item '.cargo-target/release/OSCMidi.exe' -ErrorAction Stop
+            Get-Item 'src-tauri/binaries/vst-host-worker-x64-x86_64-pc-windows-msvc.exe' -ErrorAction Stop
+            Get-Item 'src-tauri/binaries/vst-host-worker-x86-x86_64-pc-windows-msvc.exe' -ErrorAction Stop
+            Get-ChildItem '.cargo-target/release/bundle/msi' -Filter '*.msi' -File -ErrorAction Stop
+          )
+          foreach ($file in $files) {
+            $signature = Get-AuthenticodeSignature -LiteralPath $file.FullName
+            if ($signature.Status -ne 'Valid') {
+              throw "Invalid Authenticode signature for $($file.FullName): $($signature.Status)"
+            }
+          }
 
       - name: Collect Windows artifacts
         shell: pwsh
@@ -138,7 +288,30 @@ jobs:
           $portableArchive = "artifacts/OSCMidi_${version}_windows_x64_portable.zip"
           Compress-Archive -Path (Join-Path $portableDirectory '*') -DestinationPath $portableArchive
 
-          $releaseFiles = @($installers[0], (Get-Item $portableArchive))
+          $buildInfoPath = Join-Path $env:GITHUB_WORKSPACE 'artifacts/BUILDINFO.json'
+          $buildInfo = [ordered]@{
+            schemaVersion = 1
+            version = $version
+            tag = "v$version"
+            commit = $env:GITHUB_SHA
+            repository = $env:GITHUB_REPOSITORY
+            workflowRunId = $env:GITHUB_RUN_ID
+            workflowRunAttempt = [int]$env:GITHUB_RUN_ATTEMPT
+            builtAtUtc = (Get-Date).ToUniversalTime().ToString('o')
+            mutableReleaseAssets = $true
+            authenticodeSigned = '${{ steps.signing.outputs.enabled }}' -eq 'true'
+          } | ConvertTo-Json -Depth 3
+          [System.IO.File]::WriteAllText(
+            $buildInfoPath,
+            $buildInfo,
+            [System.Text.UTF8Encoding]::new($false)
+          )
+
+          $releaseFiles = @(
+            $installers[0],
+            (Get-Item $portableArchive),
+            (Get-Item $buildInfoPath)
+          )
           $hashLines = foreach ($file in $releaseFiles | Sort-Object Name) {
             $hash = Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256
             "$($hash.Hash)  $($file.Name)"
@@ -158,21 +331,51 @@ jobs:
           path: artifacts
           if-no-files-found: error
 
-      - name: Attach artifacts to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Ensure version tag exists
+        if: steps.release.outputs.publish == 'true'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
         run: |
-          $tag = $env:GITHUB_REF_NAME
+          git ls-remote --exit-code --tags origin "refs/tags/$env:RELEASE_TAG" *> $null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "Keeping existing immutable tag $env:RELEASE_TAG"
+          } elseif ($LASTEXITCODE -eq 2) {
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git tag --annotate --force $env:RELEASE_TAG $env:GITHUB_SHA `
+              --message "OSCMidi $env:RELEASE_TAG"
+            git push origin "refs/tags/$env:RELEASE_TAG"
+            if ($LASTEXITCODE -ne 0) {
+              throw "Failed to create version tag $env:RELEASE_TAG"
+            }
+          } else {
+            throw "Failed to query version tag $env:RELEASE_TAG"
+          }
+
+      - name: Attach artifacts to GitHub Release
+        if: steps.release.outputs.publish == 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          $tag = $env:RELEASE_TAG
           $repository = $env:GITHUB_REPOSITORY
           $msi = @(Get-ChildItem artifacts -Filter '*.msi' -File -ErrorAction Stop)
           $portable = @(Get-ChildItem artifacts -Filter '*_portable.zip' -File -ErrorAction Stop)
           $checksums = Get-Item artifacts/SHA256SUMS.txt -ErrorAction Stop
+          $buildInfo = Get-Item artifacts/BUILDINFO.json -ErrorAction Stop
           if ($msi.Count -ne 1 -or $portable.Count -ne 1) {
             throw "Expected one MSI and one portable archive; found $($msi.Count) and $($portable.Count)."
           }
-          $assets = @($msi[0].FullName, $portable[0].FullName, $checksums.FullName)
+          $assets = @(
+            $msi[0].FullName,
+            $portable[0].FullName,
+            $checksums.FullName,
+            $buildInfo.FullName
+          )
 
           gh release view $tag --repo $repository *> $null
           if ($LASTEXITCODE -eq 0) {
@@ -188,3 +391,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "Failed to publish GitHub Release $tag"
           }
+
+          $published = gh release view $tag --repo $repository --json assets | ConvertFrom-Json
+          foreach ($expected in @($msi[0].Name, $portable[0].Name, $checksums.Name, $buildInfo.Name)) {
+            $asset = @($published.assets | Where-Object name -eq $expected)
+            if ($asset.Count -ne 1 -or $asset[0].size -le 0) {
+              throw "Release asset verification failed for $expected"
+            }
+          }
+          Write-Host "Published and verified release assets for $tag at commit $env:GITHUB_SHA"
