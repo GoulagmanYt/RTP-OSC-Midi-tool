@@ -8,10 +8,12 @@ All notable changes to OSCMidi are documented here.
 
 - Split pull-request validation into parallel frontend, dependency-audit and Windows Rust jobs while reserving MSI packaging for release-producing events.
 - Made pull requests restore the shared Rust cache without creating isolated multi-gigabyte cache entries.
+- Consolidated the pending React, Radix UI, Vite, PostCSS, CPAL, Criterion, Chrono and Serde JSON maintenance updates.
 
 ### Fixed
 
 - Prevented pull-request artifact uploads from failing when GitHub exposes merge refs containing `/`.
+- Updated the locked transitive Nano ID dependency to remove its high-severity zero-length generator advisory.
 
 ## 2.5.0 - 2026-08-24
 
