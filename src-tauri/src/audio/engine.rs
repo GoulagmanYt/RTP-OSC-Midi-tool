@@ -109,6 +109,17 @@ impl AudioEngine {
         let _ = self.send_midi_with_outcome(bytes);
     }
 
+    /// Requests a panic without blocking the bridge or an input callback.
+    pub fn request_emergency_midi_reset(&self) {
+        #[cfg(target_os = "windows")]
+        if self.is_worker_enabled() {
+            self.worker.request_emergency_reset();
+            return;
+        }
+        self.midi_emergency_reset_requested
+            .store(true, Ordering::Release);
+    }
+
     pub fn send_midi_with_age(&self, bytes: &[u8], age_us: u64) {
         let Some(packet) = MidiPacket::from_bytes_with_age(bytes, age_us) else {
             return;
@@ -121,6 +132,9 @@ impl AudioEngine {
         if self.is_worker_enabled() {
             return if self.worker.try_send_midi(bytes) {
                 MidiSendOutcome::Sent
+            } else if crate::midi::is_critical_release_message(bytes) {
+                self.worker.request_emergency_reset();
+                MidiSendOutcome::CriticalFallbackReset
             } else {
                 MidiSendOutcome::DroppedNonCritical
             };

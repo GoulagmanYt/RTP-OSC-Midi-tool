@@ -265,6 +265,7 @@ pub fn main<T: Plugin>(callback: HostCallbackProc) -> *mut AEffect {
 #[cfg(test)]
 mod tests {
     use std::ptr;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use std::os::raw::c_void;
 
@@ -275,6 +276,14 @@ mod tests {
     };
 
     struct TestPlugin;
+
+    static DROP_TEST: AtomicBool = AtomicBool::new(false);
+
+    impl Drop for TestPlugin {
+        fn drop(&mut self) {
+            DROP_TEST.store(true, Ordering::SeqCst);
+        }
+    }
 
     impl Plugin for TestPlugin {
         fn new(_host: HostCallback) -> Self {
@@ -348,15 +357,7 @@ mod tests {
 
     #[test]
     fn plugin_drop() {
-        static mut DROP_TEST: bool = false;
-
-        impl Drop for TestPlugin {
-            fn drop(&mut self) {
-                unsafe {
-                    DROP_TEST = true;
-                }
-            }
-        }
+        DROP_TEST.store(false, Ordering::SeqCst);
 
         let aeffect = VSTPluginMain(pass_callback);
         assert!(!aeffect.is_null());
@@ -364,7 +365,7 @@ mod tests {
         unsafe { (*aeffect).drop_plugin() };
 
         // Assert that the VST is shut down and dropped.
-        assert!(unsafe { DROP_TEST });
+        assert!(DROP_TEST.load(Ordering::SeqCst));
     }
 
     #[test]

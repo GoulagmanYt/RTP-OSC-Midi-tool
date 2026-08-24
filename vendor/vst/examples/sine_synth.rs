@@ -148,7 +148,7 @@ plugin_main!(SineSynth);
 
 #[cfg(test)]
 mod tests {
-    use midi_pitch_to_freq;
+    use super::midi_pitch_to_freq;
 
     #[test]
     fn test_midi_pitch_to_freq() {

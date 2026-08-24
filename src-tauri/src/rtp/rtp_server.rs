@@ -1,5 +1,6 @@
 use crossbeam_channel::Sender;
 use parking_lot::Mutex;
+use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
@@ -8,19 +9,21 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use tauri::async_runtime::{self, JoinHandle};
 use tauri::Emitter;
-use tokio::sync::{oneshot, Notify};
+use tokio::sync::{mpsc, oneshot, Notify};
 use uuid::Uuid;
 
 use rtpmidi::sessions::{
-    events::event_handling::{MidiMessageEvent, ParticipantJoinedEvent, ParticipantLeftEvent},
+    events::event_handling::{
+        PacketLossEvent, ParticipantJoinedEvent, ParticipantLeftEvent, TimestampedMidiMessageEvent,
+    },
     invite_responder::InviteResponder,
     rtp_midi_session::RtpMidiSession,
 };
 
 use crate::{
-    bridge::pipeline::try_enqueue_midi_frame,
+    bridge::pipeline::{request_critical_midi_reset, try_enqueue_midi_frame},
     logger::{logs_enabled, FrontendLogger},
-    midi::MidiFrame,
+    midi::{is_critical_release_message, MidiFrame},
     tauri::utils::safe_block_on,
     types::RtpParticipantInfo,
 };
@@ -29,11 +32,16 @@ use super::rtp_advertisement::{RtpAdvertisementStatus, RtpMdnsAdvertisement};
 use super::rtp_midi::{midi_to_bytes, participant_matches_target};
 
 const RTP_PARTICIPANTS_EVENT: &str = "rtp:participants";
+const RTP_JITTER_BUFFER: Duration = Duration::from_millis(3);
+const RTP_MAX_SCHEDULE_AHEAD: Duration = Duration::from_millis(50);
+const RTP_SCHEDULER_CAPACITY: usize = 2_048;
+const RTP_PENDING_CAPACITY: usize = 4_096;
 
 /// Compteur de messages MIDI abandonnés faute de place dans le canal.
 /// Incrémenté de façon atomique dans le callback temps-réel, lu depuis
 /// le thread de log périodique.
 static DROPPED_MIDI_COUNT: AtomicU64 = AtomicU64::new(0);
+static RTP_LOG_SAMPLE_LAST_MS: AtomicU64 = AtomicU64::new(0);
 
 /// Retourne le nombre de messages MIDI RTP abandonnés (canal plein).
 pub fn rtp_dropped_count() -> u64 {
@@ -58,7 +66,6 @@ pub struct RtpServer {
     bound_port: u16,
     participants: Arc<Mutex<Vec<RtpParticipantInfo>>>,
     advertisement: Option<RtpMdnsAdvertisement>,
-    advertisement_status: RtpAdvertisementStatus,
 }
 
 impl RtpServer {
@@ -132,7 +139,6 @@ impl RtpServer {
             bound_port + 1
         ));
         let advertisement = RtpMdnsAdvertisement::start(&name, bound_port, &logger);
-        let advertisement_status = advertisement.status();
         if !remote_targets.is_empty() {
             for target in &remote_targets {
                 logger.info(format!(
@@ -158,43 +164,55 @@ impl RtpServer {
         emit_participants(&logger, &participants);
 
         let handle = async_runtime::spawn(async move {
+            let (scheduled_tx, scheduled_rx) = mpsc::channel(RTP_SCHEDULER_CAPACITY);
+            let scheduler =
+                async_runtime::spawn(run_rtp_scheduler(scheduled_rx, midi_sink, logger.clone()));
             // ── Listener MIDI ────────────────────────────────────────────────
             // HOT PATH : ce callback est appelé sur chaque message reçu.
             // Règles :
             //   • Pas de verrou long-durée.
             //   • Pas d'allocation évitable.
-            //   • Pas de chemin de drop interne : le canal bridge est non borné.
+            //   • File bornée et ordonnancement selon le timestamp RTP.
             let rtp_logger = logger.clone();
             session
-                .add_listener(MidiMessageEvent, move |(message, _delta)| {
-                    let bytes = midi_to_bytes(message);
+                .add_listener(TimestampedMidiMessageEvent, move |event| {
+                    let bytes = midi_to_bytes(event.message);
 
                     // Logging RTP optionnel : le formatage + IPC frontend sont coûteux.
                     // On ne l'active QUE si le mode développeur (verbose) est activé,
-                    // et on l'exécute de façon asynchrone pour NE JAMAIS bloquer
-                    // le thread de réception réseau UDP (ce qui causerait des pertes de notes).
-                    if log_rtp && logs_enabled() && crate::logger::should_log_debug() {
-                        let rtp_logger_clone = rtp_logger.clone();
-                        let bytes_clone = bytes.clone();
-                        tauri::async_runtime::spawn(async move {
-                            rtp_logger_clone
-                                .debug(format!("RTP MIDI: {:02X?}", bytes_clone.as_slice()));
+                    // Le sampler atomique borne ce chemin à une tâche par seconde :
+                    // le callback UDP ne réalise donc aucune I/O de journalisation.
+                    if log_rtp
+                        && logs_enabled()
+                        && crate::logger::should_log_debug()
+                        && should_sample_rtp_log()
+                    {
+                        let sampled_logger = rtp_logger.clone();
+                        let sampled_bytes = bytes.clone();
+                        async_runtime::spawn(async move {
+                            sampled_logger.debug(format!(
+                                "RTP MIDI: {:02X?} timestamp={}",
+                                sampled_bytes.as_slice(),
+                                event.timestamp
+                            ));
                         });
                     }
 
-                    // Lifecycle changes are rare; the read lock is held only for an Arc clone and
-                    // avoids adding another synchronization dependency to this callback.
-                    let Some(tx) = midi_sink.read().as_ref().cloned() else {
-                        return;
-                    };
-
-                    let _ = try_enqueue_midi_frame(
-                        &tx,
-                        MidiFrame {
+                    let timed = TimedRtpFrame {
+                        frame: MidiFrame {
                             data: bytes,
                             source: std::sync::Arc::clone(&rtp_source),
                         },
-                    );
+                        timestamp: event.timestamp,
+                        ssrc: event.ssrc,
+                        arrived: Instant::now(),
+                    };
+                    if let Err(error) = scheduled_tx.try_send(timed) {
+                        DROPPED_MIDI_COUNT.fetch_add(1, Ordering::Relaxed);
+                        if is_critical_release_message(error.into_inner().frame.data.as_slice()) {
+                            request_critical_midi_reset();
+                        }
+                    }
                 })
                 .await;
 
@@ -226,6 +244,7 @@ impl RtpServer {
             let left_logger = logger.clone();
             session
                 .add_listener(ParticipantLeftEvent, move |participant| {
+                    request_critical_midi_reset();
                     let name = participant.name().to_str().unwrap_or("Unknown");
                     {
                         let mut guard = participants_for_left.lock();
@@ -237,6 +256,25 @@ impl RtpServer {
                         "RTP-MIDI participant left: {name} ({})",
                         participant.addr()
                     ));
+                })
+                .await;
+
+            let loss_logger = logger.clone();
+            session
+                .add_listener(PacketLossEvent, move |loss| {
+                    // RFC 6295 recovery journals are not emitted by every peer. A
+                    // deterministic controller reset is safer than leaving notes or
+                    // sustain latched after a proven RTP sequence gap.
+                    request_critical_midi_reset();
+                    if should_sample_rtp_log() {
+                        loss_logger.warn(format!(
+                            "RTP-MIDI packet loss: ssrc={} expected={} received={} lost={}",
+                            loss.ssrc,
+                            loss.expected_sequence,
+                            loss.received_sequence,
+                            loss.lost_packets
+                        ));
+                    }
                 })
                 .await;
 
@@ -314,6 +352,8 @@ impl RtpServer {
                     }
                 }
             }
+            scheduler.abort();
+            let _ = scheduler.await;
         });
 
         Ok(Self {
@@ -322,7 +362,6 @@ impl RtpServer {
             bound_port,
             participants,
             advertisement: Some(advertisement),
-            advertisement_status,
         })
     }
 
@@ -345,8 +384,147 @@ impl RtpServer {
     }
 
     pub fn advertisement_status(&self) -> RtpAdvertisementStatus {
-        self.advertisement_status.clone()
+        self.advertisement
+            .as_ref()
+            .map(RtpMdnsAdvertisement::status)
+            .unwrap_or_default()
     }
+}
+
+struct TimedRtpFrame {
+    frame: MidiFrame,
+    timestamp: u32,
+    ssrc: u32,
+    arrived: Instant,
+}
+
+struct RtpClockMap {
+    origin_timestamp: u64,
+    last_timestamp: u64,
+    origin_local: Instant,
+}
+
+impl RtpClockMap {
+    fn new(timestamp: u32, arrived: Instant) -> Self {
+        Self {
+            origin_timestamp: u64::from(timestamp),
+            last_timestamp: u64::from(timestamp),
+            origin_local: arrived + RTP_JITTER_BUFFER,
+        }
+    }
+
+    fn deadline(&mut self, timestamp: u32, arrived: Instant) -> Instant {
+        const WRAP: u64 = 1u64 << 32;
+        const HALF_WRAP: u64 = WRAP / 2;
+        let base = self.last_timestamp & !(WRAP - 1);
+        let mut extended = base | u64::from(timestamp);
+        if extended.saturating_add(HALF_WRAP) < self.last_timestamp {
+            extended = extended.saturating_add(WRAP);
+        } else if extended > self.last_timestamp.saturating_add(HALF_WRAP) {
+            extended = extended.saturating_sub(WRAP);
+        }
+        self.last_timestamp = self.last_timestamp.max(extended);
+        let ticks = extended.saturating_sub(self.origin_timestamp);
+        let mapped = self.origin_local + Duration::from_micros(ticks.saturating_mul(100));
+        mapped.max(arrived).min(arrived + RTP_MAX_SCHEDULE_AHEAD)
+    }
+}
+
+async fn run_rtp_scheduler(
+    mut receiver: mpsc::Receiver<TimedRtpFrame>,
+    sink: Arc<parking_lot::RwLock<Option<Sender<MidiFrame>>>>,
+    logger: FrontendLogger,
+) {
+    let mut clocks = HashMap::<u32, RtpClockMap>::new();
+    let mut pending = BTreeMap::<Instant, Vec<MidiFrame>>::new();
+    let mut pending_count = 0usize;
+    loop {
+        if pending.is_empty() {
+            let Some(event) = receiver.recv().await else {
+                break;
+            };
+            schedule_rtp_frame(event, &mut clocks, &mut pending, &mut pending_count);
+            continue;
+        }
+
+        let Some((&deadline, _)) = pending.first_key_value() else {
+            continue;
+        };
+        tokio::select! {
+            event = receiver.recv() => {
+                let Some(event) = event else {
+                    flush_scheduled_frames(&mut pending, &sink, &mut pending_count, true);
+                    break;
+                };
+                schedule_rtp_frame(event, &mut clocks, &mut pending, &mut pending_count);
+            }
+            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+                flush_scheduled_frames(&mut pending, &sink, &mut pending_count, false);
+            }
+        }
+    }
+    logger.debug("RTP-MIDI timestamp scheduler stopped");
+}
+
+fn schedule_rtp_frame(
+    event: TimedRtpFrame,
+    clocks: &mut HashMap<u32, RtpClockMap>,
+    pending: &mut BTreeMap<Instant, Vec<MidiFrame>>,
+    pending_count: &mut usize,
+) {
+    if *pending_count >= RTP_PENDING_CAPACITY {
+        DROPPED_MIDI_COUNT.fetch_add(1, Ordering::Relaxed);
+        if is_critical_release_message(event.frame.data.as_slice()) {
+            request_critical_midi_reset();
+        }
+        return;
+    }
+    let clock = clocks
+        .entry(event.ssrc)
+        .or_insert_with(|| RtpClockMap::new(event.timestamp, event.arrived));
+    let deadline = clock.deadline(event.timestamp, event.arrived);
+    pending.entry(deadline).or_default().push(event.frame);
+    *pending_count += 1;
+}
+
+fn flush_scheduled_frames(
+    pending: &mut BTreeMap<Instant, Vec<MidiFrame>>,
+    sink: &Arc<parking_lot::RwLock<Option<Sender<MidiFrame>>>>,
+    pending_count: &mut usize,
+    flush_all: bool,
+) {
+    let now = Instant::now();
+    while pending
+        .first_key_value()
+        .is_some_and(|(deadline, _)| flush_all || *deadline <= now)
+    {
+        let Some((_, frames)) = pending.pop_first() else {
+            break;
+        };
+        *pending_count = (*pending_count).saturating_sub(frames.len());
+        let tx = sink.read().as_ref().cloned();
+        for frame in frames {
+            let Some(tx) = tx.as_ref() else {
+                continue;
+            };
+            if try_enqueue_midi_frame(tx, frame).is_err() {
+                DROPPED_MIDI_COUNT.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
+fn should_sample_rtp_log() -> bool {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u64::MAX as u128) as u64;
+    let last = RTP_LOG_SAMPLE_LAST_MS.load(Ordering::Relaxed);
+    now.saturating_sub(last) >= 1_000
+        && RTP_LOG_SAMPLE_LAST_MS
+            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
 }
 
 fn emit_participants(logger: &FrontendLogger, participants: &Arc<Mutex<Vec<RtpParticipantInfo>>>) {
@@ -356,6 +534,8 @@ fn emit_participants(logger: &FrontendLogger, participants: &Arc<Mutex<Vec<RtpPa
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn rtp_callback_uses_bounded_enqueue_path() {
         let source = include_str!("rtp_server.rs");
@@ -365,5 +545,25 @@ mod tests {
         assert!(source.contains("&tx"));
         assert!(source.contains("MidiFrame"));
         assert!(!source.contains(&forbidden));
+    }
+
+    #[test]
+    fn rtp_clock_map_preserves_delta_and_handles_wrap() {
+        let arrived = Instant::now();
+        let mut clock = RtpClockMap::new(u32::MAX - 5, arrived);
+        let first = clock.deadline(u32::MAX - 5, arrived);
+        let after_wrap = clock.deadline(4, arrived);
+
+        assert_eq!(first, arrived + RTP_JITTER_BUFFER);
+        assert_eq!(after_wrap.duration_since(first), Duration::from_millis(1));
+    }
+
+    #[test]
+    fn rtp_clock_map_bounds_malicious_future_timestamp() {
+        let arrived = Instant::now();
+        let mut clock = RtpClockMap::new(0, arrived);
+        let deadline = clock.deadline(1_000_000, arrived);
+
+        assert_eq!(deadline, arrived + RTP_MAX_SCHEDULE_AHEAD);
     }
 }

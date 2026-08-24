@@ -3,7 +3,7 @@ use std::{
     path::PathBuf,
     process::{Child, Command, Stdio},
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
     time::{Duration, Instant},
@@ -99,6 +99,7 @@ struct SupervisorInner {
     request_sequence: AtomicU64,
     midi_sequence: AtomicU64,
     state_generation: AtomicU64,
+    emergency_reset_pending: AtomicBool,
     last_load: Mutex<Option<(AudioSettings, Option<String>)>>,
     restart_history: Mutex<VecDeque<Instant>>,
 }
@@ -123,6 +124,7 @@ impl VstWorkerSupervisor {
                 request_sequence: AtomicU64::new(1),
                 midi_sequence: AtomicU64::new(1),
                 state_generation: AtomicU64::new(0),
+                emergency_reset_pending: AtomicBool::new(false),
                 last_load: Mutex::new(None),
                 restart_history: Mutex::new(VecDeque::new()),
             }),
@@ -294,6 +296,24 @@ impl VstWorkerSupervisor {
             guard.snapshot.midi_drops = guard.snapshot.midi_drops.saturating_add(1);
         }
         sent
+    }
+
+    pub fn request_emergency_reset(&self) {
+        self.inner
+            .emergency_reset_pending
+            .store(true, Ordering::Release);
+        let request_id = self.next_request_id();
+        let sent = self.inner.session.lock().as_ref().is_some_and(|session| {
+            session
+                .commands
+                .try_send(SessionCommand::Notify(ControlMessage::Panic { request_id }))
+                .is_ok()
+        });
+        if sent {
+            self.inner
+                .emergency_reset_pending
+                .store(false, Ordering::Release);
+        }
     }
 
     pub async fn open_editor(&self) -> Result<(), String> {
@@ -518,12 +538,48 @@ impl SessionCredentials {
 }
 
 fn create_pipe_server(name: &str, buffer_bytes: u32) -> Result<NamedPipeServer, String> {
-    ServerOptions::new()
+    use windows::{
+        core::w,
+        Win32::{
+            Foundation::{LocalFree, HLOCAL},
+            Security::{
+                Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW,
+                PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
+            },
+        },
+    };
+
+    let mut descriptor = PSECURITY_DESCRIPTOR::default();
+    // Protected DACL: only LocalSystem and the object owner (the interactive
+    // user that launched OSCMidi) may open a worker pipe.
+    unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            w!("D:P(A;;GA;;;SY)(A;;GA;;;OW)"),
+            1,
+            &mut descriptor,
+            None,
+        )
+        .map_err(|error| format!("Failed to create worker pipe security descriptor: {error}"))?;
+    }
+    let mut attributes = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: descriptor.0,
+        bInheritHandle: false.into(),
+    };
+    let mut options = ServerOptions::new();
+    options
         .first_pipe_instance(true)
+        .reject_remote_clients(true)
         .in_buffer_size(buffer_bytes)
-        .out_buffer_size(buffer_bytes)
-        .create(name)
-        .map_err(|error| format!("Failed to create named pipe {name}: {error}"))
+        .out_buffer_size(buffer_bytes);
+    let result = unsafe {
+        options
+            .create_with_security_attributes_raw(name, std::ptr::from_mut(&mut attributes).cast())
+    };
+    unsafe {
+        let _ = LocalFree(Some(HLOCAL(descriptor.0)));
+    }
+    result.map_err(|error| format!("Failed to create named pipe {name}: {error}"))
 }
 
 fn worker_executable_path() -> Result<PathBuf, String> {
@@ -830,6 +886,16 @@ async fn run_session(runtime: SessionRuntime) {
                 }
             },
             _ = poll.tick() => {
+                if inner.emergency_reset_pending.swap(false, Ordering::AcqRel) {
+                    let request_id = inner.request_sequence.fetch_add(1, Ordering::Relaxed);
+                    if let Err(error) = write_control_frame(
+                        &mut writer,
+                        &ControlMessage::Panic { request_id },
+                    ).await {
+                        terminal_error = Some(format!("worker emergency reset failed: {error}"));
+                        break;
+                    }
+                }
                 match child.child.try_wait() {
                     Ok(Some(status)) => {
                         terminal_error = Some(format!("worker exited with {status}"));

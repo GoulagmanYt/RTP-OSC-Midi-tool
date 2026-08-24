@@ -31,7 +31,9 @@ use crate::{
     vst_scan::{is_vst2_path, is_vst3_path},
 };
 
-use super::runtime_state::{AudioError, AudioSettings, PluginBackend, Vst2TimeContext};
+use super::runtime_state::{
+    AudioError, AudioSettings, PluginBackend, Vst2TimeContext, MAX_PLUGIN_CHANNELS,
+};
 
 #[cfg(target_os = "windows")]
 pub(super) const VST2_RESIZE_MESSAGE: u32 = WM_APP + 0x317;
@@ -162,7 +164,7 @@ pub(super) fn load_plugin_backend(
     let host = std::sync::Arc::new(std::sync::Mutex::new(SimpleHost::new(
         plugin_id,
         sample_rate,
-        initial_block_size,
+        max_block_size.min(u32::MAX as usize) as u32,
         std::sync::Arc::clone(&time),
     )));
     let load_path = crate::plugin_probe::native_plugin_load_path(vst_path);
@@ -177,12 +179,19 @@ pub(super) fn load_plugin_backend(
         .map_err(|error| AudioError::Message(format!("Failed to instantiate VST: {}", error)))?;
     instance.init();
     instance.set_sample_rate(sample_rate as f32);
-    instance.set_block_size(initial_block_size as i64);
-    logger.debug(format!("VST2 block size: {} samples", initial_block_size));
+    // VST2's effSetBlockSize contract is a processing capacity, not a promise
+    // that every processReplacing call has exactly this size. CPAL/WASAPI may
+    // legitimately vary callback sizes, so advertise the preallocated maximum.
+    instance.set_block_size(max_block_size.min(i64::MAX as usize) as i64);
+    logger.debug(format!(
+        "VST2 block size budget: {} samples (initial stream={})",
+        max_block_size, initial_block_size
+    ));
 
     let info = instance.get_info();
     let input_channels = info.inputs as usize;
     let output_channels = info.outputs as usize;
+    validate_plugin_channel_count(input_channels, output_channels)?;
     let latency_samples = info.initial_delay.max(0) as u32;
     logger.debug(format!(
         "VST2 '{}': {} inputs / {} outputs",
@@ -376,12 +385,22 @@ fn load_vst3_plugin(
             logger.warn(format!("VST3 channel probe failed: {error}"));
             AudioError::Message(format!("VST3 channel probe failed: {error}"))
         })?;
+    validate_plugin_channel_count(inputs, outputs)?;
     logger.debug(format!(
         "VST3 '{}': {} inputs / {} outputs",
         info.name, inputs, outputs
     ));
 
     Ok((plugin, inputs, outputs))
+}
+
+fn validate_plugin_channel_count(inputs: usize, outputs: usize) -> Result<(), AudioError> {
+    if inputs > MAX_PLUGIN_CHANNELS || outputs > MAX_PLUGIN_CHANNELS {
+        return Err(AudioError::Message(format!(
+            "Plugin channel count exceeds the real-time-safe limit ({inputs} inputs, {outputs} outputs, limit {MAX_PLUGIN_CHANNELS})"
+        )));
+    }
+    Ok(())
 }
 
 fn scan_vst3_info(scanner: &Vst3Scanner, vst_path: &Path) -> Result<rack::PluginInfo, AudioError> {

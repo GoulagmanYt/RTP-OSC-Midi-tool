@@ -17,7 +17,12 @@ use windows::{
     core::{w, PCWSTR},
     Win32::{
         Foundation::{
-            CloseHandle, HANDLE, HWND, INVALID_HANDLE_VALUE, LPARAM, LRESULT, RECT, WPARAM,
+            CloseHandle, LocalFree, HANDLE, HLOCAL, HWND, INVALID_HANDLE_VALUE, LPARAM, LRESULT,
+            RECT, WPARAM,
+        },
+        Security::{
+            Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW,
+            PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
         },
         System::{
             LibraryLoader::GetModuleHandleW,
@@ -203,17 +208,65 @@ struct Mapping {
     shared: NonNull<BridgeShared>,
 }
 
+#[cfg(target_pointer_width = "64")]
+struct PrivateKernelSecurity {
+    descriptor: PSECURITY_DESCRIPTOR,
+    attributes: SECURITY_ATTRIBUTES,
+}
+
+#[cfg(target_pointer_width = "64")]
+impl PrivateKernelSecurity {
+    fn new() -> Result<Self, String> {
+        let mut descriptor = PSECURITY_DESCRIPTOR::default();
+        unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                w!("D:P(A;;GA;;;SY)(A;;GA;;;OW)"),
+                1,
+                &mut descriptor,
+                None,
+            )
+            .map_err(|error| format!("Failed to create DSP bridge security descriptor: {error}"))?;
+        }
+        Ok(Self {
+            descriptor,
+            attributes: SECURITY_ATTRIBUTES {
+                nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+                lpSecurityDescriptor: descriptor.0,
+                bInheritHandle: false.into(),
+            },
+        })
+    }
+
+    fn attributes(&self) -> *const SECURITY_ATTRIBUTES {
+        std::ptr::from_ref(&self.attributes)
+    }
+}
+
+#[cfg(target_pointer_width = "64")]
+impl Drop for PrivateKernelSecurity {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = LocalFree(Some(HLOCAL(self.descriptor.0)));
+        }
+    }
+}
+
 unsafe impl Send for Mapping {}
 
 impl Mapping {
     #[cfg(target_pointer_width = "64")]
-    fn create(name: &str, token: u64, max_block_size: usize) -> Result<Self, String> {
+    fn create(
+        name: &str,
+        token: u64,
+        max_block_size: usize,
+        security: &PrivateKernelSecurity,
+    ) -> Result<Self, String> {
         let wide = wide(name);
         let bytes = size_of::<BridgeShared>();
         let handle = unsafe {
             CreateFileMappingW(
                 INVALID_HANDLE_VALUE,
-                None,
+                Some(security.attributes()),
                 PAGE_READWRITE,
                 (bytes as u64 >> 32) as u32,
                 bytes as u32,
@@ -317,11 +370,18 @@ impl RemotePlugin {
         let mapping_name = format!("Local\\OSCMidi-VST-{nonce}");
         let event_name = format!("Local\\OSCMidi-VST-Request-{nonce}");
         let token = stable_token(&nonce);
-        let mapping = Mapping::create(&mapping_name, token, max_block_size)?;
+        let security = PrivateKernelSecurity::new()?;
+        let mapping = Mapping::create(&mapping_name, token, max_block_size, &security)?;
         let event_wide = wide(&event_name);
-        let request_event =
-            unsafe { CreateEventW(None, false, false, PCWSTR(event_wide.as_ptr())) }
-                .map_err(|error| format!("CreateEventW failed: {error}"))?;
+        let request_event = unsafe {
+            CreateEventW(
+                Some(security.attributes()),
+                false,
+                false,
+                PCWSTR(event_wide.as_ptr()),
+            )
+        }
+        .map_err(|error| format!("CreateEventW failed: {error}"))?;
 
         let current = std::env::current_exe()
             .map_err(|error| format!("Cannot resolve x64 worker path: {error}"))?;

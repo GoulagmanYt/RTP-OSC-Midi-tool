@@ -15,8 +15,6 @@ use parking_lot::Mutex;
 use rtrb::Consumer;
 use vst::{buffer::AudioBuffer, plugin::Plugin};
 
-use crate::logger::background_log;
-
 use super::callback_render::replay_last_output_or_silence as replay_output_or_silence;
 use super::{
     callback_midi::{process_pending_vst2_midi, process_pending_vst3_midi, send_reset_messages},
@@ -70,37 +68,31 @@ pub(super) fn build_output_stream_for_sample<T: Sample + SizedSample + FromSampl
             move |data: &mut [T], info: &OutputCallbackInfo| {
                 audio_callback(data, channels, &mut state, &plugin, info)
             },
-            move |err| {
-                match err.kind() {
-                    ErrorKind::Xrun => {
-                        error_telemetry.xruns.fetch_add(1, Ordering::Relaxed);
-                    }
-                    ErrorKind::DeviceChanged => {
-                        error_telemetry
-                            .stream_route_changes
-                            .fetch_add(1, Ordering::Relaxed);
-                    }
-                    ErrorKind::RealtimeDenied => {}
-                    kind => {
-                        error_reset.store(true, Ordering::Release);
-                        error_telemetry
-                            .stream_recovery_requests
-                            .fetch_add(1, Ordering::Relaxed);
-                        error_telemetry
-                            .stream_fatal_error
-                            .compare_exchange(
-                                0,
-                                stream_error_code(kind),
-                                Ordering::AcqRel,
-                                Ordering::Relaxed,
-                            )
-                            .ok();
-                    }
+            move |err| match err.kind() {
+                ErrorKind::Xrun => {
+                    error_telemetry.xruns.fetch_add(1, Ordering::Relaxed);
                 }
-                background_log(
-                    "warn",
-                    format!("Audio stream error ({:?}): {}", err.kind(), err),
-                );
+                ErrorKind::DeviceChanged => {
+                    error_telemetry
+                        .stream_route_changes
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                ErrorKind::RealtimeDenied => {}
+                kind => {
+                    error_reset.store(true, Ordering::Release);
+                    error_telemetry
+                        .stream_recovery_requests
+                        .fetch_add(1, Ordering::Relaxed);
+                    error_telemetry
+                        .stream_fatal_error
+                        .compare_exchange(
+                            0,
+                            stream_error_code(kind),
+                            Ordering::AcqRel,
+                            Ordering::Relaxed,
+                        )
+                        .ok();
+                }
             },
             None,
         )

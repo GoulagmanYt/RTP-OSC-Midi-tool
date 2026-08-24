@@ -16,6 +16,7 @@ use std::path::PathBuf as StdPathBuf;
 
 const UPRIGHT_PIANO_VST3_CLASS_UID: &str = "5653545F474B64757072696768742070";
 const UPRIGHT_PIANO_UNSAFE_STATE_FILE_SIZE: u64 = 4_173_312;
+const MAX_PROBE_STREAM_BYTES: u64 = 256 * 1024;
 
 #[path = "plugin_probe_arch.rs"]
 mod plugin_probe_arch;
@@ -348,24 +349,16 @@ fn run_probe_process(path: &Path, timeout: Duration) -> Result<Vec<VstPluginEntr
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| format!("Failed to start isolated VST probe: {error}"))?;
-    let mut stdout_pipe = child
+    let stdout_pipe = child
         .stdout
         .take()
         .ok_or_else(|| "VST probe stdout pipe unavailable".to_string())?;
-    let mut stderr_pipe = child
+    let stderr_pipe = child
         .stderr
         .take()
         .ok_or_else(|| "VST probe stderr pipe unavailable".to_string())?;
-    let stdout_reader = std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let _ = stdout_pipe.read_to_end(&mut bytes);
-        bytes
-    });
-    let stderr_reader = std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let _ = stderr_pipe.read_to_end(&mut bytes);
-        bytes
-    });
+    let stdout_reader = std::thread::spawn(move || read_bounded_probe_stream(stdout_pipe));
+    let stderr_reader = std::thread::spawn(move || read_bounded_probe_stream(stderr_pipe));
     let started = Instant::now();
     let exit_status = loop {
         match child.try_wait() {
@@ -392,12 +385,18 @@ fn run_probe_process(path: &Path, timeout: Duration) -> Result<Vec<VstPluginEntr
             }
         }
     };
-    let stdout_bytes = stdout_reader
+    let (stdout_bytes, stdout_exceeded) = stdout_reader
         .join()
         .map_err(|_| "VST probe stdout reader panicked".to_string())?;
-    let stderr_bytes = stderr_reader
+    let (stderr_bytes, stderr_exceeded) = stderr_reader
         .join()
         .map_err(|_| "VST probe stderr reader panicked".to_string())?;
+    if stdout_exceeded || stderr_exceeded {
+        return Err(format!(
+            "VST probe output exceeded the {} KiB per-stream safety limit",
+            MAX_PROBE_STREAM_BYTES / 1024
+        ));
+    }
     let stdout = String::from_utf8_lossy(&stdout_bytes);
     let json = stdout
         .lines()
@@ -418,6 +417,16 @@ fn run_probe_process(path: &Path, timeout: Duration) -> Result<Vec<VstPluginEntr
     serde_json::from_str::<Vec<VstPluginEntry>>(json)
         .or_else(|_| serde_json::from_str::<VstPluginEntry>(json).map(|entry| vec![entry]))
         .map_err(|error| format!("Invalid VST probe result: {error}"))
+}
+
+fn read_bounded_probe_stream(reader: impl Read) -> (Vec<u8>, bool) {
+    let mut bytes = Vec::new();
+    let _ = reader
+        .take(MAX_PROBE_STREAM_BYTES + 1)
+        .read_to_end(&mut bytes);
+    let exceeded = bytes.len() as u64 > MAX_PROBE_STREAM_BYTES;
+    bytes.truncate(MAX_PROBE_STREAM_BYTES as usize);
+    (bytes, exceeded)
 }
 
 fn output_excerpt(output: &str) -> String {
@@ -560,6 +569,15 @@ mod tests {
     use rack::{PluginInfo, PluginType};
     use std::fs;
     use tempfile::tempdir;
+
+    #[test]
+    fn probe_stream_reader_never_retains_more_than_the_limit() {
+        let payload = vec![0x41; MAX_PROBE_STREAM_BYTES as usize + 32];
+        let (bytes, exceeded) = read_bounded_probe_stream(std::io::Cursor::new(payload));
+
+        assert!(exceeded);
+        assert_eq!(bytes.len(), MAX_PROBE_STREAM_BYTES as usize);
+    }
 
     #[test]
     fn scan_roots_include_existing_windows_folders_only() {

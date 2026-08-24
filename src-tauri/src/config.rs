@@ -263,11 +263,22 @@ impl ConfigStore {
     }
 
     pub fn load(&self) -> AppConfig {
-        let Ok(raw) = fs::read_to_string(&self.path) else {
-            return self.write_default();
+        let raw = match fs::read_to_string(&self.path) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return self.write_default();
+            }
+            Err(error) => {
+                log::error!("Unable to read configuration {:?}: {error}", self.path);
+                return AppConfig::default();
+            }
         };
         let Ok(mut value) = serde_yaml::from_str::<serde_yaml::Value>(&raw) else {
-            return self.write_default();
+            log::error!(
+                "Invalid YAML configuration preserved at {:?}; using defaults for this session",
+                self.path
+            );
+            return AppConfig::default();
         };
         let version = value
             .get("version")
@@ -281,10 +292,18 @@ impl ConfigStore {
                 );
             }
         } else if version != AppConfig::CURRENT_VERSION {
-            return self.write_default();
+            log::error!(
+                "Unsupported configuration version {version} preserved at {:?}; using defaults for this session",
+                self.path
+            );
+            return AppConfig::default();
         }
         let Ok(cfg) = serde_yaml::from_value::<AppConfig>(value) else {
-            return self.write_default();
+            log::error!(
+                "Invalid configuration schema preserved at {:?}; using defaults for this session",
+                self.path
+            );
+            return AppConfig::default();
         };
         if matches!(version, 2 | 3) {
             if let Err(error) = self.save(&cfg) {
@@ -408,7 +427,7 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn store_resets_invalid_payload_to_defaults() {
+    fn store_preserves_invalid_payload_while_using_defaults() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("config.yaml");
         std::fs::write(&path, "legacy: true").expect("write legacy");
@@ -417,12 +436,12 @@ mod tests {
         let config = store.load();
 
         assert_eq!(config.version, AppConfig::CURRENT_VERSION);
-        let raw = std::fs::read_to_string(path).expect("read rewritten");
-        assert!(raw.contains("version:"));
+        let raw = std::fs::read_to_string(path).expect("read preserved");
+        assert_eq!(raw, "legacy: true");
     }
 
     #[test]
-    fn store_resets_wrong_version_to_defaults() {
+    fn store_preserves_future_version_while_using_defaults() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("config.yaml");
         let legacy = AppConfig {
@@ -431,10 +450,12 @@ mod tests {
         };
         std::fs::write(&path, serde_yaml::to_string(&legacy).expect("yaml")).expect("write");
 
-        let store = ConfigStore::with_path(path);
+        let original = serde_yaml::to_string(&legacy).expect("yaml");
+        let store = ConfigStore::with_path(path.clone());
         let config = store.load();
 
         assert_eq!(config.version, AppConfig::CURRENT_VERSION);
+        assert_eq!(std::fs::read_to_string(path).expect("preserved"), original);
     }
 
     #[test]

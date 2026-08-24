@@ -3302,8 +3302,6 @@ dependencies = [
 [[package]]
 name = "rtpmidi"
 version = "0.4.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "39d1c74a5b782ec17774599f89d805c00ee72882d6a2ac41170a11a83f108cc1"
 dependencies = [
  "anyhow",
  "bytes",

@@ -54,6 +54,8 @@ use windows::Win32::Foundation::HWND;
 
 use crate::types::VstParameter;
 
+pub(super) const MAX_PLUGIN_CHANNELS: usize = 256;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioSettings {

@@ -5,12 +5,74 @@ use crate::logger::{background_log, FrontendLogger};
 use super::runtime_state::AudioCallbackState;
 
 #[cfg(target_os = "windows")]
-use std::sync::atomic::AtomicU8;
+use std::sync::atomic::{AtomicU32, AtomicU8};
 
 #[cfg(target_os = "windows")]
 static AUDIO_MMCSS_ENABLED: AtomicU8 = AtomicU8::new(0);
 #[cfg(target_os = "windows")]
 static AUDIO_POWER_THROTTLING_DISABLED: AtomicU8 = AtomicU8::new(0);
+#[cfg(target_os = "windows")]
+static AUDIO_TUNING_WARNINGS: AtomicU32 = AtomicU32::new(0);
+
+#[cfg(target_os = "windows")]
+const WARN_MMCSS_PRIORITY: u32 = 1 << 0;
+#[cfg(target_os = "windows")]
+const WARN_MMCSS_ALREADY_REGISTERED: u32 = 1 << 1;
+#[cfg(target_os = "windows")]
+const WARN_MMCSS_UNAVAILABLE: u32 = 1 << 2;
+#[cfg(target_os = "windows")]
+const WARN_THREAD_PRIORITY: u32 = 1 << 3;
+#[cfg(target_os = "windows")]
+const WARN_PRIORITY_BOOST: u32 = 1 << 4;
+#[cfg(target_os = "windows")]
+const WARN_POWER_THROTTLING: u32 = 1 << 5;
+
+#[cfg(target_os = "windows")]
+fn record_audio_tuning_warning(bit: u32) {
+    AUDIO_TUNING_WARNINGS.fetch_or(bit, Ordering::Release);
+}
+
+/// Formats and writes callback-thread tuning diagnostics from a non-realtime thread.
+#[cfg(target_os = "windows")]
+pub(super) fn flush_audio_tuning_warnings() {
+    let warnings = AUDIO_TUNING_WARNINGS.swap(0, Ordering::AcqRel);
+    for (bit, level, message) in [
+        (
+            WARN_MMCSS_PRIORITY,
+            "warn",
+            "Failed to raise MMCSS audio thread priority",
+        ),
+        (
+            WARN_MMCSS_ALREADY_REGISTERED,
+            "info",
+            "MMCSS: audio thread already registered by ASIO driver (OK)",
+        ),
+        (
+            WARN_MMCSS_UNAVAILABLE,
+            "warn",
+            "Failed to enable MMCSS for audio thread",
+        ),
+        (
+            WARN_THREAD_PRIORITY,
+            "warn",
+            "Failed to apply HIGHEST fallback to audio thread",
+        ),
+        (
+            WARN_PRIORITY_BOOST,
+            "warn",
+            "Failed to enable dynamic priority boosts for audio thread",
+        ),
+        (
+            WARN_POWER_THROTTLING,
+            "warn",
+            "Failed to disable thread power throttling for audio thread",
+        ),
+    ] {
+        if warnings & bit != 0 {
+            background_log(level, message);
+        }
+    }
+}
 
 #[cfg(target_os = "windows")]
 fn store_bool(cell: &AtomicU8, value: bool) {
@@ -94,11 +156,8 @@ pub(super) fn apply_audio_thread_priority(state: &mut AudioCallbackState) {
         match mmcss_result {
             Ok(handle) => {
                 store_bool(&AUDIO_MMCSS_ENABLED, true);
-                if let Err(error) = AvSetMmThreadPriority(handle, AVRT_PRIORITY_CRITICAL) {
-                    background_log(
-                        "warn",
-                        format!("Failed to raise MMCSS audio thread priority: {error}"),
-                    );
+                if AvSetMmThreadPriority(handle, AVRT_PRIORITY_CRITICAL).is_err() {
+                    record_audio_tuning_warning(WARN_MMCSS_PRIORITY);
                 }
                 state.mmcss_registration = Some(MmcssRegistration {
                     handle,
@@ -110,35 +169,19 @@ pub(super) fn apply_audio_thread_priority(state: &mut AudioCallbackState) {
                     || is_thread_already_in_task_error(&audio_error)
                 {
                     store_bool(&AUDIO_MMCSS_ENABLED, true);
-                    background_log(
-                        "info",
-                        "MMCSS: audio thread already registered by ASIO driver (OK)",
-                    );
+                    record_audio_tuning_warning(WARN_MMCSS_ALREADY_REGISTERED);
                 } else {
                     store_bool(&AUDIO_MMCSS_ENABLED, false);
-                    background_log(
-                        "warn",
-                        format!(
-                            "Failed to enable MMCSS for audio thread (Pro Audio: {pro_audio_error}; Audio: {audio_error})"
-                        ),
-                    );
+                    record_audio_tuning_warning(WARN_MMCSS_UNAVAILABLE);
                     // A bounded fallback avoids starving the Tauri, network and driver threads.
-                    if let Err(error) =
-                        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST)
-                    {
-                        background_log(
-                            "warn",
-                            format!("Failed to apply HIGHEST fallback to audio thread: {error}"),
-                        );
+                    if SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST).is_err() {
+                        record_audio_tuning_warning(WARN_THREAD_PRIORITY);
                     }
                 }
             }
         }
-        if let Err(error) = SetThreadPriorityBoost(GetCurrentThread(), false) {
-            background_log(
-                "warn",
-                format!("Failed to enable dynamic priority boosts for audio thread: {error}"),
-            );
+        if SetThreadPriorityBoost(GetCurrentThread(), false).is_err() {
+            record_audio_tuning_warning(WARN_PRIORITY_BOOST);
         }
         let throttle = THREAD_POWER_THROTTLING_STATE {
             Version: THREAD_POWER_THROTTLING_CURRENT_VERSION,
@@ -153,10 +196,7 @@ pub(super) fn apply_audio_thread_priority(state: &mut AudioCallbackState) {
         )
         .is_ok();
         if !thread_power_ok {
-            background_log(
-                "warn",
-                "Failed to disable thread power throttling for audio thread",
-            );
+            record_audio_tuning_warning(WARN_POWER_THROTTLING);
         }
     }
     state.mmcss_applied = true;

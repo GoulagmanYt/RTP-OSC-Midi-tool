@@ -240,7 +240,7 @@ fn ensure_vst3_sdk() -> Option<PathBuf> {
     // Try to initialize git submodule first (for developers who cloned with submodules)
     if !in_cargo_registry {
         let submodule_init = Command::new("git")
-            .args(&[
+            .args([
                 "submodule",
                 "update",
                 "--init",
@@ -296,7 +296,7 @@ fn ensure_vst3_sdk() -> Option<PathBuf> {
     }
 
     let clone_result = Command::new("git")
-        .args(&[
+        .args([
             "clone",
             "--recursive",
             "--depth=1",

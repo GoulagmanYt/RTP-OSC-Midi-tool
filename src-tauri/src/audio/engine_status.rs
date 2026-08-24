@@ -338,6 +338,8 @@ impl AudioEngine {
 
     pub fn plugin_latency_samples(&self) -> Option<u32> {
         #[cfg(target_os = "windows")]
+        super::windows_tuning::flush_audio_tuning_warnings();
+        #[cfg(target_os = "windows")]
         if self.is_worker_enabled() {
             return self
                 .worker

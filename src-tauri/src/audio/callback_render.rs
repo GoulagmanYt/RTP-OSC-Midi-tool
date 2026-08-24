@@ -6,7 +6,7 @@ use cpal::{FromSample, Sample};
 use rack::PluginInstance as _;
 use smallvec::SmallVec;
 
-use super::runtime_state::AudioCallbackState;
+use super::runtime_state::{AudioCallbackState, MAX_PLUGIN_CHANNELS};
 
 pub(super) fn replay_last_output_or_silence<T: Sample + FromSample<f32>>(
     data: &mut [T],
@@ -87,11 +87,11 @@ pub(super) fn process_vst3_plugin(
             plugin.process(&inputs, &mut outputs, frames)
         }
         _ => {
-            let mut inputs: SmallVec<[&[f32]; 64]> = SmallVec::new();
+            let mut inputs: SmallVec<[&[f32]; MAX_PLUGIN_CHANNELS]> = SmallVec::new();
             for _ in 0..input_channels {
                 inputs.push(input_slice);
             }
-            let mut outputs: SmallVec<[&mut [f32]; 64]> = SmallVec::new();
+            let mut outputs: SmallVec<[&mut [f32]; MAX_PLUGIN_CHANNELS]> = SmallVec::new();
             for output in state.outputs.iter_mut().take(output_channels) {
                 outputs.push(&mut output[..frames]);
             }
