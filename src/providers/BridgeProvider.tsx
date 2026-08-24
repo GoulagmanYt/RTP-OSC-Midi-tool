@@ -15,7 +15,7 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
   const [status, setStatus] = useState<api.RuntimeStatus | null>(null);
   const [metrics, setMetrics] = useState<api.RuntimeMetrics | null>(null);
   const [audioBackends, setAudioBackends] = useState<string[]>([]);
-  const [audioDevices, setAudioDevices] = useState<string[]>([]);
+  const [audioDevices, setAudioDevices] = useState<api.AudioDeviceEntry[]>([]);
   const [midiInputs, setMidiInputs] = useState<string[]>([]);
   const [midiOutputs, setMidiOutputs] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(true);

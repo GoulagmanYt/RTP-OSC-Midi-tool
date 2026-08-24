@@ -10,7 +10,7 @@ use crate::{
             save_vst_cache_to_disk,
         },
     },
-    types::{BridgeStatus, VstParameter, VstPluginEntry},
+    types::{legacy_path_plugin_id, AudioDeviceEntry, BridgeStatus, VstParameter, VstPluginEntry},
     vst_scan::{default_vst_scan_roots, scan_vst_plugins_in_roots_cached},
 };
 
@@ -22,7 +22,7 @@ pub fn list_audio_backends(state: &AppState) -> Vec<String> {
     state.audio.list_backends()
 }
 
-pub fn list_audio_devices(backend: Option<String>, state: &AppState) -> Vec<String> {
+pub fn list_audio_devices(backend: Option<String>, state: &AppState) -> Vec<AudioDeviceEntry> {
     state.audio.list_devices(backend)
 }
 
@@ -58,12 +58,31 @@ pub fn refresh_vst_plugins(state: &AppState) -> Vec<VstPluginEntry> {
         retain_instrument_entries(scan_vst_plugins_in_roots_cached(&roots, &cached, false));
     *state.vst_cache.lock() = Some(plugins.clone());
     save_vst_cache_to_disk(&plugins);
-    if cfg.audio.vst_plugin_id.is_none() {
+    let configured_id_is_valid = cfg
+        .audio
+        .vst_plugin_id
+        .as_ref()
+        .is_some_and(|id| plugins.iter().any(|entry| entry.id == *id));
+    if !configured_id_is_valid {
         if let Some(path) = cfg.audio.vst_path.as_deref() {
-            if let Some(entry) = plugins
-                .iter()
-                .find(|entry| entry.path.eq_ignore_ascii_case(path) && entry.supported)
-            {
+            let legacy_match = cfg.audio.vst_plugin_id.as_deref().and_then(|legacy_id| {
+                plugins.iter().find(|entry| {
+                    entry.path.eq_ignore_ascii_case(path)
+                        && entry.supported
+                        && legacy_path_plugin_id(
+                            &entry.format,
+                            &entry.path,
+                            entry.class_uid.as_deref(),
+                            entry.sub_plugin_id,
+                            &entry.architecture,
+                        ) == legacy_id
+                })
+            });
+            if let Some(entry) = legacy_match.or_else(|| {
+                plugins
+                    .iter()
+                    .find(|entry| entry.path.eq_ignore_ascii_case(path) && entry.supported)
+            }) {
                 let mut migrated = cfg;
                 migrated.audio.vst_plugin_id = Some(entry.id.clone());
                 migrated.version = crate::config::AppConfig::CURRENT_VERSION;

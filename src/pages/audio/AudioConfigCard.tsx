@@ -5,14 +5,14 @@ import { Input } from "../../components/ui/Input";
 import { Label } from "../../components/ui/Label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../components/ui/Select";
 import { Switch } from "../../components/ui/Switch";
-import type { AppConfig, RuntimeStatus, VstPluginEntry } from "../../api-types";
+import type { AppConfig, AudioDeviceEntry, RuntimeStatus, VstPluginEntry } from "../../api-types";
 import type { TranslateFn } from "./shared";
 import { Power, RefreshCcw, X } from "lucide-react";
 import { useMemo, useState } from "react";
 
 type Props = {
   audioBackends: string[];
-  audioDevices: string[];
+  audioDevices: AudioDeviceEntry[];
   audioReloading: boolean;
   bridgeRunning: boolean;
   bufferMismatch: boolean | null;
@@ -96,6 +96,11 @@ export function AudioConfigCard({
   const [vstArchitecture, setVstArchitecture] = useState("all");
   const [vstStatus, setVstStatus] = useState("all");
   const [vstVendor, setVstVendor] = useState("all");
+  const selectedAudioDeviceValue =
+    audioDevices.find((device) => device.id && device.id === config?.audio.deviceId)?.id ||
+    audioDevices.find((device) => device.name === config?.audio.device)?.id ||
+    config?.audio.device ||
+    "";
   const showVstTechnicalDetails = config?.ui.developerMode === true;
   const vstVendors = useMemo(
     () =>
@@ -153,17 +158,22 @@ export function AudioConfigCard({
           <div className="space-y-2">
             <Label>{t("audio.deviceLabel")}</Label>
             <Select
-              value={config?.audio.device || ""}
-              onValueChange={(value) => onUpdateAudioConfig({ device: value, deviceId: null })}
+              value={selectedAudioDeviceValue}
+              onValueChange={(value) => {
+                const device = audioDevices.find((candidate) => (candidate.id || candidate.name) === value);
+                if (device) {
+                  void onUpdateAudioConfig({ device: device.name, deviceId: device.id || null });
+                }
+              }}
               disabled={!config?.audio.backend || audioReloading}
             >
               <SelectTrigger>
                 <SelectValue placeholder={t("audio.devicePlaceholder")} />
               </SelectTrigger>
               <SelectContent>
-                {audioDevices.map((device) => (
-                  <SelectItem key={device} value={device}>
-                    {device}
+                {audioDevices.map((device, index) => (
+                  <SelectItem key={`${device.id || device.name}-${index}`} value={device.id || device.name}>
+                    {device.name}
                   </SelectItem>
                 ))}
               </SelectContent>

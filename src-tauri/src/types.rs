@@ -28,6 +28,13 @@ pub struct AppPaths {
     pub log_dir: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioDeviceEntry {
+    pub id: Option<String>,
+    pub name: String,
+}
+
 impl AppPaths {
     pub fn new() -> Result<Self, String> {
         let dirs = directories::ProjectDirs::from("com", "OSCMIDI", "OSCMIDI")
@@ -256,7 +263,7 @@ pub struct VstPluginEntry {
     pub host_abi_version: u32,
 }
 
-pub const VST_HOST_ABI_VERSION: u32 = 12;
+pub const VST_HOST_ABI_VERSION: u32 = 13;
 
 fn default_vst_host_abi_version() -> u32 {
     VST_HOST_ABI_VERSION
@@ -305,11 +312,32 @@ pub fn stable_plugin_id(
     sub_plugin_id: Option<i64>,
     architecture: &str,
 ) -> String {
-    let canonical = std::fs::canonicalize(path)
-        .unwrap_or_else(|_| std::path::PathBuf::from(path))
-        .to_string_lossy()
-        .replace('/', "\\")
-        .to_lowercase();
+    let normalized_uid = class_uid.unwrap_or_default().trim().to_lowercase();
+    let location_or_uid = if normalized_uid.is_empty() {
+        format!("path:{}", canonical_plugin_path(path))
+    } else {
+        format!("uid:{normalized_uid}")
+    };
+    let identity = format!(
+        "{}|{}|{}|{}",
+        format.to_lowercase(),
+        location_or_uid,
+        sub_plugin_id
+            .map(|value| value.to_string())
+            .unwrap_or_default(),
+        architecture.to_lowercase()
+    );
+    format!("vst-{:016x}", fnv1a64(identity.as_bytes()))
+}
+
+pub(crate) fn legacy_path_plugin_id(
+    format: &str,
+    path: &str,
+    class_uid: Option<&str>,
+    sub_plugin_id: Option<i64>,
+    architecture: &str,
+) -> String {
+    let canonical = canonical_plugin_path(path);
     let identity = format!(
         "{}|{}|{}|{}|{}",
         format.to_lowercase(),
@@ -320,12 +348,25 @@ pub fn stable_plugin_id(
             .unwrap_or_default(),
         architecture.to_lowercase()
     );
+    format!("vst-{:016x}", fnv1a64(identity.as_bytes()))
+}
+
+fn canonical_plugin_path(path: &str) -> String {
+    let canonical = std::fs::canonicalize(path)
+        .unwrap_or_else(|_| std::path::PathBuf::from(path))
+        .to_string_lossy()
+        .replace('/', "\\")
+        .to_lowercase();
+    canonical
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
     let mut hash = 0xcbf29ce484222325u64;
-    for byte in identity.as_bytes() {
+    for byte in bytes {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x100000001b3);
     }
-    format!("vst-{hash:016x}")
+    hash
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

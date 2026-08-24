@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
-use crate::types::{PluginStatus, VstPluginEntry, VST_HOST_ABI_VERSION};
+use crate::types::{legacy_path_plugin_id, PluginStatus, VstPluginEntry, VST_HOST_ABI_VERSION};
 use rack::PluginInfo as RackPluginInfo;
 use std::path::PathBuf as StdPathBuf;
 
@@ -216,7 +216,18 @@ pub fn ensure_plugin_reference_in_app(
 ) -> Result<VstPluginEntry, String> {
     let entries = probe_plugins_isolated(path, Duration::from_secs(30));
     let entry = plugin_id
-        .and_then(|id| entries.iter().find(|entry| entry.id == id))
+        .and_then(|id| {
+            entries.iter().find(|entry| {
+                entry.id == id
+                    || legacy_path_plugin_id(
+                        &entry.format,
+                        &entry.path,
+                        entry.class_uid.as_deref(),
+                        entry.sub_plugin_id,
+                        &entry.architecture,
+                    ) == id
+            })
+        })
         .or_else(|| entries.iter().find(|entry| entry.supported))
         .or_else(|| entries.first())
         .cloned()
@@ -678,6 +689,40 @@ mod tests {
         assert_eq!(x64_a, x64_a_again);
         assert_ne!(x64_a, x64_b);
         assert_ne!(x64_a, x86_a);
+    }
+
+    #[test]
+    fn stable_identity_survives_moves_when_the_plugin_has_an_intrinsic_id() {
+        let original = crate::types::stable_plugin_id(
+            "VST3",
+            "C:/VST/Original/Multi.vst3",
+            Some("class-a"),
+            None,
+            "x64",
+        );
+        let moved = crate::types::stable_plugin_id(
+            "VST3",
+            "D:/Audio/Moved/Multi.vst3",
+            Some("class-a"),
+            None,
+            "x64",
+        );
+        let fallback_a =
+            crate::types::stable_plugin_id("VST3", "C:/VST/Original/Multi.vst3", None, None, "x64");
+        let fallback_b =
+            crate::types::stable_plugin_id("VST3", "D:/Audio/Moved/Multi.vst3", None, None, "x64");
+        assert_eq!(original, moved);
+        assert_ne!(fallback_a, fallback_b);
+        assert_ne!(
+            original,
+            crate::types::legacy_path_plugin_id(
+                "VST3",
+                "C:/VST/Original/Multi.vst3",
+                Some("class-a"),
+                None,
+                "x64",
+            )
+        );
     }
 
     #[test]

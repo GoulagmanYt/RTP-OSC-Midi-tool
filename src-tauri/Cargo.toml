@@ -49,6 +49,7 @@ parking_lot = "0.12"
 tokio = { version = "1.50", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util"] }
 chrono = { version = "0.4", features = ["serde"] }
 directories = "6.0"
+crc32fast = "1.5"
 rtpmidi = "0.4.4"
 uuid = { version = "1.22", features = ["v4"] }
 midi-types = "0.2.1"

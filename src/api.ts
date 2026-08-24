@@ -1,6 +1,7 @@
 import { invokeCommand } from "./api-client";
 import type {
   AppConfig,
+  AudioDeviceEntry,
   AppPaths,
   PreflightReport,
   RtpSessionInfo,
@@ -62,7 +63,7 @@ export async function listAudioBackends(): Promise<string[]> {
   return invokeCommand("list_audio_backends");
 }
 
-export async function listAudioDevices(backend?: string | null): Promise<string[]> {
+export async function listAudioDevices(backend?: string | null): Promise<AudioDeviceEntry[]> {
   return invokeCommand("list_audio_devices", { backend });
 }
 

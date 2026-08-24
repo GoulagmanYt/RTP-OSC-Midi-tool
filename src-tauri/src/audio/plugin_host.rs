@@ -119,7 +119,9 @@ pub(super) fn load_plugin_backend(
             probe.name, input_channels, output_channels, initial_block_size
         ));
         return Ok(LoadedPluginBackend {
-            backend: PluginBackend::Remote { instance: remote },
+            backend: PluginBackend::Remote {
+                instance: Box::new(remote),
+            },
             input_channels,
             output_channels,
             vst_midi_compatible: probe.midi_compatible.unwrap_or(true),

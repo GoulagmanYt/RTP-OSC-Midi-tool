@@ -35,8 +35,11 @@ pub(super) fn select_device(
     preferred_name: Option<&str>,
 ) -> Option<Device> {
     if let Some(id) = preferred_id {
-        let parsed = id.parse::<cpal::DeviceId>().ok()?;
-        return host.device_by_id(&parsed);
+        if let Ok(parsed) = id.parse::<cpal::DeviceId>() {
+            if let Some(device) = host.device_by_id(&parsed) {
+                return Some(device);
+            }
+        }
     }
     let mut outputs = match host.output_devices() {
         Ok(devices) => devices,

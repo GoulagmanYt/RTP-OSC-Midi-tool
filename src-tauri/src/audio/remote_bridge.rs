@@ -56,6 +56,26 @@ use super::{
     state_codec::{load_vst_state, save_vst_state_blocking},
 };
 
+#[cfg(target_pointer_width = "64")]
+fn merge_parameter_commands(
+    pending: &mut Vec<super::runtime_state::ParameterCommand>,
+    incoming: &[super::runtime_state::ParameterCommand],
+) {
+    for command in incoming {
+        if let Some(existing) = pending.iter_mut().find(|existing| {
+            existing.index == command.index
+                || (existing.id != 0 && command.id != 0 && existing.id == command.id)
+        }) {
+            *existing = *command;
+            continue;
+        }
+        if pending.len() == BRIDGE_MAX_PARAMETER_CHANGES {
+            pending.remove(0);
+        }
+        pending.push(*command);
+    }
+}
+
 const BRIDGE_MAGIC: u32 = 0x4F53_4342;
 const BRIDGE_VERSION: u32 = 5;
 const BRIDGE_SLOTS: usize = 3;
@@ -98,6 +118,24 @@ struct BridgeMidiEvent {
     data: [u8; 3],
     len: u8,
     sample_offset: u32,
+}
+
+fn write_panic_events(events: &mut [BridgeMidiEvent; BRIDGE_MAX_MIDI]) -> usize {
+    let mut event_count = 0;
+    for channel in 0..16u8 {
+        for controller in super::runtime_state::RESET_CONTROLLERS {
+            let Some(event) = events.get_mut(event_count) else {
+                return event_count;
+            };
+            *event = BridgeMidiEvent {
+                data: [0xB0 | channel, controller, 0],
+                len: 3,
+                sample_offset: 0,
+            };
+            event_count += 1;
+        }
+    }
+    event_count
 }
 
 #[repr(C)]
@@ -253,6 +291,7 @@ pub(super) struct RemotePlugin {
     latency_samples: u32,
     sample_rate: u32,
     panic_pending: bool,
+    pending_parameter_changes: Vec<super::runtime_state::ParameterCommand>,
     consecutive_missed_frames: u64,
     parameter_cache: Vec<crate::types::VstParameter>,
     last_output_samples: [f32; BRIDGE_MAX_CHANNELS],
@@ -394,6 +433,7 @@ impl RemotePlugin {
             latency_samples,
             sample_rate,
             panic_pending: false,
+            pending_parameter_changes: Vec::with_capacity(BRIDGE_MAX_PARAMETER_CHANGES),
             consecutive_missed_frames: 0,
             parameter_cache,
             last_output_samples: [0.0; BRIDGE_MAX_CHANNELS],
@@ -426,6 +466,7 @@ impl RemotePlugin {
         if frames == 0 || frames > BRIDGE_MAX_FRAMES {
             return false;
         }
+        merge_parameter_commands(&mut self.pending_parameter_changes, parameters);
         let priming = self.next_sequence == 1;
         let shared = self.mapping.get_mut();
         let expected_sequence = self.next_sequence.saturating_sub(1);
@@ -496,38 +537,28 @@ impl RemotePlugin {
             .find(|slot| slot.state.load(Ordering::Acquire) == SLOT_EMPTY)
         {
             let mut event_count = 0usize;
-            while event_count < BRIDGE_MAX_MIDI {
-                let Some(packet) = midi.pop_front() else {
-                    break;
-                };
-                slot.events[event_count] = BridgeMidiEvent {
-                    data: packet.data,
-                    len: packet.len,
-                    sample_offset: bridge_sample_offset(packet, frames, self.sample_rate),
-                };
-                event_count += 1;
-            }
             if self.panic_pending {
-                for channel in 0..16u8 {
-                    for controller in super::runtime_state::RESET_CONTROLLERS {
-                        if event_count == BRIDGE_MAX_MIDI {
-                            break;
-                        }
-                        slot.events[event_count] = BridgeMidiEvent {
-                            data: [0xB0 | channel, controller, 0],
-                            len: 3,
-                            sample_offset: 0,
-                        };
-                        event_count += 1;
-                    }
-                }
+                midi.clear();
+                event_count = write_panic_events(&mut slot.events);
                 self.panic_pending = false;
+            } else {
+                while event_count < BRIDGE_MAX_MIDI {
+                    let Some(packet) = midi.pop_front() else {
+                        break;
+                    };
+                    slot.events[event_count] = BridgeMidiEvent {
+                        data: packet.data,
+                        len: packet.len,
+                        sample_offset: bridge_sample_offset(packet, frames, self.sample_rate),
+                    };
+                    event_count += 1;
+                }
             }
-            let parameter_count = parameters.len().min(BRIDGE_MAX_PARAMETER_CHANGES);
+            let parameter_count = self.pending_parameter_changes.len();
             for (target, source) in slot
                 .parameter_changes
                 .iter_mut()
-                .zip(parameters.iter())
+                .zip(self.pending_parameter_changes.iter())
                 .take(parameter_count)
             {
                 *target = BridgeParameterChange {
@@ -543,6 +574,7 @@ impl RemotePlugin {
                 .store(event_count as u32, Ordering::Relaxed);
             slot.parameter_change_count
                 .store(parameter_count as u32, Ordering::Relaxed);
+            self.pending_parameter_changes.clear();
             slot.sequence.store(self.next_sequence, Ordering::Relaxed);
             self.next_sequence = self.next_sequence.wrapping_add(1).max(1);
             slot.state.store(SLOT_REQUESTED, Ordering::Release);
@@ -1487,6 +1519,62 @@ mod tests {
         assert!(bridge_stall_budget_exceeded(96_000, 48_000));
         assert!(!bridge_stall_budget_exceeded(88_199, 44_100));
         assert!(bridge_stall_budget_exceeded(88_200, 44_100));
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn parameter_backpressure_keeps_the_latest_value_without_growing() {
+        use crate::audio::runtime_state::ParameterCommand;
+
+        let mut pending = Vec::with_capacity(BRIDGE_MAX_PARAMETER_CHANGES);
+        let first = ParameterCommand {
+            index: 7,
+            id: 42,
+            flags: 0,
+            step_count: 0,
+            value: 0.25,
+        };
+        let latest = ParameterCommand {
+            value: 0.75,
+            ..first
+        };
+        merge_parameter_commands(&mut pending, &[first]);
+        merge_parameter_commands(&mut pending, &[latest]);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].value, 0.75);
+        assert_eq!(pending.capacity(), BRIDGE_MAX_PARAMETER_CHANGES);
+
+        for index in 0..=BRIDGE_MAX_PARAMETER_CHANGES {
+            merge_parameter_commands(
+                &mut pending,
+                &[ParameterCommand {
+                    index: index + 100,
+                    id: index as u32 + 100,
+                    flags: 0,
+                    step_count: 0,
+                    value: index as f32,
+                }],
+            );
+        }
+        assert_eq!(pending.len(), BRIDGE_MAX_PARAMETER_CHANGES);
+        assert_eq!(
+            pending.last().unwrap().index,
+            BRIDGE_MAX_PARAMETER_CHANGES + 100
+        );
+        assert_eq!(pending.capacity(), BRIDGE_MAX_PARAMETER_CHANGES);
+    }
+
+    #[test]
+    fn panic_controller_batch_always_fits_in_one_bridge_slot() {
+        let mut events = [BridgeMidiEvent::default(); BRIDGE_MAX_MIDI];
+        let count = write_panic_events(&mut events);
+        assert_eq!(
+            count,
+            16 * crate::audio::runtime_state::RESET_CONTROLLERS.len()
+        );
+        assert_eq!(events[0].data, [0xB0, 64, 0]);
+        assert_eq!(events[count - 1].data, [0xBF, 123, 0]);
+        assert!(count <= BRIDGE_MAX_MIDI);
     }
 
     #[test]

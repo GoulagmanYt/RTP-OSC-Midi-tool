@@ -107,7 +107,7 @@ pub(super) enum PluginBackend {
     },
     #[cfg(all(target_os = "windows", target_pointer_width = "64"))]
     Remote {
-        instance: super::remote_bridge::RemotePlugin,
+        instance: Box<super::remote_bridge::RemotePlugin>,
     },
 }
 

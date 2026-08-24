@@ -14,7 +14,7 @@ use vst::{host::PluginInstance, plugin::Plugin};
 
 use crate::{
     logger::{background_log, FrontendLogger},
-    types::VstPluginEntry,
+    types::{legacy_path_plugin_id, VstPluginEntry},
 };
 
 use super::runtime_state::PluginBackend;
@@ -58,6 +58,7 @@ impl StatePolicy {
 
 #[derive(Debug)]
 pub(super) enum SavedState {
+    Invalid,
     Raw(Vec<u8>),
     Chunk(Vec<u8>),
     Params(Vec<f32>),
@@ -122,6 +123,37 @@ pub(super) fn state_path_for_plugin(entry: &VstPluginEntry) -> Option<PathBuf> {
     let file_name = Path::new(&entry.path).file_name()?.to_string_lossy();
     let hash = fnv1a64(entry.id.as_bytes());
     Some(state_dir()?.join(format!("{file_name}-{hash:016x}.state")))
+}
+
+fn state_document_matches_entry(document: &StateDocument, entry: &VstPluginEntry) -> bool {
+    if document.plugin_id.is_empty() || document.plugin_id == entry.id {
+        return true;
+    }
+    let intrinsic_identity_matches = entry.class_uid.as_deref().is_some_and(|class_uid| {
+        !class_uid.is_empty()
+            && document.class_uid.eq_ignore_ascii_case(class_uid)
+            && document.format
+                == if entry.format.eq_ignore_ascii_case("VST3") {
+                    FORMAT_VST3
+                } else {
+                    FORMAT_VST2
+                }
+            && document.architecture
+                == if entry.architecture.eq_ignore_ascii_case("x86") {
+                    ARCH_X86
+                } else {
+                    ARCH_X64
+                }
+    });
+    intrinsic_identity_matches
+        || document.plugin_id
+            == legacy_path_plugin_id(
+                &entry.format,
+                &entry.path,
+                entry.class_uid.as_deref(),
+                entry.sub_plugin_id,
+                &entry.architecture,
+            )
 }
 
 fn fnv1a64(bytes: &[u8]) -> u64 {
@@ -209,7 +241,7 @@ pub(super) fn encode_state_document(document: &StateDocument) -> Vec<u8> {
     out.push(STATE_VERSION_V3);
     push_u32(&mut out, body.len().min(u32::MAX as usize) as u32);
     out.extend_from_slice(&body);
-    push_u64(&mut out, fnv1a64(&body));
+    push_u64(&mut out, u64::from(crc32fast::hash(&body)));
     out
 }
 
@@ -283,7 +315,14 @@ fn decode_document(data: &[u8]) -> Option<StateDocument> {
     }
     let body = data.get(9..9 + body_len)?;
     let checksum = u64::from_le_bytes(data.get(9 + body_len..)?.try_into().ok()?);
-    if fnv1a64(body) != checksum {
+    let checksum_matches = match state_version {
+        STATE_VERSION_V2 => fnv1a64(body) == checksum,
+        STATE_VERSION_V3 => {
+            u64::from(crc32fast::hash(body)) == checksum || fnv1a64(body) == checksum
+        }
+        _ => false,
+    };
+    if !checksum_matches {
         return None;
     }
     let mut reader = StateReader::new(body);
@@ -350,28 +389,34 @@ pub(super) fn decode_state(data: &[u8]) -> SavedState {
     if let Some(document) = decode_document(data) {
         return SavedState::V2(document);
     }
-    if data.len() < 6 || data[..4] != *STATE_MAGIC || data[4] != STATE_VERSION_V1 {
+    if data.get(..4) != Some(STATE_MAGIC) {
         return SavedState::Raw(data.to_vec());
+    }
+    if data.len() < 6 || data[4] != STATE_VERSION_V1 {
+        return SavedState::Invalid;
     }
     match data[5] {
         STATE_KIND_CHUNK => SavedState::Chunk(data[6..].to_vec()),
         STATE_KIND_PARAMS => {
             if data.len() < 10 {
-                return SavedState::Raw(data.to_vec());
+                return SavedState::Invalid;
             }
             let count = u32::from_le_bytes([data[6], data[7], data[8], data[9]]) as usize;
             let expected = 10usize.saturating_add(count.saturating_mul(4));
             if count > MAX_PARAMETERS || data.len() != expected {
-                return SavedState::Raw(data.to_vec());
+                return SavedState::Invalid;
             }
-            SavedState::Params(
-                data[10..]
-                    .chunks_exact(4)
-                    .map(|bytes| f32::from_le_bytes(bytes.try_into().expect("four-byte chunk")))
-                    .collect(),
-            )
+            let values = data[10..]
+                .chunks_exact(4)
+                .map(|bytes| f32::from_le_bytes(bytes.try_into().expect("four-byte chunk")))
+                .collect::<Vec<_>>();
+            if values.iter().any(|value| !value.is_finite()) {
+                SavedState::Invalid
+            } else {
+                SavedState::Params(values)
+            }
         }
-        _ => SavedState::Raw(data.to_vec()),
+        _ => SavedState::Invalid,
     }
 }
 
@@ -763,17 +808,25 @@ pub(super) fn load_vst_state(
         .find_map(|(path, migrate)| {
             let data = fs::read(&path).ok()?;
             match decode_state(&data) {
-                SavedState::V2(document)
-                    if !document.plugin_id.is_empty() && document.plugin_id != entry.id =>
-                {
+                SavedState::Invalid => {
+                    archive_invalid_state(&path, logger, "corrupt or unsupported VST state");
                     None
                 }
+                SavedState::V2(document) if !state_document_matches_entry(&document, entry) => None,
                 SavedState::V2(document) if unsafe_legacy_parameter_snapshot(&document, entry) => {
-                    archive_unsafe_state(&path, logger);
+                    archive_invalid_state(
+                        &path,
+                        logger,
+                        "unsafe exhaustive VST3 parameter snapshot",
+                    );
                     None
                 }
                 SavedState::Params(values) if unsafe_legacy_parameter_values(&values, entry) => {
-                    archive_unsafe_state(&path, logger);
+                    archive_invalid_state(
+                        &path,
+                        logger,
+                        "unsafe exhaustive VST3 parameter snapshot",
+                    );
                     None
                 }
                 state => Some((path, migrate, state)),
@@ -826,6 +879,9 @@ pub(super) fn load_vst_state(
                 #[cfg(all(target_os = "windows", target_pointer_width = "64"))]
                 PluginBackend::Remote { .. } => {}
             },
+            SavedState::Invalid => {
+                logger.warn("Ignored corrupt or unsupported VST state");
+            }
         }
         if migrate {
             migrated_document = capture_document(&mut guard, entry);
@@ -895,7 +951,7 @@ fn unsafe_dense_zero_values(total: usize, zero_like: usize) -> bool {
     total >= 512 && zero_like.saturating_mul(10) >= total.saturating_mul(9)
 }
 
-fn archive_unsafe_state(path: &Path, logger: &FrontendLogger) {
+fn archive_invalid_state(path: &Path, logger: &FrontendLogger, reason: &str) {
     let timestamp = std::time::SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis())
@@ -903,11 +959,11 @@ fn archive_unsafe_state(path: &Path, logger: &FrontendLogger) {
     let archived = path.with_extension(format!("state.invalid-{timestamp}"));
     match fs::rename(path, &archived) {
         Ok(()) => logger.warn(format!(
-            "Ignored an unsafe exhaustive VST3 parameter snapshot and preserved it at {:?}",
+            "Ignored {reason} and preserved it at {:?}",
             archived
         )),
         Err(error) => logger.warn(format!(
-            "Ignored an unsafe exhaustive VST3 parameter snapshot at {:?}; archival failed: {error}",
+            "Ignored {reason} at {:?}; archival failed: {error}",
             path
         )),
     }
@@ -921,7 +977,7 @@ pub(crate) fn restore_vst3_state_file_for_diagnostic(
     let data = fs::read(path).map_err(|error| format!("failed to read state file: {error}"))?;
     match decode_state(&data) {
         SavedState::V2(document) => {
-            if !document.plugin_id.is_empty() && document.plugin_id != entry.id {
+            if !state_document_matches_entry(&document, entry) {
                 return Err("state belongs to a different plug-in identity".into());
             }
             if unsafe_legacy_parameter_snapshot(&document, entry) {
@@ -965,6 +1021,7 @@ pub(crate) fn restore_vst3_state_file_for_diagnostic(
                 .map_err(|error| format!("legacy native state restore failed: {error}"))?;
             Ok(0)
         }
+        SavedState::Invalid => Err("state envelope is corrupt or unsupported".into()),
     }
 }
 
@@ -994,6 +1051,12 @@ mod tests {
         };
         let encoded = encode_state_document(&document);
         assert_eq!(encoded[4], STATE_VERSION_V3);
+        let body_len = u32::from_le_bytes(encoded[5..9].try_into().unwrap()) as usize;
+        let checksum = u64::from_le_bytes(encoded[9 + body_len..].try_into().unwrap());
+        assert_eq!(
+            checksum,
+            u64::from(crc32fast::hash(&encoded[9..9 + body_len]))
+        );
         let SavedState::V2(decoded) = decode_state(&encoded) else {
             panic!("expected versioned state document")
         };
@@ -1003,7 +1066,22 @@ mod tests {
         assert_eq!(decoded.parameters[0].id, 42);
         let mut corrupted = encoded;
         corrupted[12] ^= 0x80;
-        assert!(matches!(decode_state(&corrupted), SavedState::Raw(_)));
+        assert!(matches!(decode_state(&corrupted), SavedState::Invalid));
+    }
+
+    #[test]
+    fn state_v3_accepts_legacy_fnv_checksum() {
+        let document = StateDocument {
+            plugin_id: "vst-test".into(),
+            format: FORMAT_VST3,
+            architecture: ARCH_X64,
+            ..Default::default()
+        };
+        let mut encoded = encode_state_document(&document);
+        let body_len = u32::from_le_bytes(encoded[5..9].try_into().unwrap()) as usize;
+        let checksum = fnv1a64(&encoded[9..9 + body_len]).to_le_bytes();
+        encoded[9 + body_len..].copy_from_slice(&checksum);
+        assert!(matches!(decode_state(&encoded), SavedState::V2(_)));
     }
 
     #[test]

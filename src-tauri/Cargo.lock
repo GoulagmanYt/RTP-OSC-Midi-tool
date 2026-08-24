@@ -3062,6 +3062,7 @@ version = "2.1.0"
 dependencies = [
  "chrono",
  "cpal",
+ "crc32fast",
  "criterion",
  "crossbeam-channel",
  "directories",

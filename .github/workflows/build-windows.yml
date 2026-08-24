@@ -39,7 +39,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
-          targets: x86_64-pc-windows-msvc
+          targets: x86_64-pc-windows-msvc, i686-pc-windows-msvc
 
       - name: Cache Rust dependencies
         uses: actions/cache@v6
@@ -110,8 +110,11 @@ jobs:
 
           $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
           $binary = Get-Item '.cargo-target/release/OSCMidi.exe' -ErrorAction Stop
-          $worker = Get-Item `
-            'src-tauri/binaries/vst-host-worker-x86_64-pc-windows-msvc.exe' `
+          $workerX64 = Get-Item `
+            'src-tauri/binaries/vst-host-worker-x64-x86_64-pc-windows-msvc.exe' `
+            -ErrorAction Stop
+          $workerX86 = Get-Item `
+            'src-tauri/binaries/vst-host-worker-x86-x86_64-pc-windows-msvc.exe' `
             -ErrorAction Stop
           $installers = @(
             Get-ChildItem '.cargo-target/release/bundle/msi' `
@@ -129,7 +132,8 @@ jobs:
           $portableDirectory = Join-Path $env:GITHUB_WORKSPACE 'artifacts/portable'
           New-Item -ItemType Directory -Path $portableDirectory | Out-Null
           Copy-Item -LiteralPath $binary.FullName -Destination (Join-Path $portableDirectory 'OSCMidi.exe')
-          Copy-Item -LiteralPath $worker.FullName -Destination (Join-Path $portableDirectory 'vst-host-worker.exe')
+          Copy-Item -LiteralPath $workerX64.FullName -Destination (Join-Path $portableDirectory 'vst-host-worker-x64.exe')
+          Copy-Item -LiteralPath $workerX86.FullName -Destination (Join-Path $portableDirectory 'vst-host-worker-x86.exe')
 
           $portableArchive = "artifacts/OSCMidi_${version}_windows_x64_portable.zip"
           Compress-Archive -Path (Join-Path $portableDirectory '*') -DestinationPath $portableArchive

@@ -2758,6 +2758,7 @@ version = "2.1.0"
 dependencies = [
  "chrono",
  "cpal",
+ "crc32fast",
  "crossbeam-channel",
  "directories",
  "env_logger",

@@ -8,7 +8,8 @@ use crate::{
     error::CommandError,
     tauri::state::AppState,
     types::{
-        AppPaths, BridgeStatus, PreflightReport, RtpSessionInfo, VstParameter, VstPluginEntry,
+        AppPaths, AudioDeviceEntry, BridgeStatus, PreflightReport, RtpSessionInfo, VstParameter,
+        VstPluginEntry,
     },
 };
 
@@ -105,7 +106,10 @@ pub fn list_audio_backends(state: State<AppState>) -> Vec<String> {
 }
 
 #[::tauri::command]
-pub fn list_audio_devices(backend: Option<String>, state: State<AppState>) -> Vec<String> {
+pub fn list_audio_devices(
+    backend: Option<String>,
+    state: State<AppState>,
+) -> Vec<AudioDeviceEntry> {
     services::list_audio_devices(backend, state.inner())
 }
 

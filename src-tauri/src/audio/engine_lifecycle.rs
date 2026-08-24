@@ -16,6 +16,7 @@ use windows::Win32::UI::WindowsAndMessaging::DestroyWindow;
 
 use crate::logger::{background_log, FrontendLogger};
 use crate::plugin_probe::ensure_plugin_reference_in_app;
+use crate::types::AudioDeviceEntry;
 
 use super::{
     callback_midi::reset_all_notes,
@@ -366,10 +367,16 @@ impl AudioEngine {
             .collect()
     }
 
-    pub fn list_devices(&self, backend: Option<String>) -> Vec<String> {
+    pub fn list_devices(&self, backend: Option<String>) -> Vec<AudioDeviceEntry> {
         let host = select_host(backend.as_deref());
         host.and_then(|h| h.output_devices().ok())
-            .map(|iter| iter.map(|d| d.to_string()).collect::<Vec<String>>())
+            .map(|iter| {
+                iter.map(|device| AudioDeviceEntry {
+                    id: device.id().ok().map(|id| id.to_string()),
+                    name: device.to_string(),
+                })
+                .collect()
+            })
             .unwrap_or_default()
     }
 

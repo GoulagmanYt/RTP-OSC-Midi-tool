@@ -84,6 +84,11 @@ export type AudioConfig = {
   vstScanPaths: string[];
 };
 
+export type AudioDeviceEntry = {
+  id?: string | null;
+  name: string;
+};
+
 export type UiConfig = {
   theme: Theme;
   themePalette: string;
