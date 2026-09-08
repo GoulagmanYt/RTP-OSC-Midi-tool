@@ -100,6 +100,7 @@ struct SupervisorInner {
     midi_sequence: AtomicU64,
     state_generation: AtomicU64,
     emergency_reset_pending: AtomicBool,
+    emergency_reset_notify: tokio::sync::Notify,
     last_load: Mutex<Option<(AudioSettings, Option<String>)>>,
     restart_history: Mutex<VecDeque<Instant>>,
 }
@@ -125,6 +126,7 @@ impl VstWorkerSupervisor {
                 midi_sequence: AtomicU64::new(1),
                 state_generation: AtomicU64::new(0),
                 emergency_reset_pending: AtomicBool::new(false),
+                emergency_reset_notify: tokio::sync::Notify::new(),
                 last_load: Mutex::new(None),
                 restart_history: Mutex::new(VecDeque::new()),
             }),
@@ -302,18 +304,7 @@ impl VstWorkerSupervisor {
         self.inner
             .emergency_reset_pending
             .store(true, Ordering::Release);
-        let request_id = self.next_request_id();
-        let sent = self.inner.session.lock().as_ref().is_some_and(|session| {
-            session
-                .commands
-                .try_send(SessionCommand::Notify(ControlMessage::Panic { request_id }))
-                .is_ok()
-        });
-        if sent {
-            self.inner
-                .emergency_reset_pending
-                .store(false, Ordering::Release);
-        }
+        self.inner.emergency_reset_notify.notify_one();
     }
 
     pub async fn open_editor(&self) -> Result<(), String> {
@@ -756,11 +747,38 @@ async fn control_reader(
     }
 }
 
-async fn midi_writer(mut pipe: NamedPipeServer, mut midi: mpsc::Receiver<MidiWireFrame>) {
-    while let Some(frame) = midi.recv().await {
-        if let Err(error) = write_midi_frame(&mut pipe, frame).await {
-            background_log("error", format!("VST worker MIDI pipe failed: {error}"));
-            break;
+async fn midi_writer<W: tokio::io::AsyncWrite + Unpin>(
+    mut pipe: W,
+    mut midi: mpsc::Receiver<MidiWireFrame>,
+    inner: Arc<SupervisorInner>,
+) {
+    loop {
+        if inner.emergency_reset_pending.swap(false, Ordering::AcqRel) {
+            for _ in 0..midi.len() {
+                let _ = midi.try_recv();
+            }
+            // An in-band reset cannot overtake older bytes already in the MIDI pipe.
+            let reset = MidiWireFrame::new(
+                inner.midi_sequence.fetch_add(1, Ordering::Relaxed),
+                monotonic_qpc(),
+                &[0xFF],
+            )
+            .expect("one-byte MIDI reset");
+            if write_midi_frame(&mut pipe, reset).await.is_err() {
+                break;
+            }
+        }
+        tokio::select! {
+            biased;
+            _ = inner.emergency_reset_notify.notified() => continue,
+            frame = midi.recv() => {
+                let Some(frame) = frame else { break; };
+                if inner.emergency_reset_pending.load(Ordering::Acquire) { continue; }
+                if let Err(error) = write_midi_frame(&mut pipe, frame).await {
+                    background_log("error", format!("VST worker MIDI pipe failed: {error}"));
+                    break;
+                }
+            }
         }
     }
 }
@@ -834,7 +852,7 @@ async fn run_session(runtime: SessionRuntime) {
         }
     }
 
-    tauri::async_runtime::spawn(midi_writer(midi_pipe, midi));
+    tauri::async_runtime::spawn(midi_writer(midi_pipe, midi, inner.clone()));
     let (reader, mut writer): (ReadHalf<_>, WriteHalf<_>) = tokio::io::split(control);
     let (event_tx, mut event_rx) = mpsc::channel(64);
     tauri::async_runtime::spawn(control_reader(reader, event_tx));
@@ -894,16 +912,6 @@ async fn run_session(runtime: SessionRuntime) {
                 }
             },
             _ = poll.tick() => {
-                if inner.emergency_reset_pending.swap(false, Ordering::AcqRel) {
-                    let request_id = inner.request_sequence.fetch_add(1, Ordering::Relaxed);
-                    if let Err(error) = write_control_frame(
-                        &mut writer,
-                        &ControlMessage::Panic { request_id },
-                    ).await {
-                        terminal_error = Some(format!("worker emergency reset failed: {error}"));
-                        break;
-                    }
-                }
                 match child.child.try_wait() {
                     Ok(Some(status)) => {
                         terminal_error = Some(format!("worker exited with {status}"));
@@ -967,6 +975,37 @@ fn set_session_fault(inner: &Arc<SupervisorInner>, error: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn emergency_reset_discards_backlog_and_precedes_new_midi() {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let supervisor = VstWorkerSupervisor::new();
+            let (writer, mut reader) = tokio::io::duplex(256);
+            let (tx, rx) = mpsc::channel(8);
+            tx.send(MidiWireFrame::new(1, 1, &[0x90, 60, 100]).unwrap())
+                .await
+                .unwrap();
+            supervisor.request_emergency_reset();
+            let task = tokio::spawn(midi_writer(writer, rx, supervisor.inner.clone()));
+            let reset = super::super::protocol::read_midi_frame(&mut reader)
+                .await
+                .unwrap();
+            assert_eq!(reset.bytes(), &[0xFF]);
+            for bytes in [[0x90, 61, 100], [0x80, 61, 0]] {
+                tx.send(MidiWireFrame::new(2, 2, &bytes).unwrap())
+                    .await
+                    .unwrap();
+                let received = super::super::protocol::read_midi_frame(&mut reader)
+                    .await
+                    .unwrap();
+                assert_eq!(received.bytes(), bytes);
+            }
+            drop(tx);
+            task.await.unwrap();
+        })
+        .await
+        .expect("MIDI reset writer timed out");
+    }
 
     #[test]
     fn pipe_names_and_tokens_are_unpredictable_per_session() {

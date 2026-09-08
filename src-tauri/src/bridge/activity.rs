@@ -69,7 +69,9 @@ impl MidiActivityState {
 }
 
 pub(super) fn record_activity(activity: &Arc<Mutex<MidiActivityTracker>>, frame: &MidiFrame) {
-    let mut guard = activity.lock();
+    let Some(mut guard) = activity.try_lock() else {
+        return;
+    };
     guard.record(&frame.source, frame.data.as_slice());
 }
 

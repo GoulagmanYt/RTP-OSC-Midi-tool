@@ -10,7 +10,6 @@ use crate::{
     config::Config,
     logger::FrontendLogger,
     midi::MidiFrame,
-    osc::OscClient,
     reliable_playback::ReliablePlaybackServer,
     rtp::{rtp_advertisement::RtpAdvertisementStatus, RtpRemoteTarget, RtpServer},
     types::{BridgeStatus, RtpParticipantInfo},
@@ -57,7 +56,6 @@ pub(super) struct BridgeRuntime {
     pub(super) reliable_playback: Option<ReliablePlaybackServer>,
     pub(super) config: Arc<Mutex<Config>>,
     pub(super) config_rev: Arc<AtomicU64>,
-    pub(super) panic_revision: Arc<AtomicU64>,
     pub(super) actual_midi_in: Arc<Mutex<Option<String>>>,
     pub(super) actual_midi_out: Arc<Mutex<Option<String>>>,
 }
@@ -116,19 +114,17 @@ impl BridgeHandle {
 
     pub fn stop(&self) -> Result<(), String> {
         self.stop_internal();
+        // RTP discovery/session setup may have run before the bridge started.
+        if let Some(server) = self.rtp_server.lock().take() {
+            crate::tauri::utils::safe_block_on(server.stop());
+        }
+        *self.rtp_sink.write() = None;
+        *self.rtp_config.lock() = None;
         Ok(())
     }
 
     pub fn reset_keys(&self) -> Result<(), String> {
-        let guard = self.inner.lock();
-        if let Some(runtime) = guard.as_ref() {
-            runtime.panic_revision.fetch_add(1, Ordering::Release);
-            let cfg = runtime.config.lock().clone();
-            if cfg.osc.enabled {
-                let osc = OscClient::new(&cfg.osc.target_ip, cfg.osc.target_port)?;
-                osc.send_reset_all()?;
-            }
-        }
+        super::pipeline::request_critical_midi_reset();
         Ok(())
     }
 
@@ -169,6 +165,7 @@ impl BridgeHandle {
     pub fn update_config(&self, config: Config, _logger: &FrontendLogger) -> Result<(), String> {
         let mut guard = self.inner.lock();
         if let Some(runtime) = guard.as_mut() {
+            super::pipeline::request_critical_midi_reset();
             *runtime.config.lock() = config.clone();
             refresh_runtime_status(
                 runtime,
@@ -236,7 +233,12 @@ impl BridgeHandle {
                     source: std::sync::Arc::from(source.as_str()),
                 },
             )
-            .map(|_| ())
+            .and_then(|outcome| match outcome {
+                super::pipeline::EnqueueOutcome::Enqueued => Ok(()),
+                super::pipeline::EnqueueOutcome::DroppedNonCritical => {
+                    Err(super::pipeline::EnqueueError::QueueFull)
+                }
+            })
             .map_err(|error| error.to_string())
         } else {
             Err("Bridge not running".to_string())

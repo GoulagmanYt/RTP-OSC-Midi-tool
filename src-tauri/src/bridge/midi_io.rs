@@ -44,6 +44,7 @@ pub(super) fn watch_midi_input(
             wait_for_config_change_only = false;
             if midi_changed && current_conn.is_some() {
                 logger.info("Reconnexion MIDI IN (changement de peripherique)");
+                super::pipeline::request_critical_midi_reset();
                 current_conn = None;
             }
         }
@@ -62,6 +63,22 @@ pub(super) fn watch_midi_input(
             continue;
         }
 
+        if current_conn.is_some() {
+            if let Ok(input) = MidiInput::new("OSCMidi hotplug") {
+                if select_input_port(
+                    &input,
+                    &input.ports(),
+                    cached_cfg.midi.input_device.as_ref(),
+                )
+                .is_none()
+                {
+                    current_conn = None;
+                    wait_for_config_change_only = !cached_cfg.midi.hotplug;
+                    *actual_midi_in.lock() = None;
+                    super::pipeline::request_critical_midi_reset();
+                }
+            }
+        }
         if current_conn.is_none() && !wait_for_config_change_only {
             match open_input(&cached_cfg, midi_tx.clone(), &logger) {
                 Ok((conn, name)) => {
@@ -91,7 +108,7 @@ pub(super) fn open_input(
     logger: &FrontendLogger,
 ) -> Result<(MidiInputConnection<Sender<MidiFrame>>, String), String> {
     let mut input = MidiInput::new("OSCMidi").map_err(|e| e.to_string())?;
-    input.ignore(Ignore::TimeAndActiveSense);
+    input.ignore(Ignore::None);
 
     let ports = input.ports();
     let port = select_input_port(&input, &ports, config.midi.input_device.as_ref())

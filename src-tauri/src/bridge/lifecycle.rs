@@ -215,7 +215,6 @@ pub(super) fn start_runtime(
         reliable_playback,
         config: shared_config,
         config_rev,
-        panic_revision,
         actual_midi_in,
         actual_midi_out,
     })
@@ -228,6 +227,7 @@ pub(super) fn stop_runtime(
     rtp_config: &Arc<Mutex<Option<RtpConfigSnapshot>>>,
 ) {
     let config_for_reset = runtime.config.lock().clone();
+    *rtp_sink.write() = None;
     runtime.stop.store(true, Ordering::Relaxed);
     if let Some(handle) = runtime.processing {
         let _ = handle.join();

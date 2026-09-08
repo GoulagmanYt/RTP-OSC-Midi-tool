@@ -26,12 +26,20 @@ static PIPELINE_QUEUE_MAX_DEPTH: AtomicU64 = AtomicU64::new(0);
 static PIPELINE_DROPPED_COUNT: AtomicU64 = AtomicU64::new(0);
 static MIDI_DEBUG_SAMPLE_LAST_MS: AtomicU64 = AtomicU64::new(0);
 static CRITICAL_MIDI_RESET_REQUESTED: AtomicBool = AtomicBool::new(false);
+static MIDI_RESET_GENERATION: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+pub(super) static TEST_PIPELINE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub(crate) fn midi_reset_generation() -> u64 {
+    MIDI_RESET_GENERATION.load(Ordering::Acquire)
+}
 
 pub(super) fn take_critical_midi_reset_request() -> bool {
     CRITICAL_MIDI_RESET_REQUESTED.swap(false, Ordering::AcqRel)
 }
 
 pub(crate) fn request_critical_midi_reset() {
+    MIDI_RESET_GENERATION.fetch_add(1, Ordering::AcqRel);
     CRITICAL_MIDI_RESET_REQUESTED.store(true, Ordering::Release);
 }
 
@@ -43,6 +51,10 @@ pub enum EnqueueOutcome {
 
 #[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
 pub enum EnqueueError {
+    #[error("Bridge queue full; MIDI message dropped")]
+    QueueFull,
+    #[error("Invalid MIDI frame")]
+    InvalidMessage,
     #[error("Bridge queue full; critical MIDI release dropped")]
     CriticalReleaseDropped,
     #[error("Bridge not running")]
@@ -160,6 +172,7 @@ pub(super) fn handle_midi_frame(
     deliver_audio: bool,
     deliver_midi_thru: bool,
     deliver_osc_ui: bool,
+    active_notes: &mut crate::midi::ActiveNotes,
 ) {
     // Compteur entrée pipeline (stress test metrics)
     if deliver_audio {
@@ -167,6 +180,10 @@ pub(super) fn handle_midi_frame(
     }
 
     let mut frame = frame;
+    if deliver_audio && frame.data.as_slice() == [0xFF] {
+        request_critical_midi_reset();
+        return;
+    }
     let mut filtered = false;
     // A load test must measure the queues/audio callback, not benchmark the
     // synchronous file logger by writing thousands of lines per second.
@@ -213,8 +230,17 @@ pub(super) fn handle_midi_frame(
         if let Some(status) = frame.data.first() {
             let is_channel_voice = (0x80..0xF0).contains(status);
             if is_channel_voice {
-                audio.send_midi(frame.data.as_slice());
-                PIPELINE_OUT_COUNT.fetch_add(1, Ordering::Relaxed);
+                match audio.send_midi_with_outcome(frame.data.as_slice()) {
+                    crate::audio::MidiSendOutcome::Sent => {
+                        PIPELINE_OUT_COUNT.fetch_add(1, Ordering::Relaxed);
+                    }
+                    crate::audio::MidiSendOutcome::AudioStopped => {
+                        PIPELINE_FILTERED_COUNT.fetch_add(1, Ordering::Relaxed);
+                    }
+                    _ => {
+                        PIPELINE_DROPPED_COUNT.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
                 if log_sample {
                     logger.debug(format!(
                         "BRIDGE: VST MIDI de {}: {:02X?}",
@@ -234,6 +260,9 @@ pub(super) fn handle_midi_frame(
             if let Err(error) = out.send(frame.data.as_slice()) {
                 logger.warn(format!("Sortie MIDI déconnectée: {error}"));
                 *midi_out = None;
+                request_critical_midi_reset();
+            } else {
+                active_notes.observe(frame.data.as_slice());
             }
         }
     }
@@ -262,7 +291,6 @@ pub(super) fn handle_midi_frame(
         {
             return;
         }
-        sustain_pressed_state[channel_idx] = Some(sustain.pressed);
 
         if !config.osc_enabled {
             if log_sample {
@@ -276,16 +304,21 @@ pub(super) fn handle_midi_frame(
 
         if let Some(osc_client) = osc {
             if let Err(err) = osc_client.send_sustain(sustain.pressed) {
+                if !sustain.pressed {
+                    request_critical_midi_reset();
+                }
                 if logs_enabled() {
                     logger.error(format!("Envoi OSC echoue: {err}"));
                 }
             } else if config.log_osc && logs_enabled() {
+                sustain_pressed_state[channel_idx] = Some(sustain.pressed);
                 logger.info(format!(
                     "{OSC_SUSTAIN_PARAM} -> {}",
                     if sustain.pressed { 1 } else { 0 }
                 ));
                 osc_counter.fetch_add(1, Ordering::Relaxed);
             } else {
+                sustain_pressed_state[channel_idx] = Some(sustain.pressed);
                 osc_counter.fetch_add(1, Ordering::Relaxed);
             }
         } else if log_sample && logs_enabled() {
@@ -337,7 +370,6 @@ pub(super) fn handle_midi_frame(
                 }
                 return;
             }
-            let param = crate::osc::parameter_name(index);
             let pressed = match note.kind {
                 MidiKind::NoteOn => true,
                 MidiKind::NoteOff => false,
@@ -345,10 +377,14 @@ pub(super) fn handle_midi_frame(
 
             if let Some(osc_client) = osc {
                 if let Err(err) = osc_client.send_note(index, pressed) {
+                    if !pressed {
+                        request_critical_midi_reset();
+                    }
                     if logs_enabled() {
                         logger.error(format!("Envoi OSC echoue: {err}"));
                     }
                 } else if config.log_osc && logs_enabled() {
+                    let param = crate::osc::parameter_name(index);
                     logger.info(format!("{param} -> {}", if pressed { 1 } else { 0 }));
                     osc_counter.fetch_add(1, Ordering::Relaxed);
                 } else {
@@ -402,13 +438,19 @@ fn apply_routing_profile(profile: &RoutingProfileRuntime, frame: &mut MidiFrame)
         0xB0 => {
             if let Some(cc) = frame.data.get_mut(1) {
                 let idx = *cc as usize;
-                *cc = profile.cc_map[idx];
+                let Some(mapped) = profile.cc_map.get(idx) else {
+                    return false;
+                };
+                *cc = *mapped;
             }
         }
         0xC0 => {
             if let Some(program) = frame.data.get_mut(1) {
                 let idx = *program as usize;
-                *program = profile.program_map[idx];
+                let Some(mapped) = profile.program_map.get(idx) else {
+                    return false;
+                };
+                *program = *mapped;
             }
         }
         _ => {}
@@ -468,8 +510,11 @@ pub(super) fn record_fanout_drop() {
 
 pub fn try_enqueue_midi_frame(
     tx: &Sender<MidiFrame>,
-    frame: MidiFrame,
+    mut frame: MidiFrame,
 ) -> Result<EnqueueOutcome, EnqueueError> {
+    if !crate::midi::normalize_message(&mut frame.data) {
+        return Err(EnqueueError::InvalidMessage);
+    }
     match tx.try_send(frame) {
         Ok(()) => Ok(EnqueueOutcome::Enqueued),
         Err(TrySendError::Full(frame)) => {
@@ -479,11 +524,11 @@ pub fn try_enqueue_midi_frame(
                     Ok(()) => Ok(EnqueueOutcome::Enqueued),
                     Err(TrySendError::Full(_)) => {
                         PIPELINE_DROPPED_COUNT.fetch_add(1, Ordering::Relaxed);
-                        CRITICAL_MIDI_RESET_REQUESTED.store(true, Ordering::Release);
+                        request_critical_midi_reset();
                         Err(EnqueueError::CriticalReleaseDropped)
                     }
                     Err(TrySendError::Disconnected(_)) => {
-                        CRITICAL_MIDI_RESET_REQUESTED.store(true, Ordering::Release);
+                        request_critical_midi_reset();
                         Err(EnqueueError::Disconnected)
                     }
                 }
@@ -494,7 +539,7 @@ pub fn try_enqueue_midi_frame(
         }
         Err(TrySendError::Disconnected(frame)) => {
             if is_critical_release_message(frame.data.as_slice()) {
-                CRITICAL_MIDI_RESET_REQUESTED.store(true, Ordering::Release);
+                request_critical_midi_reset();
             }
             Err(EnqueueError::Disconnected)
         }
@@ -509,7 +554,6 @@ pub fn reset_pipeline_stats() {
     PIPELINE_QUEUE_DEPTH.store(0, Ordering::Relaxed);
     PIPELINE_QUEUE_MAX_DEPTH.store(0, Ordering::Relaxed);
     PIPELINE_DROPPED_COUNT.store(0, Ordering::Relaxed);
-    CRITICAL_MIDI_RESET_REQUESTED.store(false, Ordering::Relaxed);
 }
 
 #[cfg(test)]
@@ -527,6 +571,7 @@ mod tests {
 
     #[test]
     fn pipeline_metrics_snapshot_tracks_queue_depth_and_counts() {
+        let _guard = TEST_PIPELINE_LOCK.lock().unwrap();
         reset_pipeline_stats();
         PIPELINE_IN_COUNT.store(10, Ordering::Relaxed);
         PIPELINE_OUT_COUNT.store(9, Ordering::Relaxed);
@@ -561,6 +606,7 @@ mod tests {
 
     #[test]
     fn bounded_enqueue_reports_non_critical_drop() {
+        let _guard = TEST_PIPELINE_LOCK.lock().unwrap();
         let (tx, _rx) = bounded(1);
         tx.try_send(frame(&[0x90, 60, 100])).expect("prefill");
 
@@ -572,6 +618,7 @@ mod tests {
 
     #[test]
     fn bounded_enqueue_reports_critical_drop_as_error() {
+        let _guard = TEST_PIPELINE_LOCK.lock().unwrap();
         let (tx, _rx) = bounded(1);
         tx.try_send(frame(&[0x90, 60, 100])).expect("prefill");
 

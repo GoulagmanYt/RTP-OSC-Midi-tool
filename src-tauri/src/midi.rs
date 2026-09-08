@@ -31,7 +31,7 @@ pub struct MidiSustain {
 }
 
 pub fn parse_note(data: &[u8]) -> Option<MidiNote> {
-    if data.len() < 2 {
+    if data.len() != 3 || data[1..].iter().any(|byte| *byte >= 0x80) {
         return None;
     }
     let status = data[0];
@@ -76,13 +76,76 @@ pub fn parse_sustain(data: &[u8]) -> Option<MidiSustain> {
 }
 
 pub fn is_critical_release_message(data: &[u8]) -> bool {
+    if data == [0xFF] {
+        return true;
+    }
     if data.len() < 3 {
         return false;
     }
     let status = data[0] & 0xF0;
     matches!(status, 0x80)
         || (status == 0x90 && data[2] == 0)
-        || (status == 0xB0 && data[1] == 64 && data[2] < 64)
+        || (status == 0xB0
+            && ((data[1] == 64 && data[2] < 64) || matches!(data[1], 120 | 121 | 123)))
+}
+
+/// Validate complete driver/bridge messages before indexing or dispatching them.
+pub fn normalize_message(data: &mut [u8]) -> bool {
+    let Some(&status) = data.first() else {
+        return false;
+    };
+    let len = match status {
+        0x80..=0xBF | 0xE0..=0xEF | 0xF2 => 3,
+        0xC0..=0xDF | 0xF1 | 0xF3 => 2,
+        0xF6 | 0xF8 | 0xFA..=0xFC | 0xFE..=0xFF => 1,
+        0xF0 => {
+            return data.len() >= 2
+                && data.last() == Some(&0xF7)
+                && data[1..data.len() - 1].iter().all(|b| *b < 0x80)
+        }
+        _ => return false,
+    };
+    if data.len() != len || data[1..].iter().any(|byte| *byte >= 0x80) {
+        return false;
+    }
+    if status & 0xF0 == 0x90 && data[2] == 0 {
+        data[0] = 0x80 | (status & 0x0F);
+    }
+    true
+}
+
+/// Owned by the MIDI destination thread; no shared mutation or heap allocation.
+#[derive(Default)]
+pub(crate) struct ActiveNotes {
+    notes: [u128; 16],
+}
+
+impl ActiveNotes {
+    pub(crate) fn observe(&mut self, data: &[u8]) {
+        if let Some(note) = parse_note(data) {
+            let channel = usize::from(note.channel - 1);
+            let mask = 1u128 << note.note;
+            if note.kind == MidiKind::NoteOn {
+                self.notes[channel] |= mask;
+            } else {
+                self.notes[channel] &= !mask;
+            }
+        } else if data == [0xFF] {
+            self.notes.fill(0);
+        } else if data.len() == 3 && data[0] & 0xF0 == 0xB0 && matches!(data[1], 120 | 123) {
+            self.notes[usize::from(data[0] & 0x0F)] = 0;
+        }
+    }
+
+    pub(crate) fn release_all(&mut self, mut send: impl FnMut([u8; 3])) {
+        for (channel, notes) in self.notes.iter_mut().enumerate() {
+            while *notes != 0 {
+                let note = notes.trailing_zeros() as u8;
+                send([0x80 | channel as u8, note, 0]);
+                *notes &= !(1u128 << note);
+            }
+        }
+    }
 }
 
 pub fn adjust_note(note: u8) -> Option<u8> {

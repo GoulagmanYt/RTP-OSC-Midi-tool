@@ -43,7 +43,7 @@ use crate::plugin_probe::detect_vst3_channels;
 const CRITICAL_MIDI_PUSH_ATTEMPTS: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum MidiSendOutcome {
+pub(crate) enum MidiSendOutcome {
     Sent,
     DroppedNonCritical,
     CriticalFallbackReset,
@@ -127,7 +127,7 @@ impl AudioEngine {
         let _ = self.send_midi_packet_with_outcome(packet, bytes);
     }
 
-    pub(super) fn send_midi_with_outcome(&self, bytes: &[u8]) -> MidiSendOutcome {
+    pub(crate) fn send_midi_with_outcome(&self, bytes: &[u8]) -> MidiSendOutcome {
         #[cfg(target_os = "windows")]
         if self.is_worker_enabled() {
             return if self.worker.try_send_midi(bytes) {
@@ -407,7 +407,9 @@ mod tests {
 
     #[test]
     fn emergency_reset_clears_pending_midi() {
-        let (_tx, rx) = RingBuffer::new(8);
+        let (mut tx, rx) = RingBuffer::new(8);
+        tx.push(MidiPacket::from_bytes(&[0x90, 60, 100]).unwrap())
+            .unwrap();
         let reset_flag = Arc::new(AtomicBool::new(true));
         let mut state = callback_test_state(rx, reset_flag);
         // Pre-fill pending MIDI with note-on events
@@ -431,6 +433,11 @@ mod tests {
             state.pending_midi.len(),
             0,
             "pending MIDI must be cleared on emergency reset"
+        );
+        assert_eq!(
+            state.midi_rx.slots(),
+            0,
+            "Queued notes must not replay after reset"
         );
     }
 

@@ -5,7 +5,8 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::{audio::AudioSettings, config::VstEqSettings, types::VstParameter};
 
-pub const CONTROL_PROTOCOL_VERSION: u32 = 7;
+// Version 8 requires ordered, in-band emergency resets on the MIDI pipe.
+pub const CONTROL_PROTOCOL_VERSION: u32 = 8;
 pub const HOST_ABI_VERSION: u32 = crate::types::VST_HOST_ABI_VERSION;
 pub const MAX_CONTROL_FRAME_BYTES: usize = 1024 * 1024;
 pub const MAX_MIDI_BYTES: usize = 3;

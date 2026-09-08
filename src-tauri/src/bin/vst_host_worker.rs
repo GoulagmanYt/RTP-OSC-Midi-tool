@@ -269,6 +269,10 @@ mod windows_worker {
             let frame = read_midi_frame(&mut pipe)
                 .await
                 .map_err(|error| format!("MIDI pipe failed: {error}"))?;
+            if frame.bytes() == [0xFF] {
+                audio.request_emergency_midi_reset();
+                continue;
+            }
             let age_us = qpc_elapsed_us(frame.monotonic_qpc, monotonic_qpc());
             audio.send_midi_with_age(frame.bytes(), age_us);
         }

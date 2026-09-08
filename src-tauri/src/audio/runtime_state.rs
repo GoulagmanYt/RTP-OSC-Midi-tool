@@ -352,7 +352,9 @@ impl MidiPacket {
     }
 
     pub(super) fn is_critical_release(self) -> bool {
-        self.is_note_off() || self.is_cc64_off()
+        self.is_note_off()
+            || self.is_cc64_off()
+            || crate::midi::is_critical_release_message(&self.data[..usize::from(self.len)])
     }
 
     pub(super) fn age_us(self, now_us: u64) -> u64 {
@@ -488,6 +490,9 @@ impl AudioCallbackState {
         {
             self.needs_emergency_reset = true;
             self.pending_midi.clear();
+            for _ in 0..self.midi_rx.slots() {
+                let _ = self.midi_rx.pop();
+            }
         }
         let now_us = monotonic_us();
         let measured_frames = self.telemetry.block_size_frames.load(Ordering::Relaxed);

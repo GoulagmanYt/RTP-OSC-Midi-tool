@@ -1,9 +1,10 @@
 use crate::midi::{NOTE_MAX, NOTE_MIN};
 use rosc::{encoder, OscMessage, OscPacket, OscType};
-use std::io::ErrorKind;
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::LazyLock;
+#[cfg(test)]
 use std::thread;
+#[cfg(test)]
 use std::time::Duration;
 
 pub const PARAMETER_PATH: &str = "/avatar/parameters/";
@@ -45,7 +46,7 @@ impl OscClient {
             .map_err(|e| e.to_string())?;
         let socket = UdpSocket::bind("0.0.0.0:0").map_err(|e| e.to_string())?;
         socket
-            .set_write_timeout(Some(Duration::from_millis(25)))
+            .set_nonblocking(true)
             .map_err(|e| format!("socket write timeout: {e}"))?;
         Ok(Self { socket, target })
     }
@@ -56,6 +57,9 @@ impl OscClient {
     }
 
     pub fn send_note(&self, index: u8, pressed: bool) -> Result<(), String> {
+        if index == 0 {
+            return Err("OSC note index must be positive".to_string());
+        }
         let packet = NOTE_PACKETS
             .get(usize::from(index.saturating_sub(1)))
             .ok_or_else(|| format!("OSC note index out of range: {index}"))?;
@@ -67,19 +71,21 @@ impl OscClient {
     }
 
     pub fn send_reset_all(&self) -> Result<(), String> {
-        // Send K1 then set all keys to zero with a short pacing delay.
-        let _ = self.send_packet(OscPacket::Message(OscMessage {
+        let mut first_error = None;
+        let mut record = |result: Result<(), String>| {
+            if let Err(error) = result {
+                first_error.get_or_insert(error);
+            }
+        };
+        record(self.send_packet(OscPacket::Message(OscMessage {
             addr: format!("{PARAMETER_PATH}K1"),
             args: vec![OscType::Float(0.0)],
-        }));
-        let _ = self.send_sustain(false);
-        thread::sleep(Duration::from_millis(20));
+        })));
+        record(self.send_sustain(false));
         for note in NOTE_MIN..=NOTE_MAX {
-            let index = (note - NOTE_MIN) + 1;
-            let _ = self.send_note(index, false);
-            thread::sleep(Duration::from_millis(6));
+            record(self.send_note(note - NOTE_MIN + 1, false));
         }
-        Ok(())
+        first_error.map_or(Ok(()), Err)
     }
 
     fn send_packet(&self, packet: OscPacket) -> Result<(), String> {
@@ -88,25 +94,10 @@ impl OscClient {
     }
 
     fn send_encoded(&self, data: &[u8]) -> Result<(), String> {
-        let mut last_retry_error: Option<std::io::Error> = None;
-        for _ in 0..3 {
-            match self.socket.send_to(data, self.target) {
-                Ok(_) => return Ok(()),
-                Err(err)
-                    if matches!(
-                        err.kind(),
-                        ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted
-                    ) =>
-                {
-                    last_retry_error = Some(err);
-                    thread::sleep(Duration::from_millis(1));
-                }
-                Err(err) => return Err(err.to_string()),
-            }
-        }
-        Err(last_retry_error
-            .map(|e| e.to_string())
-            .unwrap_or_else(|| "OSC send failed after retries".to_string()))
+        self.socket
+            .send_to(data, self.target)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -123,6 +114,29 @@ fn encode_param(name: &str, pressed: bool) -> Vec<u8> {
 mod tests {
     use super::*;
     use std::{io::ErrorKind, time::Instant};
+
+    #[test]
+    fn cached_packets_round_trip_and_have_aligned_strings_and_payloads() {
+        for index in 1..=88 {
+            for pressed in [false, true] {
+                let packet = &NOTE_PACKETS[index - 1][usize::from(pressed)];
+                assert_eq!(packet.len() % 4, 0);
+                let address_end = packet.iter().position(|b| *b == 0).unwrap();
+                let tag_start = (address_end + 4) & !3;
+                assert!(packet[address_end..tag_start].iter().all(|b| *b == 0));
+                assert_eq!(&packet[tag_start..tag_start + 4], b",i\0\0");
+                let (remaining, decoded) = rosc::decoder::decode_udp(packet).unwrap();
+                assert!(remaining.is_empty());
+                assert_eq!(
+                    decoded,
+                    OscPacket::Message(OscMessage {
+                        addr: parameter_name(index as u8),
+                        args: vec![OscType::Int(i32::from(pressed))],
+                    })
+                );
+            }
+        }
+    }
 
     #[test]
     fn stress_osc_loopback_no_loss() {
