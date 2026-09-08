@@ -23,7 +23,7 @@ pub(super) trait ReadWriteExt {
 
 impl ReadWriteExt for MidiMessage {
     fn write(&self, bytes: &mut BytesMut, running_status: Option<u8>) {
-        if let Some(status_byte) = running_status {
+        if let Some(status_byte) = running_status.filter(|_| self.status() < 0xF0) {
             if status_byte != self.status() {
                 bytes.put_u8(self.status());
             }
@@ -53,14 +53,17 @@ impl ReadWriteExt for MidiMessage {
             }
             MidiMessage::PitchBendChange(_channel, value) => {
                 let raw: u16 = Into::into(*value);
-                bytes.put_u8((raw >> 7) as u8);
                 bytes.put_u8((raw & 0x7F) as u8);
+                bytes.put_u8((raw >> 7) as u8);
             }
-            _ => {
-                // Handle other MIDI messages or SysEx messages here
-                // For now, we will panic if an unsupported message is encountered
-                panic!("Unsupported MIDI message type: {self:?}");
+            MidiMessage::QuarterFrame(value) => bytes.put_u8((*value).into()),
+            MidiMessage::SongPositionPointer(value) => {
+                let raw: u16 = (*value).into();
+                bytes.put_u8((raw & 0x7F) as u8);
+                bytes.put_u8((raw >> 7) as u8);
             }
+            MidiMessage::SongSelect(value) => bytes.put_u8((*value).into()),
+            _ => {}
         }
     }
 
@@ -97,11 +100,38 @@ impl ReadWriteExt for MidiMessage {
         channel: u8,
         bytes: &[u8],
     ) -> Result<(RtpMidiMessage<'_>, &[u8])> {
+        let invalid = || {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Invalid or truncated MIDI message",
+            )
+        };
+        if status_byte == 0xF0 {
+            let end = bytes.iter().position(|&b| b == 0xF7).ok_or_else(invalid)?;
+            if bytes[..end].iter().any(|b| *b >= 0x80) {
+                return Err(invalid());
+            }
+            return Ok((RtpMidiMessage::SysEx(&bytes[..end]), &bytes[end + 1..]));
+        }
+        let required = match status_byte {
+            0x80..=0xBF | 0xE0..=0xEF | 0xF2 => 2,
+            0xC0..=0xDF | 0xF1 | 0xF3 => 1,
+            0xF6 | 0xF8 | 0xFA..=0xFC | 0xFE..=0xFF => 0,
+            _ => return Err(invalid()),
+        };
+        if bytes.len() < required || bytes[..required].iter().any(|b| *b >= 0x80) {
+            return Err(invalid());
+        }
         let command = match status_byte {
             0x80..0x90 => RtpMidiMessage::MidiMessage(MidiMessage::NoteOff(
                 Channel::from(channel),
                 Note::from(bytes[0]),
                 Value7::from(bytes[1]),
+            )),
+            0x90..0xA0 if bytes[1] == 0 => RtpMidiMessage::MidiMessage(MidiMessage::NoteOff(
+                Channel::from(channel),
+                Note::from(bytes[0]),
+                Value7::from(0),
             )),
             0x90..0xA0 => RtpMidiMessage::MidiMessage(MidiMessage::NoteOn(
                 Channel::from(channel),
@@ -126,23 +156,24 @@ impl ReadWriteExt for MidiMessage {
                 Channel::from(channel),
                 Value7::from(bytes[0]),
             )),
-            0xE0..0xF0 => RtpMidiMessage::MidiMessage(MidiMessage::PitchBendChange(
+            0xE0..=0xEF => RtpMidiMessage::MidiMessage(MidiMessage::PitchBendChange(
                 Channel::from(channel),
-                Value14::from((bytes[0], bytes[1])),
+                Value14::from((bytes[1], bytes[0])),
             )),
-            0xF0 => {
-                let end_index = bytes.iter().position(|&b| b == 0xF7).unwrap_or(bytes.len());
-                RtpMidiMessage::SysEx(&bytes[1..end_index])
-            }
             0xF1 => {
                 RtpMidiMessage::MidiMessage(MidiMessage::QuarterFrame(QuarterFrame::from(bytes[0])))
             }
             0xF2 => RtpMidiMessage::MidiMessage(MidiMessage::SongPositionPointer(Value14::from((
-                bytes[0], bytes[1],
+                bytes[1], bytes[0],
             )))),
             0xF3 => RtpMidiMessage::MidiMessage(MidiMessage::SongSelect(Value7::from(bytes[0]))),
             0xF6 => RtpMidiMessage::MidiMessage(MidiMessage::TuneRequest),
             0xF8 => RtpMidiMessage::MidiMessage(MidiMessage::TimingClock),
+            0xFA => RtpMidiMessage::MidiMessage(MidiMessage::Start),
+            0xFB => RtpMidiMessage::MidiMessage(MidiMessage::Continue),
+            0xFC => RtpMidiMessage::MidiMessage(MidiMessage::Stop),
+            0xFE => RtpMidiMessage::MidiMessage(MidiMessage::ActiveSensing),
+            0xFF => RtpMidiMessage::MidiMessage(MidiMessage::Reset),
             _ => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -151,7 +182,7 @@ impl ReadWriteExt for MidiMessage {
             }
         };
 
-        let remaining = &bytes[command.len() - 1..];
+        let remaining = &bytes[required..];
         Ok((command, remaining))
     }
 
@@ -159,6 +190,12 @@ impl ReadWriteExt for MidiMessage {
         bytes: &[u8],
         running_status: Option<u8>,
     ) -> std::io::Result<(RtpMidiMessage<'_>, &[u8])> {
+        if bytes.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Missing MIDI status",
+            ));
+        }
         let (status_byte, bytes) = if bytes[0].status_bit() {
             (bytes[0], &bytes[1..])
         } else {
@@ -252,7 +289,7 @@ mod tests {
     #[test]
     fn test_command_write_pitch_bend() {
         let command = MidiMessage::PitchBendChange(From::from(4), From::from((0x40, 0x7F)));
-        let expected_bytes: Vec<u8> = vec![0xE4u8, 0x40, 0x7F];
+        let expected_bytes: Vec<u8> = vec![0xE4u8, 0x7F, 0x40];
         test_command_write_type(command, &expected_bytes);
     }
 

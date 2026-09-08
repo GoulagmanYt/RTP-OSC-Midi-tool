@@ -34,6 +34,7 @@ rack = { version = "0.4.8", path = "../../vendor/rack" }
 vst = { version = "0.4", path = "../../vendor/vst" }
 
 [patch.crates-io]
+midi-types = { path = "../../vendor/midi-types" }
 rack = { path = "../../vendor/rack" }
 vst = { path = "../../vendor/vst" }
 rtpmidi = { path = "../../vendor/rtpmidi" }

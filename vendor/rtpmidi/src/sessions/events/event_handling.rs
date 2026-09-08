@@ -7,6 +7,7 @@ pub(super) type TimestampedMidiMessageListener = dyn Fn(TimestampedMidiMessage) 
 pub(super) type SysExPacketListener = dyn for<'a> Fn(&'a [u8]) + Send + 'static;
 pub(super) type ParticipantListener = dyn for<'a> Fn(&'a Participant) + Send + 'static;
 pub(super) type PacketLossListener = dyn Fn(PacketLoss) + Send + 'static;
+pub(super) type StreamFaultListener = dyn Fn(u32) + Send + 'static;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PacketLoss {
@@ -22,6 +23,8 @@ pub struct TimestampedMidiMessage {
     /// RTP timestamp in 100-microsecond units, including command delta time.
     pub timestamp: u32,
     pub ssrc: u32,
+    /// Monotonic local rendering deadline derived from the latest CK exchange.
+    pub deadline: std::time::Instant,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -32,6 +35,7 @@ pub enum RtpMidiEventType {
     ParticipantLeft,
     PacketLoss,
     TimestampedMidiMessage,
+    StreamFault,
 }
 
 pub struct EventListeners {
@@ -41,6 +45,7 @@ pub struct EventListeners {
     participant_joined: Vec<Box<ParticipantListener>>,
     participant_left: Vec<Box<ParticipantListener>>,
     packet_loss: Vec<Box<PacketLossListener>>,
+    stream_fault: Vec<Box<StreamFaultListener>>,
 }
 
 pub struct MidiMessageEvent;
@@ -49,6 +54,18 @@ pub struct SysExPacketEvent;
 pub struct ParticipantJoinedEvent;
 pub struct ParticipantLeftEvent;
 pub struct PacketLossEvent;
+/// An established endpoint sent an unusable packet. Its last release may be lost.
+pub struct StreamFaultEvent;
+
+impl EventType for StreamFaultEvent {
+    type Data<'a> = u32;
+    fn add_listener_to_storage<F>(listeners: &mut EventListeners, callback: F)
+    where
+        F: for<'a> Fn(Self::Data<'a>) + Send + 'static,
+    {
+        listeners.stream_fault.push(Box::new(callback));
+    }
+}
 
 pub trait EventType {
     type Data<'a>;
@@ -139,10 +156,17 @@ impl EventListeners {
             participant_joined: Vec::new(),
             participant_left: Vec::new(),
             packet_loss: Vec::new(),
+            stream_fault: Vec::new(),
         }
     }
 
-    pub fn notify_midi_message(&self, message: MidiMessage, timestamp: u32, ssrc: u32) {
+    pub fn notify_midi_message(
+        &self,
+        message: MidiMessage,
+        timestamp: u32,
+        ssrc: u32,
+        deadline: std::time::Instant,
+    ) {
         for listener in &self.midi_message {
             listener((message, timestamp));
         }
@@ -150,6 +174,7 @@ impl EventListeners {
             message,
             timestamp,
             ssrc,
+            deadline,
         };
         for listener in &self.timestamped_midi_message {
             listener(event);
@@ -177,6 +202,12 @@ impl EventListeners {
     pub fn notify_packet_loss(&self, loss: PacketLoss) {
         for listener in &self.packet_loss {
             listener(loss);
+        }
+    }
+
+    pub fn notify_stream_fault(&self, ssrc: u32) {
+        for listener in &self.stream_fault {
+            listener(ssrc);
         }
     }
 }

@@ -32,7 +32,7 @@ pub struct RtpMidiSession {
     control_port: Arc<ControlPort>,
     host_syncer: Arc<HostSyncer>,
     cancel_token: Arc<CancellationToken>,
-    task_handles: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    task_handles: Arc<std::sync::Mutex<Vec<JoinHandle<()>>>>,
     name: CString,
     #[cfg(feature = "mdns")]
     mdns: mdns_sd::ServiceDaemon,
@@ -43,10 +43,18 @@ pub(super) struct PendingInvitation {
     pub addr: SocketAddr,
     pub token: U32,
     pub name: CString,
+    pub created: Instant,
+    pub ssrc: U32,
 }
 
 impl RtpMidiSession {
     async fn bind(port: u16, name: &str, ssrc: u32) -> std::io::Result<Self> {
+        if port == u16::MAX {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Invalid RTP port pair",
+            ));
+        }
         let cstr_name = CString::new(name)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
 
@@ -62,7 +70,7 @@ impl RtpMidiSession {
             host_syncer: Arc::new(HostSyncer::new()),
             listeners: Arc::new(Mutex::new(EventListeners::new())),
             cancel_token: Arc::new(CancellationToken::new()),
-            task_handles: Arc::new(Mutex::new(Vec::new())),
+            task_handles: Arc::new(std::sync::Mutex::new(Vec::new())),
             name: cstr_name,
             #[cfg(feature = "mdns")]
             mdns: advertise_mdns(name, port).map_err(|e| std::io::Error::other(e.to_string()))?,
@@ -142,12 +150,10 @@ impl RtpMidiSession {
         });
         handles.push(handle);
 
-        // Store all handles
-        let task_handles = self.task_handles.clone();
-        tokio::spawn(async move {
-            let mut guard = task_handles.lock().await;
-            guard.extend(handles);
-        });
+        self.task_handles
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend(handles);
     }
 
     #[instrument(skip_all, fields(name = %self.name()))]
@@ -163,9 +169,10 @@ impl RtpMidiSession {
         self.stop_immediately();
 
         // Wait for all background tasks to complete
-        let mut task_handles = self.task_handles.lock().await;
-        let handles = std::mem::take(&mut *task_handles);
-        drop(task_handles); // Release the lock
+        let handles = {
+            let mut task_handles = self.task_handles.lock().unwrap_or_else(|e| e.into_inner());
+            std::mem::take(&mut *task_handles)
+        };
 
         event!(
             Level::DEBUG,
@@ -202,7 +209,41 @@ impl RtpMidiSession {
         event!(Level::INFO, "Removing participant");
         self.control_port.send_termination_packet(participant).await;
         self.midi_port.send_termination_packet(participant).await;
-        self.participants.lock().await.remove(&participant.ssrc());
+        self.forget_participant(participant.ssrc()).await;
+    }
+
+    pub(super) async fn notify_joined(&self, participant: &Participant) {
+        self.listeners
+            .lock()
+            .await
+            .notify_participant_joined(participant);
+    }
+
+    pub(super) async fn forget_participant(&self, ssrc: U32) {
+        let participant = self.participants.lock().await.remove(&ssrc);
+        self.midi_port.clear_receive_sequence(ssrc).await;
+        if let Some(participant) = participant {
+            self.listeners
+                .lock()
+                .await
+                .notify_participant_left(&participant);
+        }
+    }
+
+    pub(super) async fn handle_termination(
+        &self,
+        ssrc: U32,
+        token: U32,
+        src: SocketAddr,
+        midi: bool,
+    ) {
+        let valid = self.participants.lock().await.get(&ssrc).is_some_and(|p| {
+            (if midi { p.midi_port_addr() } else { p.addr() }) == src
+                && p.initiator_token() == Some(token)
+        });
+        if valid {
+            self.forget_participant(ssrc).await;
+        }
     }
 
     pub async fn add_listener<E, F>(&self, _event_type: E, callback: F)

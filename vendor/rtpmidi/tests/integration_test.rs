@@ -9,9 +9,11 @@ use rtpmidi::sessions::rtp_midi_session::RtpMidiSession;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::Notify;
+static INTEGRATION_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[tokio::test]
 async fn test_two_session_inter_communication() {
+    let _guard = INTEGRATION_LOCK.lock().await;
     let (control_port_1, _midi_port_1) = find_consecutive_ports();
     let ssrc1 = 0x11111111;
     let session1 =
@@ -109,4 +111,126 @@ async fn test_two_session_inter_communication() {
         }
         _ => panic!("Expected a NoteOff message"),
     }
+}
+
+#[tokio::test]
+async fn malformed_udp_loss_rollover_and_control_disconnect() {
+    let _guard = INTEGRATION_LOCK.lock().await;
+    use rtpmidi::sessions::events::event_handling::{
+        PacketLossEvent, ParticipantLeftEvent, TimestampedMidiMessageEvent,
+    };
+    use tokio::{
+        net::UdpSocket,
+        time::{Duration, timeout},
+    };
+    timeout(Duration::from_secs(5), async {
+        let (port, _) = find_consecutive_ports();
+        let server = RtpMidiSession::start(port, "Regression", 7, InviteResponder::Accept)
+            .await
+            .unwrap();
+        let (peer_port, _) = find_consecutive_ports();
+        let control = UdpSocket::bind(("127.0.0.1", peer_port)).await.unwrap();
+        let data = UdpSocket::bind(("127.0.0.1", peer_port + 1)).await.unwrap();
+        let (tx, mut events) = tokio::sync::mpsc::channel(32);
+        server
+            .add_listener(TimestampedMidiMessageEvent, move |event| {
+                tx.try_send(event).unwrap();
+            })
+            .await;
+        let (left_tx, mut left_rx) = tokio::sync::mpsc::channel(1);
+        server
+            .add_listener(ParticipantLeftEvent, move |_| {
+                left_tx.try_send(()).unwrap();
+            })
+            .await;
+        let (fault_tx, mut fault_rx) = tokio::sync::mpsc::channel(4);
+        server
+            .add_listener(
+                rtpmidi::sessions::events::event_handling::StreamFaultEvent,
+                move |ssrc| {
+                    fault_tx.try_send(ssrc).unwrap();
+                },
+            )
+            .await;
+        let (loss_tx, mut loss_rx) = tokio::sync::mpsc::channel(8);
+        server
+            .add_listener(PacketLossEvent, move |event| {
+                loss_tx.try_send(event).unwrap();
+            })
+            .await;
+        let mut invitation = vec![255, 255, b'I', b'N', 0, 0, 0, 2, 0, 0, 0, 9, 0, 0, 0, 42];
+        invitation.extend_from_slice(b"Peer\0");
+        let mut buffer = [0u8; 512];
+        control
+            .send_to(&invitation, ("127.0.0.1", port))
+            .await
+            .unwrap();
+        control.recv_from(&mut buffer).await.unwrap();
+        data.send_to(&invitation, ("127.0.0.1", port + 1))
+            .await
+            .unwrap();
+        data.recv_from(&mut buffer).await.unwrap();
+        assert_eq!(server.participants().await.len(), 1);
+        let packet = |sequence: u16, body: &[u8]| {
+            let mut bytes = vec![0x80, 0x61];
+            bytes.extend_from_slice(&sequence.to_be_bytes());
+            bytes.extend_from_slice(&(u32::MAX - 5).to_be_bytes());
+            bytes.extend_from_slice(&42u32.to_be_bytes());
+            bytes.extend_from_slice(body);
+            bytes
+        };
+        for malformed in [&[0x80][..], &[3, 0x90, 60], &[1, 0x90]] {
+            data.send_to(&packet(65534, malformed), ("127.0.0.1", port + 1))
+                .await
+                .unwrap();
+        }
+        data.send_to(
+            &packet(
+                65535,
+                &[11, 0x90, 60, 100, 10, 0x80, 60, 0, 10, 0x90, 61, 100],
+            ),
+            ("127.0.0.1", port + 1),
+        )
+        .await
+        .unwrap();
+        for _ in 0..3 {
+            assert_eq!(fault_rx.recv().await.unwrap(), 42);
+        }
+        assert_eq!(events.recv().await.unwrap().timestamp, u32::MAX - 5);
+        assert_eq!(events.recv().await.unwrap().timestamp, 4);
+        assert_eq!(events.recv().await.unwrap().timestamp, 14);
+        for sequence in [0, 2, 1, 2, 3] {
+            data.send_to(
+                &packet(sequence, &[3, 0x80, 61, 0]),
+                ("127.0.0.1", port + 1),
+            )
+            .await
+            .unwrap();
+        }
+        for _ in 0..3 {
+            events.recv().await.unwrap();
+        }
+        assert_eq!(loss_rx.recv().await.unwrap().lost_packets, 1);
+        assert!(
+            timeout(Duration::from_millis(30), events.recv())
+                .await
+                .is_err()
+        );
+        let mut bye = invitation[..16].to_vec();
+        bye[2..4].copy_from_slice(b"BY");
+        // A matching SSRC alone is insufficient to terminate a session.
+        let stranger = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        stranger.send_to(&bye, ("127.0.0.1", port)).await.unwrap();
+        assert!(
+            timeout(Duration::from_millis(30), left_rx.recv())
+                .await
+                .is_err()
+        );
+        control.send_to(&bye, ("127.0.0.1", port)).await.unwrap();
+        left_rx.recv().await.unwrap();
+        assert!(server.participants().await.is_empty());
+        server.stop_gracefully().await;
+    })
+    .await
+    .expect("UDP regression timed out");
 }

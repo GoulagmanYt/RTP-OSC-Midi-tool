@@ -143,3 +143,6 @@ strip = true
 [profile.release-with-debug]
 debug = 2
 inherits = "release"
+
+[patch.crates-io]
+midi-types = { path = "../midi-types" }

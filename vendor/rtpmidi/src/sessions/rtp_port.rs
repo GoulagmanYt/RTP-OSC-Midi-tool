@@ -1,6 +1,6 @@
-use std::{collections::HashMap, ffi::CStr, net::SocketAddr, sync::Arc};
+use std::{ffi::CStr, net::SocketAddr, sync::Arc};
 
-use tokio::{net::UdpSocket, sync::Mutex};
+use tokio::net::UdpSocket;
 use tracing::{Level, event, instrument};
 use zerocopy::network_endian::U32;
 
@@ -27,22 +27,10 @@ pub(super) trait RtpPort {
         }
     }
 
-    #[instrument(skip_all, fields(ssrc = ssrc.get(), src = %src))]
-    async fn handle_termination(
-        &self,
-        ssrc: U32,
-        src: SocketAddr,
-        participants: &Arc<Mutex<HashMap<U32, Participant>>>,
-    ) {
-        event!(Level::INFO, "Received termination packet");
-        let mut lock = participants.lock().await;
-        lock.remove(&ssrc);
-    }
-
     #[instrument(skip_all, fields(destination = %participant.addr(), participant = participant.name().to_str().unwrap_or("Unknown")))]
     async fn send_termination_packet(&self, participant: &Participant) {
         let termination_packet = ControlPacket::new_termination_as_bytes(
-            participant.initiator_token().unwrap(),
+            participant.initiator_token().unwrap_or(U32::ZERO),
             self.ssrc(),
         );
         let addr = Self::participant_addr(participant);

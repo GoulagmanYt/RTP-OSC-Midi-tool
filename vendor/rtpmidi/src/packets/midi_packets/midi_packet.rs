@@ -19,6 +19,12 @@ pub(crate) struct MidiPacket {
 }
 
 impl MidiPacket {
+    pub(crate) fn batch_fits(commands: &[MidiEvent<'_>]) -> bool {
+        commands.size(false) <= 1200
+            && commands
+                .iter()
+                .all(|event| event.delta_time() <= 0x0FFF_FFFF)
+    }
     pub(crate) fn new_as_bytes<'a>(
         sequence_number: U16,
         timestamp: U32,
@@ -43,6 +49,13 @@ impl MidiPacket {
 
     pub fn commands(&self) -> MidiCommandIterator<'_> {
         MidiCommandIterator::new(&self.body)
+    }
+
+    pub fn validate(&self) -> std::io::Result<()> {
+        MidiCommandListHeader::validate(&self.body)?;
+        let mut commands = self.commands();
+        while commands.try_next()?.is_some() {}
+        Ok(())
     }
 
     pub fn sequence_number(&self) -> U16 {

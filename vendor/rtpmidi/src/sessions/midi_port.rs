@@ -97,12 +97,22 @@ impl MidiPort {
         }
 
         let (amt, src) = recv.unwrap();
-        tracing::Span::current().record("src", src.to_string());
+        tracing::Span::current().record("src", tracing::field::display(src));
         event!(Level::TRACE, "Received {amt} bytes");
 
         let packet = RtpMidiPacket::parse(&buf[..amt]);
         if packet.is_err() {
             event!(Level::ERROR, "Failed to parse RTP MIDI packet: {packet:?}");
+            let ssrc = ctx
+                .participants
+                .lock()
+                .await
+                .values()
+                .find(|peer| peer.midi_port_addr() == src)
+                .map(|peer| peer.ssrc().get());
+            if let Some(ssrc) = ssrc {
+                listeners.lock().await.notify_stream_fault(ssrc);
+            }
             return;
         }
 
@@ -124,7 +134,7 @@ impl MidiPort {
                         name = name.to_str().unwrap_or("Unknown"),
                         "Received session acceptance"
                     );
-                    if let Ok(participant) = self.handle_acceptance(body, ctx).await {
+                    if let Ok(participant) = self.handle_acceptance(body, src, ctx).await {
                         event!(
                             Level::INFO,
                             "Accepted MIDI port invitation from {participant}"
@@ -137,25 +147,12 @@ impl MidiPort {
                 }
                 ControlPacket::ClockSync(clock_sync_packet) => {
                     event!(Level::DEBUG, "Received clock sync from {}", src);
-                    self.handle_clock_sync(clock_sync_packet, ctx).await;
+                    self.handle_clock_sync(clock_sync_packet, src, ctx).await;
                 }
                 ControlPacket::Termination(body) => {
                     event!(Level::INFO, "Received session termination from {}", src);
-                    let mut part_lock = ctx.participants.lock().await;
-                    if let Some(participant) = part_lock.remove(&body.sender_ssrc) {
-                        self.receive_sequence_numbers
-                            .lock()
-                            .await
-                            .remove(&body.sender_ssrc.get());
-                        listeners.lock().await.notify_participant_left(&participant);
-                        event!(Level::INFO, "Removed participant: {participant}");
-                    } else {
-                        event!(
-                            Level::WARN,
-                            "No participant found for SSRC {}",
-                            body.sender_ssrc.get()
-                        );
-                    }
+                    ctx.handle_termination(body.sender_ssrc, body.initiator_token, src, true)
+                        .await;
                 }
                 _ => {
                     event!(Level::WARN, "Unhandled control packet {:?}", control_packet);
@@ -164,16 +161,18 @@ impl MidiPort {
             RtpMidiPacket::Midi(midi_packet) => {
                 event!(Level::DEBUG, "Parsed MIDI packet: {:#?}", midi_packet);
                 let ssrc = midi_packet.ssrc().get();
-                let valid_sender = ctx
-                    .participants
-                    .lock()
-                    .await
+                let arrived = Instant::now();
+                let peers = ctx.participants.lock().await;
+                let Some(peer) = peers
                     .get(&midi_packet.ssrc())
-                    .is_some_and(|participant| participant.midi_port_addr() == src);
-                if !valid_sender {
-                    event!(Level::WARN, ssrc, %src, "Rejected MIDI packet from unauthenticated endpoint");
+                    .filter(|p| p.midi_port_addr() == src)
+                else {
                     return;
-                }
+                };
+                let packet_deadline = peer
+                    .deadline(u32::from(midi_packet.timestamp()))
+                    .unwrap_or(arrived);
+                drop(peers);
 
                 let received = midi_packet.sequence_number().get();
                 let mut receive_sequences = self.receive_sequence_numbers.lock().await;
@@ -205,16 +204,24 @@ impl MidiPort {
                 }
                 receive_sequences.insert(ssrc, received.wrapping_add(1));
                 drop(receive_sequences);
+                let mut timestamp = u32::from(midi_packet.timestamp());
                 for command in midi_packet.commands() {
+                    timestamp = timestamp.wrapping_add(command.delta_time());
                     match command.command() {
                         RtpMidiMessage::MidiMessage(message) => {
                             event!(Level::DEBUG, "Received MIDI message: {message:?}");
-                            let timestamp =
-                                u32::from(midi_packet.timestamp()) + command.delta_time();
-                            listeners
-                                .lock()
-                                .await
-                                .notify_midi_message(*message, timestamp, ssrc);
+                            listeners.lock().await.notify_midi_message(
+                                *message,
+                                timestamp,
+                                ssrc,
+                                packet_deadline
+                                    + std::time::Duration::from_micros(
+                                        u64::from(
+                                            timestamp
+                                                .wrapping_sub(u32::from(midi_packet.timestamp())),
+                                        ) * 100,
+                                    ),
+                            );
                         }
                         RtpMidiMessage::SysEx(sysex) => {
                             event!(Level::DEBUG, "Received SysEx message: {sysex:?}");
@@ -234,53 +241,64 @@ impl MidiPort {
         src: SocketAddr,
         ctx: &RtpMidiSession,
     ) {
-        let invitation = ctx
-            .pending_invitations
+        let Some(ctrl_port) = src.port().checked_sub(1) else {
+            return;
+        };
+        let ctrl_addr = SocketAddr::new(src.ip(), ctrl_port);
+        let existing = ctx
+            .participants
             .lock()
             .await
-            .remove(&body.sender_ssrc);
-        match invitation {
-            None => {
-                event!(
-                    Level::WARN,
-                    "Received unexpected MIDI port invitation for SSRC {}",
-                    body.sender_ssrc.get()
-                );
-            }
-            Some(_inv) => {
-                event!(
-                    Level::DEBUG,
-                    "Found pending invitation for SSRC {}",
-                    body.sender_ssrc.get()
-                );
-
-                let ctrl_addr = SocketAddr::new(src.ip(), src.port() - 1);
-                ctx.participants.lock().await.insert(
-                    body.sender_ssrc,
-                    Participant::new(
-                        ctrl_addr,
-                        false,
-                        Some(body.initiator_token),
-                        sender_name,
-                        body.sender_ssrc,
-                    ),
-                );
+            .get(&body.sender_ssrc)
+            .cloned();
+        if let Some(peer) = existing {
+            if peer.addr() == ctrl_addr && peer.initiator_token() == Some(body.initiator_token) {
                 self.send_invitation_acceptance(body.initiator_token, src)
                     .await;
             }
+            return;
         }
+        let mut pending = ctx.pending_invitations.lock().await;
+        let valid = pending.get(&body.initiator_token).is_some_and(|inv| {
+            inv.addr == ctrl_addr
+                && inv.ssrc == body.sender_ssrc
+                && inv.created.elapsed() < std::time::Duration::from_secs(30)
+        });
+        if !valid {
+            return;
+        }
+        pending.remove(&body.initiator_token);
+        drop(pending);
+        let participant = Participant::new(
+            ctrl_addr,
+            false,
+            Some(body.initiator_token),
+            sender_name,
+            body.sender_ssrc,
+        );
+        let mut peers = ctx.participants.lock().await;
+        if peers.len() >= 128 {
+            return;
+        }
+        peers.insert(body.sender_ssrc, participant.clone());
+        drop(peers);
+        self.clear_receive_sequence(body.sender_ssrc).await;
+        self.send_invitation_acceptance(body.initiator_token, src)
+            .await;
+        ctx.notify_joined(&participant).await;
     }
 
     #[instrument(skip_all, fields(token = %ack_body.initiator_token))]
     async fn handle_acceptance(
         &self,
         ack_body: &SessionInitiationPacketBody,
+        src: SocketAddr,
         ctx: &RtpMidiSession,
     ) -> Result<Participant, &str> {
         let mut locked_pending_invitations = ctx.pending_invitations.lock().await;
 
         let inv = locked_pending_invitations
-            .get(&ack_body.sender_ssrc)
+            .get(&ack_body.initiator_token)
             .cloned();
         if inv.is_none() {
             event!(
@@ -292,7 +310,11 @@ impl MidiPort {
         }
 
         let inv = inv.unwrap();
-        if inv.token != ack_body.initiator_token {
+        if inv.token != ack_body.initiator_token
+            || inv.addr != src
+            || inv.ssrc != ack_body.sender_ssrc
+            || inv.created.elapsed() >= std::time::Duration::from_secs(30)
+        {
             event!(
                 Level::WARN,
                 expected = inv.token.get(),
@@ -301,13 +323,16 @@ impl MidiPort {
             return Err("Token mismatch in acceptance");
         }
 
-        locked_pending_invitations.remove(&ack_body.sender_ssrc);
+        locked_pending_invitations.remove(&ack_body.initiator_token);
         drop(locked_pending_invitations);
         event!(
             Level::DEBUG,
             "Matched Acceptance for MIDI port invitation. Sending Clock Sync."
         );
-        let ctrl_addr = SocketAddr::new(inv.addr.ip(), inv.addr.port() - 1);
+        let ctrl_addr = SocketAddr::new(
+            inv.addr.ip(),
+            inv.addr.port().checked_sub(1).ok_or("Invalid MIDI port")?,
+        );
         let participant = Participant::new(
             ctrl_addr,
             true,
@@ -315,12 +340,15 @@ impl MidiPort {
             &inv.name,
             ack_body.sender_ssrc,
         );
-        ctx.participants
-            .lock()
-            .await
-            .insert(ack_body.sender_ssrc, participant.clone());
+        let mut peers = ctx.participants.lock().await;
+        if peers.len() >= 128 {
+            return Err("Participant capacity reached");
+        }
+        peers.insert(ack_body.sender_ssrc, participant.clone());
+        drop(peers);
+        self.clear_receive_sequence(ack_body.sender_ssrc).await;
         let timestamps = [U64::new(0); 3];
-        self.send_clock_sync(std::iter::once(&participant), timestamps, 1)
+        self.send_clock_sync(std::iter::once(&participant), timestamps, 0)
             .await;
         Ok(participant)
     }
@@ -364,7 +392,12 @@ impl MidiPort {
     }
 
     #[instrument(skip_all, fields(count = packet.count, ssrc = packet.sender_ssrc.get(), src_name))]
-    async fn handle_clock_sync(&self, packet: &ClockSyncPacket, ctx: &RtpMidiSession) {
+    async fn handle_clock_sync(
+        &self,
+        packet: &ClockSyncPacket,
+        src: SocketAddr,
+        ctx: &RtpMidiSession,
+    ) {
         let mut part_lock = ctx.participants.lock().await;
         let maybe_participant = part_lock.get_mut(&packet.sender_ssrc);
 
@@ -378,6 +411,28 @@ impl MidiPort {
         let participant = maybe_participant.unwrap();
         tracing::Span::current()
             .record("src_name", participant.name().to_str().unwrap_or("Unknown"));
+        if participant.midi_port_addr() != src || packet.count > 2 {
+            return;
+        }
+        let now = Instant::now();
+        let local_ticks = current_timestamp(self.start_time).get();
+        let [t0, t1, t2] = packet.timestamps.map(|value| value.get());
+        match packet.count {
+            1 if local_ticks >= t0 && local_ticks - t0 <= 100_000 => {
+                let midpoint = now - std::time::Duration::from_micros((local_ticks - t0) * 50);
+                participant.synchronize(t1, midpoint);
+            }
+            2 if t2 >= t0
+                && t2 - t0 <= 100_000
+                && local_ticks >= t1
+                && local_ticks - t1 <= 100_000 =>
+            {
+                let local = now - std::time::Duration::from_micros((local_ticks - t1) * 100);
+                participant.synchronize(t0 + (t2 - t0) / 2, local);
+            }
+            0 => {}
+            _ => return,
+        }
         participant.received_clock_sync();
         event!(Level::DEBUG, "Updated clock sync for existing participant");
         let participant = participant.clone();
@@ -393,8 +448,11 @@ impl MidiPort {
                 .await;
             }
             2 => {
-                let latency_estimate =
-                    (packet.timestamps[2].get() - packet.timestamps[0].get()) as f32 / 10.0;
+                let latency_estimate = packet.timestamps[2]
+                    .get()
+                    .saturating_sub(packet.timestamps[0].get())
+                    as f64
+                    / 10.0;
                 event!(
                     Level::INFO,
                     latency_estimate = std::format!("{latency_estimate}ms"),
@@ -415,6 +473,13 @@ impl MidiPort {
     ) -> std::io::Result<()> {
         let lock = ctx.participants.lock().await;
         let participants: Vec<Participant> = lock.values().cloned().collect();
+        drop(lock);
+        if !MidiPacket::batch_fits(commands) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "RTP MIDI batch exceeds packet or delta-time limit",
+            ));
+        }
         let mut seq = self.send_sequence_number.lock().await;
         let packet = MidiPacket::new_as_bytes(
             U16::new(*seq),
@@ -441,6 +506,13 @@ impl MidiPort {
     ) -> std::io::Result<()> {
         let batch: [MidiEvent; 1] = [MidiEvent::new(None, command.to_owned())];
         self.send_midi_batch(ctx, &batch).await
+    }
+
+    pub(super) async fn clear_receive_sequence(&self, ssrc: U32) {
+        self.receive_sequence_numbers
+            .lock()
+            .await
+            .remove(&ssrc.get());
     }
 
     #[instrument(skip_all, fields(addr = %addr))]

@@ -354,8 +354,6 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 [[package]]
 name = "midi-types"
 version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c25dc5a1d7f293669c2dce9e5608e5ab2e295d2440363790b625f755ae8fdf78"
 
 [[package]]
 name = "mio"

@@ -80,8 +80,12 @@ impl<'a> ControlPacket<'a> {
                     SessionInitiationPacketBody::ref_from_prefix(remaining)
                         .map_err(|_| PacketParseError::InvalidData)
                         .context("Failed to parse Session Invitation Packet")?;
-                let name = CStr::from_bytes_with_nul(name_bytes)
-                    .context("Failed to parse Session name from Session Invitation Packet")?;
+                let name = CStr::from_bytes_with_nul(if name_bytes.is_empty() {
+                    b"\0"
+                } else {
+                    name_bytes
+                })
+                .context("Failed to parse Session name from Session Invitation Packet")?;
                 ControlPacket::Invitation {
                     body: session_body,
                     name,
@@ -92,8 +96,12 @@ impl<'a> ControlPacket<'a> {
                     SessionInitiationPacketBody::ref_from_prefix(remaining)
                         .map_err(|_| PacketParseError::InvalidData)
                         .context("Failed to parse Session Acceptance Packet")?;
-                let name = CStr::from_bytes_with_nul(name_bytes)
-                    .context("Failed to parse Session name from Session Acceptance Packet")?;
+                let name = CStr::from_bytes_with_nul(if name_bytes.is_empty() {
+                    b"\0"
+                } else {
+                    name_bytes
+                })
+                .context("Failed to parse Session name from Session Acceptance Packet")?;
                 ControlPacket::Acceptance {
                     body: session_body,
                     name,
@@ -116,6 +124,20 @@ impl<'a> ControlPacket<'a> {
                     .context(format!("Unknown control packet command: {command:?}")));
             }
         };
+        match &result {
+            ControlPacket::Invitation { body, .. }
+            | ControlPacket::Acceptance { body, .. }
+            | ControlPacket::Rejection(body)
+            | ControlPacket::Termination(body)
+                if body.protocol_version.get() != 2 =>
+            {
+                return Err(anyhow::Error::new(PacketParseError::InvalidData));
+            }
+            ControlPacket::ClockSync(packet) if packet.count > 2 => {
+                return Err(anyhow::Error::new(PacketParseError::InvalidData));
+            }
+            _ => {}
+        }
         Ok(result)
     }
 

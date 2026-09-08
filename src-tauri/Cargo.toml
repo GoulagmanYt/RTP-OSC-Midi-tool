@@ -73,6 +73,7 @@ name = "performance_bench"
 harness = false
 
 [patch.crates-io]
+midi-types = { path = "../vendor/midi-types" }
 rack = { path = "../vendor/rack" }
 vst = { path = "../vendor/vst" }
 rtpmidi = { path = "../vendor/rtpmidi" }

@@ -2263,8 +2263,6 @@ dependencies = [
 [[package]]
 name = "midi-types"
 version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c25dc5a1d7f293669c2dce9e5608e5ab2e295d2440363790b625f755ae8fdf78"
 
 [[package]]
 name = "midir"

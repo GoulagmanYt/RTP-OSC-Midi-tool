@@ -37,14 +37,11 @@ impl WriteDeltaTimeExt for BytesMut {
 
 pub fn read_delta_time(bytes: &[u8]) -> std::io::Result<(u32, &[u8])> {
     let mut value: u32 = 0;
-    let mut shift: u8 = 0;
-
-    for (bytes_read, &byte) in bytes.iter().enumerate() {
-        value |= ((byte & 0x7F) as u32) << shift;
+    for (bytes_read, &byte) in bytes.iter().take(4).enumerate() {
+        value = (value << 7) | u32::from(byte & 0x7F);
         if byte & 0x80 == 0 {
             return Ok((value, &bytes[(bytes_read + 1)..]));
         }
-        shift += 7;
     }
 
     Err(std::io::Error::new(
@@ -63,6 +60,9 @@ mod tests {
         buffer.write_delta_time(delta_time);
         assert_eq!(buffer.len(), expected_bytes.len());
         assert_eq!(buffer, expected_bytes);
+        let (decoded, remaining) = read_delta_time(&buffer).unwrap();
+        assert_eq!(decoded, delta_time);
+        assert!(remaining.is_empty());
     }
 
     #[test]

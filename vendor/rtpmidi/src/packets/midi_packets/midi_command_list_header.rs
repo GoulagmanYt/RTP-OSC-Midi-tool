@@ -72,7 +72,7 @@ impl MidiCommandListHeader {
     pub fn build_for(events: &[MidiEvent], z_flag: bool) -> Self {
         let length = events.size(z_flag);
         let b_flag = MidiCommandListFlags::needs_b_flag(length);
-        let flags = MidiCommandListFlags::new(b_flag, false, false, z_flag);
+        let flags = MidiCommandListFlags::new(b_flag, false, z_flag, false);
         Self::new(flags, length)
     }
 
@@ -102,6 +102,32 @@ impl MidiCommandListHeader {
             let length = (first_byte & 0x0F) as usize;
             Self { flags, length }
         }
+    }
+
+    pub fn validate(data: &[u8]) -> std::io::Result<()> {
+        let invalid = || {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Truncated MIDI command section",
+            )
+        };
+        let first = *data.first().ok_or_else(invalid)?;
+        let size = if first & 0x80 != 0 { 2 } else { 1 };
+        if data.len() < size {
+            return Err(invalid());
+        }
+        let header = Self::from_slice(data);
+        if data.len() < size + header.length {
+            return Err(invalid());
+        }
+        // A journal must at least contain its three-octet top-level header.
+        if first & 0x40 != 0 && data.len() < size + header.length + 3 {
+            return Err(invalid());
+        }
+        if first & 0x40 == 0 && data.len() != size + header.length {
+            return Err(invalid());
+        }
+        Ok(())
     }
 
     pub fn write(&self, buffer: &mut BytesMut) {
