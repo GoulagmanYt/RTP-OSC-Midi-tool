@@ -294,7 +294,9 @@ impl RtpServer {
                     // RFC 6295 recovery journals are not emitted by every peer. A
                     // deterministic controller reset is safer than leaving notes or
                     // sustain latched after a proven RTP sequence gap.
-                    request_critical_midi_reset();
+                    if !loss.recovered {
+                        request_critical_midi_reset();
+                    }
                     if should_sample_rtp_log() {
                         let logger = loss_logger.clone();
                         async_runtime::spawn(async move {

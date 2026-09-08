@@ -175,7 +175,7 @@ impl MidiPort {
                     .deadline(u32::from(midi_packet.timestamp()))
                     .unwrap_or(arrived);
                 let received = midi_packet.sequence_number().get();
-                let loss = if let Some(expected) = peer.expected_sequence {
+                let mut loss = if let Some(expected) = peer.expected_sequence {
                     match classify_sequence(expected, received) {
                         SequenceDisposition::InOrder => None,
                         SequenceDisposition::Gap(distance) => {
@@ -184,6 +184,7 @@ impl MidiPort {
                                 expected_sequence: expected,
                                 received_sequence: received,
                                 lost_packets: distance,
+                                recovered: false,
                             })
                         }
                         SequenceDisposition::DuplicateOrOutOfOrder => {
@@ -200,6 +201,27 @@ impl MidiPort {
                 } else {
                     None
                 };
+                let repairs = loss.as_mut().and_then(|loss| {
+                    if peer.sysex.as_ref().is_some_and(|state| state.is_active()) {
+                        return None;
+                    }
+                    let journal = crate::packets::midi_packets::recovery_journal::Journal::parse(
+                        midi_packet.journal_bytes()?,
+                    )
+                    .ok()?;
+                    let repairs = super::note_recovery::NoteRepairs::build(
+                        journal,
+                        loss.expected_sequence,
+                        &mut peer.active_notes,
+                    )?;
+                    loss.recovered = true;
+                    Some(repairs)
+                });
+                for event in midi_packet.commands() {
+                    if let RtpMidiMessage::MidiMessage(message) = event.command() {
+                        super::note_recovery::observe(&mut peer.active_notes, *message);
+                    }
+                }
                 let needs_assembly = peer.sysex.as_ref().is_some_and(|state| state.is_active())
                     || midi_packet.commands().any(|event| {
                         matches!(event.command(), RtpMidiMessage::SysExSegment { .. })
@@ -222,6 +244,16 @@ impl MidiPort {
                 let listeners = listeners.lock().await;
                 if let Some(loss) = loss {
                     listeners.notify_packet_loss(loss);
+                }
+                if let Some(repairs) = repairs {
+                    for message in repairs.messages() {
+                        listeners.notify_midi_message(
+                            message,
+                            midi_packet.timestamp().get(),
+                            ssrc,
+                            packet_deadline,
+                        );
+                    }
                 }
                 let mut timestamp = u32::from(midi_packet.timestamp());
                 for command in midi_packet.commands() {

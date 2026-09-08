@@ -8,3 +8,5 @@ pub mod rtp_midi_session;
 mod rtp_port;
 
 pub(crate) mod sysex;
+
+mod note_recovery;

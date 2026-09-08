@@ -17,6 +17,7 @@ pub struct Participant {
     ssrc: U32,
     clock: Option<ClockMapping>,
     pub(crate) expected_sequence: Option<u16>,
+    pub(crate) active_notes: [u128; 16],
     pub(crate) sysex: Option<crate::sessions::sysex::SysExAssembly>,
 }
 
@@ -44,6 +45,7 @@ impl Participant {
             ssrc,
             clock: None,
             expected_sequence: None,
+            active_notes: [0; 16],
             sysex: Some(crate::sessions::sysex::SysExAssembly::new()),
         }
     }

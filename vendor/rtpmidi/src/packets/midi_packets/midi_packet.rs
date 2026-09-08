@@ -53,9 +53,20 @@ impl MidiPacket {
 
     pub fn validate(&self) -> std::io::Result<()> {
         MidiCommandListHeader::validate(&self.body)?;
+        if let Some(journal) = self.journal_bytes() {
+            super::recovery_journal::Journal::parse(journal)?;
+        }
         let mut commands = self.commands();
         while commands.try_next()?.is_some() {}
         Ok(())
+    }
+
+    pub(crate) fn journal_bytes(&self) -> Option<&[u8]> {
+        if self.body[0] & 0x40 == 0 {
+            return None;
+        }
+        let header = MidiCommandListHeader::from_slice(&self.body);
+        Some(&self.body[header.size() + header.length()..])
     }
 
     pub fn sequence_number(&self) -> U16 {

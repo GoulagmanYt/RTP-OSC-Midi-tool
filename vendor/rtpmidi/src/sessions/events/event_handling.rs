@@ -15,6 +15,8 @@ pub struct PacketLoss {
     pub expected_sequence: u16,
     pub received_sequence: u16,
     pub lost_packets: u16,
+    /// True only when the entire covering journal uses supported repair forms.
+    pub recovered: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

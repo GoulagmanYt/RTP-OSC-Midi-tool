@@ -308,6 +308,19 @@ async fn malformed_udp_loss_rollover_and_control_disconnect() {
         assert_eq!(fault_rx.recv().await.unwrap(), 42);
         assert_eq!(fault_rx.recv().await.unwrap(), 42);
         assert!(sysex_rx.try_recv().is_err());
+        data.send_to(&packet(12, &[3, 0x90, 60, 100]), ("127.0.0.1", port + 1)).await.unwrap();
+        assert!(matches!(events.recv().await.unwrap().message, MidiMessage::NoteOn(..)));
+        // Packet 13's NoteOff is missing. Packet 14 carries its Chapter N state.
+        data.send_to(&packet(14, &[0x43, 0x90, 63, 100, 0x20, 0, 13, 0, 6, 8, 0, 0x77, 8]), ("127.0.0.1", port + 1)).await.unwrap();
+        assert!(loss_rx.recv().await.unwrap().recovered);
+        assert!(matches!(events.recv().await.unwrap().message, MidiMessage::ControlChange(_, control, value) if u8::from(control) == 64 && u8::from(value) == 0));
+        assert!(matches!(events.recv().await.unwrap().message, MidiMessage::NoteOff(_, note, _) if u8::from(note) == 60));
+        assert!(matches!(events.recv().await.unwrap().message, MidiMessage::NoteOn(_, note, _) if u8::from(note) == 63));
+        // A checkpoint newer than the missing packet cannot repair that loss.
+        data.send_to(&packet(16, &[0x43, 0x80, 63, 0, 0x20, 0, 16, 0, 6, 8, 0, 0x77, 8]), ("127.0.0.1", port + 1)).await.unwrap();
+        assert!(!loss_rx.recv().await.unwrap().recovered);
+        assert!(matches!(events.recv().await.unwrap().message, MidiMessage::NoteOff(_, note, _) if u8::from(note) == 63));
+        assert!(events.try_recv().is_err());
         server.stop_gracefully().await;
     })
     .await

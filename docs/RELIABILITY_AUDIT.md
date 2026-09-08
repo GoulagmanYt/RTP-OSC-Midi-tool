@@ -62,8 +62,14 @@ was performed.
 - Pending invitations expire after 30 seconds and are capped at 256; connected
   peers are capped at 128. Both session roles expire after 60 seconds without a
   valid synchronization packet, checked on the 10-second maintenance cycle.
-- The conservative loss policy remains: a proven forward sequence gap triggers
-  a reset and late/duplicate packets are discarded. There is no added sequence
+- Journals now validate container lengths, channel ordering, and channel
+  chapter boundaries. A covering journal containing only Chapter N can repair
+  missing NoteOffs and recommended missing NoteOns; known active notes are not
+  retriggered. Ambiguous sustain is released before repaired NoteOffs. Other
+  chapter combinations and insufficient checkpoint coverage retain the reset
+  fallback. System and parameter journal internals are not yet fully decoded.
+- A proven forward sequence gap without supported recovery triggers a reset;
+  late/duplicate packets are discarded. There is no added sequence
   reorder delay. This preserves the latency policy at the cost of interrupted
   notes when the network reorders packets.
 - A reset intentionally releases all destinations rather than attempting to
@@ -97,7 +103,7 @@ Node 20 does not satisfy the existing Vite/jsdom dependency requirements.
 ## Explicit limits
 
 This is a reliability pass over implemented routes, not a certification of full
-RFC 6295/OSC support. Recovery-journal reconstruction,
+RFC 6295/OSC support. Recovery beyond Chapter N,
 general OSC reception/bundle scheduling, and application-level outbound RTP
 routing remain unsupported. Complete RTP SysEx is forwarded to local MIDI; its
 existing untimestamped library event is dispatched at arrival time. Segmented
