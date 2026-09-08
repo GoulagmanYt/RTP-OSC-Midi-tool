@@ -39,6 +39,7 @@ function makeConfig(): AppConfig {
       vstPluginId: null,
       vstPath: null,
       vstScanPaths: [],
+      vstEqByPlugin: {},
     },
     ui: {
       theme: "light",
@@ -97,5 +98,21 @@ describe("mergeConfig", () => {
 
     expect(next.midi.routingProfiles).toHaveLength(1);
     expect(next.midi.routingProfiles[0]?.ccMap[0]?.to).toBe(74);
+  });
+
+  it("replaces the per-plugin EQ map so reset can remove a profile", () => {
+    const current = makeConfig();
+    current.audio.vstEqByPlugin = {
+      piano: {
+        enabled: true,
+        lowShelf: { frequencyHz: 120, gainDb: -6 },
+        midPeak: { frequencyHz: 1_000, gainDb: 0, q: 1 },
+        highShelf: { frequencyHz: 8_000, gainDb: 0 },
+      },
+    };
+
+    const next = mergeConfig(current, { audio: { vstEqByPlugin: {} } });
+
+    expect(next.audio.vstEqByPlugin).toEqual({});
   });
 });

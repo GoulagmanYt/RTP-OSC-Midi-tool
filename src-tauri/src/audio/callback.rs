@@ -336,6 +336,7 @@ fn audio_callback<T: Sample + FromSample<f32>>(
 
     let gain_linear = f32::from_bits(state.controls.gain_bits.load(Ordering::Relaxed));
     let limiter_on = state.controls.limiter_enabled.load(Ordering::Relaxed);
+    state.equalizer.begin_block(&state.controls.equalizer);
     let left = &state.outputs[0];
     let right = if state.plugin_outputs > 1 {
         &state.outputs[1]
@@ -352,8 +353,16 @@ fn audio_callback<T: Sample + FromSample<f32>>(
         } else {
             1.0
         };
-        let mut l = left[frame_idx] * gain_linear * recovery_gain;
-        let mut r = right[frame_idx] * gain_linear * recovery_gain;
+        let (equalized_left, equalized_right) = if state.plugin_outputs > 1 {
+            state
+                .equalizer
+                .process_stereo(left[frame_idx], right[frame_idx])
+        } else {
+            let mono = state.equalizer.process_mono(left[frame_idx]);
+            (mono, mono)
+        };
+        let mut l = equalized_left * gain_linear * recovery_gain;
+        let mut r = equalized_right * gain_linear * recovery_gain;
         if limiter_on {
             l = limit_sample(l);
             r = limit_sample(r);

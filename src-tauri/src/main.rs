@@ -108,6 +108,7 @@ fn run_app() -> Result<(), Box<dyn std::error::Error>> {
             close_vst_ui,
             set_master_gain,
             set_audio_limiter,
+            set_vst_eq,
             send_test_midi,
             run_automated_stress_test
         ])

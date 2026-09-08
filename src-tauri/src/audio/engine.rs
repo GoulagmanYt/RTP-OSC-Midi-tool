@@ -337,6 +337,10 @@ mod tests {
             Arc::new(AudioControls {
                 gain_bits: AtomicU32::new(1.0f32.to_bits()),
                 limiter_enabled: AtomicBool::new(false),
+                equalizer: crate::audio::equalizer::PublishedEq::new(
+                    &crate::config::VstEqSettings::default(),
+                    48_000,
+                ),
             }),
             Arc::new(AudioTelemetry::new()),
             emergency_reset_requested,

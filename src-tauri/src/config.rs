@@ -1,6 +1,6 @@
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
-use std::{fs, path::PathBuf};
+use std::{collections::BTreeMap, fs, path::PathBuf};
 
 use crate::types::RuntimeStatus;
 
@@ -120,6 +120,98 @@ impl Default for RtpConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub struct EqShelfSettings {
+    pub frequency_hz: f32,
+    pub gain_db: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct EqPeakSettings {
+    pub frequency_hz: f32,
+    pub gain_db: f32,
+    pub q: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct VstEqSettings {
+    pub enabled: bool,
+    pub low_shelf: EqShelfSettings,
+    pub mid_peak: EqPeakSettings,
+    pub high_shelf: EqShelfSettings,
+}
+
+impl Default for VstEqSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            low_shelf: EqShelfSettings {
+                frequency_hz: 120.0,
+                gain_db: 0.0,
+            },
+            mid_peak: EqPeakSettings {
+                frequency_hz: 1_000.0,
+                gain_db: 0.0,
+                q: 1.0,
+            },
+            high_shelf: EqShelfSettings {
+                frequency_hz: 8_000.0,
+                gain_db: 0.0,
+            },
+        }
+    }
+}
+
+impl VstEqSettings {
+    pub fn normalized(&self, sample_rate: u32) -> Self {
+        let nyquist_safe = (sample_rate.max(1) as f32 * 0.45).max(40.0);
+        Self {
+            enabled: self.enabled,
+            low_shelf: EqShelfSettings {
+                frequency_hz: finite_clamp(
+                    self.low_shelf.frequency_hz,
+                    120.0,
+                    40.0,
+                    500.0f32.min(nyquist_safe),
+                ),
+                gain_db: finite_clamp(self.low_shelf.gain_db, 0.0, -18.0, 18.0),
+            },
+            mid_peak: EqPeakSettings {
+                frequency_hz: finite_clamp(
+                    self.mid_peak.frequency_hz,
+                    1_000.0f32.min(nyquist_safe),
+                    100.0,
+                    10_000.0f32.min(nyquist_safe),
+                ),
+                gain_db: finite_clamp(self.mid_peak.gain_db, 0.0, -18.0, 18.0),
+                q: finite_clamp(self.mid_peak.q, 1.0, 0.2, 10.0),
+            },
+            high_shelf: EqShelfSettings {
+                frequency_hz: finite_clamp(
+                    self.high_shelf.frequency_hz,
+                    8_000.0f32.min(nyquist_safe),
+                    2_000.0f32.min(nyquist_safe),
+                    16_000.0f32.min(nyquist_safe),
+                ),
+                gain_db: finite_clamp(self.high_shelf.gain_db, 0.0, -18.0, 18.0),
+            },
+        }
+    }
+}
+
+fn finite_clamp(value: f32, default: f32, minimum: f32, maximum: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(minimum, maximum.max(minimum))
+    } else {
+        default.clamp(minimum, maximum.max(minimum))
+    }
+}
+
+pub const BUNDLED_VST_EQ_KEY: &str = "__bundled_default__";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct AudioConfig {
     pub enabled: bool,
     pub backend: Option<String>,
@@ -135,6 +227,8 @@ pub struct AudioConfig {
     pub vst_path: Option<String>,
     #[serde(default)]
     pub vst_scan_paths: Vec<String>,
+    #[serde(default)]
+    pub vst_eq_by_plugin: BTreeMap<String, VstEqSettings>,
 }
 
 impl Default for AudioConfig {
@@ -151,6 +245,7 @@ impl Default for AudioConfig {
             vst_plugin_id: None,
             vst_path: None,
             vst_scan_paths: Vec::new(),
+            vst_eq_by_plugin: BTreeMap::new(),
         }
     }
 }
@@ -298,13 +393,16 @@ impl ConfigStore {
             );
             return AppConfig::default();
         }
-        let Ok(cfg) = serde_yaml::from_value::<AppConfig>(value) else {
+        let Ok(mut cfg) = serde_yaml::from_value::<AppConfig>(value) else {
             log::error!(
                 "Invalid configuration schema preserved at {:?}; using defaults for this session",
                 self.path
             );
             return AppConfig::default();
         };
+        for settings in cfg.audio.vst_eq_by_plugin.values_mut() {
+            *settings = settings.normalized(cfg.audio.sample_rate);
+        }
         if matches!(version, 2 | 3) {
             if let Err(error) = self.save(&cfg) {
                 log::warn!("Unable to persist migrated configuration: {error}");
@@ -510,5 +608,51 @@ mod tests {
         assert!(!migrated.contains("themePreset"));
         assert!(!migrated.contains("alwaysOnTop"));
         assert!(!migrated.contains("liveLogs"));
+    }
+
+    #[test]
+    fn current_config_without_eq_profiles_loads_as_neutral() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("config.yaml");
+        let raw = serde_yaml::to_string(&AppConfig::default())
+            .expect("serialize")
+            .replace("  vstEqByPlugin: {}\n", "");
+        std::fs::write(&path, raw).expect("write config without EQ");
+
+        let loaded = ConfigStore::with_path(path).load();
+        assert!(loaded.audio.vst_eq_by_plugin.is_empty());
+    }
+
+    #[test]
+    fn eq_profiles_round_trip_independently_by_plugin() {
+        let mut config = AppConfig::default();
+        let piano = VstEqSettings {
+            enabled: true,
+            low_shelf: EqShelfSettings {
+                gain_db: -6.0,
+                ..VstEqSettings::default().low_shelf
+            },
+            ..VstEqSettings::default()
+        };
+        config
+            .audio
+            .vst_eq_by_plugin
+            .insert("piano".into(), piano.clone());
+        config.audio.vst_eq_by_plugin.insert(
+            "organ".into(),
+            VstEqSettings {
+                enabled: true,
+                mid_peak: EqPeakSettings {
+                    gain_db: 3.0,
+                    ..VstEqSettings::default().mid_peak
+                },
+                ..VstEqSettings::default()
+            },
+        );
+
+        let raw = serde_yaml::to_string(&config).expect("serialize EQ profiles");
+        let loaded: AppConfig = serde_yaml::from_str(&raw).expect("deserialize EQ profiles");
+        assert_eq!(loaded.audio.vst_eq_by_plugin["piano"], piano);
+        assert_eq!(loaded.audio.vst_eq_by_plugin["organ"].mid_peak.gain_db, 3.0);
     }
 }

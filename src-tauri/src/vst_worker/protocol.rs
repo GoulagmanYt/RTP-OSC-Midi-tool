@@ -3,9 +3,9 @@ use std::{io, sync::OnceLock, time::Instant};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::{audio::AudioSettings, types::VstParameter};
+use crate::{audio::AudioSettings, config::VstEqSettings, types::VstParameter};
 
-pub const CONTROL_PROTOCOL_VERSION: u32 = 6;
+pub const CONTROL_PROTOCOL_VERSION: u32 = 7;
 pub const HOST_ABI_VERSION: u32 = crate::types::VST_HOST_ABI_VERSION;
 pub const MAX_CONTROL_FRAME_BYTES: usize = 1024 * 1024;
 pub const MAX_MIDI_BYTES: usize = 3;
@@ -95,6 +95,10 @@ pub enum ControlMessage {
     SetLimiter {
         request_id: u64,
         enabled: bool,
+    },
+    SetEq {
+        request_id: u64,
+        settings: VstEqSettings,
     },
     SaveState {
         request_id: u64,
@@ -328,6 +332,29 @@ mod tests {
         let write = write_control_frame(&mut client, &message);
         let read = read_control_frame(&mut server);
         let (write_result, read_result) = tokio::join!(write, read);
+        write_result.unwrap();
+        assert_eq!(read_result.unwrap(), message);
+    }
+
+    #[tokio::test]
+    async fn eq_control_frame_round_trip_preserves_settings() {
+        let settings = VstEqSettings {
+            enabled: true,
+            low_shelf: crate::config::EqShelfSettings {
+                gain_db: -6.5,
+                ..VstEqSettings::default().low_shelf
+            },
+            ..VstEqSettings::default()
+        };
+        let message = ControlMessage::SetEq {
+            request_id: 7,
+            settings,
+        };
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        let (write_result, read_result) = tokio::join!(
+            write_control_frame(&mut client, &message),
+            read_control_frame(&mut server)
+        );
         write_result.unwrap();
         assert_eq!(read_result.unwrap(), message);
     }

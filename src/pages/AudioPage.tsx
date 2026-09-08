@@ -2,6 +2,7 @@ import { AudioConfigCard } from "./audio/AudioConfigCard";
 import { VstParametersDialog } from "./audio/VstParametersDialog";
 import { AudioStressTestCard } from "./audio/AudioStressTestCard";
 import { useAudioPageController } from "./audio/useAudioPageController";
+import { VstEqDialog } from "./audio/VstEqDialog";
 
 export default function AudioPage() {
   const controller = useAudioPageController();
@@ -23,12 +24,14 @@ export default function AudioPage() {
         bufferMismatch={controller.bufferMismatch}
         canOpenSelectedVstUi={controller.canOpenSelectedVstUi}
         canOpenVstParameterFallback={controller.canOpenVstParameterFallback}
+        canOpenVstEq={Boolean(controller.config)}
         config={controller.config}
         currentLatencyMs={controller.currentLatencyMs}
         midiMessagesPerSec={controller.midiMessagesPerSec}
         selectedPluginKindLabel={controller.selectedPluginKindLabel}
         selectedPluginStatusLabel={controller.selectedPluginStatusLabel}
         selectedVstPlugin={controller.selectedVstPlugin}
+        vstEqEnabled={controller.selectedVstEq.enabled}
         status={controller.status}
         streamBufferSize={controller.streamBufferSize}
         t={controller.t}
@@ -44,6 +47,7 @@ export default function AudioPage() {
         onGainChange={controller.handleGainChange}
         onLimiterToggle={controller.handleLimiterToggle}
         onOpenVstParameters={controller.handleOpenVstParameters}
+        onOpenVstEq={() => controller.setVstEqDialogOpen(true)}
         onOpenVstUi={controller.handleOpenVstUi}
         onPingAudio={controller.handlePingAudio}
         onRefreshVstPluginsList={controller.refreshVstPluginsList}
@@ -64,6 +68,16 @@ export default function AudioPage() {
           if (!open) controller.setVstParameterDialogOpen(false);
         }}
         onParamChange={controller.handleVstParamChange}
+      />
+      <VstEqDialog
+        open={controller.vstEqDialogOpen}
+        pluginName={controller.selectedVstEqName}
+        settings={controller.selectedVstEq}
+        sampleRate={controller.activeSampleRate ?? 48_000}
+        t={controller.t}
+        onOpenChange={controller.setVstEqDialogOpen}
+        onChange={controller.handleVstEqChange}
+        onReset={controller.handleVstEqReset}
       />
     </div>
   );

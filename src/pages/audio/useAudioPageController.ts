@@ -14,13 +14,15 @@ import {
   saveConfig as saveConfigApi,
   setAudioLimiter,
   setMasterGain,
+  setVstEq,
   setVstParameter,
 } from "../../api";
-import type { VstParameter, VstPluginEntry } from "../../api";
+import type { VstEqSettings, VstParameter, VstPluginEntry } from "../../api";
 import { useI18n } from "../../providers/LanguageProvider";
 import { useBridge } from "../../providers/BridgeProvider";
 import { mergeLiveAudioMetrics } from "./liveStatus";
 import { getErrorMessage } from "../../api-errors";
+import { BUNDLED_VST_EQ_KEY, createDefaultVstEqSettings, getVstEqKey } from "./eq";
 
 export function useAudioPageController() {
   const {
@@ -46,12 +48,18 @@ export function useAudioPageController() {
 
   const [vstUiOpen, setVstUiOpen] = useState(false);
   const [vstParameterDialogOpen, setVstParameterDialogOpen] = useState(false);
+  const [vstEqDialogOpen, setVstEqDialogOpen] = useState(false);
   const [vstPlugins, setVstPlugins] = useState<VstPluginEntry[]>([]);
   const [vstPluginsLoading, setVstPluginsLoading] = useState(false);
   const [vstParams, setVstParams] = useState<VstParameter[]>([]);
   const [vstParamsLoading, setVstParamsLoading] = useState(false);
   const [audioReloading, setAudioReloading] = useState(false);
   const audioReloadInFlight = useRef(false);
+  const pendingVstEq = useRef<VstEqSettings | null>(null);
+  const vstEqFrame = useRef<number | null>(null);
+  const vstEqSendInFlight = useRef(false);
+  const vstEqControllerMounted = useRef(true);
+  const flushVstEqRef = useRef<() => void>(() => undefined);
 
   useEffect(() => {
     const unlisten = listen("audio:vst-editor-hidden", () => {
@@ -78,8 +86,53 @@ export function useAudioPageController() {
       vstPlugins.find((plugin) => plugin.id === config?.audio.vstPluginId) ??
       vstPlugins.find((plugin) => plugin.path === (config?.audio.vstPath || "")) ??
       null,
-    [config?.audio.vstPath, config?.audio.vstPluginId, vstPlugins]
+    [config?.audio, vstPlugins]
   );
+  const selectedVstEqKey = config ? getVstEqKey(config.audio, selectedVstPlugin) : BUNDLED_VST_EQ_KEY;
+  const selectedVstEq =
+    config?.audio.vstEqByPlugin?.[selectedVstEqKey] ?? createDefaultVstEqSettings();
+  const selectedVstEqName = selectedVstPlugin?.name ?? t("dashboard.bundledVstDefault");
+
+  const flushVstEq = useCallback(() => {
+    vstEqFrame.current = null;
+    if (vstEqSendInFlight.current || !pendingVstEq.current) return;
+    const next = pendingVstEq.current;
+    pendingVstEq.current = null;
+    vstEqSendInFlight.current = true;
+    void setVstEq(next)
+      .catch((error) => {
+        console.error("Failed to set VST EQ", error);
+        toast.error(getErrorMessage(error) || t("toasts.audio.eqFailed"));
+      })
+      .finally(() => {
+        vstEqSendInFlight.current = false;
+        if (vstEqControllerMounted.current && pendingVstEq.current && vstEqFrame.current === null) {
+          vstEqFrame.current = window.requestAnimationFrame(() => flushVstEqRef.current());
+        }
+      });
+  }, [t]);
+
+  useEffect(() => {
+    flushVstEqRef.current = flushVstEq;
+  }, [flushVstEq]);
+
+  const queueVstEq = useCallback(
+    (settings: VstEqSettings) => {
+      pendingVstEq.current = settings;
+      if (!vstEqSendInFlight.current && vstEqFrame.current === null) {
+        vstEqFrame.current = window.requestAnimationFrame(() => flushVstEqRef.current());
+      }
+    },
+    []
+  );
+
+  useEffect(() => {
+    vstEqControllerMounted.current = true;
+    return () => {
+      vstEqControllerMounted.current = false;
+      if (vstEqFrame.current !== null) window.cancelAnimationFrame(vstEqFrame.current);
+    };
+  }, []);
 
   const canOpenSelectedVstUi =
     Boolean(config?.audio.enabled) &&
@@ -211,6 +264,12 @@ export function useAudioPageController() {
       if (!config) return;
       setVstUiOpen(false);
       setVstParameterDialogOpen(false);
+      setVstEqDialogOpen(false);
+      pendingVstEq.current = null;
+      if (vstEqFrame.current !== null) {
+        window.cancelAnimationFrame(vstEqFrame.current);
+        vstEqFrame.current = null;
+      }
       setVstParams([]);
       const updated = {
         ...config,
@@ -333,6 +392,33 @@ export function useAudioPageController() {
     }
   };
 
+  const handleVstEqChange = (settings: VstEqSettings) => {
+    if (!config) return;
+    void updateConfig({
+      audio: {
+        vstPluginId: config.audio.vstPluginId ?? selectedVstPlugin?.id,
+        vstEqByPlugin: {
+          ...config.audio.vstEqByPlugin,
+          [selectedVstEqKey]: settings,
+        },
+      },
+    });
+    queueVstEq(settings);
+  };
+
+  const handleVstEqReset = () => {
+    if (!config) return;
+    const profiles = { ...config.audio.vstEqByPlugin };
+    delete profiles[selectedVstEqKey];
+    void updateConfig({
+      audio: {
+        vstPluginId: config.audio.vstPluginId ?? selectedVstPlugin?.id,
+        vstEqByPlugin: profiles,
+      },
+    });
+    queueVstEq(createDefaultVstEqSettings());
+  };
+
   const selectedPluginStatusLabel = selectedVstPlugin?.supported
     ? t("audio.vstStatusCompatible")
     : selectedVstPlugin?.unsupportedReason || t("audio.vstStatusUnsupported");
@@ -365,6 +451,9 @@ export function useAudioPageController() {
     t,
     vstMidiCompatible,
     vstParameterDialogOpen,
+    vstEqDialogOpen,
+    selectedVstEq,
+    selectedVstEqName,
     vstParams,
     vstParamsLoading,
     vstPlugins,
@@ -387,6 +476,9 @@ export function useAudioPageController() {
     updateConfig,
     updateAudioConfig,
     setVstParameterDialogOpen,
+    setVstEqDialogOpen,
     handleVstParamChange,
+    handleVstEqChange,
+    handleVstEqReset,
   };
 }

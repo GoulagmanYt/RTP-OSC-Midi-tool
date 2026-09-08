@@ -42,13 +42,14 @@ function config(developerMode: boolean): AppConfig {
       limiterEnabled: true,
       vstPluginId: plugin.id,
       vstScanPaths: [],
+      vstEqByPlugin: {},
     },
     ui: { theme: "dark", themePalette: "default", cornerRadius: 8, autoStart: false, developerMode },
     logging: { enabled: true, verbose: false, logAllToFile: false },
   };
 }
 
-function renderCard(developerMode: boolean) {
+function renderCard(developerMode: boolean, vstEqEnabled = false) {
   const noop = vi.fn(async () => undefined);
   render(
     <AudioConfigCard
@@ -59,12 +60,14 @@ function renderCard(developerMode: boolean) {
       bufferMismatch={false}
       canOpenSelectedVstUi
       canOpenVstParameterFallback
+      canOpenVstEq
       config={config(developerMode)}
       currentLatencyMs={null}
       midiMessagesPerSec={null}
       selectedPluginKindLabel="Instrument"
       selectedPluginStatusLabel="Compatible"
       selectedVstPlugin={plugin}
+      vstEqEnabled={vstEqEnabled}
       status={status}
       streamBufferSize={512}
       t={(key, values) => values?.layout ? `${key}: ${values.layout}` : key}
@@ -80,6 +83,7 @@ function renderCard(developerMode: boolean) {
       onGainChange={noop}
       onLimiterToggle={noop}
       onOpenVstParameters={noop}
+      onOpenVstEq={noop}
       onOpenVstUi={noop}
       onPingAudio={noop}
       onRefreshVstPluginsList={noop}
@@ -117,5 +121,11 @@ describe("AudioConfigCard VST diagnostics", () => {
     expect(screen.getByText(/audio\.vstBridgeLatency/)).toBeTruthy();
     expect(screen.getByText(/audio\.vstPluginLatency/)).toBeTruthy();
     expect(screen.getByText(/audio\.vstBridgeUnderruns/)).toBeTruthy();
+  });
+
+  it("shows the active badge only for an enabled VST EQ profile", () => {
+    renderCard(false, true);
+
+    expect(screen.getByText("audio.eq.active")).toBeTruthy();
   });
 });

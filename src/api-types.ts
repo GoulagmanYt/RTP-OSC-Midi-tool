@@ -82,6 +82,23 @@ export type AudioConfig = {
   vstPluginId?: string | null;
   vstPath?: string | null;
   vstScanPaths: string[];
+  vstEqByPlugin: Record<string, VstEqSettings>;
+};
+
+export type EqShelfSettings = {
+  frequencyHz: number;
+  gainDb: number;
+};
+
+export type EqPeakSettings = EqShelfSettings & {
+  q: number;
+};
+
+export type VstEqSettings = {
+  enabled: boolean;
+  lowShelf: EqShelfSettings;
+  midPeak: EqPeakSettings;
+  highShelf: EqShelfSettings;
 };
 
 export type AudioDeviceEntry = {

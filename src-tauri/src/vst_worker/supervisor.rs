@@ -380,6 +380,13 @@ impl VstWorkerSupervisor {
         })
     }
 
+    pub fn try_set_eq(&self, settings: crate::config::VstEqSettings) -> bool {
+        self.try_notify(ControlMessage::SetEq {
+            request_id: self.next_request_id(),
+            settings,
+        })
+    }
+
     pub async fn list_parameters(&self) -> Result<Vec<crate::types::VstParameter>, String> {
         let response = self
             .request_with_timeout(
@@ -767,6 +774,7 @@ fn message_request_id(message: &ControlMessage) -> Option<u64> {
         | ControlMessage::SetParameter { request_id, .. }
         | ControlMessage::SetGain { request_id, .. }
         | ControlMessage::SetLimiter { request_id, .. }
+        | ControlMessage::SetEq { request_id, .. }
         | ControlMessage::SaveState { request_id }
         | ControlMessage::Panic { request_id }
         | ControlMessage::Stop { request_id }

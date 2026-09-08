@@ -52,6 +52,7 @@ use vst::api;
 use vst::{editor::Editor, host::PluginInstance};
 use windows::Win32::Foundation::HWND;
 
+use crate::config::VstEqSettings;
 use crate::types::VstParameter;
 
 pub(super) const MAX_PLUGIN_CHANNELS: usize = 256;
@@ -70,6 +71,8 @@ pub struct AudioSettings {
     #[serde(default)]
     pub limiter_enabled: bool,
     #[serde(default)]
+    pub vst_eq: VstEqSettings,
+    #[serde(default)]
     pub vst_plugin_id: Option<String>,
     pub vst_path: Option<String>,
 }
@@ -85,6 +88,7 @@ impl Default for AudioSettings {
             buffer_size: 256,
             gain_db: 0.0,
             limiter_enabled: false,
+            vst_eq: VstEqSettings::default(),
             vst_plugin_id: None,
             vst_path: None,
         }
@@ -138,6 +142,7 @@ impl Vst2TimeContext {
 pub(super) struct AudioControls {
     pub(super) gain_bits: AtomicU32,
     pub(super) limiter_enabled: AtomicBool,
+    pub(super) equalizer: super::equalizer::PublishedEq,
 }
 
 #[repr(align(64))]
@@ -371,6 +376,7 @@ pub(super) struct AudioCallbackState {
     pub(super) plugin_outputs: usize,
     pub(super) max_frames: usize,
     pub(super) controls: Arc<AudioControls>,
+    pub(super) equalizer: super::equalizer::StereoEqualizer,
     pub(super) telemetry: Arc<AudioTelemetry>,
     pub(super) emergency_reset_requested: Arc<AtomicBool>,
     pub(super) sample_rate: u32,
@@ -411,6 +417,11 @@ impl AudioCallbackState {
             (0..plugin_outputs).map(|_| vec![0.0; max_frames]).collect();
         let output_ptrs = outputs.iter_mut().map(Vec::as_mut_ptr).collect();
 
+        let (eq_revision, eq_target) = controls
+            .equalizer
+            .load()
+            .expect("initial EQ snapshot must be coherent");
+
         Self {
             midi_rx,
             pending_midi: VecDeque::with_capacity(MAX_PENDING_MIDI),
@@ -431,6 +442,7 @@ impl AudioCallbackState {
             plugin_outputs,
             max_frames,
             controls,
+            equalizer: super::equalizer::StereoEqualizer::new(eq_revision, eq_target, sample_rate),
             telemetry,
             emergency_reset_requested,
             sample_rate,

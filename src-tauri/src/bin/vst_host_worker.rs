@@ -439,6 +439,10 @@ mod windows_worker {
                             audio.set_limiter_enabled(enabled);
                             ControlMessage::Ack { request_id }
                         }
+                        ControlMessage::SetEq { request_id, settings } => {
+                            audio.set_vst_eq(settings);
+                            ControlMessage::Ack { request_id }
+                        }
                         ControlMessage::Panic { request_id } => {
                             match audio.panic_all_notes() {
                                 Ok(()) => ControlMessage::Ack { request_id },

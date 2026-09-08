@@ -28,6 +28,7 @@ fn test_audio_engine_lifecycle() {
         buffer_size: 256,
         gain_db: 0.0,
         limiter_enabled: false,
+        vst_eq: Default::default(),
         vst_plugin_id: None,
         vst_path: None,
     };

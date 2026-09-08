@@ -22,6 +22,7 @@ use super::{
     callback_midi::reset_all_notes,
     device_selection::{select_device, select_host},
     engine::{db_to_linear, requires_vst3_destructor_quarantine, AudioEngine},
+    equalizer::PublishedEq,
     runtime_state::{
         AudioControls, AudioError, AudioLifecycleState, AudioRuntime, AudioSettings,
         AudioTelemetry, EditorWindow,
@@ -545,6 +546,7 @@ impl AudioEngine {
         let controls = Arc::new(AudioControls {
             gain_bits: AtomicU32::new(db_to_linear(settings.gain_db).to_bits()),
             limiter_enabled: AtomicBool::new(settings.limiter_enabled),
+            equalizer: PublishedEq::new(&settings.vst_eq, settings.sample_rate),
         });
         let telemetry = Arc::new(AudioTelemetry::new());
 
@@ -727,6 +729,7 @@ impl AudioEngine {
                 &dev_name,
                 prefer_low_latency,
                 &vst_probe,
+                &settings.vst_eq,
             ) {
                 Ok(res) => {
                     let (

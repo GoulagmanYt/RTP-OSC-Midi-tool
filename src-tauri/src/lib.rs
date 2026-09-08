@@ -20,8 +20,9 @@ pub mod vst_worker;
 pub use audio::AudioEngine;
 pub use bridge::BridgeHandle;
 pub use config::{
-    AppConfig, AudioConfig, Config, ConfigStore, LoggingConfig, MidiConfig, OscConfig,
-    RoutingAssignment, RoutingMapping, RoutingProfile, RtpConfig, RtpRemoteEntry, Theme, UiConfig,
+    AppConfig, AudioConfig, Config, ConfigStore, EqPeakSettings, EqShelfSettings, LoggingConfig,
+    MidiConfig, OscConfig, RoutingAssignment, RoutingMapping, RoutingProfile, RtpConfig,
+    RtpRemoteEntry, Theme, UiConfig, VstEqSettings, BUNDLED_VST_EQ_KEY,
 };
 pub use error::{
     AppError, AudioError, BridgeError, CommandError, ConfigError as AppConfigError, TauriError,

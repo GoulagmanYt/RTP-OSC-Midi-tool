@@ -2,7 +2,11 @@
 
 All notable changes to OSCMidi are documented here.
 
-## Unreleased
+## 2.6.0 - 2026-09-02
+
+### Added
+
+- Added a live, per-instrument three-band VST equalizer with a response graph, click-free parameter smoothing and support for direct x64 and bridged x86 plug-ins.
 
 ### Changed
 
@@ -13,6 +17,7 @@ All notable changes to OSCMidi are documented here.
 
 ### Fixed
 
+- Restored strict CI compatibility with Criterion 0.8 and upgraded `rtrb` to 0.3.5 to address RUSTSEC-2026-0274.
 - Prevented pull-request artifact uploads from failing when GitHub exposes merge refs containing `/`.
 - Updated the locked transitive Nano ID dependency to remove its high-severity zero-length generator advisory.
 

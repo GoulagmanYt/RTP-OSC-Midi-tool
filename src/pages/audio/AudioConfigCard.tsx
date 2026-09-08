@@ -7,7 +7,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 import { Switch } from "../../components/ui/Switch";
 import type { AppConfig, AudioDeviceEntry, RuntimeStatus, VstPluginEntry } from "../../api-types";
 import type { TranslateFn } from "./shared";
-import { Power, RefreshCcw, X } from "lucide-react";
+import { Power, RefreshCcw, SlidersHorizontal, X } from "lucide-react";
 import { useMemo, useState } from "react";
 
 type Props = {
@@ -18,12 +18,14 @@ type Props = {
   bufferMismatch: boolean | null;
   canOpenSelectedVstUi: boolean;
   canOpenVstParameterFallback: boolean;
+  canOpenVstEq: boolean;
   config: AppConfig | null;
   currentLatencyMs: number | null;
   midiMessagesPerSec: number | null;
   selectedPluginKindLabel: string;
   selectedPluginStatusLabel: string;
   selectedVstPlugin: VstPluginEntry | null;
+  vstEqEnabled: boolean;
   status: RuntimeStatus | null;
   streamBufferSize: number | null;
   t: TranslateFn;
@@ -39,6 +41,7 @@ type Props = {
   onGainChange: (value: number) => Promise<void>;
   onLimiterToggle: (checked: boolean) => Promise<void>;
   onOpenVstParameters: () => Promise<void>;
+  onOpenVstEq: () => void;
   onOpenVstUi: () => Promise<void>;
   onPingAudio: () => Promise<void>;
   onRefreshVstPluginsList: () => Promise<void>;
@@ -59,12 +62,14 @@ export function AudioConfigCard({
   bufferMismatch,
   canOpenSelectedVstUi,
   canOpenVstParameterFallback,
+  canOpenVstEq,
   config,
   currentLatencyMs,
   midiMessagesPerSec,
   selectedPluginKindLabel,
   selectedPluginStatusLabel,
   selectedVstPlugin,
+  vstEqEnabled,
   status,
   streamBufferSize,
   t,
@@ -80,6 +85,7 @@ export function AudioConfigCard({
   onGainChange,
   onLimiterToggle,
   onOpenVstParameters,
+  onOpenVstEq,
   onOpenVstUi,
   onPingAudio,
   onRefreshVstPluginsList,
@@ -526,6 +532,11 @@ export function AudioConfigCard({
             <p className="text-xs text-muted-foreground">{t("audio.vstCustomPathsHint")}</p>
           </div>
           <div className="flex flex-wrap gap-2">
+            <Button variant="outline" onClick={onOpenVstEq} disabled={!canOpenVstEq}>
+              <SlidersHorizontal className="mr-2 h-4 w-4" />
+              {t("audio.eq.open")}
+              {vstEqEnabled ? <Badge variant="success" className="ml-2">{t("audio.eq.active")}</Badge> : null}
+            </Button>
             <Button variant="outline" onClick={onOpenVstUi} disabled={vstUiOpen || !canOpenSelectedVstUi}>
               {t("audio.openVstUi")}
             </Button>

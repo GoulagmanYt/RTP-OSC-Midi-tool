@@ -1,9 +1,9 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
 use osc_midi_bridge::{
     audio::AudioEngine, bridge::BridgeHandle, config::ConfigStore, midi::MidiFrame,
 };
 use smallvec::SmallVec;
-use std::sync::Arc;
+use std::{hint::black_box, sync::Arc};
 
 /// Benchmark du parsing de frames MIDI
 fn bench_midi_frame_parsing(c: &mut Criterion) {
