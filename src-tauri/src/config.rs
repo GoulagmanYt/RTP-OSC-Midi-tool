@@ -76,7 +76,11 @@ impl Default for MidiConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+#[serde(default)]
 pub struct OscConfig {
+    pub input_enabled: bool,
+    pub listen_ip: String,
+    pub listen_port: u16,
     pub enabled: bool,
     pub target_ip: String,
     pub target_port: u16,
@@ -86,6 +90,9 @@ pub struct OscConfig {
 impl Default for OscConfig {
     fn default() -> Self {
         Self {
+            input_enabled: false,
+            listen_ip: "127.0.0.1".into(),
+            listen_port: 9001,
             enabled: true,
             target_ip: "127.0.0.1".to_string(),
             target_port: 9000,

@@ -9,6 +9,7 @@ pub mod error;
 pub mod logger;
 pub mod midi;
 pub mod osc;
+pub(crate) mod osc_input;
 pub mod plugin_probe;
 pub mod reliable_playback;
 pub mod rtp;

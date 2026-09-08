@@ -14,7 +14,7 @@ function makeConfig(): AppConfig {
       routingProfiles: [],
       routingAssignments: [],
     },
-    osc: {
+    osc: { inputEnabled: false, listenIp: "127.0.0.1", listenPort: 9001,
       enabled: true,
       targetIp: "127.0.0.1",
       targetPort: 9000,

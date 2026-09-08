@@ -55,6 +55,9 @@ export type MidiConfig = {
 };
 
 export type OscConfig = {
+  inputEnabled: boolean;
+  listenIp: string;
+  listenPort: number;
   enabled: boolean;
   targetIp: string;
   targetPort: number;

@@ -308,6 +308,12 @@ const en: TranslationTree = {
       bufferMismatchWarning: "The audio driver enforces a buffer size different from the requested value.",
     },
     osc: {
+      inputTitle: "OSC input",
+      inputHint: "Receive note and sustain parameters, or MIDI messages at /midi. Timed bundles are scheduled automatically.",
+      inputEnable: "Enable OSC input",
+      listenIp: "Listen address",
+      listenPort: "Listen port",
+
       title: "OSC Configuration",
       description: "Configure the OSC server and transmission settings.",
       enable: "Enable OSC",

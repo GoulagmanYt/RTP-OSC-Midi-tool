@@ -308,6 +308,12 @@ const fr: TranslationTree = {
       bufferMismatchWarning: "Le driver audio impose une taille de buffer différente de la valeur demandée.",
     },
     osc: {
+      inputTitle: "Entrée OSC",
+      inputHint: "Recevoir les paramètres de notes et de sustain, ou des messages MIDI sur /midi. Les bundles datés sont programmés automatiquement.",
+      inputEnable: "Activer l’entrée OSC",
+      listenIp: "Adresse d’écoute",
+      listenPort: "Port d’écoute",
+
       title: "Configuration OSC",
       description: "Configurez le serveur OSC et les paramètres de transmission.",
       enable: "Activer OSC",

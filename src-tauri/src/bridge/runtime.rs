@@ -54,6 +54,7 @@ pub(super) struct BridgeRuntime {
     pub(super) activity_emitter: Option<thread::JoinHandle<()>>,
     pub(super) midi_event_emitter: Option<thread::JoinHandle<()>>,
     pub(super) reliable_playback: Option<ReliablePlaybackServer>,
+    pub(super) osc_input: Option<crate::osc_input::OscInputServer>,
     pub(super) config: Arc<Mutex<Config>>,
     pub(super) config_rev: Arc<AtomicU64>,
     pub(super) actual_midi_in: Arc<Mutex<Option<String>>>,
@@ -165,6 +166,23 @@ impl BridgeHandle {
     pub fn update_config(&self, config: Config, _logger: &FrontendLogger) -> Result<(), String> {
         let mut guard = self.inner.lock();
         if let Some(runtime) = guard.as_mut() {
+            let old = runtime.config.lock().osc.clone();
+            if old.input_enabled != config.osc.input_enabled
+                || old.listen_ip != config.osc.listen_ip
+                || old.listen_port != config.osc.listen_port
+            {
+                let sink = self
+                    .rtp_sink
+                    .read()
+                    .as_ref()
+                    .cloned()
+                    .ok_or("Bridge MIDI input unavailable")?;
+                let replacement = crate::osc_input::OscInputServer::start(&config.osc, sink)?;
+                if let Some(previous) = runtime.osc_input.take() {
+                    previous.stop();
+                }
+                runtime.osc_input = replacement;
+            }
             super::pipeline::request_critical_midi_reset();
             *runtime.config.lock() = config.clone();
             refresh_runtime_status(

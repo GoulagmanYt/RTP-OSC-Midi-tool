@@ -28,7 +28,7 @@ static MIDI_DEBUG_SAMPLE_LAST_MS: AtomicU64 = AtomicU64::new(0);
 static CRITICAL_MIDI_RESET_REQUESTED: AtomicBool = AtomicBool::new(false);
 static MIDI_RESET_GENERATION: AtomicU64 = AtomicU64::new(0);
 #[cfg(test)]
-pub(super) static TEST_PIPELINE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) static TEST_PIPELINE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub(crate) fn midi_reset_generation() -> u64 {
     MIDI_RESET_GENERATION.load(Ordering::Acquire)
@@ -292,7 +292,7 @@ pub(super) fn handle_midi_frame(
             return;
         }
 
-        if !config.osc_enabled {
+        if !config.osc_enabled || frame.source.starts_with("OSC:") {
             if log_sample {
                 logger.debug(format!(
                     "OSC desactive -> sustain ignoree pour OSC depuis {}",
@@ -361,7 +361,7 @@ pub(super) fn handle_midi_frame(
         }
 
         if let Some(index) = note.index {
-            if !config.osc_enabled {
+            if !config.osc_enabled || frame.source.starts_with("OSC:") {
                 if log_sample {
                     logger.debug(format!(
                         "OSC desactive -> note {} ignoree pour OSC depuis {}",

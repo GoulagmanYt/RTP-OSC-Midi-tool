@@ -84,6 +84,29 @@ export default function OscPage() {
           </div>
 
           <div className="space-y-4 p-4 rounded-lg bg-slate-50 dark:bg-slate-900/50 border border-slate-100 dark:border-slate-800">
+            <h3 className="font-semibold text-sm">{t("osc.inputTitle")}</h3>
+            <p className="text-xs text-muted-foreground">{t("osc.inputHint")}</p>
+            <div className="flex items-center justify-between">
+              <Label htmlFor="osc-input-enabled">{t("osc.inputEnable")}</Label>
+              <Switch id="osc-input-enabled" checked={config?.osc.inputEnabled ?? false}
+                onCheckedChange={(inputEnabled) => updateConfig({ osc: { inputEnabled } })} />
+            </div>
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className="space-y-2">
+                <Label htmlFor="osc-listen-ip">{t("osc.listenIp")}</Label>
+                <Input id="osc-listen-ip" value={config?.osc.listenIp ?? "127.0.0.1"}
+                  onChange={(e) => updateConfig({ osc: { listenIp: e.target.value } })} />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="osc-listen-port">{t("osc.listenPort")}</Label>
+                <Input id="osc-listen-port" type="number" min={1} max={65535}
+                  value={config?.osc.listenPort ?? 9001}
+                  onChange={(e) => updateConfig({ osc: { listenPort: Number(e.target.value || 0) } })} />
+              </div>
+            </div>
+          </div>
+
+          <div className="space-y-4 p-4 rounded-lg bg-slate-50 dark:bg-slate-900/50 border border-slate-100 dark:border-slate-800">
             <h3 className="font-semibold text-sm">{t("osc.protocolOptions")}</h3>
             <div className="space-y-3">
               <div className="flex items-center justify-between">

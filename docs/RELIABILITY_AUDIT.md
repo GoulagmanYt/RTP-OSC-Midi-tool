@@ -104,8 +104,7 @@ Node 20 does not satisfy the existing Vite/jsdom dependency requirements.
 
 This is a reliability pass over implemented routes, not a certification of full
 RFC 6295/OSC support. Recovery beyond Chapter N,
-general OSC reception/bundle scheduling, and application-level outbound RTP
-routing remain unsupported. Complete RTP SysEx is forwarded to local MIDI; its
+application-level outbound RTP routing remains unsupported. Complete RTP SysEx is forwarded to local MIDI; its
 existing untimestamped library event is dispatched at arrival time. Segmented
 SysEx is reassembled per participant in a preallocated 64 KiB payload buffer;
 only completed messages are delivered. Cancellation, corruption, packet loss,
@@ -124,3 +123,32 @@ disconnect recovery require measurements on the intended rig.
 Protocol references: [RFC 6295](https://www.rfc-editor.org/rfc/rfc6295),
 [Apple MIDI Network Driver Protocol](https://developer.apple.com/library/archive/documentation/Audio/Conceptual/MIDINetworkDriverProtocol/MIDI/MIDI.html),
 and [OSC 1.0](https://opensoundcontrol.stanford.edu/spec-1_0.html).
+
+## OSC input
+
+OSC input is optional (off by default), configurable in the OSC page, and binds
+127.0.0.1:9001 by default. Exact `/avatar/parameters/1` through `88` and `sustain`
+accept a single zero/one integer or float, or OSC True/False. Notes map to MIDI
+channel 1 and velocity 127. `/midi` accepts one OSC `m` argument with explicit
+status and zero-filled unused data bytes; the port-id byte is not routed.
+Input events are forwarded to MIDI/audio and suppressed on OSC output to prevent
+feedback. OSC input does not require OSC output to be enabled.
+
+The decoder validates i/f/s/b/h/t/d/m/T/F/N/I argument layouts, ASCII strings,
+zero padding, complete consumption, signed lengths, and nested bundle ordering.
+It reads borrowed packet slices and rejects a malformed packet before queuing
+any of its events. Unknown exact addresses are ignored after validation;
+address-pattern dispatch and array type tags are not implemented.
+
+An input packet is limited to 1,024 mapped messages and 16 nested levels; the
+scheduler holds at most 4,096 events and accepts deadlines up to ten seconds
+in the future. NTP era rollover is handled using integer arithmetic. Immediate
+nested bundles inherit their parent deadline. Due events are submitted in wire
+order, and reception remains asynchronous while future bundles wait. This does
+not provide transactional isolation from other MIDI producers in the shared
+bridge queue or guarantee physical microsecond wake-up accuracy.
+
+UDP tests cover timed/immediate interleaving, ordering and port release. Codec
+tests cover all requested atomic layouts, truncation, padding, nested deadline
+violations, capacity rejection, and NTP era rollover. Config changes replace the
+input server with validation of its new bind address before stopping the old one.

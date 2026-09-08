@@ -32,7 +32,7 @@ function config(developerMode: boolean): AppConfig {
   return {
     version: 1,
     midi: { thruEnabled: false, hotplug: true, routingProfiles: [], routingAssignments: [] },
-    osc: { enabled: false, targetIp: "127.0.0.1", targetPort: 9000, logMessages: false },
+    osc: { inputEnabled: false, listenIp: "127.0.0.1", listenPort: 9001, enabled: false, targetIp: "127.0.0.1", targetPort: 9000, logMessages: false },
     rtp: { enabled: false, sessionName: "OSCMidi", port: 5004, remoteEnabled: false, remotes: [], logMessages: false },
     audio: {
       enabled: false,

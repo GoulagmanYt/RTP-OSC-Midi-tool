@@ -136,9 +136,13 @@ pub(super) fn start_runtime(
     status.midi_input = actual_midi_in.lock().clone();
     status.midi_output = actual_midi_out.lock().clone();
 
+    let osc_input = crate::osc_input::OscInputServer::start(&config.osc, midi_tx.clone())?;
     *rtp_sink.write() = Some(midi_tx.clone());
     if let Err(error) = sync_rtp(rtp_server, rtp_sink, rtp_config, &config, &logger, false) {
         *rtp_sink.write() = None;
+        if let Some(server) = osc_input {
+            server.stop();
+        }
         return Err(error);
     }
     let reliable_playback =
@@ -146,6 +150,9 @@ pub(super) fn start_runtime(
             Ok(server) => Some(server),
             Err(error) => {
                 cleanup_startup_rtp(rtp_server, rtp_sink, rtp_config);
+                if let Some(server) = osc_input {
+                    server.stop();
+                }
                 return Err(error);
             }
         };
@@ -213,6 +220,7 @@ pub(super) fn start_runtime(
         activity_emitter,
         midi_event_emitter,
         reliable_playback,
+        osc_input,
         config: shared_config,
         config_rev,
         actual_midi_in,
@@ -229,6 +237,9 @@ pub(super) fn stop_runtime(
     let config_for_reset = runtime.config.lock().clone();
     *rtp_sink.write() = None;
     runtime.stop.store(true, Ordering::Relaxed);
+    if let Some(server) = runtime.osc_input {
+        server.stop();
+    }
     if let Some(handle) = runtime.processing {
         let _ = handle.join();
     }
