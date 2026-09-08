@@ -65,6 +65,15 @@ export function RtpConfigCard({
           <Switch checked={config?.rtp.enabled ?? false} onCheckedChange={onToggleRtp} />
         </div>
 
+        <div className="flex items-center justify-between rounded-lg border border-slate-100 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-900/50">
+          <div className="flex flex-col gap-1">
+            <Label htmlFor="rtp-thru">{t("rtp.thruEnable")}</Label>
+            <p className="text-xs text-muted-foreground">{t("rtp.thruHint")}</p>
+          </div>
+          <Switch id="rtp-thru" checked={config?.rtp.thruEnabled ?? false}
+            onCheckedChange={(thruEnabled) => onUpdateConfig({ rtp: { thruEnabled } })} />
+        </div>
+
         <div className="space-y-4 rounded-lg border border-slate-100 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-900/50">
           <h3 className="text-sm font-semibold">{t("rtp.sessionConfig")}</h3>
           <div className="grid gap-4 md:grid-cols-2">

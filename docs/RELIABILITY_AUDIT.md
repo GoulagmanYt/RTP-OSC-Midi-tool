@@ -103,8 +103,7 @@ Node 20 does not satisfy the existing Vite/jsdom dependency requirements.
 ## Explicit limits
 
 This is a reliability pass over implemented routes, not a certification of full
-RFC 6295/OSC support. Recovery beyond Chapter N,
-application-level outbound RTP routing remains unsupported. Complete RTP SysEx is forwarded to local MIDI; its
+RFC 6295/OSC support. Recovery beyond Chapter N remains unsupported. Complete RTP SysEx is forwarded to local MIDI; its
 existing untimestamped library event is dispatched at arrival time. Segmented
 SysEx is reassembled per participant in a preallocated 64 KiB payload buffer;
 only completed messages are delivered. Cancellation, corruption, packet loss,
@@ -152,3 +151,25 @@ UDP tests cover timed/immediate interleaving, ordering and port release. Codec
 tests cover all requested atomic layouts, truncation, padding, nested deadline
 violations, capacity rejection, and NTP era rollover. Config changes replace the
 input server with validation of its new bind address before stopping the old one.
+
+## RTP output
+
+The RTP page now offers an independent forwarding switch (off by default).
+Local MIDI, injected events and OSC input can be forwarded to connected peers;
+RTP-origin events are not echoed. Source routing profiles are applied before
+forwarding. Output uses a separate bounded 2,048-frame queue and worker, with
+nonblocking route lookup/submission on the processing path. Overflow is counted;
+a lost critical release requests recovery. Reset generations discard stale work.
+
+The sender releases sustain/notes/sound on all channels when a previously used
+outbound route resets or stops, before session BY. An unused outbound route does
+not send these controller resets. Socket operations are bounded by a 100 ms
+failure timeout; failed resets are retried before new notes are sent. SysEx up
+to 64 KiB is split into 1,024-byte RTP sublists and reassembled by the receiver.
+The vendor sender snapshots only peer addresses in fixed storage, avoiding
+copies of participant names and SysEx buffers for every outgoing packet.
+
+A two-session regression verifies MIDI forwarding, 2,700-byte segmented SysEx,
+and remote panic. Queue tests cover echo prevention, critical overflow and a
+concurrent configuration writer. The output worker checks reset generations on
+a two-millisecond maintenance tick; no sub-millisecond reset bound is claimed.

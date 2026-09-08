@@ -20,7 +20,7 @@ function makeConfig(): AppConfig {
       targetPort: 9000,
       logMessages: true,
     },
-    rtp: {
+    rtp: { thruEnabled: false,
       enabled: true,
       sessionName: "OSCMidi",
       port: 5004,

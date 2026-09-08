@@ -65,6 +65,7 @@ export type OscConfig = {
 };
 
 export type RtpConfig = {
+  thruEnabled: boolean;
   enabled: boolean;
   sessionName: string;
   port: number;

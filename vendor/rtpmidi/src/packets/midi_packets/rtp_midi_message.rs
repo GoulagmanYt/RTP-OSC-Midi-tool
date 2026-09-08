@@ -21,7 +21,19 @@ impl From<MidiMessage> for RtpMidiMessage<'_> {
     }
 }
 
-impl RtpMidiMessage<'_> {
+impl<'a> RtpMidiMessage<'a> {
+    /// Parse one complete MIDI wire message; segmented RTP sublists are excluded.
+    pub fn parse_complete(bytes: &'a [u8]) -> std::io::Result<Self> {
+        let (message, remaining) = MidiMessage::from_be_bytes(bytes, None)?;
+        if !remaining.is_empty() || matches!(message, Self::SysExSegment { .. }) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Expected one complete MIDI message",
+            ));
+        }
+        Ok(message)
+    }
+
     pub fn len(&self) -> usize {
         match self {
             RtpMidiMessage::MidiMessage(msg) => msg.len(),

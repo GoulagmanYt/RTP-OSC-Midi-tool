@@ -550,7 +550,10 @@ impl MidiPort {
         commands: &'a [MidiEvent<'a>],
     ) -> std::io::Result<()> {
         let lock = ctx.participants.lock().await;
-        let participants: Vec<Participant> = lock.values().cloned().collect();
+        let mut destinations = [None; 128];
+        for (slot, participant) in destinations.iter_mut().zip(lock.values()) {
+            *slot = Some(participant.midi_port_addr());
+        }
         drop(lock);
         if !MidiPacket::batch_fits(commands) {
             return Err(std::io::Error::new(
@@ -568,10 +571,8 @@ impl MidiPort {
         );
         *seq = seq.wrapping_add(1);
         event!(Level::DEBUG, "Sending MIDI packet batch");
-        for participant in participants {
-            self.socket
-                .send_to(&packet, participant.midi_port_addr())
-                .await?;
+        for destination in destinations.into_iter().flatten() {
+            self.socket.send_to(&packet, destination).await?;
         }
         Ok(())
     }

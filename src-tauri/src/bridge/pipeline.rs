@@ -114,6 +114,8 @@ impl RoutingProfileRuntime {
 
 #[derive(Clone)]
 pub(super) struct ConfigSnapshot {
+    pub(super) rtp_output: Option<crate::rtp::rtp_output::RtpOutputRoute>,
+    rtp_thru: bool,
     pub(super) osc_target_ip: String,
     pub(super) osc_target_port: u16,
     pub(super) osc_enabled: bool,
@@ -145,6 +147,8 @@ impl From<&Config> for ConfigSnapshot {
         }
 
         Self {
+            rtp_output: None,
+            rtp_thru: cfg.rtp.thru_enabled,
             osc_target_ip: cfg.osc.target_ip.clone(),
             osc_target_port: cfg.osc.target_port,
             osc_enabled: cfg.osc.enabled,
@@ -199,6 +203,12 @@ pub(super) fn handle_midi_frame(
                 }
                 return;
             }
+        }
+    }
+
+    if deliver_audio && config.rtp_thru {
+        if let Some(output) = config.rtp_output.as_ref() {
+            output.send(&frame);
         }
     }
 

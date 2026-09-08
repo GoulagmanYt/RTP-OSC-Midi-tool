@@ -335,6 +335,8 @@ const fr: TranslationTree = {
       defaultPort: "Port par défaut :",
     },
     rtp: {
+      thruEnable: "Envoyer le MIDI aux pairs RTP",
+      thruHint: "Transmettre les entrées MIDI et OSC aux pairs RTP connectés. Le RTP reçu n’est pas renvoyé.",
       remoteConfig: "Connexion distante",
       remoteEnable: "Se connecter a une session RTP-MIDI distante",
       remoteEnableHint: "Invite une session distante a envoyer du MIDI ici",

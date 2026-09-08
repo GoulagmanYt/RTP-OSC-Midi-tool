@@ -29,6 +29,7 @@ use tauri::Window;
 
 #[derive(Clone)]
 pub struct BridgeHandle {
+    rtp_output: crate::rtp::rtp_output::RtpOutputRoute,
     inner: Arc<Mutex<Option<BridgeRuntime>>>,
     rtp_server: Arc<Mutex<Option<RtpServer>>>,
     rtp_sink: Arc<parking_lot::RwLock<Option<Sender<MidiFrame>>>>,
@@ -64,6 +65,7 @@ pub(super) struct BridgeRuntime {
 impl BridgeHandle {
     pub fn new() -> Self {
         Self {
+            rtp_output: crate::rtp::rtp_output::RtpOutputRoute::default(),
             inner: Arc::new(Mutex::new(None)),
             rtp_server: Arc::new(Mutex::new(None)),
             rtp_sink: Arc::new(parking_lot::RwLock::new(None)),
@@ -84,6 +86,7 @@ impl BridgeHandle {
             config,
             logger,
             force_restart,
+            &self.rtp_output,
         )
     }
 
@@ -107,6 +110,7 @@ impl BridgeHandle {
             &self.rtp_server,
             &self.rtp_sink,
             &self.rtp_config,
+            self.rtp_output.clone(),
         )?;
         let status = runtime.status.clone();
         *self.inner.lock() = Some(runtime);
@@ -115,6 +119,7 @@ impl BridgeHandle {
 
     pub fn stop(&self) -> Result<(), String> {
         self.stop_internal();
+        self.rtp_output.set(None);
         // RTP discovery/session setup may have run before the bridge started.
         if let Some(server) = self.rtp_server.lock().take() {
             crate::tauri::utils::safe_block_on(server.stop());

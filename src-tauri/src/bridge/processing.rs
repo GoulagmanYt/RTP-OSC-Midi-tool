@@ -51,6 +51,7 @@ pub(super) fn spawn_processing_loop(
     osc_counter: Arc<AtomicU32>,
     actual_midi_out: Arc<Mutex<Option<String>>>,
     midi_event_tx: Sender<MidiNoteEvent>,
+    rtp_output: crate::rtp::rtp_output::RtpOutputRoute,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         processing_loop(
@@ -67,6 +68,7 @@ pub(super) fn spawn_processing_loop(
             osc_counter,
             actual_midi_out,
             midi_event_tx,
+            rtp_output,
         );
     })
 }
@@ -86,6 +88,7 @@ fn processing_loop(
     osc_counter: Arc<AtomicU32>,
     actual_midi_out: Arc<Mutex<Option<String>>>,
     midi_event_tx: Sender<MidiNoteEvent>,
+    rtp_output: crate::rtp::rtp_output::RtpOutputRoute,
 ) {
     let initial_cfg = shared_config.lock().clone();
     logger.info(format!(
@@ -121,6 +124,7 @@ fn processing_loop(
     );
 
     let mut snapshot = ConfigSnapshot::from(&initial_cfg);
+    snapshot.rtp_output = Some(rtp_output.clone());
     let mut cached_rev = config_rev.load(Ordering::Relaxed);
     let mut sustain_pressed_state = [None; 16];
     let mut unused_midi_out = None;
@@ -140,6 +144,7 @@ fn processing_loop(
         if rev_now != cached_rev {
             let cfg = shared_config.lock().clone();
             snapshot = ConfigSnapshot::from(&cfg);
+            snapshot.rtp_output = Some(rtp_output.clone());
             cached_rev = rev_now;
         }
 

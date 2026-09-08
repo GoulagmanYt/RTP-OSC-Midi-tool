@@ -32,6 +32,7 @@ pub(super) const BRIDGE_MIDI_QUEUE_CAPACITY: usize = 8192;
 
 pub(super) fn rtp_requested(config: &Config) -> bool {
     config.rtp.enabled
+        || config.rtp.thru_enabled
         || config.rtp.remote_enabled
         || config
             .midi
@@ -48,6 +49,7 @@ pub(super) fn sync_rtp(
     config: &Config,
     logger: &FrontendLogger,
     force_restart: bool,
+    rtp_output: &crate::rtp::rtp_output::RtpOutputRoute,
 ) -> Result<(), String> {
     let should_run = rtp_requested(config);
     let mut server_guard = rtp_server.lock();
@@ -69,6 +71,7 @@ pub(super) fn sync_rtp(
                 .unwrap_or(true);
 
         if needs_restart {
+            rtp_output.set(None);
             if let Some(existing) = server_guard.take() {
                 crate::tauri::utils::safe_block_on(existing.stop());
             }
@@ -91,9 +94,11 @@ pub(super) fn sync_rtp(
                 log_rtp: config.rtp.log_messages,
                 advertisement,
             });
+            rtp_output.set(Some(server.outgoing()));
             *server_guard = Some(server);
         }
     } else {
+        rtp_output.set(None);
         if let Some(existing) = server_guard.take() {
             crate::tauri::utils::safe_block_on(existing.stop());
         }
@@ -115,6 +120,7 @@ pub(super) fn start_runtime(
     rtp_server: &Arc<Mutex<Option<RtpServer>>>,
     rtp_sink: &Arc<parking_lot::RwLock<Option<Sender<MidiFrame>>>>,
     rtp_config: &Arc<Mutex<Option<RtpConfigSnapshot>>>,
+    rtp_output: crate::rtp::rtp_output::RtpOutputRoute,
 ) -> Result<BridgeRuntime, String> {
     let logger = FrontendLogger::new(window.clone(), dev_logging);
     let osc = OscClient::new(&config.osc.target_ip, config.osc.target_port)?;
@@ -138,7 +144,15 @@ pub(super) fn start_runtime(
 
     let osc_input = crate::osc_input::OscInputServer::start(&config.osc, midi_tx.clone())?;
     *rtp_sink.write() = Some(midi_tx.clone());
-    if let Err(error) = sync_rtp(rtp_server, rtp_sink, rtp_config, &config, &logger, false) {
+    if let Err(error) = sync_rtp(
+        rtp_server,
+        rtp_sink,
+        rtp_config,
+        &config,
+        &logger,
+        false,
+        &rtp_output,
+    ) {
         *rtp_sink.write() = None;
         if let Some(server) = osc_input {
             server.stop();
@@ -196,6 +210,7 @@ pub(super) fn start_runtime(
         osc_counter.clone(),
         actual_midi_out.clone(),
         midi_event_tx,
+        rtp_output,
     ));
 
     let midi_event_emitter = Some(spawn_midi_event_emitter(

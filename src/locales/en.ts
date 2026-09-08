@@ -335,6 +335,8 @@ const en: TranslationTree = {
       defaultPort: "Default port:",
     },
     rtp: {
+      thruEnable: "Forward MIDI to RTP peers",
+      thruHint: "Send local MIDI and OSC input to connected RTP peers. Received RTP is not echoed.",
       title: "RTP-MIDI / AppleMIDI Configuration",
       description: "Configure the network MIDI server (RTP-MIDI / AppleMIDI).",
       enable: "Enable RTP-MIDI server",

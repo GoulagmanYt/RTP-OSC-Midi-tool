@@ -46,6 +46,10 @@ static DROPPED_MIDI_COUNT: AtomicU64 = AtomicU64::new(0);
 static RTP_LOG_SAMPLE_LAST_MS: AtomicU64 = AtomicU64::new(0);
 
 /// Retourne le nombre de messages MIDI RTP abandonnés (canal plein).
+pub(crate) fn record_rtp_drop() {
+    DROPPED_MIDI_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+
 pub fn rtp_dropped_count() -> u64 {
     DROPPED_MIDI_COUNT.load(Ordering::Relaxed)
 }
@@ -63,6 +67,7 @@ struct RemoteTargetState {
 }
 
 pub struct RtpServer {
+    outgoing: mpsc::Sender<super::rtp_output::OutgoingFrame>,
     stop_tx: Option<oneshot::Sender<()>>,
     handle: JoinHandle<()>,
     bound_port: u16,
@@ -165,7 +170,15 @@ impl RtpServer {
         let notify_for_left = notify.clone();
         emit_participants(&logger, &participants);
 
+        let (outgoing, outgoing_rx) = mpsc::channel(2048);
         let handle = async_runtime::spawn(async move {
+            let (sender_stop, sender_cancelled) = oneshot::channel();
+            let mut sender_stop = Some(sender_stop);
+            let mut sender_task = async_runtime::spawn(super::rtp_output::run(
+                session.clone(),
+                outgoing_rx,
+                sender_cancelled,
+            ));
             let (scheduled_tx, scheduled_rx) = mpsc::channel(RTP_SCHEDULER_CAPACITY);
             let scheduler =
                 async_runtime::spawn(run_rtp_scheduler(scheduled_rx, midi_sink, logger.clone()));
@@ -361,6 +374,8 @@ impl RtpServer {
                         tokio::select! {
                             _ = &mut stop_rx => {
                                 logger.info("Arret serveur RTP-MIDI");
+                                if let Some(stop) = sender_stop.take() { let _ = stop.send(()); }
+                                let _ = (&mut sender_task).await;
                                 session.stop_gracefully().await;
                                 break;
                             }
@@ -371,6 +386,8 @@ impl RtpServer {
                         tokio::select! {
                             _ = &mut stop_rx => {
                                 logger.info("Arret serveur RTP-MIDI");
+                                if let Some(stop) = sender_stop.take() { let _ = stop.send(()); }
+                                let _ = (&mut sender_task).await;
                                 session.stop_gracefully().await;
                                 break;
                             }
@@ -382,7 +399,9 @@ impl RtpServer {
                 tokio::select! {
                     _ = &mut stop_rx => {
                         logger.info("Arret serveur RTP-MIDI");
-                        session.stop_gracefully().await;
+                        if let Some(stop) = sender_stop.take() { let _ = stop.send(()); }
+                                let _ = (&mut sender_task).await;
+                                session.stop_gracefully().await;
                     }
                 }
             }
@@ -391,6 +410,7 @@ impl RtpServer {
         });
 
         Ok(Self {
+            outgoing,
             stop_tx: Some(stop_tx),
             handle,
             bound_port,
@@ -407,6 +427,10 @@ impl RtpServer {
             let _ = stop_tx.send(());
         }
         let _ = self.handle.await;
+    }
+
+    pub(crate) fn outgoing(&self) -> mpsc::Sender<super::rtp_output::OutgoingFrame> {
+        self.outgoing.clone()
     }
 
     pub fn bound_port(&self) -> u16 {

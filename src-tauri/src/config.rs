@@ -104,6 +104,8 @@ impl Default for OscConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RtpConfig {
+    #[serde(default)]
+    pub thru_enabled: bool,
     pub enabled: bool,
     pub session_name: String,
     pub port: u16,
@@ -115,6 +117,7 @@ pub struct RtpConfig {
 impl Default for RtpConfig {
     fn default() -> Self {
         Self {
+            thru_enabled: false,
             enabled: true,
             session_name: "OSCMidi".to_string(),
             port: 5004,
