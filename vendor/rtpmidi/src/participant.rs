@@ -16,6 +16,7 @@ pub struct Participant {
     invited_by_us: bool,
     ssrc: U32,
     clock: Option<ClockMapping>,
+    pub(crate) expected_sequence: Option<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -41,6 +42,7 @@ impl Participant {
             invited_by_us,
             ssrc,
             clock: None,
+            expected_sequence: None,
         }
     }
 

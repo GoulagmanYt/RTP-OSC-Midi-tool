@@ -266,7 +266,6 @@ impl RtpMidiSession {
 
     pub(super) async fn forget_participant(&self, ssrc: U32) {
         let participant = self.participants.lock().await.remove(&ssrc);
-        self.midi_port.clear_receive_sequence(ssrc).await;
         if let Some(participant) = participant {
             self.listeners
                 .lock()

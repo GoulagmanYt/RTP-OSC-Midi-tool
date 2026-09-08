@@ -237,6 +237,24 @@ async fn malformed_udp_loss_rollover_and_control_disconnect() {
         control.send_to(&bye, ("127.0.0.1", port)).await.unwrap();
         left_rx.recv().await.unwrap();
         assert!(server.participants().await.is_empty());
+        // Reusing an SSRC after reconnect must start a fresh sequence history.
+        control
+            .send_to(&invitation, ("127.0.0.1", port))
+            .await
+            .unwrap();
+        control.recv_from(&mut buffer).await.unwrap();
+        data.send_to(&invitation, ("127.0.0.1", port + 1))
+            .await
+            .unwrap();
+        data.recv_from(&mut buffer).await.unwrap();
+        data.send_to(&packet(0, &[3, 0x90, 62, 100]), ("127.0.0.1", port + 1))
+            .await
+            .unwrap();
+        assert_eq!(
+            events.recv().await.unwrap().message,
+            MidiMessage::NoteOn(Channel::C1, Note::from(62), Value7::from(100))
+        );
+        assert!(loss_rx.try_recv().is_err());
         server.stop_gracefully().await;
     })
     .await

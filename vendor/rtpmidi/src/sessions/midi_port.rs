@@ -10,7 +10,6 @@ use crate::packets::packet::RtpMidiPacket;
 use crate::participant::Participant;
 use crate::sessions::events::event_handling::EventListeners;
 use crate::sessions::rtp_midi_session::current_timestamp_u32;
-use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::iter;
 use std::net::SocketAddr;
@@ -62,7 +61,6 @@ pub(super) struct MidiPort {
     ssrc: U32,
     start_time: Instant,
     send_sequence_number: Arc<Mutex<u16>>,
-    receive_sequence_numbers: Arc<Mutex<HashMap<u32, u16>>>,
     socket: Arc<UdpSocket>,
 }
 
@@ -75,7 +73,6 @@ impl MidiPort {
             start_time: Instant::now(),
             name,
             send_sequence_number: Arc::new(Mutex::new(0)),
-            receive_sequence_numbers: Arc::new(Mutex::new(HashMap::new())),
             socket,
         })
     }
@@ -162,9 +159,9 @@ impl MidiPort {
                 event!(Level::DEBUG, "Parsed MIDI packet: {:#?}", midi_packet);
                 let ssrc = midi_packet.ssrc().get();
                 let arrived = Instant::now();
-                let peers = ctx.participants.lock().await;
+                let mut peers = ctx.participants.lock().await;
                 let Some(peer) = peers
-                    .get(&midi_packet.ssrc())
+                    .get_mut(&midi_packet.ssrc())
                     .filter(|p| p.midi_port_addr() == src)
                 else {
                     return;
@@ -172,14 +169,18 @@ impl MidiPort {
                 let packet_deadline = peer
                     .deadline(u32::from(midi_packet.timestamp()))
                     .unwrap_or(arrived);
-                drop(peers);
-
                 let received = midi_packet.sequence_number().get();
-                let mut receive_sequences = self.receive_sequence_numbers.lock().await;
-                if let Some(expected) = receive_sequences.get(&ssrc).copied() {
-                    let distance = match classify_sequence(expected, received) {
-                        SequenceDisposition::InOrder => 0,
-                        SequenceDisposition::Gap(distance) => distance,
+                let loss = if let Some(expected) = peer.expected_sequence {
+                    match classify_sequence(expected, received) {
+                        SequenceDisposition::InOrder => None,
+                        SequenceDisposition::Gap(distance) => {
+                            Some(crate::sessions::events::event_handling::PacketLoss {
+                                ssrc,
+                                expected_sequence: expected,
+                                received_sequence: received,
+                                lost_packets: distance,
+                            })
+                        }
                         SequenceDisposition::DuplicateOrOutOfOrder => {
                             event!(
                                 Level::WARN,
@@ -190,27 +191,26 @@ impl MidiPort {
                             );
                             return;
                         }
-                    };
-                    if distance != 0 {
-                        listeners.lock().await.notify_packet_loss(
-                            crate::sessions::events::event_handling::PacketLoss {
-                                ssrc,
-                                expected_sequence: expected,
-                                received_sequence: received,
-                                lost_packets: distance,
-                            },
-                        );
                     }
+                } else {
+                    None
+                };
+                peer.expected_sequence = Some(received.wrapping_add(1));
+                drop(peers);
+
+                // Snapshot sequence state before invoking user callbacks. One
+                // listener guard covers the whole packet, not each MIDI command.
+                let listeners = listeners.lock().await;
+                if let Some(loss) = loss {
+                    listeners.notify_packet_loss(loss);
                 }
-                receive_sequences.insert(ssrc, received.wrapping_add(1));
-                drop(receive_sequences);
                 let mut timestamp = u32::from(midi_packet.timestamp());
                 for command in midi_packet.commands() {
                     timestamp = timestamp.wrapping_add(command.delta_time());
                     match command.command() {
                         RtpMidiMessage::MidiMessage(message) => {
                             event!(Level::DEBUG, "Received MIDI message: {message:?}");
-                            listeners.lock().await.notify_midi_message(
+                            listeners.notify_midi_message(
                                 *message,
                                 timestamp,
                                 ssrc,
@@ -225,7 +225,7 @@ impl MidiPort {
                         }
                         RtpMidiMessage::SysEx(sysex) => {
                             event!(Level::DEBUG, "Received SysEx message: {sysex:?}");
-                            listeners.lock().await.notify_sysex_packet(sysex);
+                            listeners.notify_sysex_packet(sysex);
                         }
                     }
                 }
@@ -282,7 +282,6 @@ impl MidiPort {
         }
         peers.insert(body.sender_ssrc, participant.clone());
         drop(peers);
-        self.clear_receive_sequence(body.sender_ssrc).await;
         self.send_invitation_acceptance(body.initiator_token, src)
             .await;
         ctx.notify_joined(&participant).await;
@@ -346,7 +345,6 @@ impl MidiPort {
         }
         peers.insert(ack_body.sender_ssrc, participant.clone());
         drop(peers);
-        self.clear_receive_sequence(ack_body.sender_ssrc).await;
         let timestamps = [U64::new(0); 3];
         self.send_clock_sync(std::iter::once(&participant), timestamps, 0)
             .await;
@@ -506,13 +504,6 @@ impl MidiPort {
     ) -> std::io::Result<()> {
         let batch: [MidiEvent; 1] = [MidiEvent::new(None, command.to_owned())];
         self.send_midi_batch(ctx, &batch).await
-    }
-
-    pub(super) async fn clear_receive_sequence(&self, ssrc: U32) {
-        self.receive_sequence_numbers
-            .lock()
-            .await
-            .remove(&ssrc.get());
     }
 
     #[instrument(skip_all, fields(addr = %addr))]

@@ -31,6 +31,10 @@ was performed.
    serialize, join reception and maintenance tasks before draining peers, clear
    pending invitations, and prevent invitations on stopped sessions. BY uses
    best-effort nonblocking UDP sends so socket pressure cannot delay shutdown.
+   Sequence history lives inside each participant, eliminating a separate map
+   allocation and mutex on reception. One listener guard covers each packet;
+   peer-state locks are released before callbacks. Reconnecting the same SSRC
+   resets sequence history, verified through UDP injection.
 6. **Regression harness:** malformed byte campaigns, real UDP session injection,
    sequence gaps/rollover/late packets, timestamp vectors, real-time interleaving,
    10,000 matched note lifecycles through bounded queues, output overflow,
