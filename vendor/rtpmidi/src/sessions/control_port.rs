@@ -54,13 +54,15 @@ impl ControlPort {
 
     #[instrument(skip_all, fields(name = %ctx.name(), addr = %addr))]
     pub async fn invite_participant(&self, ctx: &RtpMidiSession, addr: SocketAddr) {
-        if addr.port() == u16::MAX || ctx.pending_invitations.lock().await.len() >= 256 {
+        let mut pending = ctx.pending_invitations.lock().await;
+        if ctx.is_stopped() || addr.port() == u16::MAX || pending.len() >= 256 {
             return;
         }
-        let initiator_token = U32::new(rand::random::<u32>());
-        let invitation =
-            ControlPacket::new_invitation_as_bytes(initiator_token, self.ssrc, &self.session_name);
-        ctx.pending_invitations.lock().await.insert(
+        let mut initiator_token = U32::new(rand::random::<u32>());
+        while pending.contains_key(&initiator_token) {
+            initiator_token = U32::new(rand::random::<u32>());
+        }
+        pending.insert(
             initiator_token,
             PendingInvitation {
                 addr,
@@ -70,6 +72,9 @@ impl ControlPort {
                 ssrc: U32::ZERO,
             },
         );
+        drop(pending);
+        let invitation =
+            ControlPacket::new_invitation_as_bytes(initiator_token, self.ssrc, &self.session_name);
         let result = self.socket.send_to(&invitation, addr).await;
         if let Err(e) = result {
             event!(Level::ERROR, "Failed to send session invitation: {}", e);

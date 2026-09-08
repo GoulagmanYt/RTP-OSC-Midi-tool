@@ -58,6 +58,14 @@ async fn test_two_session_inter_communication() {
         })
         .await;
 
+    // Dropping a public value clone must not cancel a still-owned session.
+    drop(session1.as_ref().clone());
+    drop(session2.as_ref().clone());
+    // A retained value clone must also survive destruction of the original.
+    let retained_session = session1.as_ref().clone();
+    drop(session1);
+    let session1 = Arc::new(retained_session);
+
     // Invite each other
     let addr1 = SocketAddr::new("127.0.0.1".parse().unwrap(), control_port_1);
     let addr2 = SocketAddr::new("127.0.0.1".parse().unwrap(), control_port_2);

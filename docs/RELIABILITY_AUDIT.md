@@ -25,11 +25,19 @@ was performed.
    its upstream backlog and the callback's pre-reset ring contents are discarded.
    Tauri exit waits for bridge/audio shutdown, and an RTP session started before
    the bridge is also stopped.
-5. **Regression harness:** malformed byte campaigns, real UDP session injection,
+5. **Session ownership follow-up:** only public session handles own the
+   cancellation guard. Dropping a value clone does not cancel surviving owners,
+   while dropping the last owner cancels background contexts. Graceful stops
+   serialize, join reception and maintenance tasks before draining peers, clear
+   pending invitations, and prevent invitations on stopped sessions. BY uses
+   best-effort nonblocking UDP sends so socket pressure cannot delay shutdown.
+6. **Regression harness:** malformed byte campaigns, real UDP session injection,
    sequence gaps/rollover/late packets, timestamp vectors, real-time interleaving,
    10,000 matched note lifecycles through bounded queues, output overflow,
    ordered IPC reset, callback backlog invalidation, and OSC byte alignment and
-   round trips.
+   round trips. Session regressions also verify retained clones communicate
+   after the original is dropped, final-owner drop releases ports, and concurrent
+   graceful stops both wait for registered tasks.
 
 ## Interfaces and runtime policy
 

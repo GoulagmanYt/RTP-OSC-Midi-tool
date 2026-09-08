@@ -25,7 +25,7 @@ use crate::sessions::midi_port::{MAX_MIDI_PACKET_SIZE, MidiPort};
 #[derive(Clone)]
 pub struct RtpMidiSession {
     pub(super) participants: Arc<Mutex<HashMap<U32, Participant>>>, // key by ssrc
-    pub(super) pending_invitations: Arc<Mutex<HashMap<U32, PendingInvitation>>>, // key by ssrc
+    pub(super) pending_invitations: Arc<Mutex<HashMap<U32, PendingInvitation>>>, // key by token
     pub(super) midi_port: Arc<MidiPort>,
 
     listeners: Arc<Mutex<EventListeners>>,
@@ -34,8 +34,26 @@ pub struct RtpMidiSession {
     cancel_token: Arc<CancellationToken>,
     task_handles: Arc<std::sync::Mutex<Vec<JoinHandle<()>>>>,
     name: CString,
+    lifetime: Option<Arc<SessionLifetime>>,
+    stop_lock: Arc<Mutex<()>>,
     #[cfg(feature = "mdns")]
     mdns: mdns_sd::ServiceDaemon,
+}
+
+// Only public session handles keep this guard alive. Background task contexts
+// must not own it, otherwise they keep their own cancellation alive forever.
+struct SessionLifetime {
+    cancel_token: Arc<CancellationToken>,
+    #[cfg(feature = "mdns")]
+    mdns: mdns_sd::ServiceDaemon,
+}
+
+impl Drop for SessionLifetime {
+    fn drop(&mut self) {
+        self.cancel_token.cancel();
+        #[cfg(feature = "mdns")]
+        let _ = self.mdns.shutdown();
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -58,7 +76,7 @@ impl RtpMidiSession {
         let cstr_name = CString::new(name)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
 
-        let context = RtpMidiSession {
+        let mut context = RtpMidiSession {
             participants: Arc::new(Mutex::new(HashMap::new())),
             pending_invitations: Arc::new(Mutex::new(HashMap::new())),
             control_port: Arc::new(
@@ -72,9 +90,16 @@ impl RtpMidiSession {
             cancel_token: Arc::new(CancellationToken::new()),
             task_handles: Arc::new(std::sync::Mutex::new(Vec::new())),
             name: cstr_name,
+            lifetime: None,
+            stop_lock: Arc::new(Mutex::new(())),
             #[cfg(feature = "mdns")]
             mdns: advertise_mdns(name, port).map_err(|e| std::io::Error::other(e.to_string()))?,
         };
+        context.lifetime = Some(Arc::new(SessionLifetime {
+            cancel_token: context.cancel_token.clone(),
+            #[cfg(feature = "mdns")]
+            mdns: context.mdns.clone(),
+        }));
         Ok(context)
     }
 
@@ -91,18 +116,25 @@ impl RtpMidiSession {
         Ok(ctx)
     }
 
+    fn task_context(&self) -> Self {
+        let mut context = self.clone();
+        context.lifetime = None;
+        context
+    }
+
     fn start_threads(&self, invite_handler: InviteResponder) {
         let mut handles = Vec::new();
 
         // Control port listener
         let control_port = Arc::clone(&self.control_port);
-        let ctx_control = self.clone();
+        let ctx_control = self.task_context();
         let control_cancel_token = Arc::clone(&self.cancel_token);
 
         let handle = tokio::spawn(async move {
             let mut buf = [0u8; MAX_CONTROL_PACKET_SIZE];
             loop {
                 tokio::select! {
+                    biased;
                     _ = control_cancel_token.cancelled() => {
                         event!(Level::DEBUG, "listen_for_control: cancellation requested");
                         break;
@@ -114,7 +146,7 @@ impl RtpMidiSession {
         handles.push(handle);
 
         // MIDI port listener
-        let ctx_midi = self.clone();
+        let ctx_midi = self.task_context();
         let midi_port_listener = Arc::clone(&self.midi_port);
         let listeners_midi = Arc::clone(&self.listeners);
         let midi_cancel_token = Arc::clone(&self.cancel_token);
@@ -123,6 +155,7 @@ impl RtpMidiSession {
             let mut buf = [0u8; MAX_MIDI_PACKET_SIZE];
             loop {
                 tokio::select! {
+                    biased;
                     _ = midi_cancel_token.cancelled() => {
                         event!(Level::DEBUG, "listen_for_midi: cancellation requested");
                         break;
@@ -134,17 +167,21 @@ impl RtpMidiSession {
         handles.push(handle);
 
         // Host clock sync
-        let ctx_clock = self.clone();
+        let ctx_clock = self.task_context();
         let syncer_clock = Arc::clone(&self.host_syncer);
         let syncer_cancel_token = Arc::clone(&self.cancel_token);
         let handle = tokio::spawn(async move {
             loop {
                 tokio::select! {
+                    biased;
                     _ = syncer_cancel_token.cancelled() => {
                         event!(Level::DEBUG, "listen_for_clock_sync: cancellation requested");
                         break;
                     },
-                    _ = sleep(Duration::from_secs(10)) => syncer_clock.cleanup(&ctx_clock).await
+                    _ = async {
+                        sleep(Duration::from_secs(10)).await;
+                        syncer_clock.cleanup(&ctx_clock).await;
+                    } => {}
                 }
             }
         });
@@ -165,7 +202,7 @@ impl RtpMidiSession {
     }
     #[instrument(skip_all, fields(name = %self.name()))]
     pub async fn stop_gracefully(&self) {
-        self.remove_all_participants().await;
+        let _stop_guard = self.stop_lock.lock().await;
         self.stop_immediately();
 
         // Wait for all background tasks to complete
@@ -184,6 +221,10 @@ impl RtpMidiSession {
                 event!(Level::WARN, "Task failed to complete cleanly: {}", e);
             }
         }
+        // Reception is stopped before draining peers: an invitation cannot add
+        // a participant after the shutdown snapshot has been taken.
+        self.remove_all_participants().await;
+        self.pending_invitations.lock().await.clear();
         event!(Level::INFO, "Graceful shutdown complete");
     }
 
@@ -193,6 +234,10 @@ impl RtpMidiSession {
         for participant in participants {
             self.remove_participant(&participant).await;
         }
+    }
+
+    pub(super) fn is_stopped(&self) -> bool {
+        self.cancel_token.is_cancelled()
     }
 
     pub async fn invite_participant(&self, addr: SocketAddr) {
@@ -278,10 +323,61 @@ pub fn current_timestamp_u32(start_time: Instant) -> U32 {
     U32::new(time as u32)
 }
 
-impl Drop for RtpMidiSession {
-    fn drop(&mut self) {
-        if !self.cancel_token.is_cancelled() {
-            self.stop_immediately();
-        }
+#[cfg(test)]
+mod shutdown_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn concurrent_stops_wait_for_tasks_and_clear_pending_invitations() {
+        let session = loop {
+            let probe = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            let port = probe.local_addr().unwrap().port();
+            drop(probe);
+            if let Ok(session) = RtpMidiSession::bind(port, "Shutdown", 1).await {
+                break Arc::new(session);
+            }
+        };
+        session.pending_invitations.lock().await.insert(
+            U32::new(2),
+            PendingInvitation {
+                addr: "127.0.0.1:5004".parse().unwrap(),
+                token: U32::new(2),
+                name: CString::default(),
+                created: Instant::now(),
+                ssrc: U32::ZERO,
+            },
+        );
+        let release = Arc::new(tokio::sync::Notify::new());
+        let task_release = release.clone();
+        session
+            .task_handles
+            .lock()
+            .unwrap()
+            .push(tokio::spawn(async move {
+                task_release.notified().await;
+            }));
+        let first_session = session.clone();
+        let first = tokio::spawn(async move { first_session.stop_gracefully().await });
+        session.cancel_token.cancelled().await;
+        let second_session = session.clone();
+        let mut second = tokio::spawn(async move { second_session.stop_gracefully().await });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut second)
+                .await
+                .is_err()
+        );
+        assert!(!first.is_finished());
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            first.await.unwrap();
+            second.await.unwrap();
+        })
+        .await
+        .expect("shutdown did not join registered tasks");
+        assert!(session.pending_invitations.lock().await.is_empty());
+        session
+            .invite_participant("127.0.0.1:5004".parse().unwrap())
+            .await;
+        assert!(session.pending_invitations.lock().await.is_empty());
     }
 }

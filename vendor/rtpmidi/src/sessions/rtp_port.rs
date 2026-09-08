@@ -34,10 +34,10 @@ pub(super) trait RtpPort {
             self.ssrc(),
         );
         let addr = Self::participant_addr(participant);
-        if let Err(e) = self.socket().send_to(&termination_packet, addr).await {
-            event!(Level::WARN, "Failed to send termination packet: {}", e);
-        } else {
-            event!(Level::INFO, "Sent termination packet");
+        // BY is best effort over UDP; socket pressure must not hold shutdown.
+        match self.socket().try_send_to(&termination_packet, addr) {
+            Ok(_) => event!(Level::INFO, "Sent termination packet"),
+            Err(e) => event!(Level::WARN, "Failed to send termination packet: {}", e),
         }
     }
 }
