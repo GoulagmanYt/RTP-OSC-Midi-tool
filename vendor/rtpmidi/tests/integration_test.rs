@@ -145,6 +145,15 @@ async fn malformed_udp_loss_rollover_and_control_disconnect() {
                 tx.try_send(event).unwrap();
             })
             .await;
+        let (sysex_tx, mut sysex_rx) = tokio::sync::mpsc::channel(8);
+        server
+            .add_listener(
+                rtpmidi::sessions::events::event_handling::SysExPacketEvent,
+                move |data| {
+                    sysex_tx.try_send(data.to_vec()).unwrap();
+                },
+            )
+            .await;
         let (left_tx, mut left_rx) = tokio::sync::mpsc::channel(1);
         server
             .add_listener(ParticipantLeftEvent, move |_| {
@@ -255,6 +264,50 @@ async fn malformed_udp_loss_rollover_and_control_disconnect() {
             MidiMessage::NoteOn(Channel::C1, Note::from(62), Value7::from(100))
         );
         assert!(loss_rx.try_recv().is_err());
+        // Real-time commands between fragments preserve the assembly.
+        for (seq, body) in [
+            (1, &[4, 0xF0, 0x7D, 1, 0xF0][..]),
+            (2, &[1, 0xF8][..]),
+            (3, &[3, 0xF7, 2, 0xF7][..]),
+        ] {
+            data.send_to(&packet(seq, body), ("127.0.0.1", port + 1))
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            events.recv().await.unwrap().message,
+            MidiMessage::TimingClock
+        );
+        assert_eq!(sysex_rx.recv().await.unwrap(), [0x7D, 1, 2]);
+        // Cancellation and packet loss must never emit partial SysEx.
+        for (seq, body) in [
+            (4, &[3, 0xF0, 1, 0xF0][..]),
+            (5, &[2, 0xF7, 0xF4][..]),
+            (6, &[3, 0xF7, 2, 0xF7][..]),
+            (7, &[3, 0xF0, 1, 0xF0][..]),
+            (9, &[3, 0xF7, 2, 0xF7][..]),
+        ] {
+            data.send_to(&packet(seq, body), ("127.0.0.1", port + 1))
+                .await
+                .unwrap();
+        }
+        assert_eq!(fault_rx.recv().await.unwrap(), 42);
+        assert_eq!(fault_rx.recv().await.unwrap(), 42);
+        assert_eq!(loss_rx.recv().await.unwrap().lost_packets, 1);
+        assert!(sysex_rx.try_recv().is_err());
+        // A corrupt packet also invalidates an assembly even without a gap.
+        for (seq, body) in [
+            (10, &[3, 0xF0, 1, 0xF0][..]),
+            (11, &[3, 0xF7][..]),
+            (11, &[3, 0xF7, 2, 0xF7][..]),
+        ] {
+            data.send_to(&packet(seq, body), ("127.0.0.1", port + 1))
+                .await
+                .unwrap();
+        }
+        assert_eq!(fault_rx.recv().await.unwrap(), 42);
+        assert_eq!(fault_rx.recv().await.unwrap(), 42);
+        assert!(sysex_rx.try_recv().is_err());
         server.stop_gracefully().await;
     })
     .await

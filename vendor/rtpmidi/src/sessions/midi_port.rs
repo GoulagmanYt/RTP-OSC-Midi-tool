@@ -104,9 +104,14 @@ impl MidiPort {
                 .participants
                 .lock()
                 .await
-                .values()
+                .values_mut()
                 .find(|peer| peer.midi_port_addr() == src)
-                .map(|peer| peer.ssrc().get());
+                .map(|peer| {
+                    if let Some(sysex) = peer.sysex.as_mut() {
+                        sysex.clear();
+                    }
+                    peer.ssrc().get()
+                });
             if let Some(ssrc) = ssrc {
                 listeners.lock().await.notify_stream_fault(ssrc);
             }
@@ -195,6 +200,20 @@ impl MidiPort {
                 } else {
                     None
                 };
+                let needs_assembly = peer.sysex.as_ref().is_some_and(|state| state.is_active())
+                    || midi_packet.commands().any(|event| {
+                        matches!(event.command(), RtpMidiMessage::SysExSegment { .. })
+                    });
+                let mut sysex_state = if needs_assembly {
+                    peer.sysex.take()
+                } else {
+                    None
+                };
+                if loss.is_some()
+                    && let Some(state) = sysex_state.as_mut()
+                {
+                    state.clear();
+                }
                 peer.expected_sequence = Some(received.wrapping_add(1));
                 drop(peers);
 
@@ -209,6 +228,12 @@ impl MidiPort {
                     timestamp = timestamp.wrapping_add(command.delta_time());
                     match command.command() {
                         RtpMidiMessage::MidiMessage(message) => {
+                            if (command.command().status() < 0xF8
+                                || matches!(message, midi_types::MidiMessage::Reset))
+                                && let Some(state) = sysex_state.as_mut()
+                            {
+                                state.clear();
+                            }
                             event!(Level::DEBUG, "Received MIDI message: {message:?}");
                             listeners.notify_midi_message(
                                 *message,
@@ -223,11 +248,34 @@ impl MidiPort {
                                     ),
                             );
                         }
+                        RtpMidiMessage::SysExSegment { head, data, tail } => {
+                            match sysex_state
+                                .as_mut()
+                                .expect("fragment storage reserved")
+                                .segment(*head, data, *tail, arrived)
+                            {
+                                Ok(Some(payload)) => listeners.notify_sysex_packet(payload),
+                                Ok(None) => {}
+                                Err(()) => listeners.notify_stream_fault(ssrc),
+                            }
+                        }
                         RtpMidiMessage::SysEx(sysex) => {
+                            if let Some(state) = sysex_state.as_mut() {
+                                state.clear();
+                            }
                             event!(Level::DEBUG, "Received SysEx message: {sysex:?}");
                             listeners.notify_sysex_packet(sysex);
                         }
                     }
+                }
+                drop(listeners);
+                // A concurrently removed/replaced participant owns a fresh buffer.
+                // Never restore old fragments into a reconnected session.
+                if let Some(state) = sysex_state
+                    && let Some(peer) = ctx.participants.lock().await.get_mut(&midi_packet.ssrc())
+                    && peer.sysex.is_none()
+                {
+                    peer.sysex = Some(state);
                 }
             }
         }

@@ -154,6 +154,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn sysex_delimiters_are_validated_before_dispatch() {
+        for bytes in [
+            &[3, 0xF0, 1, 0xF0][..],
+            &[3, 0xF7, 2, 0xF0],
+            &[2, 0xF7, 0xF7],
+            &[2, 0xF7, 0xF4],
+            &[3, 0xF7, 3, 0xF5],
+        ] {
+            assert!(
+                MidiCommandIterator::new(bytes)
+                    .try_next()
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        for bytes in [
+            &[2, 0xF0, 0xF0][..],
+            &[2, 0xF7, 0xF0],
+            &[3, 0xF7, 1, 0xF4],
+            &[2, 0xF0, 0xF4],
+            &[3, 0xF0, 1, 0x90],
+        ] {
+            assert!(MidiCommandIterator::new(bytes).try_next().is_err());
+        }
+    }
+
+    #[test]
     fn test_midi_command_iterator() {
         let data = &[
             70, 145, 65, 0, 11, 62, 0, 32, 126, 37, 8, 12, 8, 131, 136, 62, 83, 193, 93, 197, 83,

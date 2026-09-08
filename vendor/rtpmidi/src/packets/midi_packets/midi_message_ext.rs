@@ -106,12 +106,29 @@ impl ReadWriteExt for MidiMessage {
                 "Invalid or truncated MIDI message",
             )
         };
-        if status_byte == 0xF0 {
-            let end = bytes.iter().position(|&b| b == 0xF7).ok_or_else(invalid)?;
-            if bytes[..end].iter().any(|b| *b >= 0x80) {
+        if status_byte == 0xF0 || status_byte == 0xF7 {
+            let end = bytes.iter().position(|&b| b >= 0x80).ok_or_else(invalid)?;
+            let data = &bytes[..end];
+            let tail = bytes[end];
+            let valid = match (status_byte, tail) {
+                (0xF0 | 0xF7, 0xF0) => !data.is_empty(),
+                (0xF0 | 0xF7, 0xF5 | 0xF7) => true,
+                (0xF7, 0xF4) => data.is_empty(),
+                _ => false,
+            };
+            if !valid {
                 return Err(invalid());
             }
-            return Ok((RtpMidiMessage::SysEx(&bytes[..end]), &bytes[end + 1..]));
+            let command = if status_byte == 0xF0 && matches!(tail, 0xF5 | 0xF7) {
+                RtpMidiMessage::SysEx(data)
+            } else {
+                RtpMidiMessage::SysExSegment {
+                    head: status_byte,
+                    data,
+                    tail,
+                }
+            };
+            return Ok((command, &bytes[end + 1..]));
         }
         let required = match status_byte {
             0x80..=0xBF | 0xE0..=0xEF | 0xF2 => 2,

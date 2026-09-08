@@ -6,3 +6,5 @@ mod mdns;
 pub mod midi_port;
 pub mod rtp_midi_session;
 mod rtp_port;
+
+pub(crate) mod sysex;

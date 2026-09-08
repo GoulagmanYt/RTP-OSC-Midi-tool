@@ -97,10 +97,15 @@ Node 20 does not satisfy the existing Vite/jsdom dependency requirements.
 ## Explicit limits
 
 This is a reliability pass over implemented routes, not a certification of full
-RFC 6295/OSC support. Recovery-journal reconstruction, fragmented SysEx recovery,
+RFC 6295/OSC support. Recovery-journal reconstruction,
 general OSC reception/bundle scheduling, and application-level outbound RTP
 routing remain unsupported. Complete RTP SysEx is forwarded to local MIDI; its
-existing untimestamped library event is dispatched at arrival time. Channel
+existing untimestamped library event is dispatched at arrival time. Segmented
+SysEx is reassembled per participant in a preallocated 64 KiB payload buffer;
+only completed messages are delivered. Cancellation, corruption, packet loss,
+non-real-time interruption, and a 10-second inter-fragment timeout discard the
+partial command. Missing fragments are not reconstructed from journals. The
+F5 dropped-EOX representation is normalized to a completed SysEx for MIDI APIs. Channel
 voice messages use the synchronized scheduler.
 
 The 10,000-note regression exercises the actual bounded enqueue/fanout functions
