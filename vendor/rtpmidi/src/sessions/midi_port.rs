@@ -10,6 +10,7 @@ use crate::packets::packet::RtpMidiPacket;
 use crate::participant::Participant;
 use crate::sessions::events::event_handling::EventListeners;
 use crate::sessions::rtp_midi_session::current_timestamp_u32;
+use bytes::BytesMut;
 use std::ffi::{CStr, CString};
 use std::iter;
 use std::net::SocketAddr;
@@ -60,8 +61,13 @@ pub(super) struct MidiPort {
     name: CString,
     ssrc: U32,
     start_time: Instant,
-    send_sequence_number: Arc<Mutex<u16>>,
+    send_state: Mutex<SendState>,
     socket: Arc<UdpSocket>,
+}
+
+struct SendState {
+    sequence: u16,
+    packet: BytesMut,
 }
 
 impl MidiPort {
@@ -72,7 +78,10 @@ impl MidiPort {
             ssrc,
             start_time: Instant::now(),
             name,
-            send_sequence_number: Arc::new(Mutex::new(0)),
+            send_state: Mutex::new(SendState {
+                sequence: 0,
+                packet: BytesMut::with_capacity(MidiPacket::MAX_ENCODED_SIZE),
+            }),
             socket,
         })
     }
@@ -555,24 +564,20 @@ impl MidiPort {
             *slot = Some(participant.midi_port_addr());
         }
         drop(lock);
-        if !MidiPacket::batch_fits(commands) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "RTP MIDI batch exceeds packet or delta-time limit",
-            ));
-        }
-        let mut seq = self.send_sequence_number.lock().await;
-        let packet = MidiPacket::new_as_bytes(
-            U16::new(*seq),
+        let mut state = self.send_state.lock().await;
+        let sequence = state.sequence;
+        MidiPacket::write_into(
+            &mut state.packet,
+            U16::new(sequence),
             current_timestamp_u32(self.start_time),
             self.ssrc,
             commands,
             false,
-        );
-        *seq = seq.wrapping_add(1);
+        )?;
+        state.sequence = sequence.wrapping_add(1);
         event!(Level::DEBUG, "Sending MIDI packet batch");
         for destination in destinations.into_iter().flatten() {
-            self.socket.send_to(&packet, destination).await?;
+            self.socket.send_to(&state.packet, destination).await?;
         }
         Ok(())
     }

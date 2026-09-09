@@ -470,6 +470,7 @@ impl From<&AppConfig> for RuntimeStatus {
             osc_target: format!("{}:{}", cfg.osc.target_ip, cfg.osc.target_port),
             rtp_active: cfg.rtp.enabled
                 || cfg.rtp.remote_enabled
+                || cfg.rtp.thru_enabled
                 || cfg
                     .midi
                     .input_device

@@ -1,4 +1,6 @@
-use bytes::{BufMut, Bytes, BytesMut};
+#[cfg(test)]
+use bytes::Bytes;
+use bytes::{BufMut, BytesMut};
 use zerocopy::{
     FromBytes, Immutable, IntoBytes, KnownLayout,
     network_endian::{U16, U32},
@@ -19,12 +21,37 @@ pub(crate) struct MidiPacket {
 }
 
 impl MidiPacket {
+    pub(crate) const MAX_ENCODED_SIZE: usize = 12 + 2 + 1200;
     pub(crate) fn batch_fits(commands: &[MidiEvent<'_>]) -> bool {
         commands.size(false) <= 1200
             && commands
                 .iter()
                 .all(|event| event.delta_time() <= 0x0FFF_FFFF)
     }
+    pub(crate) fn write_into<'a>(
+        buffer: &mut BytesMut,
+        sequence_number: U16,
+        timestamp: U32,
+        ssrc: U32,
+        commands: &'a [MidiEvent<'a>],
+        z_flag: bool,
+    ) -> std::io::Result<()> {
+        if !Self::batch_fits(commands) || commands.size(z_flag) > 1200 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "RTP MIDI batch exceeds packet or delta-time limit",
+            ));
+        }
+        let packet_header = MidiPacketHeader::new(sequence_number, timestamp, ssrc);
+        let command_list_header = MidiCommandListHeader::build_for(commands, z_flag);
+        buffer.clear();
+        buffer.put_slice(packet_header.as_bytes());
+        command_list_header.write(buffer);
+        commands.write(buffer, z_flag);
+        Ok(())
+    }
+
+    #[cfg(test)]
     pub(crate) fn new_as_bytes<'a>(
         sequence_number: U16,
         timestamp: U32,
@@ -32,18 +59,16 @@ impl MidiPacket {
         commands: &'a [MidiEvent<'a>],
         z_flag: bool,
     ) -> Bytes {
-        let packet_header = MidiPacketHeader::new(sequence_number, timestamp, ssrc);
-        let command_list_header = MidiCommandListHeader::build_for(commands, z_flag);
-
-        // Get the size of the body from the header as it's already calculated
-        let mut buffer = BytesMut::with_capacity(
-            std::mem::size_of::<MidiPacketHeader>()
-                + command_list_header.size()
-                + command_list_header.length(),
-        );
-        buffer.put_slice(packet_header.as_bytes());
-        command_list_header.write(&mut buffer);
-        commands.write(&mut buffer, z_flag);
+        let mut buffer = BytesMut::with_capacity(Self::MAX_ENCODED_SIZE);
+        Self::write_into(
+            &mut buffer,
+            sequence_number,
+            timestamp,
+            ssrc,
+            commands,
+            z_flag,
+        )
+        .expect("valid test packet");
         buffer.freeze()
     }
 
@@ -91,6 +116,59 @@ mod tests {
     use crate::packets::midi_packets::rtp_midi_message::RtpMidiMessage;
 
     use super::*;
+
+    #[test]
+    fn reusable_encoder_keeps_storage_and_rejects_oversized_batches() {
+        let mut buffer = BytesMut::with_capacity(MidiPacket::MAX_ENCODED_SIZE);
+        let pointer = buffer.as_ptr();
+        let capacity = buffer.capacity();
+        let payload = [0x01; 1198];
+        let commands = [MidiEvent::new(None, RtpMidiMessage::SysEx(&payload))];
+        for sequence in 0..10_000 {
+            MidiPacket::write_into(
+                &mut buffer,
+                U16::new(sequence),
+                U32::new(0),
+                U32::new(1),
+                &commands,
+                false,
+            )
+            .unwrap();
+            assert_eq!(buffer.len(), MidiPacket::MAX_ENCODED_SIZE);
+            assert_eq!(buffer.as_ptr(), pointer);
+            assert_eq!(buffer.capacity(), capacity);
+            MidiPacket::ref_from_bytes(&buffer)
+                .unwrap()
+                .validate()
+                .unwrap();
+        }
+        let saved = buffer.clone();
+        // The first delta byte would exceed the body limit with Z set.
+        assert!(
+            MidiPacket::write_into(
+                &mut buffer,
+                U16::new(0),
+                U32::new(0),
+                U32::new(1),
+                &commands,
+                true
+            )
+            .is_err()
+        );
+        assert_eq!(buffer, saved);
+        let too_large = [MidiEvent::new(None, RtpMidiMessage::SysEx(&[1; 1199]))];
+        assert!(
+            MidiPacket::write_into(
+                &mut buffer,
+                U16::new(0),
+                U32::new(0),
+                U32::new(1),
+                &too_large,
+                false
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn test_midi_packet_creation() {
