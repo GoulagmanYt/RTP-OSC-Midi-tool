@@ -32,7 +32,7 @@ was performed.
    pending invitations, and prevent invitations on stopped sessions. BY uses
    best-effort nonblocking UDP sends so socket pressure cannot delay shutdown.
    Sequence history lives inside each participant, eliminating a separate map
-   allocation and mutex on reception. One listener guard covers each packet;
+   allocation and mutex on reception. One immutable listener snapshot covers each packet;
    peer-state locks are released before callbacks. Reconnecting the same SSRC
    resets sequence history, verified through UDP injection.
    Port zero now reserves an actual adjacent ephemeral control/MIDI pair, with
@@ -67,9 +67,9 @@ was performed.
   peers are capped at 128. Both session roles expire after 60 seconds without a
   valid synchronization packet, checked on the 10-second maintenance cycle.
 - Journals now validate container lengths, channel ordering, and channel
-  chapter boundaries. A covering journal containing only Chapter N can repair
-  missing NoteOffs and recommended missing NoteOns; known active notes are not
-  retriggered. Ambiguous sustain is released before repaired NoteOffs. Other
+  chapter boundaries. A covering journal containing Chapters N/W/T/A can repair
+  missing NoteOffs, recommended missing NoteOns, pitch wheel and pressure state;
+  known active notes are not retriggered. Stale X-marked poly pressure is skipped. Ambiguous sustain is released before repaired NoteOffs. Other
   chapter combinations and insufficient checkpoint coverage retain the reset
   fallback. System and parameter journal internals are not yet fully decoded.
 - A proven forward sequence gap without supported recovery triggers a reset;
@@ -107,14 +107,20 @@ Node 20 does not satisfy the existing Vite/jsdom dependency requirements.
 ## Explicit limits
 
 This is a reliability pass over implemented routes, not a certification of full
-RFC 6295/OSC support. Recovery beyond Chapter N remains unsupported. Complete RTP SysEx is forwarded to local MIDI; its
-existing untimestamped library event is dispatched at arrival time. Segmented
+RFC 6295/OSC support. Recovery currently supports Chapters N/W/T/A. Program, controller, parameter,
+additional-note and system recovery chapters still use the conservative reset fallback. Complete RTP SysEx is forwarded to local MIDI
+through the synchronized scheduler. A new borrowed timestamped event carries the
+SSRC, RTP timestamp and monotonic deadline while retaining the legacy callback.
+Reassembled SysEx uses the final segment deadline; this whole-message MIDI API
+does not preserve inter-octet timing inside segmented commands. Segmented
 SysEx is reassembled per participant in a preallocated 64 KiB payload buffer;
 only completed messages are delivered. Cancellation, corruption, packet loss,
 non-real-time interruption, and a 10-second inter-fragment timeout discard the
 partial command. Missing fragments are not reconstructed from journals. The
 F5 dropped-EOX representation is normalized to a completed SysEx for MIDI APIs. Channel
-voice messages use the synchronized scheduler.
+voice messages use the same synchronized scheduler. UDP regression covers complete
+and segmented SysEx delta times across timestamp rollover. Per-message packet/MIDI
+trace formatting was removed from the vendor receive and send paths.
 
 The 10,000-note regression exercises the actual bounded enqueue/fanout functions
 and destination note tracking in a headless harness. It does not replace a
@@ -177,9 +183,38 @@ copies of participant names and SysEx buffers for every outgoing packet.
 The packet encoder now reuses a preallocated 1,214-byte buffer under the existing
 send-order mutex. A 10,000-encode regression checks stable storage at maximum
 packet size and rejection before mutation for oversized batches. This removes
-the encoded-packet allocation; the async send-order and participant locks remain.
+the encoded-packet allocation; the async send-order and participant locks remain; listener and route reads use atomic snapshots.
 
 A two-session regression verifies MIDI forwarding, 2,700-byte segmented SysEx,
 and remote panic. Queue tests cover echo prevention, critical overflow and a
-concurrent configuration writer. The output worker checks reset generations on
+concurrent configuration publication. The output worker checks reset generations on
 a two-millisecond maintenance tick; no sub-millisecond reset bound is claimed.
+
+## Configuration failure recovery
+
+User save, reset and import operations serialize their bridge configuration
+changes. OSC binding and RTP application precede the atomic configuration-file
+write. A failed apply or write attempts to restore the previous runtime settings;
+if restoration also fails, the returned error includes `rollbackError` alongside
+the original error. Logging and discovery changes follow a successful commit.
+Regression tests exercise an occupied UDP port, failed persistence, successful
+persistence, and failed rollback. Recovery may interrupt sounding notes and may
+fail if another process has occupied the previous port; this is not a guarantee
+of uninterrupted reconfiguration. Instrument loading after import remains a
+separate operation with its own error reporting.
+
+RTP input and output routes now publish sender snapshots through ArcSwapOption.
+Readers do not wait on configuration writers or drop messages merely because a
+writer owns a lock. A concurrent route-swap regression delivers all 1,000 test
+frames without requesting a reset. Queue exhaustion and route removal still have
+the documented drop/reset policies.
+
+Listener registration uses copy-on-write ArcSwap snapshots. A packet holds one
+consistent callback list, while concurrent registration preserves all additions.
+Callbacks now require `Send + Sync` because control and data notifications may
+run concurrently; consumers must keep callbacks bounded. A regression retains an
+old snapshot during four concurrent writers and verifies all 64 registrations
+are present afterward. Publication allocates on the registration path; ordinary
+notification does not clone the callback vectors. The participant-state and
+outbound send-order mutexes still exist. ArcSwap's read guarantees are documented
+by the [crate author](https://docs.rs/arc-swap/1.9.2/arc_swap/docs/performance/index.html).

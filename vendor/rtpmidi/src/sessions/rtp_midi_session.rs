@@ -1,3 +1,4 @@
+use arc_swap::ArcSwap;
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::net::SocketAddr;
@@ -28,7 +29,7 @@ pub struct RtpMidiSession {
     pub(super) pending_invitations: Arc<Mutex<HashMap<U32, PendingInvitation>>>, // key by token
     pub(super) midi_port: Arc<MidiPort>,
 
-    listeners: Arc<Mutex<EventListeners>>,
+    listeners: Arc<ArcSwap<EventListeners>>,
     control_port: Arc<ControlPort>,
     host_syncer: Arc<HostSyncer>,
     cancel_token: Arc<CancellationToken>,
@@ -112,7 +113,7 @@ impl RtpMidiSession {
             control_port,
             midi_port,
             host_syncer: Arc::new(HostSyncer::new()),
-            listeners: Arc::new(Mutex::new(EventListeners::new())),
+            listeners: Arc::new(ArcSwap::from_pointee(EventListeners::new())),
             cancel_token: Arc::new(CancellationToken::new()),
             task_handles: Arc::new(std::sync::Mutex::new(Vec::new())),
             name: cstr_name,
@@ -285,19 +286,13 @@ impl RtpMidiSession {
     }
 
     pub(super) async fn notify_joined(&self, participant: &Participant) {
-        self.listeners
-            .lock()
-            .await
-            .notify_participant_joined(participant);
+        self.listeners.load().notify_participant_joined(participant);
     }
 
     pub(super) async fn forget_participant(&self, ssrc: U32) {
         let participant = self.participants.lock().await.remove(&ssrc);
         if let Some(participant) = participant {
-            self.listeners
-                .lock()
-                .await
-                .notify_participant_left(&participant);
+            self.listeners.load().notify_participant_left(&participant);
         }
     }
 
@@ -320,10 +315,15 @@ impl RtpMidiSession {
     pub async fn add_listener<E, F>(&self, _event_type: E, callback: F)
     where
         E: EventType,
-        F: for<'a> Fn(E::Data<'a>) + Send + 'static,
+        F: for<'a> Fn(E::Data<'a>) + Send + Sync + 'static,
     {
-        let mut listeners = self.listeners.lock().await;
-        E::add_listener_to_storage(&mut listeners, callback);
+        let callback = Arc::new(callback);
+        self.listeners.rcu(|current| {
+            let mut updated = (**current).clone();
+            let callback = callback.clone();
+            E::add_listener_to_storage(&mut updated, move |data| callback(data));
+            updated
+        });
     }
 
     pub async fn send_midi_batch<'a>(&self, commands: &[MidiEvent<'a>]) -> std::io::Result<()> {
@@ -336,6 +336,11 @@ impl RtpMidiSession {
 
     pub fn name(&self) -> &str {
         self.name.to_str().unwrap_or("Unnamed Session")
+    }
+
+    /// Actual bound control address, including the selected port for port zero.
+    pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        self.control_port.socket().local_addr()
     }
 }
 
@@ -352,6 +357,50 @@ pub fn current_timestamp_u32(start_time: Instant) -> U32 {
 #[cfg(test)]
 mod shutdown_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn listener_publication_is_concurrent_and_preserves_packet_snapshots() {
+        use crate::sessions::events::event_handling::MidiMessageEvent;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let session = Arc::new(RtpMidiSession::bind(0, "Listeners", 4).await.unwrap());
+        let count = Arc::new(AtomicUsize::new(0));
+        let old = session.listeners.load();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let mut writers = Vec::new();
+        for _ in 0..4 {
+            let session = session.clone();
+            let count = count.clone();
+            let done = done_tx.clone();
+            writers.push(std::thread::spawn(move || {
+                for _ in 0..16 {
+                    let count = count.clone();
+                    futures::executor::block_on(session.add_listener(
+                        MidiMessageEvent,
+                        move |_| {
+                            count.fetch_add(1, Ordering::Relaxed);
+                        },
+                    ));
+                }
+                done.send(()).unwrap();
+            }));
+        }
+        let completed = (0..4).all(|_| done_rx.recv_timeout(Duration::from_secs(2)).is_ok());
+        old.notify_midi_message(midi_types::MidiMessage::Reset, 0, 4, Instant::now());
+        assert_eq!(count.load(Ordering::Relaxed), 0);
+        // Release the snapshot before joining even if a regression blocked a writer.
+        drop(old);
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        assert!(completed, "listener writers waited for a packet snapshot");
+        session.listeners.load().notify_midi_message(
+            midi_types::MidiMessage::Reset,
+            0,
+            4,
+            Instant::now(),
+        );
+        assert_eq!(count.load(Ordering::Relaxed), 64);
+    }
 
     #[tokio::test]
     async fn ephemeral_sessions_hold_distinct_adjacent_port_pairs() {

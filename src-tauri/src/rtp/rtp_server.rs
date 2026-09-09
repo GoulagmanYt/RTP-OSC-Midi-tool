@@ -15,7 +15,7 @@ use uuid::Uuid;
 use rtpmidi::sessions::{
     events::event_handling::{
         PacketLossEvent, ParticipantJoinedEvent, ParticipantLeftEvent, StreamFaultEvent,
-        SysExPacketEvent, TimestampedMidiMessageEvent,
+        TimestampedMidiMessageEvent, TimestampedSysExEvent,
     },
     invite_responder::InviteResponder,
     rtp_midi_session::RtpMidiSession,
@@ -81,7 +81,7 @@ impl RtpServer {
         port: u16,
         remote_targets: Vec<RtpRemoteTarget>,
         log_rtp: bool,
-        sink: Arc<parking_lot::RwLock<Option<Sender<MidiFrame>>>>,
+        sink: Arc<arc_swap::ArcSwapOption<Sender<MidiFrame>>>,
         logger: FrontendLogger,
     ) -> Result<Self, String> {
         let (stop_tx, mut stop_rx) = oneshot::channel();
@@ -114,7 +114,11 @@ impl RtpServer {
                         tokio::time::sleep(Duration::from_millis(*delay_ms)).await;
                     }
                     match RtpMidiSession::start(p, &name, ssrc, InviteResponder::Accept).await {
-                        Ok(session) => return Ok((session, p)),
+                        Ok(session) => {
+                            let bound_port =
+                                session.local_addr().map_err(|err| err.to_string())?.port();
+                            return Ok((session, bound_port));
+                        }
                         Err(err)
                             if err.kind() == std::io::ErrorKind::AddrInUse
                                 && attempt + 1 < retry_delays_ms.len() => {}
@@ -156,9 +160,6 @@ impl RtpServer {
         }
 
         // La source est construite une seule fois et partagée via Arc.
-        // NOTE : si MidiFrame.source est changé en Arc<str>, remplacer
-        // rtp_source.to_string() par Arc::clone(&rtp_source) dans le
-        // callback pour éliminer l'allocation heap par message.
         let rtp_source: Arc<str> = Arc::from(format!("RTP:{name}"));
         let midi_sink = sink.clone();
         let participants = Arc::new(Mutex::new(Vec::<RtpParticipantInfo>::new()));
@@ -195,7 +196,8 @@ impl RtpServer {
             let sysex_tx = scheduled_tx.clone();
             let sysex_source = rtp_source.clone();
             session
-                .add_listener(SysExPacketEvent, move |payload| {
+                .add_listener(TimestampedSysExEvent, move |event| {
+                    let payload = event.payload;
                     let mut data = smallvec::SmallVec::with_capacity(payload.len() + 2);
                     data.push(0xF0);
                     data.extend_from_slice(payload);
@@ -206,7 +208,7 @@ impl RtpServer {
                                 data,
                                 source: sysex_source.clone(),
                             },
-                            deadline: Instant::now(),
+                            deadline: event.deadline,
                             generation: midi_reset_generation(),
                             order: 0,
                         })
@@ -475,7 +477,7 @@ impl Ord for TimedRtpFrame {
 
 async fn run_rtp_scheduler(
     mut receiver: mpsc::Receiver<TimedRtpFrame>,
-    sink: Arc<parking_lot::RwLock<Option<Sender<MidiFrame>>>>,
+    sink: Arc<arc_swap::ArcSwapOption<Sender<MidiFrame>>>,
     logger: FrontendLogger,
 ) {
     let mut pending = BinaryHeap::<TimedRtpFrame>::with_capacity(RTP_PENDING_CAPACITY);
@@ -493,14 +495,7 @@ async fn run_rtp_scheduler(
             if event.generation != midi_reset_generation() {
                 continue;
             }
-            if let Some(tx) = sink.read().as_ref() {
-                if !matches!(
-                    try_enqueue_midi_frame(tx, event.frame),
-                    Ok(crate::bridge::pipeline::EnqueueOutcome::Enqueued)
-                ) {
-                    DROPPED_MIDI_COUNT.fetch_add(1, Ordering::Relaxed);
-                }
-            }
+            dispatch_scheduled_frame(&sink, event.frame);
         }
         let wake = pending
             .peek()
@@ -526,6 +521,18 @@ async fn run_rtp_scheduler(
     logger.debug("RTP-MIDI timestamp scheduler stopped");
 }
 
+fn dispatch_scheduled_frame(sink: &arc_swap::ArcSwapOption<Sender<MidiFrame>>, frame: MidiFrame) {
+    let route = sink.load();
+    if let Some(tx) = route.as_ref() {
+        if !matches!(
+            try_enqueue_midi_frame(tx, frame),
+            Ok(crate::bridge::pipeline::EnqueueOutcome::Enqueued)
+        ) {
+            DROPPED_MIDI_COUNT.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
 fn should_sample_rtp_log() -> bool {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -549,14 +556,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rtp_callback_uses_bounded_enqueue_path() {
-        let source = include_str!("rtp_server.rs");
-
-        let forbidden = ["tx", ".send(MidiFrame"].concat();
-        assert!(source.contains("try_enqueue_midi_frame"));
-        assert!(source.contains("&tx"));
-        assert!(source.contains("MidiFrame"));
-        assert!(!source.contains(&forbidden));
+    fn scheduler_routes_during_concurrent_publication_without_contention_drops() {
+        let _guard = crate::bridge::pipeline::TEST_PIPELINE_LOCK.lock().unwrap();
+        let (first_tx, first_rx) = crossbeam_channel::bounded(1000);
+        let (second_tx, second_rx) = crossbeam_channel::bounded(1000);
+        let first_tx = Arc::new(first_tx);
+        let second_tx = Arc::new(second_tx);
+        let sink = Arc::new(arc_swap::ArcSwapOption::from(Some(first_tx.clone())));
+        let writer_sink = sink.clone();
+        let writer = std::thread::spawn(move || {
+            for _ in 0..1000 {
+                writer_sink.store(Some(second_tx.clone()));
+                writer_sink.store(Some(first_tx.clone()));
+            }
+        });
+        let generation = midi_reset_generation();
+        for _ in 0..1000 {
+            dispatch_scheduled_frame(
+                &sink,
+                MidiFrame {
+                    data: smallvec::smallvec![0x80, 60, 0],
+                    source: Arc::from("RTP:test"),
+                },
+            );
+        }
+        writer.join().unwrap();
+        assert_eq!(first_rx.len() + second_rx.len(), 1000);
+        assert_eq!(midi_reset_generation(), generation);
     }
 
     #[test]

@@ -2,7 +2,7 @@ use crate::{
     bridge::pipeline::{midi_reset_generation, request_critical_midi_reset},
     midi::{is_critical_release_message, MidiFrame},
 };
-use parking_lot::RwLock;
+use arc_swap::ArcSwapOption;
 use rtpmidi::{
     packets::midi_packets::{midi_event::MidiEvent, rtp_midi_message::RtpMidiMessage},
     sessions::rtp_midi_session::RtpMidiSession,
@@ -15,24 +15,22 @@ pub(crate) struct OutgoingFrame {
     generation: u64,
 }
 #[derive(Clone, Default)]
-pub(crate) struct RtpOutputRoute(Arc<RwLock<Option<mpsc::Sender<OutgoingFrame>>>>);
+pub(crate) struct RtpOutputRoute(Arc<ArcSwapOption<mpsc::Sender<OutgoingFrame>>>);
 impl RtpOutputRoute {
     pub(crate) fn set(&self, sender: Option<mpsc::Sender<OutgoingFrame>>) {
-        *self.0.write() = sender;
+        self.0.store(sender.map(Arc::new));
     }
     pub(crate) fn send(&self, frame: &MidiFrame) {
         if frame.source.starts_with("RTP:") {
             return;
         }
-        let accepted = self.0.try_read().is_some_and(|route| {
-            route.as_ref().is_some_and(|sender| {
-                sender
-                    .try_send(OutgoingFrame {
-                        frame: frame.clone(),
-                        generation: midi_reset_generation(),
-                    })
-                    .is_ok()
-            })
+        let accepted = self.0.load().as_ref().is_some_and(|sender| {
+            sender
+                .try_send(OutgoingFrame {
+                    frame: frame.clone(),
+                    generation: midi_reset_generation(),
+                })
+                .is_ok()
         });
         if !accepted {
             super::rtp_server::record_rtp_drop();
@@ -167,8 +165,10 @@ mod tests {
         route.send(&frame);
         assert!(midi_reset_generation() > generation);
         assert!(rx.try_recv().unwrap().generation < midi_reset_generation());
-        let _write_guard = route.0.write();
-        route.send(&frame); // Must return while a config writer owns the route.
+        let old_route = route.0.load();
+        route.set(None); // Publication must not wait for readers of the old route.
+        route.send(&frame);
+        drop(old_route);
     }
     #[test]
     fn forwards_wire_midi_segments_large_sysex_and_resets_remote_notes() {

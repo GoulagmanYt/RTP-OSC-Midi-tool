@@ -144,6 +144,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "arc-swap"
+version = "1.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c049c0be4daef0b145cb3555416b3b8ef5b7888a38aea1a3a155801fe7b0810b"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "asio-sys"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3040,6 +3049,7 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 name = "osc-midi-bridge"
 version = "2.6.0"
 dependencies = [
+ "arc-swap",
  "chrono",
  "cpal",
  "crc32fast",
@@ -3846,6 +3856,7 @@ name = "rtpmidi"
 version = "0.4.4"
 dependencies = [
  "anyhow",
+ "arc-swap",
  "bytes",
  "futures",
  "midi-types",

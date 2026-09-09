@@ -78,6 +78,9 @@ path = "tests/cleanup.rs"
 name = "integration_test"
 path = "tests/integration_test.rs"
 
+[dependencies.arc-swap]
+version = "1.9.2"
+
 [dependencies.anyhow]
 version = "1.0.98"
 

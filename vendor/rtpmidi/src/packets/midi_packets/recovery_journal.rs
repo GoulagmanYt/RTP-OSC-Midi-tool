@@ -56,16 +56,16 @@ impl<'a> Journal<'a> {
         u16::from_be_bytes([self.bytes[1], self.bytes[2]])
     }
 
-    /// Only the note chapter is currently recoverable; all other forms retain
+    /// Notes, pitch wheel and pressure state are recoverable; other forms retain
     /// the caller's conservative reset policy. Parsing never implies recovery.
-    pub(crate) fn note_channels(&self) -> Option<impl Iterator<Item = (u8, &'a [u8])>> {
+    pub(crate) fn state_channels(&self) -> Option<impl Iterator<Item = (u8, u8, &'a [u8])>> {
         if self.bytes[0] & 0x50 != 0 {
             return None;
         }
         let mut remaining = &self.bytes[3..];
         while !remaining.is_empty() {
             let size = length(remaining, 3).ok()?;
-            if remaining[0] & 4 != 0 || remaining[2] != 8 {
+            if remaining[0] & 4 != 0 || remaining[2] & !0x1B != 0 {
                 return None;
             }
             remaining = &remaining[size..];
@@ -78,7 +78,7 @@ impl<'a> Journal<'a> {
             let size = length(remaining, 3).ok()?;
             let section = &remaining[..size];
             remaining = &remaining[size..];
-            Some(((section[0] >> 3) & 15, &section[3..]))
+            Some(((section[0] >> 3) & 15, section[2], &section[3..]))
         }))
     }
 }
@@ -145,7 +145,17 @@ fn validate_chapters(toc: u8, mut bytes: &[u8]) -> Result<()> {
             2 => 1,
             _ => unreachable!(),
         };
-        take(&mut bytes, size)?;
+        let chapter = take(&mut bytes, size)?;
+        if bit == 1 {
+            let mut seen = 0u128;
+            for log in chapter[1..].chunks_exact(2) {
+                let mask = 1u128 << (log[0] & 127);
+                if seen & mask != 0 {
+                    return Err(invalid());
+                }
+                seen |= mask;
+            }
+        }
     }
     if !bytes.is_empty() {
         return Err(invalid());
@@ -162,7 +172,7 @@ mod tests {
         let journal = [0x20, 0, 8, 0, 8, 8, 1, 0x77, 61, 0xE4, 8];
         let parsed = Journal::parse(&journal).unwrap();
         assert_eq!(parsed.checkpoint(), 8);
-        assert_eq!(parsed.note_channels().unwrap().count(), 1);
+        assert_eq!(parsed.state_channels().unwrap().count(), 1);
         for end in 0..journal.len() {
             assert!(Journal::parse(&journal[..end]).is_err());
         }

@@ -35,6 +35,7 @@ required-features = ["worker-fixtures"]
 tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
+arc-swap = "1.9.2"
 tauri = { version = "2.11.5", features = [] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

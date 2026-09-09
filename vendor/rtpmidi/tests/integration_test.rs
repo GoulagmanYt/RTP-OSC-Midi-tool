@@ -154,6 +154,10 @@ async fn malformed_udp_loss_rollover_and_control_disconnect() {
                 },
             )
             .await;
+        let (timed_sysex_tx, mut timed_sysex_rx) = tokio::sync::mpsc::channel(8);
+        server.add_listener(rtpmidi::sessions::events::event_handling::TimestampedSysExEvent, move |event| {
+            timed_sysex_tx.try_send((event.payload.to_vec(), event.timestamp, event.ssrc, event.deadline)).unwrap();
+        }).await;
         let (left_tx, mut left_rx) = tokio::sync::mpsc::channel(1);
         server
             .add_listener(ParticipantLeftEvent, move |_| {
@@ -256,7 +260,8 @@ async fn malformed_udp_loss_rollover_and_control_disconnect() {
             .await
             .unwrap();
         data.recv_from(&mut buffer).await.unwrap();
-        data.send_to(&packet(0, &[3, 0x90, 62, 100]), ("127.0.0.1", port + 1))
+        let before_complete = std::time::Instant::now();
+        data.send_to(&packet(0, &[8, 0x90, 62, 100, 0x83, 0x74, 0xF0, 0x7D, 0xF7]), ("127.0.0.1", port + 1))
             .await
             .unwrap();
         assert_eq!(
@@ -264,11 +269,18 @@ async fn malformed_udp_loss_rollover_and_control_disconnect() {
             MidiMessage::NoteOn(Channel::C1, Note::from(62), Value7::from(100))
         );
         assert!(loss_rx.try_recv().is_err());
+        assert_eq!(sysex_rx.recv().await.unwrap(), [0x7D]);
+        let (payload, timestamp, ssrc, deadline) = timed_sysex_rx.recv().await.unwrap();
+        assert_eq!(payload, [0x7D]);
+        assert_eq!(timestamp, 494);
+        assert_eq!(ssrc, 42);
+        assert!(deadline >= before_complete + Duration::from_millis(50));
         // Real-time commands between fragments preserve the assembly.
+        let before_sysex = std::time::Instant::now();
         for (seq, body) in [
             (1, &[4, 0xF0, 0x7D, 1, 0xF0][..]),
             (2, &[1, 0xF8][..]),
-            (3, &[3, 0xF7, 2, 0xF7][..]),
+            (3, &[0x25, 0x87, 0x68, 0xF7, 2, 0xF7][..]),
         ] {
             data.send_to(&packet(seq, body), ("127.0.0.1", port + 1))
                 .await
@@ -279,6 +291,11 @@ async fn malformed_udp_loss_rollover_and_control_disconnect() {
             MidiMessage::TimingClock
         );
         assert_eq!(sysex_rx.recv().await.unwrap(), [0x7D, 1, 2]);
+        let (payload, timestamp, ssrc, deadline) = timed_sysex_rx.recv().await.unwrap();
+        assert_eq!(payload, [0x7D, 1, 2]);
+        assert_eq!(timestamp, 994);
+        assert_eq!(ssrc, 42);
+        assert!(deadline >= before_sysex + Duration::from_millis(100));
         // Cancellation and packet loss must never emit partial SysEx.
         for (seq, body) in [
             (4, &[3, 0xF0, 1, 0xF0][..]),

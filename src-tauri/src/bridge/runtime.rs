@@ -32,7 +32,7 @@ pub struct BridgeHandle {
     rtp_output: crate::rtp::rtp_output::RtpOutputRoute,
     inner: Arc<Mutex<Option<BridgeRuntime>>>,
     rtp_server: Arc<Mutex<Option<RtpServer>>>,
-    rtp_sink: Arc<parking_lot::RwLock<Option<Sender<MidiFrame>>>>,
+    rtp_sink: Arc<arc_swap::ArcSwapOption<Sender<MidiFrame>>>,
     rtp_config: Arc<Mutex<Option<RtpConfigSnapshot>>>,
 }
 
@@ -68,7 +68,7 @@ impl BridgeHandle {
             rtp_output: crate::rtp::rtp_output::RtpOutputRoute::default(),
             inner: Arc::new(Mutex::new(None)),
             rtp_server: Arc::new(Mutex::new(None)),
-            rtp_sink: Arc::new(parking_lot::RwLock::new(None)),
+            rtp_sink: Arc::new(arc_swap::ArcSwapOption::empty()),
             rtp_config: Arc::new(Mutex::new(None)),
         }
     }
@@ -124,7 +124,7 @@ impl BridgeHandle {
         if let Some(server) = self.rtp_server.lock().take() {
             crate::tauri::utils::safe_block_on(server.stop());
         }
-        *self.rtp_sink.write() = None;
+        self.rtp_sink.store(None);
         *self.rtp_config.lock() = None;
         Ok(())
     }
@@ -146,7 +146,7 @@ impl BridgeHandle {
         thread::spawn(move || {
             thread::sleep(Duration::from_millis(200));
             let off = smallvec::SmallVec::from_slice(&[0x80 | ch, note, 0]);
-            if let Some(tx) = sink.read().as_ref().cloned() {
+            if let Some(tx) = sink.load_full() {
                 let _ = try_enqueue_midi_frame(
                     &tx,
                     MidiFrame {
@@ -178,9 +178,8 @@ impl BridgeHandle {
             {
                 let sink = self
                     .rtp_sink
-                    .read()
-                    .as_ref()
-                    .cloned()
+                    .load_full()
+                    .map(|sender| (*sender).clone())
                     .ok_or("Bridge MIDI input unavailable")?;
                 let replacement = crate::osc_input::OscInputServer::start(&config.osc, sink)?;
                 if let Some(previous) = runtime.osc_input.take() {
@@ -248,7 +247,7 @@ impl BridgeHandle {
 
     /// Inject a MIDI frame directly into the bridge pipeline (for testing).
     pub fn inject_frame(&self, data: SmallVec<[u8; 32]>, source: String) -> Result<(), String> {
-        if let Some(tx) = self.rtp_sink.read().as_ref().cloned() {
+        if let Some(tx) = self.rtp_sink.load_full() {
             try_enqueue_midi_frame(
                 &tx,
                 MidiFrame {

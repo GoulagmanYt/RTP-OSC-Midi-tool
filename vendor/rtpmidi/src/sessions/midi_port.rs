@@ -10,6 +10,7 @@ use crate::packets::packet::RtpMidiPacket;
 use crate::participant::Participant;
 use crate::sessions::events::event_handling::EventListeners;
 use crate::sessions::rtp_midi_session::current_timestamp_u32;
+use arc_swap::ArcSwap;
 use bytes::BytesMut;
 use std::ffi::{CStr, CString};
 use std::iter;
@@ -90,7 +91,7 @@ impl MidiPort {
     pub async fn start(
         &self,
         ctx: &RtpMidiSession,
-        listeners: Arc<Mutex<EventListeners>>,
+        listeners: Arc<ArcSwap<EventListeners>>,
         buf: &mut [u8; MAX_MIDI_PACKET_SIZE],
     ) {
         let recv = self.socket.recv_from(buf).await;
@@ -122,13 +123,12 @@ impl MidiPort {
                     peer.ssrc().get()
                 });
             if let Some(ssrc) = ssrc {
-                listeners.lock().await.notify_stream_fault(ssrc);
+                listeners.load().notify_stream_fault(ssrc);
             }
             return;
         }
 
         let packet = packet.unwrap();
-        event!(Level::TRACE, "Parsed RTP MIDI packet: {:?}", &packet);
         match packet {
             RtpMidiPacket::Control(control_packet) => match control_packet {
                 ControlPacket::Invitation { body, name } => {
@@ -150,10 +150,7 @@ impl MidiPort {
                             Level::INFO,
                             "Accepted MIDI port invitation from {participant}"
                         );
-                        listeners
-                            .lock()
-                            .await
-                            .notify_participant_joined(&participant);
+                        listeners.load().notify_participant_joined(&participant);
                     }
                 }
                 ControlPacket::ClockSync(clock_sync_packet) => {
@@ -218,7 +215,7 @@ impl MidiPort {
                         midi_packet.journal_bytes()?,
                     )
                     .ok()?;
-                    let repairs = super::note_recovery::NoteRepairs::build(
+                    let repairs = super::note_recovery::ChannelRepairs::build(
                         journal,
                         loss.expected_sequence,
                         &mut peer.active_notes,
@@ -250,7 +247,7 @@ impl MidiPort {
 
                 // Snapshot sequence state before invoking user callbacks. One
                 // listener guard covers the whole packet, not each MIDI command.
-                let listeners = listeners.lock().await;
+                let listeners = listeners.load();
                 if let Some(loss) = loss {
                     listeners.notify_packet_loss(loss);
                 }
@@ -267,6 +264,10 @@ impl MidiPort {
                 let mut timestamp = u32::from(midi_packet.timestamp());
                 for command in midi_packet.commands() {
                     timestamp = timestamp.wrapping_add(command.delta_time());
+                    let deadline = packet_deadline
+                        + std::time::Duration::from_micros(
+                            u64::from(timestamp.wrapping_sub(midi_packet.timestamp().get())) * 100,
+                        );
                     match command.command() {
                         RtpMidiMessage::MidiMessage(message) => {
                             if (command.command().status() < 0xF8
@@ -275,7 +276,6 @@ impl MidiPort {
                             {
                                 state.clear();
                             }
-                            event!(Level::DEBUG, "Received MIDI message: {message:?}");
                             listeners.notify_midi_message(
                                 *message,
                                 timestamp,
@@ -295,7 +295,8 @@ impl MidiPort {
                                 .expect("fragment storage reserved")
                                 .segment(*head, data, *tail, arrived)
                             {
-                                Ok(Some(payload)) => listeners.notify_sysex_packet(payload),
+                                Ok(Some(payload)) => listeners
+                                    .notify_sysex_packet(payload, timestamp, ssrc, deadline),
                                 Ok(None) => {}
                                 Err(()) => listeners.notify_stream_fault(ssrc),
                             }
@@ -304,8 +305,7 @@ impl MidiPort {
                             if let Some(state) = sysex_state.as_mut() {
                                 state.clear();
                             }
-                            event!(Level::DEBUG, "Received SysEx message: {sysex:?}");
-                            listeners.notify_sysex_packet(sysex);
+                            listeners.notify_sysex_packet(sysex, timestamp, ssrc, deadline);
                         }
                     }
                 }
@@ -575,7 +575,6 @@ impl MidiPort {
             false,
         )?;
         state.sequence = sequence.wrapping_add(1);
-        event!(Level::DEBUG, "Sending MIDI packet batch");
         for destination in destinations.into_iter().flatten() {
             self.socket.send_to(&state.packet, destination).await?;
         }
