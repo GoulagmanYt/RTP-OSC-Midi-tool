@@ -4,6 +4,51 @@ This audit and implementation apply to the local working tree, including the
 existing audio/EQ changes. Those changes were preserved. No deployment or release
 was performed.
 
+## Architecture and audit priorities
+
+The target is Windows/MSVC with Rust 1.90.0, Tauri 2 and a TypeScript frontend.
+Tokio owns network/session and worker-control tasks. `midir` exposes installed
+Windows MIDI endpoints; CPAL supplies audio, including ASIO. VST hosting runs in
+an isolated child process in production. Virtual MIDI/audio endpoints depend on
+installed drivers; the bridge does not create an operating-system MIDI driver.
+
+```mermaid
+flowchart LR
+  RTP[UDP RTP / AppleMIDI] --> RP[Validated parser and clock mapping]
+  RP --> RS[Bounded RTP scheduler]
+  OSC[UDP OSC] --> OP[Validated OSC parser and scheduler]
+  MIDI[Windows MIDI input] --> Q[Bounded bridge input]
+  RS --> Q
+  OP --> Q
+  Q --> B[Routing and filtering thread]
+  B --> MW[MIDI output thread]
+  MW --> MO[Windows MIDI output]
+  B --> OW[OSC output thread]
+  OW --> OO[UDP OSC output]
+  B --> RW[Bounded RTP output task]
+  RW --> RO[UDP RTP peers]
+  B --> IPC[Bounded MIDI IPC]
+  IPC --> VST[Isolated VST worker / SPSC audio ring]
+  VST --> ASIO[CPAL / ASIO callback]
+```
+
+RTP-origin frames are excluded from RTP forwarding; OSC-origin frames are
+excluded from OSC output. Driver sends run in destination threads, GUI events
+have a separate emitter, and audio submission uses nonblocking queues. Remaining
+participant/send-order async mutexes, configuration locks, callback plugin
+`try_lock`, and lifecycle joins are described below; there is no claim that every
+operation in this architecture is lock-free.
+
+| Priority | Defects addressed | Verification |
+| --- | --- | --- |
+| Tier 0: stuck notes / lifetime | Lost critical releases, stale queues after panic, eviction reordering, detached worker tasks, restart-after-stop, session-owner leaks | Overflow and note-accounting tests, worker crash/hang fixtures, cancellation and socket-release tests |
+| Tier 1: protocol | Truncated packet acceptance, running status, zero-velocity notes, 14-bit byte order, sequence rollover, CK deadlines, SysEx assembly, OSC padding/timetags | Parser vectors, malformed UDP injection, two-session tests, OSC round trips and scheduled bundles |
+| Tier 2: allocation / contention | Repeated packet allocation, callback-list locks, route locks, MIDI submission telemetry locks, per-packet trace formatting | Stable-storage tests, concurrent publication/lock-contention regressions, production-worker telemetry |
+
+Patch boundaries below form the independently committed refactoring roadmap.
+The explicit-limits section distinguishes implemented recovery from unsupported
+protocol forms and unproven absolute timing or loss guarantees.
+
 ## Patch boundaries
 
 1. **Wire parsing:** validate complete packets before dispatch, bound delta-time
@@ -103,6 +148,12 @@ npm run build
 
 Frontend validation used the installed Node 26 runtime; the machine's default
 Node 20 does not satisfy the existing Vite/jsdom dependency requirements.
+
+The final Windows Rust validation passed 147 application tests and 55 vendored
+RTP tests. Three opt-in third-party instrument tests remain ignored. Application
+and RTP Clippy checks passed with warnings denied, as did formatting checks.
+The rebuilt production worker and diagnostic then passed a fresh 10,000-note
+Splice/Voicemeeter run; its raw JSON is tracked in `docs/measurements/`.
 
 ## Explicit limits
 

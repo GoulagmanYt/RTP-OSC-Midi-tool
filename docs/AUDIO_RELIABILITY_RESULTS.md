@@ -58,7 +58,9 @@ The JSON includes actual/requested buffers, signal presence, telemetry samples,
 final queue state, restarts and shutdown errors. Failed delivery or timing checks
 produce a nonzero exit code. Signal presence is reported separately because an
 unconfigured or intentionally silent instrument can process MIDI correctly.
-Reports from the measured runs remain under `.cargo-target/splice-asio-*.json`.
+The original raw reports were written under `.cargo-target/splice-asio-*.json`.
+Those untracked files were no longer present when the workspace was revisited;
+the recorded summaries above remain, but the original raw reports are unavailable.
 
 ## Extended run
 
@@ -69,8 +71,39 @@ callbacks, lock misses, route changes or worker restarts were reported. The queu
 peaked at 16 and drained to zero. Signal was observed (peak approximately 0.086).
 The final DSP p99 estimate was 3,250 us, maximum callback 7,679 us, maximum sampled
 MIDI age 15,990 us, and graceful stop 19 ms. Both diagnostic checks passed.
-The report is `.cargo-target/splice-asio-100000.json`.
+Its original report was `.cargo-target/splice-asio-100000.json` (also unavailable
+after the build-directory cleanup).
 
 This extends the observed successful total to 130,000 notes. It exercises worker
 IPC/audio, not the new RTP journal or SysEx paths, and retains all measurement
 limitations above. Three minutes is not a long-duration soak or leak proof.
+
+## Verification after audio and lifecycle fixes
+
+The worker and diagnostic were rebuilt from code commit
+`e4803dd29ae37690024a4e8cfda98b7078d94b73`, which includes audio fix `e2b5f12`.
+A fresh 10,000-note run completed in 25.596 seconds with the same Splice/ASIO rig,
+explicit Splice VST3 path and requested/actual 512-frame buffer. The complete
+[raw report](measurements/splice-asio-audio-fixes.json) is tracked in this repository.
+The measured worker executable SHA-256 was
+`86B6EA78C39F19D496A617052CDA9DD6C5F07971BE013437F6B6F8E4047F2F83`.
+
+| Measurement | Result |
+| --- | ---: |
+| Note-On / Note-Off submissions | 10,000 / 10,000 |
+| Rejected submissions / supervisor drops / audio drops | 0 / 0 / 0 |
+| Xruns / over-budget callbacks / lock misses / restarts | 0 / 0 / 0 / 0 |
+| Maximum / final MIDI queue depth | 16 / 0 |
+| DSP p99 estimate / maximum callback (us) | 3,500 / 8,673 |
+| Maximum periodically observed MIDI age (us) | 11,605 |
+| Backend-reported latency (us) | 21,333 |
+| Peak signal amplitude | 0.0648 |
+| Stop duration, including session-task completion (ms) | 106 |
+
+Delivery and timing checks passed. The single emergency reset is the harness's
+intentional final panic; observations during note transmission reported none.
+No worker or diagnostic process remained after completion. Stop now waits for
+session-task completion, so its duration is not directly comparable to the older
+acknowledgement-only measurements. This run validates the latest audio/IPC code
+under the stated load, with the physical latency and voice-accounting limitations
+already described above.
