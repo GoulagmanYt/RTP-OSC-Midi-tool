@@ -119,15 +119,17 @@ pub(super) fn open_input(
         .unwrap_or_else(|_| "MIDI IN".to_string());
     logger.info(format!("Entree MIDI connectee: {name}"));
     let source: Arc<str> = Arc::from(name.as_str());
+    crate::midi::initialize_midi_buffers();
     let tx = midi_tx.clone();
     input
         .connect(
             &port,
             "osc-midi-in",
             move |_timestamp, message, _| {
-                let frame = MidiFrame {
-                    data: smallvec::SmallVec::from_slice(message),
-                    source: Arc::clone(&source),
+                let Some(frame) = MidiFrame::copy_realtime(message, Arc::clone(&source)) else {
+                    super::pipeline::record_fanout_drop();
+                    super::pipeline::request_critical_midi_reset();
+                    return;
                 };
                 let _ = try_enqueue_midi_frame(&tx, frame);
             },

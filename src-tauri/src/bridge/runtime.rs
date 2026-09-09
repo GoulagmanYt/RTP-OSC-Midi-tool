@@ -64,6 +64,7 @@ pub(super) struct BridgeRuntime {
 
 impl BridgeHandle {
     pub fn new() -> Self {
+        crate::midi::initialize_midi_buffers();
         Self {
             rtp_output: crate::rtp::rtp_output::RtpOutputRoute::default(),
             inner: Arc::new(Mutex::new(None)),

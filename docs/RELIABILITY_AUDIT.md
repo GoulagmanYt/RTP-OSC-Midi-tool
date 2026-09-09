@@ -35,7 +35,7 @@ flowchart LR
 RTP-origin frames are excluded from RTP forwarding; OSC-origin frames are
 excluded from OSC output. Driver sends run in destination threads, GUI events
 have a separate emitter, and audio submission uses nonblocking queues. Remaining
-participant/send-order async mutexes, configuration locks, callback plugin
+management/send-order async mutexes, configuration locks, callback plugin
 `try_lock`, and lifecycle joins are described below; there is no claim that every
 operation in this architecture is lock-free.
 
@@ -76,9 +76,10 @@ protocol forms and unproven absolute timing or loss guarantees.
    serialize, join reception and maintenance tasks before draining peers, clear
    pending invitations, and prevent invitations on stopped sessions. BY uses
    best-effort nonblocking UDP sends so socket pressure cannot delay shutdown.
-   Sequence history lives inside each participant, eliminating a separate map
-   allocation and mutex on reception. One immutable listener snapshot covers each packet;
-   peer-state locks are released before callbacks. Reconnecting the same SSRC
+   Sequence and fragment history belong exclusively to the MIDI receive task.
+   Session metadata is published through immutable snapshots; packet reception
+   never acquires the participant-management lock. One listener snapshot covers
+   each packet. Reconnecting the same SSRC
    resets sequence history, verified through UDP injection.
    Port zero now reserves an actual adjacent ephemeral control/MIDI pair, with
    bounded retries on adjacent-port contention, and advertises its bound control
@@ -164,7 +165,7 @@ through the synchronized scheduler. A new borrowed timestamped event carries the
 SSRC, RTP timestamp and monotonic deadline while retaining the legacy callback.
 Reassembled SysEx uses the final segment deadline; this whole-message MIDI API
 does not preserve inter-octet timing inside segmented commands. Segmented
-SysEx is reassembled per participant in a preallocated 64 KiB payload buffer;
+SysEx is reassembled in 128 preallocated 64 KiB receive slots;
 only completed messages are delivered. Cancellation, corruption, packet loss,
 non-real-time interruption, and a 10-second inter-fragment timeout discard the
 partial command. Missing fragments are not reconstructed from journals. The
@@ -243,7 +244,8 @@ copies of participant names and SysEx buffers for every outgoing packet.
 The packet encoder now reuses a preallocated 1,214-byte buffer under the existing
 send-order mutex. A 10,000-encode regression checks stable storage at maximum
 packet size and rejection before mutation for oversized batches. This removes
-the encoded-packet allocation; the async send-order and participant locks remain; listener and route reads use atomic snapshots.
+the encoded-packet allocation; the public concurrent-send API retains its async
+send-order lock, while destination, listener and route reads use atomic snapshots.
 
 A two-session regression verifies MIDI forwarding, 2,700-byte segmented SysEx,
 and remote panic. Queue tests cover echo prevention, critical overflow and a
@@ -275,8 +277,8 @@ Callbacks now require `Send + Sync` because control and data notifications may
 run concurrently; consumers must keep callbacks bounded. A regression retains an
 old snapshot during four concurrent writers and verifies all 64 registrations
 are present afterward. Publication allocates on the registration path; ordinary
-notification does not clone the callback vectors. The participant-state and
-outbound send-order mutexes still exist. ArcSwap's read guarantees are documented
+notification does not clone the callback vectors. The management-writer and
+outbound send-order mutexes still exist; packet reads do not acquire the former. ArcSwap's read guarantees are documented
 by the [crate author](https://docs.rs/arc-swap/1.9.2/arc_swap/docs/performance/index.html).
 
 ## Audio overload and worker ownership
@@ -316,3 +318,40 @@ cancellation, in addition to the existing real worker crash/hang fixtures.
 Control-stop acknowledgement and session joining each have a ten-second timeout;
 a stop waiting for an in-progress load may also wait on that load's timeout.
 These are bounded fallback policies, not a hard real-time shutdown guarantee.
+
+
+## Receive ownership and bounded SysEx storage
+
+The MIDI receive task owns its sequence, active-note and fragment state. Control
+writers publish a participant snapshot on mutation while preserving publication
+order under their management lock. A distinct connection identity prevents a
+reconnected SSRC from inheriting old fragments or sequence state. Stale cleanup
+also matches this identity before removal; BY validation and removal share one
+management critical section. Snapshot reads continue while that lock is held.
+
+Control datagrams arriving on the MIDI socket enter a preallocated 64-entry,
+1,024-byte queue and a separate session-owned task. A blocked control operation
+cannot suspend MIDI packet dispatch. Queue exhaustion rejects excess control
+traffic, which peers can retry through their invitation/synchronization protocol.
+The control task participates in cancellation and graceful joining. UDP receive
+errors, including Windows oversized-datagram errors without a source address,
+now emit a stream fault (SSRC zero when unavailable) so a lost final release
+still requests destination recovery.
+
+Each receiver reserves approximately 8 MiB for 128 fragment slots before its
+receive loop. The application reserves another approximately 8 MiB in a shared
+128-buffer pool for complete messages up to 65,538 bytes including F0/F7.
+RTP callbacks, local MIDI callbacks and processing fanout use fallible bounded
+copies. Dropping a large frame returns its buffer to the pool. Pool exhaustion
+is counted and follows the reset/drop policy; it never invokes a heap-allocation
+fallback in those paths. The ordinary public Rust Clone implementation remains
+available for non-realtime callers and can allocate for large data. Pool memory
+is retained for the process lifetime deliberately, with a fixed bound.
+
+Allocation-counter regressions measured zero allocations for 60,000 valid and
+malformed packet parses, and for 10,000 maximum-size SysEx frames plus their
+fanout copies. Reconnection tests exercise 10,000 replacements without growing
+receive-slot storage. These are bounded-path tests, not proof that driver, UI,
+management operations or every third-party callback is allocation-free. Parser
+errors on the measured path use unboxed error kinds; the legacy public control
+parser preserves its anyhow error API through a wrapper.

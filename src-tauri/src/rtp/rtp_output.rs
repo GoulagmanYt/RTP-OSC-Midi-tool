@@ -25,9 +25,12 @@ impl RtpOutputRoute {
             return;
         }
         let accepted = self.0.load().as_ref().is_some_and(|sender| {
+            let Some(copy) = frame.clone_realtime() else {
+                return false;
+            };
             sender
                 .try_send(OutgoingFrame {
-                    frame: frame.clone(),
+                    frame: copy,
                     generation: midi_reset_generation(),
                 })
                 .is_ok()

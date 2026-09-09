@@ -34,3 +34,7 @@ pub use types::{
     MidiActivitySnapshot, PreflightReport, RuntimeMetrics, RuntimeStatus, VstParameter,
     VstPluginEntry,
 };
+
+#[cfg(test)]
+#[path = "../../vendor/rtpmidi/src/test_alloc.rs"]
+mod test_alloc;

@@ -84,6 +84,7 @@ impl RtpServer {
         sink: Arc<arc_swap::ArcSwapOption<Sender<MidiFrame>>>,
         logger: FrontendLogger,
     ) -> Result<Self, String> {
+        crate::midi::initialize_midi_buffers();
         let (stop_tx, mut stop_rx) = oneshot::channel();
 
         if port == u16::MAX {
@@ -205,17 +206,16 @@ impl RtpServer {
             let sysex_source = rtp_source.clone();
             session
                 .add_listener(TimestampedSysExEvent, move |event| {
-                    let payload = event.payload;
-                    let mut data = smallvec::SmallVec::with_capacity(payload.len() + 2);
-                    data.push(0xF0);
-                    data.extend_from_slice(payload);
-                    data.push(0xF7);
+                    let Some(frame) =
+                        MidiFrame::sysex_realtime(event.payload, sysex_source.clone())
+                    else {
+                        record_rtp_drop();
+                        request_critical_midi_reset();
+                        return;
+                    };
                     if sysex_tx
                         .try_send(TimedRtpFrame {
-                            frame: MidiFrame {
-                                data,
-                                source: sysex_source.clone(),
-                            },
+                            frame,
                             deadline: event.deadline,
                             generation: midi_reset_generation(),
                             order: 0,

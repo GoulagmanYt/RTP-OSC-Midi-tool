@@ -160,8 +160,13 @@ fn processing_loop(
                 }
                 update_pipeline_queue_depth(midi_rx.len());
                 record_activity(&activity, &frame);
-                let midi_thru_frame = frame.clone();
-                let osc_frame = frame.clone();
+                let Some((midi_thru_frame, osc_frame)) =
+                    frame.clone_realtime().zip(frame.clone_realtime())
+                else {
+                    record_fanout_drop();
+                    request_critical_midi_reset();
+                    continue;
+                };
                 handle_midi_frame(
                     &snapshot,
                     None,
@@ -189,8 +194,13 @@ fn processing_loop(
                     };
                     update_pipeline_queue_depth(midi_rx.len());
                     record_activity(&activity, &frame);
-                    let midi_thru_frame = frame.clone();
-                    let osc_frame = frame.clone();
+                    let Some((midi_thru_frame, osc_frame)) =
+                        frame.clone_realtime().zip(frame.clone_realtime())
+                    else {
+                        record_fanout_drop();
+                        request_critical_midi_reset();
+                        continue;
+                    };
                     handle_midi_frame(
                         &snapshot,
                         None,
