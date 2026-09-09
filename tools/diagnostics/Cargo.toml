@@ -22,6 +22,10 @@ path = "src/bin/vst_probe.rs"
 name = "midi_stress"
 path = "src/bin/midi_stress.rs"
 
+[[bin]]
+name = "audio_reliability"
+path = "src/bin/audio_reliability.rs"
+
 [dependencies]
 osc-midi-bridge = { path = "../../src-tauri" }
 midi-types = "0.2.1"
