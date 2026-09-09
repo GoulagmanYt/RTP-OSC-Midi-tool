@@ -16,6 +16,7 @@ use std::ffi::{CStr, CString};
 use std::iter;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
@@ -64,6 +65,7 @@ pub(super) struct MidiPort {
     start_time: Instant,
     send_state: Mutex<SendState>,
     socket: Arc<UdpSocket>,
+    rejected_packets: AtomicU64,
 }
 
 struct SendState {
@@ -84,10 +86,18 @@ impl MidiPort {
                 packet: BytesMut::with_capacity(MidiPacket::MAX_ENCODED_SIZE),
             }),
             socket,
+            rejected_packets: AtomicU64::new(0),
         })
     }
 
-    #[instrument(name = "MIDI", skip_all, fields(name = %ctx.name(), src, src_name))]
+    fn sampled_rejection_count(&self) -> Option<u64> {
+        let count = self
+            .rejected_packets
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1);
+        count.is_power_of_two().then_some(count)
+    }
+
     pub async fn start(
         &self,
         ctx: &RtpMidiSession,
@@ -104,12 +114,16 @@ impl MidiPort {
         }
 
         let (amt, src) = recv.unwrap();
-        tracing::Span::current().record("src", tracing::field::display(src));
-        event!(Level::TRACE, "Received {amt} bytes");
 
         let packet = RtpMidiPacket::parse(&buf[..amt]);
         if packet.is_err() {
-            event!(Level::ERROR, "Failed to parse RTP MIDI packet: {packet:?}");
+            if let Some(rejected_packets) = self.sampled_rejection_count() {
+                event!(
+                    Level::ERROR,
+                    rejected_packets,
+                    "Failed to parse RTP MIDI packet: {packet:?}"
+                );
+            }
             let ssrc = ctx
                 .participants
                 .lock()
@@ -167,7 +181,6 @@ impl MidiPort {
                 }
             },
             RtpMidiPacket::Midi(midi_packet) => {
-                event!(Level::DEBUG, "Parsed MIDI packet: {:#?}", midi_packet);
                 let ssrc = midi_packet.ssrc().get();
                 let arrived = Instant::now();
                 let mut peers = ctx.participants.lock().await;
@@ -177,6 +190,10 @@ impl MidiPort {
                 else {
                     return;
                 };
+                peer.synchronize_recovery_generation(
+                    ctx.recovery_generation
+                        .load(std::sync::atomic::Ordering::Acquire),
+                );
                 let packet_deadline = peer
                     .deadline(u32::from(midi_packet.timestamp()))
                     .unwrap_or(arrived);
@@ -194,13 +211,16 @@ impl MidiPort {
                             })
                         }
                         SequenceDisposition::DuplicateOrOutOfOrder => {
-                            event!(
-                                Level::WARN,
-                                ssrc,
-                                expected,
-                                received,
-                                "Discarded duplicate or out-of-order MIDI packet"
-                            );
+                            if let Some(rejected_packets) = self.sampled_rejection_count() {
+                                event!(
+                                    Level::WARN,
+                                    rejected_packets,
+                                    ssrc,
+                                    expected,
+                                    received,
+                                    "Discarded duplicate or out-of-order MIDI packet"
+                                );
+                            }
                             return;
                         }
                     }
@@ -276,18 +296,7 @@ impl MidiPort {
                             {
                                 state.clear();
                             }
-                            listeners.notify_midi_message(
-                                *message,
-                                timestamp,
-                                ssrc,
-                                packet_deadline
-                                    + std::time::Duration::from_micros(
-                                        u64::from(
-                                            timestamp
-                                                .wrapping_sub(u32::from(midi_packet.timestamp())),
-                                        ) * 100,
-                                    ),
-                            );
+                            listeners.notify_midi_message(*message, timestamp, ssrc, deadline);
                         }
                         RtpMidiMessage::SysExSegment { head, data, tail } => {
                             match sysex_state
@@ -552,7 +561,6 @@ impl MidiPort {
         }
     }
 
-    #[instrument(skip_all, fields(name = %ctx.name(), participants))]
     pub async fn send_midi_batch<'a>(
         &self,
         ctx: &RtpMidiSession,
@@ -581,7 +589,6 @@ impl MidiPort {
         Ok(())
     }
 
-    #[instrument(skip_all, fields(name = %ctx.name()))]
     pub async fn send_midi<'a>(
         &self,
         ctx: &RtpMidiSession,

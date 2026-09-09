@@ -121,6 +121,15 @@ F5 dropped-EOX representation is normalized to a completed SysEx for MIDI APIs. 
 voice messages use the same synchronized scheduler. UDP regression covers complete
 and segmented SysEx delta times across timestamp rollover. Per-message packet/MIDI
 trace formatting was removed from the vendor receive and send paths.
+Malformed/duplicate packet diagnostics are sampled at power-of-two rejection
+counts, so an error flood does not format a log for every datagram.
+
+The application shares its atomic reset generation with RTP sessions. Before
+processing another packet, each participant invalidates pre-reset note and SysEx
+state. A UDP regression checks that an unchanged generation suppresses duplicate
+journal Note-Ons, while a destination reset permits the journal to restore the
+note. This tracks receiver knowledge, not acknowledgement of physical playback;
+queued events can still be invalidated by subsequent overload recovery.
 
 The 10,000-note regression exercises the actual bounded enqueue/fanout functions
 and destination note tracking in a headless harness. It does not replace a

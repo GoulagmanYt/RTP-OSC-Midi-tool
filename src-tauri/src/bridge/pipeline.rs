@@ -26,12 +26,17 @@ static PIPELINE_QUEUE_MAX_DEPTH: AtomicU64 = AtomicU64::new(0);
 static PIPELINE_DROPPED_COUNT: AtomicU64 = AtomicU64::new(0);
 static MIDI_DEBUG_SAMPLE_LAST_MS: AtomicU64 = AtomicU64::new(0);
 static CRITICAL_MIDI_RESET_REQUESTED: AtomicBool = AtomicBool::new(false);
-static MIDI_RESET_GENERATION: AtomicU64 = AtomicU64::new(0);
+static MIDI_RESET_GENERATION: std::sync::LazyLock<std::sync::Arc<AtomicU64>> =
+    std::sync::LazyLock::new(|| std::sync::Arc::new(AtomicU64::new(0)));
 #[cfg(test)]
 pub(crate) static TEST_PIPELINE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub(crate) fn midi_reset_generation() -> u64 {
     MIDI_RESET_GENERATION.load(Ordering::Acquire)
+}
+
+pub(crate) fn midi_reset_generation_source() -> std::sync::Arc<AtomicU64> {
+    std::sync::Arc::clone(&MIDI_RESET_GENERATION)
 }
 
 pub(super) fn take_critical_midi_reset_request() -> bool {

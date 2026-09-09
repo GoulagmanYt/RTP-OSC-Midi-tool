@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::ffi::CString;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
@@ -28,6 +29,7 @@ pub struct RtpMidiSession {
     pub(super) participants: Arc<Mutex<HashMap<U32, Participant>>>, // key by ssrc
     pub(super) pending_invitations: Arc<Mutex<HashMap<U32, PendingInvitation>>>, // key by token
     pub(super) midi_port: Arc<MidiPort>,
+    pub(super) recovery_generation: Arc<AtomicU64>,
 
     listeners: Arc<ArcSwap<EventListeners>>,
     control_port: Arc<ControlPort>,
@@ -112,6 +114,7 @@ impl RtpMidiSession {
             pending_invitations: Arc::new(Mutex::new(HashMap::new())),
             control_port,
             midi_port,
+            recovery_generation: Arc::new(AtomicU64::new(0)),
             host_syncer: Arc::new(HostSyncer::new()),
             listeners: Arc::new(ArcSwap::from_pointee(EventListeners::new())),
             cancel_token: Arc::new(CancellationToken::new()),
@@ -138,8 +141,29 @@ impl RtpMidiSession {
         ssrc: u32,
         invite_handler: InviteResponder,
     ) -> std::io::Result<Arc<Self>> {
+        Self::start_with_recovery_generation(
+            port,
+            name,
+            ssrc,
+            invite_handler,
+            Arc::new(AtomicU64::new(0)),
+        )
+        .await
+    }
+
+    /// Share the destination's reset epoch so journal recovery does not assume
+    /// that notes received before a destination panic are still sounding.
+    pub async fn start_with_recovery_generation(
+        port: u16,
+        name: &str,
+        ssrc: u32,
+        invite_handler: InviteResponder,
+        recovery_generation: Arc<AtomicU64>,
+    ) -> std::io::Result<Arc<Self>> {
         event!(tracing::Level::INFO, "Starting RTP-MIDI session");
-        let ctx = Arc::new(Self::bind(port, name, ssrc).await?);
+        let mut session = Self::bind(port, name, ssrc).await?;
+        session.recovery_generation = recovery_generation;
+        let ctx = Arc::new(session);
         ctx.start_threads(invite_handler);
         Ok(ctx)
     }
@@ -357,6 +381,87 @@ pub fn current_timestamp_u32(start_time: Instant) -> U32 {
 #[cfg(test)]
 mod shutdown_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn destination_reset_allows_journal_note_recovery_again() {
+        use crate::packets::midi_packets::midi_packet::MidiPacket;
+        use crate::sessions::events::event_handling::MidiMessageEvent;
+        use midi_types::{Channel, MidiMessage, Note, Value7};
+        use std::sync::atomic::Ordering;
+        use zerocopy::network_endian::U16;
+
+        tokio::time::timeout(Duration::from_secs(3), async {
+            let receiver = RtpMidiSession::bind(0, "Recovery", 1).await.unwrap();
+            let sender = RtpMidiSession::bind(0, "Source", 2).await.unwrap();
+            let mut source_addr = sender.local_addr().unwrap();
+            source_addr.set_ip(std::net::Ipv4Addr::LOCALHOST.into());
+            receiver.participants.lock().await.insert(
+                U32::new(2),
+                Participant::new(source_addr, true, None, c"Source", U32::new(2)),
+            );
+            let mut destination = receiver.midi_port.socket().local_addr().unwrap();
+            destination.set_ip(std::net::Ipv4Addr::LOCALHOST.into());
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            receiver
+                .add_listener(MidiMessageEvent, move |(message, _)| {
+                    tx.send(message).unwrap();
+                })
+                .await;
+            let note = MidiMessage::NoteOn(Channel::C1, Note::from(61), Value7::from(100));
+            let commands = [MidiEvent::new(None, RtpMidiMessage::MidiMessage(note))];
+            let first =
+                MidiPacket::new_as_bytes(U16::new(0), U32::new(0), U32::new(2), &commands, false);
+            let mut buffer = [0; MAX_MIDI_PACKET_SIZE];
+            sender
+                .midi_port
+                .socket()
+                .send_to(&first, destination)
+                .await
+                .unwrap();
+            receiver
+                .midi_port
+                .start(&receiver, receiver.listeners.clone(), &mut buffer)
+                .await;
+            assert_eq!(rx.recv().await.unwrap(), note);
+
+            for (sequence, reset) in [(2, false), (4, true)] {
+                if reset {
+                    receiver.recovery_generation.fetch_add(1, Ordering::AcqRel);
+                }
+                let mut packet = MidiPacket::new_as_bytes(
+                    U16::new(sequence),
+                    U32::new(0),
+                    U32::new(2),
+                    &[],
+                    false,
+                )
+                .to_vec();
+                packet[12] |= 0x40;
+                // Covering Chapter N with a recommended Note-On and no Note-Off bitmap.
+                packet.extend_from_slice(&[0x20, 0, 1, 0, 7, 8, 1, 0xF0, 61, 0xE4]);
+                sender
+                    .midi_port
+                    .socket()
+                    .send_to(&packet, destination)
+                    .await
+                    .unwrap();
+                receiver
+                    .midi_port
+                    .start(&receiver, receiver.listeners.clone(), &mut buffer)
+                    .await;
+                if reset {
+                    assert_eq!(rx.try_recv().unwrap(), note);
+                } else {
+                    assert!(
+                        rx.try_recv().is_err(),
+                        "known note was retriggered without a reset"
+                    );
+                }
+            }
+        })
+        .await
+        .expect("RTP recovery test timed out");
+    }
 
     #[tokio::test]
     async fn listener_publication_is_concurrent_and_preserves_packet_snapshots() {

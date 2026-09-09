@@ -18,6 +18,7 @@ pub struct Participant {
     clock: Option<ClockMapping>,
     pub(crate) expected_sequence: Option<u16>,
     pub(crate) active_notes: [u128; 16],
+    recovery_generation: u64,
     pub(crate) sysex: Option<crate::sessions::sysex::SysExAssembly>,
 }
 
@@ -46,7 +47,18 @@ impl Participant {
             clock: None,
             expected_sequence: None,
             active_notes: [0; 16],
+            recovery_generation: 0,
             sysex: Some(crate::sessions::sysex::SysExAssembly::new()),
+        }
+    }
+
+    pub(crate) fn synchronize_recovery_generation(&mut self, generation: u64) {
+        if self.recovery_generation != generation {
+            self.active_notes.fill(0);
+            self.recovery_generation = generation;
+            if let Some(sysex) = &mut self.sysex {
+                sysex.clear();
+            }
         }
     }
 

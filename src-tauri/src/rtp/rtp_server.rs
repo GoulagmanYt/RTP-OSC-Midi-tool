@@ -113,7 +113,15 @@ impl RtpServer {
                     if *delay_ms > 0 {
                         tokio::time::sleep(Duration::from_millis(*delay_ms)).await;
                     }
-                    match RtpMidiSession::start(p, &name, ssrc, InviteResponder::Accept).await {
+                    match RtpMidiSession::start_with_recovery_generation(
+                        p,
+                        &name,
+                        ssrc,
+                        InviteResponder::Accept,
+                        crate::bridge::pipeline::midi_reset_generation_source(),
+                    )
+                    .await
+                    {
                         Ok(session) => {
                             let bound_port =
                                 session.local_addr().map_err(|err| err.to_string())?.port();
