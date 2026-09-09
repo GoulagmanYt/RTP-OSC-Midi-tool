@@ -26,10 +26,7 @@ impl<'a> RtpMidiMessage<'a> {
     pub fn parse_complete(bytes: &'a [u8]) -> std::io::Result<Self> {
         let (message, remaining) = MidiMessage::from_be_bytes(bytes, None)?;
         if !remaining.is_empty() || matches!(message, Self::SysExSegment { .. }) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Expected one complete MIDI message",
-            ));
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
         }
         Ok(message)
     }

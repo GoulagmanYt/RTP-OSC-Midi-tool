@@ -100,12 +100,7 @@ impl ReadWriteExt for MidiMessage {
         channel: u8,
         bytes: &[u8],
     ) -> Result<(RtpMidiMessage<'_>, &[u8])> {
-        let invalid = || {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Invalid or truncated MIDI message",
-            )
-        };
+        let invalid = || std::io::Error::from(std::io::ErrorKind::InvalidData);
         if status_byte == 0xF0 || status_byte == 0xF7 {
             let end = bytes.iter().position(|&b| b >= 0x80).ok_or_else(invalid)?;
             let data = &bytes[..end];
@@ -192,10 +187,7 @@ impl ReadWriteExt for MidiMessage {
             0xFE => RtpMidiMessage::MidiMessage(MidiMessage::ActiveSensing),
             0xFF => RtpMidiMessage::MidiMessage(MidiMessage::Reset),
             _ => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("Unsupported MIDI status byte: {status_byte:#02X}"),
-                ));
+                return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
             }
         };
 
@@ -208,18 +200,14 @@ impl ReadWriteExt for MidiMessage {
         running_status: Option<u8>,
     ) -> std::io::Result<(RtpMidiMessage<'_>, &[u8])> {
         if bytes.is_empty() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Missing MIDI status",
-            ));
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
         }
         let (status_byte, bytes) = if bytes[0].status_bit() {
             (bytes[0], &bytes[1..])
         } else {
             (
-                running_status.ok_or_else(|| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidData, "Running status not set")
-                })?,
+                running_status
+                    .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidData))?,
                 bytes,
             )
         };

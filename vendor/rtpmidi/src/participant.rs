@@ -16,10 +16,7 @@ pub struct Participant {
     invited_by_us: bool,
     ssrc: U32,
     clock: Option<ClockMapping>,
-    pub(crate) expected_sequence: Option<u16>,
-    pub(crate) active_notes: [u128; 16],
-    recovery_generation: u64,
-    pub(crate) sysex: Option<crate::sessions::sysex::SysExAssembly>,
+    identity: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -45,21 +42,15 @@ impl Participant {
             invited_by_us,
             ssrc,
             clock: None,
-            expected_sequence: None,
-            active_notes: [0; 16],
-            recovery_generation: 0,
-            sysex: Some(crate::sessions::sysex::SysExAssembly::new()),
+            identity: {
+                static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            },
         }
     }
 
-    pub(crate) fn synchronize_recovery_generation(&mut self, generation: u64) {
-        if self.recovery_generation != generation {
-            self.active_notes.fill(0);
-            self.recovery_generation = generation;
-            if let Some(sysex) = &mut self.sysex {
-                sysex.clear();
-            }
-        }
+    pub(crate) fn identity(&self) -> u64 {
+        self.identity
     }
 
     pub(super) fn midi_port_addr(&self) -> SocketAddr {

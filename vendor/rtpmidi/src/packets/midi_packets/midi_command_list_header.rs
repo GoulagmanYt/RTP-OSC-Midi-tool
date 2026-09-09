@@ -105,12 +105,7 @@ impl MidiCommandListHeader {
     }
 
     pub fn validate(data: &[u8]) -> std::io::Result<()> {
-        let invalid = || {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Truncated MIDI command section",
-            )
-        };
+        let invalid = || std::io::Error::from(std::io::ErrorKind::InvalidData);
         let first = *data.first().ok_or_else(invalid)?;
         let size = if first & 0x80 != 0 { 2 } else { 1 };
         if data.len() < size {

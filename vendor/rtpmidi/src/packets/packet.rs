@@ -13,26 +13,15 @@ pub(crate) enum RtpMidiPacket<'a> {
 impl<'a> RtpMidiPacket<'a> {
     pub fn parse(bytes: &'a [u8]) -> Result<Self, std::io::Error> {
         if ControlPacket::is_control_packet(bytes) {
-            let packet = ControlPacket::try_from_bytes(bytes).map_err(|_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "Failed to parse Control packet",
-                )
-            })?;
+            let packet = ControlPacket::parse_borrowed(bytes)
+                .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidData))?;
             Ok(RtpMidiPacket::Control(packet))
         } else {
             if bytes.len() < 13 || bytes[0] != 0x80 || bytes[1] & 0x7F != 0x61 {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "Unsupported RTP header",
-                ));
+                return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
             }
-            let (packet, _remaining) = MidiPacket::ref_from_prefix(bytes).map_err(|_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "Failed to parse MIDI packet",
-                )
-            })?;
+            let (packet, _remaining) = MidiPacket::ref_from_prefix(bytes)
+                .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidData))?;
             packet.validate()?;
             Ok(RtpMidiPacket::Midi(packet))
         }
@@ -41,6 +30,26 @@ impl<'a> RtpMidiPacket<'a> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn valid_and_malformed_packet_parsing_allocates_nothing() {
+        let packets = [
+            vec![0x80, 0x61, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 3, 0x90, 60, 100],
+            vec![0x80, 0x61, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 3, 0xF0, 1, 0xF7],
+            vec![0x80, 0x61, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 3, 0x90, 60],
+            vec![0xFF, 0xFF, b'C', b'K'],
+            vec![0xFF, 0xFF, b'X', b'X'],
+            vec![0x80, 0x61, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0x40, 0x20, 0, 1],
+        ];
+        let allocations = crate::test_alloc::count_allocations(|| {
+            for _ in 0..10_000 {
+                for (index, packet) in packets.iter().enumerate() {
+                    assert_eq!(super::RtpMidiPacket::parse(packet).is_ok(), index < 2);
+                }
+            }
+        });
+        assert_eq!(allocations, 0);
+    }
+
     use midi_types::{Channel, MidiMessage, Note, Value7};
     use zerocopy::U16;
     use zerocopy::network_endian::U32;

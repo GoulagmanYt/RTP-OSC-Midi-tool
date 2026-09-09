@@ -26,7 +26,7 @@ use crate::sessions::midi_port::{MAX_MIDI_PACKET_SIZE, MidiPort};
 
 #[derive(Clone)]
 pub struct RtpMidiSession {
-    pub(super) participants: Arc<Mutex<HashMap<U32, Participant>>>, // key by ssrc
+    pub(super) participants: Arc<super::peer_registry::PeerRegistry>, // key by ssrc
     pub(super) pending_invitations: Arc<Mutex<HashMap<U32, PendingInvitation>>>, // key by token
     pub(super) midi_port: Arc<MidiPort>,
     pub(super) recovery_generation: Arc<AtomicU64>,
@@ -110,7 +110,7 @@ impl RtpMidiSession {
         let _ = bound_port;
 
         let mut context = RtpMidiSession {
-            participants: Arc::new(Mutex::new(HashMap::new())),
+            participants: Arc::new(super::peer_registry::PeerRegistry::new()),
             pending_invitations: Arc::new(Mutex::new(HashMap::new())),
             control_port,
             midi_port,
@@ -205,6 +205,7 @@ impl RtpMidiSession {
 
         let handle = tokio::spawn(async move {
             let mut buf = [0u8; MAX_MIDI_PACKET_SIZE];
+            let mut receive_states = crate::sessions::receive_state::ReceiveStates::new();
             loop {
                 tokio::select! {
                     biased;
@@ -212,11 +213,25 @@ impl RtpMidiSession {
                         event!(Level::DEBUG, "listen_for_midi: cancellation requested");
                         break;
                     },
-                    _ = midi_port_listener.start(&ctx_midi, listeners_midi.clone(), &mut buf) => {}
+                    _ = midi_port_listener.start(&ctx_midi, listeners_midi.clone(), &mut buf, &mut receive_states) => {}
                 }
             }
         });
         handles.push(handle);
+
+        // Control traffic arriving on the MIDI socket cannot suspend data dispatch.
+        let control_receiver = self.midi_port.take_control_receiver();
+        let ctx = self.task_context();
+        let port = self.midi_port.clone();
+        let listeners = self.listeners.clone();
+        let cancel = self.cancel_token.clone();
+        handles.push(tokio::spawn(async move {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {}
+                _ = port.run_control(&ctx, control_receiver, listeners) => {}
+            }
+        }));
 
         // Host clock sync
         let ctx_clock = self.task_context();
@@ -303,21 +318,30 @@ impl RtpMidiSession {
 
     #[instrument(skip_all, fields(participant = %participant.name().to_str().unwrap_or("Unknown")))]
     pub async fn remove_participant(&self, participant: &Participant) {
+        let removed = {
+            let mut peers = self.participants.lock().await;
+            if peers
+                .get(&participant.ssrc())
+                .is_some_and(|current| current.identity() == participant.identity())
+            {
+                peers.remove(&participant.ssrc())
+            } else {
+                None
+            }
+        };
+        let Some(participant) = removed else {
+            return;
+        };
         event!(Level::INFO, "Removing participant");
-        self.control_port.send_termination_packet(participant).await;
-        self.midi_port.send_termination_packet(participant).await;
-        self.forget_participant(participant.ssrc()).await;
+        self.control_port
+            .send_termination_packet(&participant)
+            .await;
+        self.midi_port.send_termination_packet(&participant).await;
+        self.listeners.load().notify_participant_left(&participant);
     }
 
     pub(super) async fn notify_joined(&self, participant: &Participant) {
         self.listeners.load().notify_participant_joined(participant);
-    }
-
-    pub(super) async fn forget_participant(&self, ssrc: U32) {
-        let participant = self.participants.lock().await.remove(&ssrc);
-        if let Some(participant) = participant {
-            self.listeners.load().notify_participant_left(&participant);
-        }
     }
 
     pub(super) async fn handle_termination(
@@ -327,12 +351,16 @@ impl RtpMidiSession {
         src: SocketAddr,
         midi: bool,
     ) {
-        let valid = self.participants.lock().await.get(&ssrc).is_some_and(|p| {
-            (if midi { p.midi_port_addr() } else { p.addr() }) == src
-                && p.initiator_token() == Some(token)
-        });
-        if valid {
-            self.forget_participant(ssrc).await;
+        let participant = {
+            let mut peers = self.participants.lock().await;
+            let valid = peers.get(&ssrc).is_some_and(|p| {
+                (if midi { p.midi_port_addr() } else { p.addr() }) == src
+                    && p.initiator_token() == Some(token)
+            });
+            if valid { peers.remove(&ssrc) } else { None }
+        };
+        if let Some(participant) = participant {
+            self.listeners.load().notify_participant_left(&participant);
         }
     }
 
@@ -383,6 +411,41 @@ mod shutdown_tests {
     use super::*;
 
     #[tokio::test]
+    async fn stale_cleanup_cannot_remove_a_reconnected_peer_with_the_same_ssrc() {
+        let session = RtpMidiSession::bind(0, "Cleanup", 1).await.unwrap();
+        let previous = Participant::new(
+            "127.0.0.1:5004".parse().unwrap(),
+            true,
+            Some(U32::new(3)),
+            c"peer",
+            U32::new(7),
+        );
+        let current = Participant::new(
+            previous.addr(),
+            true,
+            Some(U32::new(4)),
+            c"peer",
+            previous.ssrc(),
+        );
+        session
+            .participants
+            .lock()
+            .await
+            .insert(current.ssrc(), current.clone());
+        session.remove_participant(&previous).await;
+        assert_eq!(
+            session.participants.snapshot()[0].identity(),
+            current.identity()
+        );
+        session
+            .handle_termination(previous.ssrc(), U32::new(3), previous.addr(), false)
+            .await;
+        assert_eq!(session.participants.snapshot().len(), 1);
+        session.remove_participant(&current).await;
+        assert!(session.participants.snapshot().is_empty());
+    }
+
+    #[tokio::test]
     async fn destination_reset_allows_journal_note_recovery_again() {
         use crate::packets::midi_packets::midi_packet::MidiPacket;
         use crate::sessions::events::event_handling::MidiMessageEvent;
@@ -412,6 +475,7 @@ mod shutdown_tests {
             let first =
                 MidiPacket::new_as_bytes(U16::new(0), U32::new(0), U32::new(2), &commands, false);
             let mut buffer = [0; MAX_MIDI_PACKET_SIZE];
+            let mut receive_states = crate::sessions::receive_state::ReceiveStates::new();
             sender
                 .midi_port
                 .socket()
@@ -420,10 +484,16 @@ mod shutdown_tests {
                 .unwrap();
             receiver
                 .midi_port
-                .start(&receiver, receiver.listeners.clone(), &mut buffer)
+                .start(
+                    &receiver,
+                    receiver.listeners.clone(),
+                    &mut buffer,
+                    &mut receive_states,
+                )
                 .await;
             assert_eq!(rx.recv().await.unwrap(), note);
 
+            let _held_management_lock = receiver.participants.lock().await;
             for (sequence, reset) in [(2, false), (4, true)] {
                 if reset {
                     receiver.recovery_generation.fetch_add(1, Ordering::AcqRel);
@@ -447,7 +517,12 @@ mod shutdown_tests {
                     .unwrap();
                 receiver
                     .midi_port
-                    .start(&receiver, receiver.listeners.clone(), &mut buffer)
+                    .start(
+                        &receiver,
+                        receiver.listeners.clone(),
+                        &mut buffer,
+                        &mut receive_states,
+                    )
                     .await;
                 if reset {
                     assert_eq!(rx.try_recv().unwrap(), note);
@@ -458,6 +533,35 @@ mod shutdown_tests {
                     );
                 }
             }
+            let (fault_tx, mut fault_rx) = tokio::sync::mpsc::unbounded_channel();
+            receiver
+                .add_listener(
+                    crate::sessions::events::event_handling::StreamFaultEvent,
+                    move |ssrc| {
+                        fault_tx.send(ssrc).unwrap();
+                    },
+                )
+                .await;
+            let oversized = vec![0u8; MAX_MIDI_PACKET_SIZE + 1];
+            sender
+                .midi_port
+                .socket()
+                .send_to(&oversized, destination)
+                .await
+                .unwrap();
+            receiver
+                .midi_port
+                .start(
+                    &receiver,
+                    receiver.listeners.clone(),
+                    &mut buffer,
+                    &mut receive_states,
+                )
+                .await;
+            let source = fault_rx
+                .try_recv()
+                .expect("oversized final release did not request recovery");
+            assert!(source == 0 || source == 2);
         })
         .await
         .expect("RTP recovery test timed out");

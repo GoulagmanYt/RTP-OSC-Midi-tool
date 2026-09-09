@@ -2,7 +2,7 @@
 use std::io::{Error, ErrorKind, Result};
 
 fn invalid() -> Error {
-    Error::new(ErrorKind::InvalidData, "Invalid RTP MIDI recovery journal")
+    Error::from(ErrorKind::InvalidData)
 }
 fn take<'a>(bytes: &mut &'a [u8], size: usize) -> Result<&'a [u8]> {
     let part = bytes.get(..size).ok_or_else(invalid)?;

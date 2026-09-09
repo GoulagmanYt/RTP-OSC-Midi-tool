@@ -10,3 +10,5 @@ mod rtp_port;
 pub(crate) mod sysex;
 
 mod note_recovery;
+mod peer_registry;
+mod receive_state;

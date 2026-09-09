@@ -37,12 +37,7 @@ impl<'a> MidiCommandIterator<'a> {
     pub fn try_next(&mut self) -> std::io::Result<Option<MidiEvent<'a>>> {
         use super::{midi_message_ext::ReadWriteExt, rtp_midi_message::RtpMidiMessage};
         use midi_types::MidiMessage;
-        let invalid = || {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Truncated or invalid MIDI command",
-            )
-        };
+        let invalid = || std::io::Error::from(std::io::ErrorKind::InvalidData);
         if self.partial.is_none() {
             if self.data.is_empty() {
                 return Ok(None);

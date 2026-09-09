@@ -66,6 +66,15 @@ pub(super) struct MidiPort {
     send_state: Mutex<SendState>,
     socket: Arc<UdpSocket>,
     rejected_packets: AtomicU64,
+    control_tx: std::sync::mpsc::SyncSender<ControlDatagram>,
+    control_rx: std::sync::Mutex<Option<std::sync::mpsc::Receiver<ControlDatagram>>>,
+    control_ready: tokio::sync::Notify,
+}
+
+pub(super) struct ControlDatagram {
+    bytes: [u8; super::control_port::MAX_CONTROL_PACKET_SIZE],
+    len: usize,
+    source: SocketAddr,
 }
 
 struct SendState {
@@ -77,6 +86,7 @@ impl MidiPort {
     pub async fn bind(port: u16, name: CString, ssrc: U32) -> std::io::Result<Self> {
         let socket = Arc::new(UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, port)).await?);
 
+        let (control_tx, control_rx) = std::sync::mpsc::sync_channel(64);
         Ok(MidiPort {
             ssrc,
             start_time: Instant::now(),
@@ -87,6 +97,9 @@ impl MidiPort {
             }),
             socket,
             rejected_packets: AtomicU64::new(0),
+            control_tx,
+            control_rx: std::sync::Mutex::new(Some(control_rx)),
+            control_ready: tokio::sync::Notify::new(),
         })
     }
 
@@ -103,9 +116,13 @@ impl MidiPort {
         ctx: &RtpMidiSession,
         listeners: Arc<ArcSwap<EventListeners>>,
         buf: &mut [u8; MAX_MIDI_PACKET_SIZE],
+        receive_states: &mut super::receive_state::ReceiveStates,
     ) {
         let recv = self.socket.recv_from(buf).await;
         if recv.is_err() {
+            // Windows can reject an oversized UDP datagram without returning
+            // its source. A lost final release must still trigger recovery.
+            listeners.load().notify_stream_fault(0);
             event!(
                 Level::ERROR,
                 "Failed to receive data on MIDI port: {recv:?}"
@@ -124,27 +141,197 @@ impl MidiPort {
                     "Failed to parse RTP MIDI packet: {packet:?}"
                 );
             }
-            let ssrc = ctx
-                .participants
-                .lock()
-                .await
-                .values_mut()
-                .find(|peer| peer.midi_port_addr() == src)
-                .map(|peer| {
-                    if let Some(sysex) = peer.sysex.as_mut() {
-                        sysex.clear();
-                    }
-                    peer.ssrc().get()
-                });
-            if let Some(ssrc) = ssrc {
-                listeners.load().notify_stream_fault(ssrc);
+            let peers = ctx.participants.snapshot();
+            if let Some(peer) = peers.iter().find(|peer| peer.midi_port_addr() == src) {
+                let state = receive_states.get(
+                    peer,
+                    &peers,
+                    ctx.recovery_generation.load(Ordering::Acquire),
+                );
+                state.sysex.clear();
+                listeners.load().notify_stream_fault(peer.ssrc().get());
             }
             return;
         }
 
         let packet = packet.unwrap();
         match packet {
-            RtpMidiPacket::Control(control_packet) => match control_packet {
+            RtpMidiPacket::Control(_) => {
+                if amt <= super::control_port::MAX_CONTROL_PACKET_SIZE {
+                    let mut datagram = ControlDatagram {
+                        bytes: [0; super::control_port::MAX_CONTROL_PACKET_SIZE],
+                        len: amt,
+                        source: src,
+                    };
+                    datagram.bytes[..amt].copy_from_slice(&buf[..amt]);
+                    if self.control_tx.try_send(datagram).is_ok() {
+                        self.control_ready.notify_one();
+                    } else if let Some(rejected_packets) = self.sampled_rejection_count() {
+                        event!(
+                            Level::WARN,
+                            rejected_packets,
+                            "MIDI-port control queue full"
+                        );
+                    }
+                }
+            }
+            RtpMidiPacket::Midi(midi_packet) => {
+                let ssrc = midi_packet.ssrc().get();
+                let arrived = Instant::now();
+                let peers = ctx.participants.snapshot();
+                let Some(peer) = peers
+                    .iter()
+                    .find(|peer| peer.ssrc() == midi_packet.ssrc())
+                    .filter(|p| p.midi_port_addr() == src)
+                else {
+                    return;
+                };
+                let state = receive_states.get(
+                    peer,
+                    &peers,
+                    ctx.recovery_generation.load(Ordering::Acquire),
+                );
+                let packet_deadline = peer
+                    .deadline(u32::from(midi_packet.timestamp()))
+                    .unwrap_or(arrived);
+                let received = midi_packet.sequence_number().get();
+                let mut loss = if let Some(expected) = state.expected_sequence {
+                    match classify_sequence(expected, received) {
+                        SequenceDisposition::InOrder => None,
+                        SequenceDisposition::Gap(distance) => {
+                            Some(crate::sessions::events::event_handling::PacketLoss {
+                                ssrc,
+                                expected_sequence: expected,
+                                received_sequence: received,
+                                lost_packets: distance,
+                                recovered: false,
+                            })
+                        }
+                        SequenceDisposition::DuplicateOrOutOfOrder => {
+                            if let Some(rejected_packets) = self.sampled_rejection_count() {
+                                event!(
+                                    Level::WARN,
+                                    rejected_packets,
+                                    ssrc,
+                                    expected,
+                                    received,
+                                    "Discarded duplicate or out-of-order MIDI packet"
+                                );
+                            }
+                            return;
+                        }
+                    }
+                } else {
+                    None
+                };
+                let repairs = loss.as_mut().and_then(|loss| {
+                    if state.sysex.is_active() {
+                        return None;
+                    }
+                    let journal = crate::packets::midi_packets::recovery_journal::Journal::parse(
+                        midi_packet.journal_bytes()?,
+                    )
+                    .ok()?;
+                    let repairs = super::note_recovery::ChannelRepairs::build(
+                        journal,
+                        loss.expected_sequence,
+                        &mut state.active_notes,
+                    )?;
+                    loss.recovered = true;
+                    Some(repairs)
+                });
+                for event in midi_packet.commands() {
+                    if let RtpMidiMessage::MidiMessage(message) = event.command() {
+                        super::note_recovery::observe(&mut state.active_notes, *message);
+                    }
+                }
+                if loss.is_some() {
+                    state.sysex.clear();
+                }
+                state.expected_sequence = Some(received.wrapping_add(1));
+
+                // Snapshot sequence state before invoking user callbacks. One
+                // listener guard covers the whole packet, not each MIDI command.
+                let listeners = listeners.load();
+                if let Some(loss) = loss {
+                    listeners.notify_packet_loss(loss);
+                }
+                if let Some(repairs) = repairs {
+                    for message in repairs.messages() {
+                        listeners.notify_midi_message(
+                            message,
+                            midi_packet.timestamp().get(),
+                            ssrc,
+                            packet_deadline,
+                        );
+                    }
+                }
+                let mut timestamp = u32::from(midi_packet.timestamp());
+                for command in midi_packet.commands() {
+                    timestamp = timestamp.wrapping_add(command.delta_time());
+                    let deadline = packet_deadline
+                        + std::time::Duration::from_micros(
+                            u64::from(timestamp.wrapping_sub(midi_packet.timestamp().get())) * 100,
+                        );
+                    match command.command() {
+                        RtpMidiMessage::MidiMessage(message) => {
+                            if command.command().status() < 0xF8
+                                || matches!(message, midi_types::MidiMessage::Reset)
+                            {
+                                state.sysex.clear();
+                            }
+                            listeners.notify_midi_message(*message, timestamp, ssrc, deadline);
+                        }
+                        RtpMidiMessage::SysExSegment { head, data, tail } => {
+                            match state.sysex.segment(*head, data, *tail, arrived) {
+                                Ok(Some(payload)) => listeners
+                                    .notify_sysex_packet(payload, timestamp, ssrc, deadline),
+                                Ok(None) => {}
+                                Err(()) => listeners.notify_stream_fault(ssrc),
+                            }
+                        }
+                        RtpMidiMessage::SysEx(sysex) => {
+                            state.sysex.clear();
+                            listeners.notify_sysex_packet(sysex, timestamp, ssrc, deadline);
+                        }
+                    }
+                }
+                drop(listeners);
+            }
+        }
+    }
+
+    pub(super) fn take_control_receiver(&self) -> std::sync::mpsc::Receiver<ControlDatagram> {
+        self.control_rx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+            .expect("one control consumer")
+    }
+
+    pub(super) async fn run_control(
+        &self,
+        ctx: &RtpMidiSession,
+        receiver: std::sync::mpsc::Receiver<ControlDatagram>,
+        listeners: Arc<ArcSwap<EventListeners>>,
+    ) {
+        loop {
+            let ready = self.control_ready.notified();
+            let datagram = match receiver.try_recv() {
+                Ok(datagram) => datagram,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    ready.await;
+                    continue;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
+            };
+            let src = datagram.source;
+            let Ok(RtpMidiPacket::Control(control_packet)) =
+                RtpMidiPacket::parse(&datagram.bytes[..datagram.len])
+            else {
+                continue;
+            };
+            match control_packet {
                 ControlPacket::Invitation { body, name } => {
                     event!(
                         Level::INFO,
@@ -178,154 +365,6 @@ impl MidiPort {
                 }
                 _ => {
                     event!(Level::WARN, "Unhandled control packet {:?}", control_packet);
-                }
-            },
-            RtpMidiPacket::Midi(midi_packet) => {
-                let ssrc = midi_packet.ssrc().get();
-                let arrived = Instant::now();
-                let mut peers = ctx.participants.lock().await;
-                let Some(peer) = peers
-                    .get_mut(&midi_packet.ssrc())
-                    .filter(|p| p.midi_port_addr() == src)
-                else {
-                    return;
-                };
-                peer.synchronize_recovery_generation(
-                    ctx.recovery_generation
-                        .load(std::sync::atomic::Ordering::Acquire),
-                );
-                let packet_deadline = peer
-                    .deadline(u32::from(midi_packet.timestamp()))
-                    .unwrap_or(arrived);
-                let received = midi_packet.sequence_number().get();
-                let mut loss = if let Some(expected) = peer.expected_sequence {
-                    match classify_sequence(expected, received) {
-                        SequenceDisposition::InOrder => None,
-                        SequenceDisposition::Gap(distance) => {
-                            Some(crate::sessions::events::event_handling::PacketLoss {
-                                ssrc,
-                                expected_sequence: expected,
-                                received_sequence: received,
-                                lost_packets: distance,
-                                recovered: false,
-                            })
-                        }
-                        SequenceDisposition::DuplicateOrOutOfOrder => {
-                            if let Some(rejected_packets) = self.sampled_rejection_count() {
-                                event!(
-                                    Level::WARN,
-                                    rejected_packets,
-                                    ssrc,
-                                    expected,
-                                    received,
-                                    "Discarded duplicate or out-of-order MIDI packet"
-                                );
-                            }
-                            return;
-                        }
-                    }
-                } else {
-                    None
-                };
-                let repairs = loss.as_mut().and_then(|loss| {
-                    if peer.sysex.as_ref().is_some_and(|state| state.is_active()) {
-                        return None;
-                    }
-                    let journal = crate::packets::midi_packets::recovery_journal::Journal::parse(
-                        midi_packet.journal_bytes()?,
-                    )
-                    .ok()?;
-                    let repairs = super::note_recovery::ChannelRepairs::build(
-                        journal,
-                        loss.expected_sequence,
-                        &mut peer.active_notes,
-                    )?;
-                    loss.recovered = true;
-                    Some(repairs)
-                });
-                for event in midi_packet.commands() {
-                    if let RtpMidiMessage::MidiMessage(message) = event.command() {
-                        super::note_recovery::observe(&mut peer.active_notes, *message);
-                    }
-                }
-                let needs_assembly = peer.sysex.as_ref().is_some_and(|state| state.is_active())
-                    || midi_packet.commands().any(|event| {
-                        matches!(event.command(), RtpMidiMessage::SysExSegment { .. })
-                    });
-                let mut sysex_state = if needs_assembly {
-                    peer.sysex.take()
-                } else {
-                    None
-                };
-                if loss.is_some()
-                    && let Some(state) = sysex_state.as_mut()
-                {
-                    state.clear();
-                }
-                peer.expected_sequence = Some(received.wrapping_add(1));
-                drop(peers);
-
-                // Snapshot sequence state before invoking user callbacks. One
-                // listener guard covers the whole packet, not each MIDI command.
-                let listeners = listeners.load();
-                if let Some(loss) = loss {
-                    listeners.notify_packet_loss(loss);
-                }
-                if let Some(repairs) = repairs {
-                    for message in repairs.messages() {
-                        listeners.notify_midi_message(
-                            message,
-                            midi_packet.timestamp().get(),
-                            ssrc,
-                            packet_deadline,
-                        );
-                    }
-                }
-                let mut timestamp = u32::from(midi_packet.timestamp());
-                for command in midi_packet.commands() {
-                    timestamp = timestamp.wrapping_add(command.delta_time());
-                    let deadline = packet_deadline
-                        + std::time::Duration::from_micros(
-                            u64::from(timestamp.wrapping_sub(midi_packet.timestamp().get())) * 100,
-                        );
-                    match command.command() {
-                        RtpMidiMessage::MidiMessage(message) => {
-                            if (command.command().status() < 0xF8
-                                || matches!(message, midi_types::MidiMessage::Reset))
-                                && let Some(state) = sysex_state.as_mut()
-                            {
-                                state.clear();
-                            }
-                            listeners.notify_midi_message(*message, timestamp, ssrc, deadline);
-                        }
-                        RtpMidiMessage::SysExSegment { head, data, tail } => {
-                            match sysex_state
-                                .as_mut()
-                                .expect("fragment storage reserved")
-                                .segment(*head, data, *tail, arrived)
-                            {
-                                Ok(Some(payload)) => listeners
-                                    .notify_sysex_packet(payload, timestamp, ssrc, deadline),
-                                Ok(None) => {}
-                                Err(()) => listeners.notify_stream_fault(ssrc),
-                            }
-                        }
-                        RtpMidiMessage::SysEx(sysex) => {
-                            if let Some(state) = sysex_state.as_mut() {
-                                state.clear();
-                            }
-                            listeners.notify_sysex_packet(sysex, timestamp, ssrc, deadline);
-                        }
-                    }
-                }
-                drop(listeners);
-                // A concurrently removed/replaced participant owns a fresh buffer.
-                // Never restore old fragments into a reconnected session.
-                if let Some(state) = sysex_state
-                    && let Some(peer) = ctx.participants.lock().await.get_mut(&midi_packet.ssrc())
-                    && peer.sysex.is_none()
-                {
-                    peer.sysex = Some(state);
                 }
             }
         }
@@ -566,12 +605,12 @@ impl MidiPort {
         ctx: &RtpMidiSession,
         commands: &'a [MidiEvent<'a>],
     ) -> std::io::Result<()> {
-        let lock = ctx.participants.lock().await;
+        let snapshot = ctx.participants.snapshot();
         let mut destinations = [None; 128];
-        for (slot, participant) in destinations.iter_mut().zip(lock.values()) {
+        for (slot, participant) in destinations.iter_mut().zip(snapshot.iter()) {
             *slot = Some(participant.midi_port_addr());
         }
-        drop(lock);
+        drop(snapshot);
         let mut state = self.send_state.lock().await;
         let sequence = state.sequence;
         MidiPacket::write_into(

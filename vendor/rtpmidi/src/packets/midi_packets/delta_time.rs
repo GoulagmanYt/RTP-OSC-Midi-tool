@@ -44,10 +44,7 @@ pub fn read_delta_time(bytes: &[u8]) -> std::io::Result<(u32, &[u8])> {
         }
     }
 
-    Err(std::io::Error::new(
-        std::io::ErrorKind::InvalidData,
-        "Invalid delta time encoding",
-    ))
+    Err(std::io::Error::from(std::io::ErrorKind::InvalidData))
 }
 
 #[cfg(test)]
