@@ -59,3 +59,18 @@ final queue state, restarts and shutdown errors. Failed delivery or timing check
 produce a nonzero exit code. Signal presence is reported separately because an
 unconfigured or intentionally silent instrument can process MIDI correctly.
 Reports from the measured runs remain under `.cargo-target/splice-asio-*.json`.
+
+## Extended run
+
+A subsequent 100,000-note run on the same rig and optimized audio worker lasted
+204.029 seconds. All 100,000 Note-On and 100,000 Note-Off submissions completed:
+zero rejected submissions, audio/supervisor MIDI drops, xruns, over-budget
+callbacks, lock misses, route changes or worker restarts were reported. The queue
+peaked at 16 and drained to zero. Signal was observed (peak approximately 0.086).
+The final DSP p99 estimate was 3,250 us, maximum callback 7,679 us, maximum sampled
+MIDI age 15,990 us, and graceful stop 19 ms. Both diagnostic checks passed.
+The report is `.cargo-target/splice-asio-100000.json`.
+
+This extends the observed successful total to 130,000 notes. It exercises worker
+IPC/audio, not the new RTP journal or SysEx paths, and retains all measurement
+limitations above. Three minutes is not a long-duration soak or leak proof.
