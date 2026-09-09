@@ -218,3 +218,41 @@ are present afterward. Publication allocates on the registration path; ordinary
 notification does not clone the callback vectors. The participant-state and
 outbound send-order mutexes still exist. ArcSwap's read guarantees are documented
 by the [crate author](https://docs.rs/arc-swap/1.9.2/arc_swap/docs/performance/index.html).
+
+## Audio overload and worker ownership
+
+Audio backlog eviction preserves queue order. Previously, swapping an evicted
+Note-On with the queue front could move a Note-Off behind sustain-on, keeping a
+voice sounding. Regression tests cover both Note-On and controller eviction
+without growing the preallocated queue. The direct-engine MIDI route is now an
+atomic snapshot with a nonblocking producer guard and atomic drop telemetry.
+The 64 yield/retry loop, runtime-mutex telemetry access and per-submission debug
+formatting were removed. Producer contention or exhaustion requests an atomic
+reset for critical releases. This bounds the submission path, not delivery under
+unbounded load. Stable eviction remains linear in the bounded queue length.
+
+Private audio packets and IPC frames validate complete short MIDI messages and
+normalize velocity-zero Note-On. They reject malformed lengths/data and SysEx
+instead of silently truncating a SysEx into the three-byte audio packet format.
+SysEx still uses the external MIDI destination path; this does not add SysEx
+instrument hosting support.
+
+The worker supervisor also publishes its MIDI sender atomically and counts drops
+without acquiring control/status locks. Lifecycle operations serialize; an epoch
+invalidates delayed automatic restarts after explicit stop or a newer start.
+Graceful stop waits for the session task after the audio acknowledgement and
+aborts it on failure/timeout. Session pipe tasks are cancelled and joined on
+normal teardown; cancellation also aborts their guards. Pending connection tasks
+are cancelled if their starting future is dropped. Only public supervisor clones
+retain the cancellation owner: dropping the last public owner aborts the active
+session even if internal background contexts still exist. Child-process teardown
+kills and reaps the worker even when job assignment was unavailable.
+Cancelling an in-progress Stop also aborts its locally owned session task, rather
+than detaching it when the control future is dropped.
+
+Tests cover control/status/producer lock contention, deferred restart invalidation,
+waiting past Stop acknowledgement, retained owner clones and final-owner
+cancellation, in addition to the existing real worker crash/hang fixtures.
+Control-stop acknowledgement and session joining each have a ten-second timeout;
+a stop waiting for an in-progress load may also wait on that load's timeout.
+These are bounded fallback policies, not a hard real-time shutdown guarantee.

@@ -319,13 +319,16 @@ impl MidiPacket {
     }
 
     pub(super) fn from_bytes_with_age(bytes: &[u8], age_us: u64) -> Option<Self> {
-        if bytes.is_empty() {
+        if bytes.is_empty() || bytes.len() > 3 || bytes[0] == 0xF0 {
             return None;
         }
         let mut data = [0u8; 3];
-        let len = bytes.len().min(3);
+        let len = bytes.len();
         for (idx, byte) in bytes.iter().take(len).enumerate() {
             data[idx] = *byte;
+        }
+        if !crate::midi::normalize_message(&mut data[..len]) {
+            return None;
         }
         Some(Self {
             data,
@@ -577,8 +580,8 @@ impl AudioCallbackState {
     fn drop_oldest_note_on(&mut self) -> bool {
         let pos = self.pending_midi.iter().position(|m| m.is_note_on());
         if let Some(idx) = pos {
-            self.pending_midi.swap(0, idx);
-            self.pending_midi.pop_front();
+            // Preserve release/controller ordering when evicting a lower-priority message.
+            self.pending_midi.remove(idx);
             return true;
         }
         false
@@ -590,8 +593,8 @@ impl AudioCallbackState {
             .iter()
             .position(|m| !m.is_critical_release());
         if let Some(idx) = pos {
-            self.pending_midi.swap(0, idx);
-            self.pending_midi.pop_front();
+            // Preserve release/controller ordering when evicting a lower-priority message.
+            self.pending_midi.remove(idx);
             return true;
         }
         false
@@ -618,15 +621,6 @@ impl AudioCallbackState {
             }
         }
     }
-}
-
-pub(super) fn timestamp_ms() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 pub(super) fn monotonic_us() -> u64 {

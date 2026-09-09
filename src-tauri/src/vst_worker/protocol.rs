@@ -158,6 +158,9 @@ impl MidiWireFrame {
         }
         let mut data = [0; MAX_MIDI_BYTES];
         data[..bytes.len()].copy_from_slice(bytes);
+        if data[0] == 0xF0 || !crate::midi::normalize_message(&mut data[..bytes.len()]) {
+            return None;
+        }
         Some(Self {
             sequence,
             monotonic_qpc,
@@ -193,6 +196,15 @@ impl MidiWireFrame {
         qpc.copy_from_slice(&encoded[8..16]);
         let mut data = [0u8; MAX_MIDI_BYTES];
         data.copy_from_slice(&encoded[17..20]);
+        if data[0] == 0xF0
+            || data[usize::from(len)..].iter().any(|byte| *byte != 0)
+            || !crate::midi::normalize_message(&mut data[..usize::from(len)])
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid MIDI frame contents",
+            ));
+        }
         Ok(Self {
             sequence: u64::from_le_bytes(sequence),
             monotonic_qpc: u64::from_le_bytes(qpc),
@@ -315,6 +327,17 @@ mod tests {
         assert_eq!(frame.bytes(), &[0x90, 60, 100]);
         assert!(MidiWireFrame::new(1, 1, &[]).is_none());
         assert!(MidiWireFrame::new(1, 1, &[1, 2, 3, 4]).is_none());
+        assert!(MidiWireFrame::new(1, 1, &[0x90, 60]).is_none());
+        assert!(MidiWireFrame::new(1, 1, &[0x90, 128, 1]).is_none());
+        assert!(MidiWireFrame::new(1, 1, &[0xF0, 1, 0xF7]).is_none());
+        let zero_velocity = MidiWireFrame::new(1, 1, &[0x91, 60, 0]).unwrap();
+        assert_eq!(zero_velocity.bytes(), &[0x81, 60, 0]);
+        let mut truncated = frame.encode();
+        truncated[16] = 2;
+        assert!(MidiWireFrame::decode(truncated).is_err());
+        let mut bad_data = frame.encode();
+        bad_data[18] = 128;
+        assert!(MidiWireFrame::decode(bad_data).is_err());
     }
 
     #[test]

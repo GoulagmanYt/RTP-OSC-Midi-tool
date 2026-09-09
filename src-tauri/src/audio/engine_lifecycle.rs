@@ -227,7 +227,7 @@ impl AudioEngine {
         let app_handle_for_drop = app_handle.clone();
         let runtime = self.runtime.lock().take();
         let mut retained_device = None;
-        *self.midi_tx.lock() = None;
+        self.midi_tx.store(None);
         self.midi_emergency_reset_requested
             .store(false, Ordering::Relaxed);
 
@@ -877,7 +877,11 @@ impl AudioEngine {
         };
 
         *self.last_vst.lock() = Some(vst_path);
-        *self.midi_tx.lock() = Some(midi_tx);
+        self.midi_tx
+            .store(Some(Arc::new(super::engine::MidiIngress::new(
+                midi_tx,
+                runtime.telemetry.clone(),
+            ))));
         *self.runtime.lock() = Some(runtime);
         Ok(())
     }

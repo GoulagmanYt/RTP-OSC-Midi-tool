@@ -3,12 +3,13 @@ use std::{
     path::PathBuf,
     process::{Child, Command, Stdio},
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         Arc,
     },
     time::{Duration, Instant},
 };
 
+use arc_swap::ArcSwapOption;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tokio::{
@@ -89,13 +90,24 @@ enum SessionCommand {
 }
 
 struct ActiveSession {
+    task: tauri::async_runtime::JoinHandle<()>,
     commands: mpsc::Sender<SessionCommand>,
-    midi: mpsc::Sender<MidiWireFrame>,
+}
+
+impl Drop for ActiveSession {
+    fn drop(&mut self) {
+        // Also covers cancellation while stop_session owns the session locally.
+        self.task.abort();
+    }
 }
 
 struct SupervisorInner {
+    lifecycle: tokio::sync::Mutex<()>,
+    lifecycle_generation: AtomicU64,
     status: Mutex<SupervisorStatus>,
     session: Mutex<Option<ActiveSession>>,
+    midi_route: ArcSwapOption<mpsc::Sender<MidiWireFrame>>,
+    midi_drops: AtomicU32,
     request_sequence: AtomicU64,
     midi_sequence: AtomicU64,
     state_generation: AtomicU64,
@@ -108,6 +120,32 @@ struct SupervisorInner {
 #[derive(Clone)]
 pub struct VstWorkerSupervisor {
     inner: Arc<SupervisorInner>,
+    // Background contexts do not retain the lifetime of public owners.
+    _lifetime: Option<Arc<SupervisorLifetime>>,
+}
+
+struct SupervisorLifetime {
+    inner: Arc<SupervisorInner>,
+}
+impl Drop for SupervisorLifetime {
+    fn drop(&mut self) {
+        self.inner
+            .lifecycle_generation
+            .fetch_add(1, Ordering::AcqRel);
+        self.inner.midi_route.store(None);
+        if let Some(session) = self.inner.session.lock().take() {
+            session.task.abort();
+        }
+    }
+}
+
+struct PendingSessionTask(Option<tauri::async_runtime::JoinHandle<()>>);
+impl Drop for PendingSessionTask {
+    fn drop(&mut self) {
+        if let Some(task) = &self.0 {
+            task.abort();
+        }
+    }
 }
 
 impl Default for VstWorkerSupervisor {
@@ -118,23 +156,38 @@ impl Default for VstWorkerSupervisor {
 
 impl VstWorkerSupervisor {
     pub fn new() -> Self {
+        let inner = Arc::new(SupervisorInner {
+            lifecycle: tokio::sync::Mutex::new(()),
+            lifecycle_generation: AtomicU64::new(0),
+            status: Mutex::new(SupervisorStatus::default()),
+            session: Mutex::new(None),
+            midi_route: ArcSwapOption::empty(),
+            midi_drops: AtomicU32::new(0),
+            request_sequence: AtomicU64::new(1),
+            midi_sequence: AtomicU64::new(1),
+            state_generation: AtomicU64::new(0),
+            emergency_reset_pending: AtomicBool::new(false),
+            emergency_reset_notify: tokio::sync::Notify::new(),
+            last_load: Mutex::new(None),
+            restart_history: Mutex::new(VecDeque::new()),
+        });
         Self {
-            inner: Arc::new(SupervisorInner {
-                status: Mutex::new(SupervisorStatus::default()),
-                session: Mutex::new(None),
-                request_sequence: AtomicU64::new(1),
-                midi_sequence: AtomicU64::new(1),
-                state_generation: AtomicU64::new(0),
-                emergency_reset_pending: AtomicBool::new(false),
-                emergency_reset_notify: tokio::sync::Notify::new(),
-                last_load: Mutex::new(None),
-                restart_history: Mutex::new(VecDeque::new()),
-            }),
+            inner: inner.clone(),
+            _lifetime: Some(Arc::new(SupervisorLifetime { inner })),
+        }
+    }
+
+    fn task_context(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            _lifetime: None,
         }
     }
 
     pub fn snapshot(&self) -> SupervisorSnapshot {
-        self.inner.status.lock().snapshot.clone()
+        let mut snapshot = self.inner.status.lock().snapshot.clone();
+        snapshot.midi_drops = self.inner.midi_drops.load(Ordering::Relaxed);
+        snapshot
     }
 
     pub fn is_ready(&self) -> bool {
@@ -146,8 +199,26 @@ impl VstWorkerSupervisor {
         settings: AudioSettings,
         class_uid: Option<String>,
     ) -> Result<WorkerAudioStatus, String> {
+        let generation = self
+            .inner
+            .lifecycle_generation
+            .fetch_add(1, Ordering::AcqRel)
+            .wrapping_add(1);
+        self.start_generation(settings, class_uid, generation).await
+    }
+
+    async fn start_generation(
+        &self,
+        settings: AudioSettings,
+        class_uid: Option<String>,
+        generation: u64,
+    ) -> Result<WorkerAudioStatus, String> {
+        let _lifecycle = self.inner.lifecycle.lock().await;
+        if generation != self.inner.lifecycle_generation.load(Ordering::Acquire) {
+            return Err("Worker start superseded by another lifecycle request".into());
+        }
         *self.inner.last_load.lock() = Some((settings.clone(), class_uid.clone()));
-        self.stop().await.ok();
+        self.stop_session().await.ok();
         self.set_state(VstWorkerState::Starting);
 
         let credentials = SessionCredentials::new();
@@ -166,8 +237,9 @@ impl VstWorkerSupervisor {
         let (midi_tx, midi_rx) = mpsc::channel(MIDI_PIPE_CAPACITY);
         let (connected_tx, connected_rx) = oneshot::channel();
         let inner = self.inner.clone();
-        tauri::async_runtime::spawn(async move {
+        let mut pending_task = PendingSessionTask(Some(tauri::async_runtime::spawn(async move {
             run_session(SessionRuntime {
+                generation,
                 credentials,
                 control: control_server,
                 midi_pipe: midi_server,
@@ -178,30 +250,26 @@ impl VstWorkerSupervisor {
                 inner,
             })
             .await;
-        });
+        })));
 
-        match tokio::time::timeout(CONNECT_TIMEOUT, connected_rx).await {
-            Ok(Ok(Ok(()))) => {}
-            Ok(Ok(Err(error))) => {
-                self.fault(error.clone());
-                return Err(error);
-            }
-            Ok(Err(_)) => {
-                let error = "worker connection task exited before authentication".to_string();
-                self.fault(error.clone());
-                return Err(error);
-            }
-            Err(_) => {
-                let error = "timed out authenticating VST worker".to_string();
-                self.fault(error.clone());
-                return Err(error);
-            }
+        let connected = match tokio::time::timeout(CONNECT_TIMEOUT, connected_rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err("worker connection task exited before authentication".to_string()),
+            Err(_) => Err("timed out authenticating VST worker".to_string()),
+        };
+        if let Err(error) = connected {
+            let task = pending_task.0.take().expect("pending session task");
+            task.abort();
+            let _ = task.await;
+            self.fault(error.clone());
+            return Err(error);
         }
 
         *self.inner.session.lock() = Some(ActiveSession {
+            task: pending_task.0.take().expect("connected session task"),
             commands: command_tx,
-            midi: midi_tx,
         });
+        self.inner.midi_route.store(Some(Arc::new(midi_tx)));
         self.set_state(VstWorkerState::Loading);
 
         let request_id = self.next_request_id();
@@ -219,6 +287,7 @@ impl VstWorkerSupervisor {
         {
             Ok(response) => response,
             Err(error) => {
+                self.stop_session().await.ok();
                 self.fault(error.clone());
                 return Err(error);
             }
@@ -231,11 +300,13 @@ impl VstWorkerSupervisor {
                 Ok(status)
             }
             ControlMessage::Error { message, .. } => {
+                self.stop_session().await.ok();
                 self.fault(message.clone());
                 Err(message)
             }
             other => {
                 let error = format!("unexpected worker load response: {other:?}");
+                self.stop_session().await.ok();
                 self.fault(error.clone());
                 Err(error)
             }
@@ -243,39 +314,66 @@ impl VstWorkerSupervisor {
     }
 
     pub async fn stop(&self) -> Result<(), String> {
-        let state = self.snapshot().state;
-        if matches!(state, VstWorkerState::Disabled) && self.inner.session.lock().is_none() {
-            return Ok(());
-        }
+        self.inner
+            .lifecycle_generation
+            .fetch_add(1, Ordering::AcqRel);
+        self.inner.midi_route.store(None);
+        let _lifecycle = self.inner.lifecycle.lock().await;
+        self.stop_session().await
+    }
+
+    async fn stop_session(&self) -> Result<(), String> {
+        self.inner.midi_route.store(None);
         self.set_state(VstWorkerState::Stopping);
         let session = self.inner.session.lock().take();
-        if let Some(session) = session {
+        let mut result = Ok(());
+        if let Some(mut session) = session {
             let request_id = self.next_request_id();
             let (response_tx, response_rx) = oneshot::channel();
-            session
-                .commands
-                .send(SessionCommand::Request {
-                    message: ControlMessage::Stop { request_id },
-                    response: response_tx,
-                })
-                .await
-                .map_err(|_| "worker control channel is closed".to_string())?;
-            match tokio::time::timeout(COMMAND_TIMEOUT, response_rx).await {
-                Ok(Ok(Ok(ControlMessage::Stopped { .. }))) => {}
-                Ok(Ok(Ok(other))) => {
-                    background_log(
-                        "warn",
-                        format!("Unexpected worker stop response: {other:?}"),
-                    );
+            result = match tokio::time::timeout(COMMAND_TIMEOUT, async {
+                session
+                    .commands
+                    .send(SessionCommand::Request {
+                        message: ControlMessage::Stop { request_id },
+                        response: response_tx,
+                    })
+                    .await
+                    .map_err(|_| "worker control channel is closed".to_string())?;
+                match response_rx.await {
+                    Ok(Ok(ControlMessage::Stopped { .. })) => Ok(()),
+                    Ok(Ok(other)) => Err(format!("Unexpected worker stop response: {other:?}")),
+                    Ok(Err(error)) => Err(error),
+                    Err(_) => Err("worker stop response channel closed".into()),
                 }
-                Ok(Ok(Err(error))) => return Err(error),
-                Ok(Err(_)) => return Err("worker stop response channel closed".into()),
-                Err(_) => return Err("worker did not stop within 10 seconds".into()),
+            })
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => Err("worker did not stop within 10 seconds".into()),
+            };
+            // Never leave the session alive when Stop failed or its reply was lost.
+            if result.is_err() || session.commands.try_send(SessionCommand::Shutdown).is_err() {
+                session.task.abort();
             }
-            let _ = session.commands.send(SessionCommand::Shutdown).await;
+            match tokio::time::timeout(COMMAND_TIMEOUT, &mut session.task).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) if result.is_ok() => {
+                    result = Err(format!("worker session join failed: {error}"))
+                }
+                Ok(Err(_)) => {}
+                Err(_) => {
+                    session.task.abort();
+                    let _ = (&mut session.task).await;
+                    result = Err("worker session did not terminate within 10 seconds".into());
+                }
+            }
         }
-        self.set_state(VstWorkerState::Disabled);
-        Ok(())
+        self.set_state(if result.is_ok() {
+            VstWorkerState::Disabled
+        } else {
+            VstWorkerState::Faulted
+        });
+        result
     }
 
     pub fn try_send_midi(&self, bytes: &[u8]) -> bool {
@@ -289,13 +387,17 @@ impl VstWorkerSupervisor {
         };
         let sent = self
             .inner
-            .session
-            .lock()
+            .midi_route
+            .load()
             .as_ref()
-            .is_some_and(|session| session.midi.try_send(frame).is_ok());
+            .is_some_and(|sender| sender.try_send(frame).is_ok());
         if !sent {
-            let mut guard = self.inner.status.lock();
-            guard.snapshot.midi_drops = guard.snapshot.midi_drops.saturating_add(1);
+            let _ =
+                self.inner
+                    .midi_drops
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                        Some(value.saturating_add(1))
+                    });
         }
         sent
     }
@@ -343,7 +445,7 @@ impl VstWorkerSupervisor {
             .state_generation
             .fetch_add(1, Ordering::AcqRel)
             .wrapping_add(1);
-        let supervisor = self.clone();
+        let supervisor = self.task_context();
         tauri::async_runtime::spawn(async move {
             tokio::time::sleep(STATE_AUTOSAVE_DEBOUNCE).await;
             if supervisor.inner.state_generation.load(Ordering::Acquire) != generation
@@ -465,7 +567,10 @@ impl VstWorkerSupervisor {
         guard.snapshot.last_exit = Some(error);
     }
 
-    fn schedule_restart_after_fault(&self) {
+    fn schedule_restart_after_fault(&self, generation: u64) {
+        if generation != self.inner.lifecycle_generation.load(Ordering::Acquire) {
+            return;
+        }
         let now = Instant::now();
         let allowed = {
             let mut history = self.inner.restart_history.lock();
@@ -504,11 +609,21 @@ impl VstWorkerSupervisor {
                 ),
             );
         }
-        let supervisor = self.clone();
+        let supervisor = self.task_context();
         tauri::async_runtime::spawn(async move {
             tokio::time::sleep(Duration::from_millis(100)).await;
-            if let Err(error) = supervisor.start(settings, class_uid).await {
-                supervisor.fault(format!("VST worker restart failed: {error}"));
+            if let Err(error) = supervisor
+                .start_generation(settings, class_uid, generation)
+                .await
+            {
+                if generation
+                    == supervisor
+                        .inner
+                        .lifecycle_generation
+                        .load(Ordering::Acquire)
+                {
+                    supervisor.fault(format!("VST worker restart failed: {error}"));
+                }
             }
         });
     }
@@ -623,6 +738,8 @@ unsafe impl Send for WorkerProcess {}
 
 impl Drop for WorkerProcess {
     fn drop(&mut self) {
+        // Cancellation must also reap the child if Windows job assignment failed.
+        terminate_child(&mut self.child);
         if let Some(job) = self.job.take() {
             // SAFETY: this process owns the job handle returned by CreateJobObjectW.
             let _ = unsafe { windows::Win32::Foundation::CloseHandle(job) };
@@ -805,7 +922,27 @@ fn message_request_id(message: &ControlMessage) -> Option<u64> {
     }
 }
 
+struct SessionIoTasks {
+    midi: tauri::async_runtime::JoinHandle<()>,
+    control: tauri::async_runtime::JoinHandle<()>,
+}
+impl SessionIoTasks {
+    async fn stop(&mut self) {
+        self.midi.abort();
+        self.control.abort();
+        let _ = (&mut self.midi).await;
+        let _ = (&mut self.control).await;
+    }
+}
+impl Drop for SessionIoTasks {
+    fn drop(&mut self) {
+        self.midi.abort();
+        self.control.abort();
+    }
+}
+
 struct SessionRuntime {
+    generation: u64,
     credentials: SessionCredentials,
     control: NamedPipeServer,
     midi_pipe: NamedPipeServer,
@@ -818,6 +955,7 @@ struct SessionRuntime {
 
 async fn run_session(runtime: SessionRuntime) {
     let SessionRuntime {
+        generation,
         credentials,
         mut control,
         midi_pipe,
@@ -852,10 +990,14 @@ async fn run_session(runtime: SessionRuntime) {
         }
     }
 
-    tauri::async_runtime::spawn(midi_writer(midi_pipe, midi, inner.clone()));
+    let midi_task = tauri::async_runtime::spawn(midi_writer(midi_pipe, midi, inner.clone()));
     let (reader, mut writer): (ReadHalf<_>, WriteHalf<_>) = tokio::io::split(control);
     let (event_tx, mut event_rx) = mpsc::channel(64);
-    tauri::async_runtime::spawn(control_reader(reader, event_tx));
+    let control_task = tauri::async_runtime::spawn(control_reader(reader, event_tx));
+    let mut io_tasks = SessionIoTasks {
+        midi: midi_task,
+        control: control_task,
+    };
 
     let mut pending: HashMap<u64, oneshot::Sender<Result<ControlMessage, String>>> = HashMap::new();
     let mut poll = tokio::time::interval(PROCESS_POLL_PERIOD);
@@ -938,22 +1080,29 @@ async fn run_session(runtime: SessionRuntime) {
         }
     }
 
+    io_tasks.stop().await;
+    terminate_child(&mut child.child);
     if let Some(error) = terminal_error {
+        // Finish state cleanup before waking failed requests, whose callers may
+        // immediately stop/restart the supervisor.
+        if generation == inner.lifecycle_generation.load(Ordering::Acquire) {
+            inner.midi_route.store(None);
+            *inner.session.lock() = None;
+            let intentional_stop = matches!(
+                inner.status.lock().snapshot.state,
+                VstWorkerState::Stopping | VstWorkerState::Disabled
+            );
+            if !intentional_stop {
+                set_session_fault(&inner, error.clone());
+                VstWorkerSupervisor {
+                    inner: inner.clone(),
+                    _lifetime: None,
+                }
+                .schedule_restart_after_fault(generation);
+            }
+        }
         for (_, response) in pending.drain() {
             let _ = response.send(Err(error.clone()));
-        }
-        terminate_child(&mut child.child);
-        *inner.session.lock() = None;
-        let intentional_stop = matches!(
-            inner.status.lock().snapshot.state,
-            VstWorkerState::Stopping | VstWorkerState::Disabled
-        );
-        if !intentional_stop {
-            set_session_fault(&inner, error);
-            VstWorkerSupervisor {
-                inner: inner.clone(),
-            }
-            .schedule_restart_after_fault();
         }
     }
 }
@@ -1016,6 +1165,131 @@ mod tests {
         assert_ne!(first.control_pipe, second.control_pipe);
         assert!(first.control_pipe.starts_with(r"\\.\pipe\oscmidi-"));
         assert!(first.token.len() >= 64);
+    }
+
+    #[tokio::test]
+    async fn stop_invalidates_a_delayed_automatic_restart() {
+        let supervisor = VstWorkerSupervisor::new();
+        *supervisor.inner.last_load.lock() = Some((AudioSettings::default(), None));
+        supervisor.schedule_restart_after_fault(0);
+        supervisor.stop().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(supervisor.snapshot().state, VstWorkerState::Disabled);
+        assert!(supervisor.inner.session.lock().is_none());
+        assert!(supervisor.inner.midi_route.load().is_none());
+    }
+
+    #[tokio::test]
+    async fn only_the_last_public_owner_cancels_the_worker_session() {
+        struct OnDrop(Option<oneshot::Sender<()>>);
+        impl Drop for OnDrop {
+            fn drop(&mut self) {
+                let _ = self.0.take().unwrap().send(());
+            }
+        }
+        let supervisor = VstWorkerSupervisor::new();
+        let survivor = supervisor.clone();
+        let internal = supervisor.task_context();
+        let (commands, _rx) = mpsc::channel(1);
+        let (started_tx, started_rx) = oneshot::channel();
+        let (ended_tx, mut ended_rx) = oneshot::channel();
+        let task = tauri::async_runtime::spawn(async move {
+            let _on_drop = OnDrop(Some(ended_tx));
+            started_tx.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        *supervisor.inner.session.lock() = Some(ActiveSession { commands, task });
+        started_rx.await.unwrap();
+        drop(supervisor);
+        assert!(matches!(
+            ended_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        drop(survivor);
+        tokio::time::timeout(Duration::from_secs(2), ended_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(internal.inner.session.lock().is_none());
+    }
+
+    #[tokio::test]
+    async fn cancelling_stop_cancels_the_owned_session_task() {
+        let supervisor = VstWorkerSupervisor::new();
+        let (commands, mut requests) = mpsc::channel(1);
+        let (received_tx, received_rx) = oneshot::channel();
+        let (ended_tx, ended_rx) = oneshot::channel::<()>();
+        let task = tauri::async_runtime::spawn(async move {
+            let _ended = ended_tx;
+            let _request = requests.recv().await.unwrap();
+            received_tx.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        *supervisor.inner.session.lock() = Some(ActiveSession { commands, task });
+        let stopping = supervisor.clone();
+        let stop = tokio::spawn(async move { stopping.stop().await });
+        tokio::time::timeout(Duration::from_secs(2), received_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        stop.abort();
+        let _ = stop.await;
+        assert!(tokio::time::timeout(Duration::from_secs(2), ended_rx)
+            .await
+            .expect("cancelled Stop detached its worker session")
+            .is_err());
+        assert!(supervisor.inner.session.lock().is_none());
+        assert!(supervisor.inner.midi_route.load().is_none());
+    }
+
+    #[tokio::test]
+    async fn stop_waits_for_session_completion_after_audio_acknowledgement() {
+        let supervisor = VstWorkerSupervisor::new();
+        let (tx, mut rx) = mpsc::channel(2);
+        let release = Arc::new(tokio::sync::Notify::new());
+        let task_release = release.clone();
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let task = tauri::async_runtime::spawn(async move {
+            if let Some(SessionCommand::Request {
+                message: ControlMessage::Stop { request_id },
+                response,
+            }) = rx.recv().await
+            {
+                response
+                    .send(Ok(ControlMessage::Stopped { request_id }))
+                    .unwrap();
+            } else {
+                panic!("expected Stop request");
+            }
+            assert!(matches!(rx.recv().await, Some(SessionCommand::Shutdown)));
+            ack_tx.send(()).unwrap();
+            task_release.notified().await;
+        });
+        *supervisor.inner.session.lock() = Some(ActiveSession { commands: tx, task });
+        let stopping = supervisor.clone();
+        let mut stop = tokio::spawn(async move { stopping.stop().await });
+        ack_rx.await.unwrap();
+        assert!(tokio::time::timeout(Duration::from_millis(20), &mut stop)
+            .await
+            .is_err());
+        release.notify_one();
+        stop.await.unwrap().unwrap();
+        assert_eq!(supervisor.snapshot().state, VstWorkerState::Disabled);
+    }
+
+    #[test]
+    fn midi_submission_does_not_wait_for_control_or_status_locks() {
+        let supervisor = VstWorkerSupervisor::new();
+        let (tx, mut rx) = mpsc::channel(1);
+        supervisor.inner.midi_route.store(Some(Arc::new(tx)));
+        let _session = supervisor.inner.session.lock();
+        let status = supervisor.inner.status.lock();
+        assert!(supervisor.try_send_midi(&[0x90, 60, 100]));
+        assert!(!supervisor.try_send_midi(&[0x80, 60, 0]));
+        assert_eq!(supervisor.inner.midi_drops.load(Ordering::Relaxed), 1);
+        assert_eq!(rx.try_recv().unwrap().bytes(), &[0x90, 60, 100]);
+        drop(status);
+        assert_eq!(supervisor.snapshot().midi_drops, 1);
     }
 
     #[test]
