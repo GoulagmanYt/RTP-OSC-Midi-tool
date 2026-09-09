@@ -76,15 +76,41 @@ impl RtpMidiSession {
         let cstr_name = CString::new(name)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
 
+        // Keep the control socket bound while reserving its adjacent MIDI port.
+        // Port zero requests an ephemeral pair, not an unrelated MIDI port 1.
+        let mut attempts = 0;
+        let (control_port, midi_port, bound_port) = loop {
+            attempts += 1;
+            let control = ControlPort::bind(port, cstr_name.to_owned(), U32::new(ssrc)).await?;
+            let bound = control.socket().local_addr()?.port();
+            let midi = if let Some(midi_port) = bound.checked_add(1) {
+                MidiPort::bind(midi_port, cstr_name.to_owned(), U32::new(ssrc)).await
+            } else {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::AddrInUse,
+                    "No adjacent MIDI port",
+                ))
+            };
+            match midi {
+                Ok(midi) => break (Arc::new(control), Arc::new(midi), bound),
+                Err(error)
+                    if port == 0
+                        && attempts < 32
+                        && error.kind() == std::io::ErrorKind::AddrInUse =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        #[cfg(not(feature = "mdns"))]
+        let _ = bound_port;
+
         let mut context = RtpMidiSession {
             participants: Arc::new(Mutex::new(HashMap::new())),
             pending_invitations: Arc::new(Mutex::new(HashMap::new())),
-            control_port: Arc::new(
-                ControlPort::bind(port, cstr_name.to_owned(), U32::new(ssrc)).await?,
-            ),
-            midi_port: Arc::new(
-                MidiPort::bind(port + 1, cstr_name.to_owned(), U32::new(ssrc)).await?,
-            ),
+            control_port,
+            midi_port,
             host_syncer: Arc::new(HostSyncer::new()),
             listeners: Arc::new(Mutex::new(EventListeners::new())),
             cancel_token: Arc::new(CancellationToken::new()),
@@ -93,7 +119,8 @@ impl RtpMidiSession {
             lifetime: None,
             stop_lock: Arc::new(Mutex::new(())),
             #[cfg(feature = "mdns")]
-            mdns: advertise_mdns(name, port).map_err(|e| std::io::Error::other(e.to_string()))?,
+            mdns: advertise_mdns(name, bound_port)
+                .map_err(|e| std::io::Error::other(e.to_string()))?,
         };
         context.lifetime = Some(Arc::new(SessionLifetime {
             cancel_token: context.cancel_token.clone(),
@@ -103,7 +130,7 @@ impl RtpMidiSession {
         Ok(context)
     }
 
-    #[instrument(skip(port),fields(control_port = %port, midi_port = %port + 1))]
+    #[instrument(skip(port),fields(requested_control_port = %port))]
     pub async fn start(
         port: u16,
         name: &str,
@@ -325,6 +352,33 @@ pub fn current_timestamp_u32(start_time: Instant) -> U32 {
 #[cfg(test)]
 mod shutdown_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn ephemeral_sessions_hold_distinct_adjacent_port_pairs() {
+        let first = RtpMidiSession::bind(0, "Ephemeral A", 1).await.unwrap();
+        let second = RtpMidiSession::bind(0, "Ephemeral B", 2).await.unwrap();
+        let first_control = first.control_port.socket().local_addr().unwrap().port();
+        let first_midi = first.midi_port.socket().local_addr().unwrap().port();
+        let second_control = second.control_port.socket().local_addr().unwrap().port();
+        let second_midi = second.midi_port.socket().local_addr().unwrap().port();
+        assert_ne!(first_control, 0);
+        assert_eq!(first_midi, first_control + 1);
+        assert_eq!(second_midi, second_control + 1);
+        for port in [first_control, first_midi] {
+            assert!(![second_control, second_midi].contains(&port));
+            assert!(std::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, port)).is_err());
+        }
+        drop(first);
+        for port in [first_control, first_midi] {
+            let released =
+                std::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, port)).unwrap();
+            drop(released);
+        }
+        assert!(
+            matches!(RtpMidiSession::start(u16::MAX, "Invalid", 3, InviteResponder::Accept).await,
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidInput)
+        );
+    }
 
     #[tokio::test]
     async fn concurrent_stops_wait_for_tasks_and_clear_pending_invitations() {

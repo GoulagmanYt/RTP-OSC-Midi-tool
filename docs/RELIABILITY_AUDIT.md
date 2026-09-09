@@ -35,6 +35,10 @@ was performed.
    allocation and mutex on reception. One listener guard covers each packet;
    peer-state locks are released before callbacks. Reconnecting the same SSRC
    resets sequence history, verified through UDP injection.
+   Port zero now reserves an actual adjacent ephemeral control/MIDI pair, with
+   bounded retries on adjacent-port contention, and advertises its bound control
+   port. Invalid port 65535 returns an error without trace-field overflow. The
+   logging example now handles Ctrl+C on both Windows and Unix.
 6. **Regression harness:** malformed byte campaigns, real UDP session injection,
    sequence gaps/rollover/late packets, timestamp vectors, real-time interleaving,
    10,000 matched note lifecycles through bounded queues, output overflow,
@@ -115,7 +119,9 @@ voice messages use the synchronized scheduler.
 The 10,000-note regression exercises the actual bounded enqueue/fanout functions
 and destination note tracking in a headless harness. It does not replace a
 hardware/driver test. The existing ASIO/VST tests requiring installed instruments
-remain opt-in. No hard sub-millisecond or zero-network-loss claim follows from
+remain opt-in. Three production-worker runs with the requested Splice/Voicemeeter
+rig completed 10,000 notes each; see [measurements and reproduction](AUDIO_RELIABILITY_RESULTS.md).
+No hard sub-millisecond or zero-network-loss claim follows from
 these results: driver timing, Windows wake-up jitter, UDP delivery, and physical
 disconnect recovery require measurements on the intended rig.
 
@@ -168,6 +174,10 @@ failure timeout; failed resets are retried before new notes are sent. SysEx up
 to 64 KiB is split into 1,024-byte RTP sublists and reassembled by the receiver.
 The vendor sender snapshots only peer addresses in fixed storage, avoiding
 copies of participant names and SysEx buffers for every outgoing packet.
+The packet encoder now reuses a preallocated 1,214-byte buffer under the existing
+send-order mutex. A 10,000-encode regression checks stable storage at maximum
+packet size and rejection before mutation for oversized batches. This removes
+the encoded-packet allocation; the async send-order and participant locks remain.
 
 A two-session regression verifies MIDI forwarding, 2,700-byte segmented SysEx,
 and remote panic. Queue tests cover echo prevention, critical overflow and a
