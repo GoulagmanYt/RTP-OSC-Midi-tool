@@ -112,12 +112,12 @@ protocol forms and unproven absolute timing or loss guarantees.
 - Pending invitations expire after 30 seconds and are capped at 256; connected
   peers are capped at 128. Both session roles expire after 60 seconds without a
   valid synchronization packet, checked on the 10-second maintenance cycle.
-- Journals now validate container lengths, channel ordering, and channel
-  chapter boundaries. A covering journal containing Chapters N/W/T/A can repair
-  missing NoteOffs, recommended missing NoteOns, pitch wheel and pressure state;
-  known active notes are not retriggered. Stale X-marked poly pressure is skipped. Ambiguous sustain is released before repaired NoteOffs. Other
-  chapter combinations and insufficient checkpoint coverage retain the reset
-  fallback. System and parameter journal internals are not yet fully decoded.
+- Journals validate container lengths, channel order, chapter boundaries and
+  parameter/system field layouts before dispatch. Covering journals containing
+  Chapters P/C/W/N/E/T/A recover programs/banks, ordinary controller state,
+  pitch, notes and pressure. Ambiguous reference counts, missing controller
+  values, parameter context and unsupported recovery forms retain the reset
+  fallback. A parsed journal is not necessarily a recoverable journal.
 - A proven forward sequence gap without supported recovery triggers a reset;
   late/duplicate packets are discarded. There is no added sequence
   reorder delay. This preserves the latency policy at the cost of interrupted
@@ -150,7 +150,7 @@ npm run build
 Frontend validation used the installed Node 26 runtime; the machine's default
 Node 20 does not satisfy the existing Vite/jsdom dependency requirements.
 
-The final Windows Rust validation passed 147 application tests and 55 vendored
+The final Windows Rust validation passed 149 application tests and 76 vendored
 RTP tests. Three opt-in third-party instrument tests remain ignored. Application
 and RTP Clippy checks passed with warnings denied, as did formatting checks.
 The rebuilt production worker and diagnostic then passed a fresh 10,000-note
@@ -159,8 +159,11 @@ Splice/Voicemeeter run; its raw JSON is tracked in `docs/measurements/`.
 ## Explicit limits
 
 This is a reliability pass over implemented routes, not a certification of full
-RFC 6295/OSC support. Recovery currently supports Chapters N/W/T/A. Program, controller, parameter,
-additional-note and system recovery chapters still use the conservative reset fallback. Complete RTP SysEx is forwarded to local MIDI
+RFC 6295/OSC support. Recovery supports Chapters P/C/W/N/E/T/A with the bounded
+policies below. Parameter-system commands (RPN/NRPN), enhanced controller logs
+and system chapters still require the reset fallback. Their structural validation
+prevents malformed lengths and fields from reaching dispatch; it does not restore
+their musical state. Complete RTP SysEx is forwarded to local MIDI
 through the synchronized scheduler. A new borrowed timestamped event carries the
 SSRC, RTP timestamp and monotonic deadline while retaining the legacy callback.
 Reassembled SysEx uses the final segment deadline; this whole-message MIDI API
@@ -355,3 +358,55 @@ receive-slot storage. These are bounded-path tests, not proof that driver, UI,
 management operations or every third-party callback is allocation-free. Parser
 errors on the measured path use unboxed error kinds; the legacy public control
 parser preserves its anyhow error API through a wrapper.
+
+
+## Stateful journal recovery verification (2026-09-10)
+
+The receive owner now keeps controller values and modulo-64 count/toggle history,
+program/bank selection, per-note reference counts and last velocities. This fixed
+storage is reserved for all 128 peer slots before reception. Peer replacement and
+destination reset discard this knowledge. Channel history has fixed capacity in
+each slot, in addition to the fragment reservation above.
+
+Chapter P restores the bank preceding a missing program change; Chapter C then
+restores subsequent controller state. Already-known programs are not replayed.
+MSB/LSB controller ordering preserves explicit 14-bit values and the implicit LSB
+reset on a new MSB. A missing off/on pedal transition releases old sustained
+voices even when the final pedal value is unchanged. Count-only logs do not
+invent values for volume or mono-channel count; unresolved values request reset.
+Parameter selectors/data entry are excluded from Chapter C recovery because
+replaying them without transaction context can alter the wrong parameter.
+
+Chapter E supplies exact reference counts up to 126 and Note-Off velocity. The
+receiver tracks stacked Note-Ons, so one Note-Off cannot erase knowledge of
+another active voice at the same pitch. Count 127 encodes an ambiguous lower
+bound and requests reset. Plans have a fixed 8,304-message budget; excess work or
+an unsupported form rolls back all tentative history changes before notification.
+Sustain is released before repaired Note-Offs and restored when its prior value
+is known. Queue capacity still applies when the resulting messages are routed.
+
+The first received packet's journal is processed as recovery. System Reset and
+GM/DLS Reset State SysEx clear note/controller history in command order, including
+when a new Note-On follows the reset in the same datagram. A UDP regression checks
+that this note remains known and is not spuriously retriggered by the next journal.
+
+Structural validation covers Chapter M's full/compressed parameter logs and
+optional fields, plus system D/V/Q/F/X field lengths, delimiters and partial-frame
+layout. Reserved LEGAL fields remain opaque and are skipped by their declared
+length, as the RFC requires. Unsupported semantic recovery is rejected as a whole;
+no partially interpreted parameter or system commands are sent to destinations.
+
+A real loopback UDP regression sends 10,000 overlapping Note-Ons, deliberately
+omits 625 release packets, and repairs their missing releases with covering
+journals across sequence rollover. It verifies exactly 10,000 matched Note-Offs
+and zero remaining reference counts without a final panic masking the result.
+This validates software note accounting, not a synthesizer's physical voice state.
+Additional tests cover transactional rollback, first-packet recovery, malformed
+system/parameter fields and zero allocations across 10,000 recovery plans.
+
+Final checks for this change: 149 application tests and 76 vendor tests passed;
+three instrument-specific opt-in tests remain ignored. Both Clippy suites passed
+with warnings denied. Diagnostic binaries compile and formatting checks pass.
+The existing tracked Splice/Voicemeeter measurement predates these network and
+buffer-pool changes; its provenance remains in AUDIO_RELIABILITY_RESULTS.md.
+These journal tests do not imply a new physical audio latency measurement.

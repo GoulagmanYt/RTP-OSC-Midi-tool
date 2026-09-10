@@ -5,6 +5,7 @@ pub(super) struct ReceiveState {
     identity: Option<u64>,
     pub expected_sequence: Option<u16>,
     pub active_notes: [u128; 16],
+    pub channels: super::channel_state::ChannelHistory,
     generation: u64,
     pub sysex: SysExAssembly,
 }
@@ -15,6 +16,7 @@ impl ReceiveState {
             identity: None,
             expected_sequence: None,
             active_notes: [0; 16],
+            channels: super::channel_state::ChannelHistory::default(),
             generation: 0,
             sysex: SysExAssembly::new(),
         }
@@ -24,6 +26,7 @@ impl ReceiveState {
         self.identity = Some(identity);
         self.expected_sequence = None;
         self.active_notes.fill(0);
+        self.channels = super::channel_state::ChannelHistory::default();
         self.generation = generation;
         self.sysex.clear();
     }
@@ -64,6 +67,7 @@ impl ReceiveStates {
             state.reset(identity, generation);
         } else if state.generation != generation {
             state.active_notes.fill(0);
+            state.channels = super::channel_state::ChannelHistory::default();
             state.sysex.clear();
             state.generation = generation;
         }

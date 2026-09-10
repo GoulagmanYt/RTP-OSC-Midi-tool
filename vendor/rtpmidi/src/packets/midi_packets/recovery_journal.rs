@@ -28,7 +28,7 @@ impl<'a> Journal<'a> {
         let head = take(&mut remaining, 3)?;
         if head[0] & 0x40 != 0 {
             let size = length(remaining, 2)?;
-            take(&mut remaining, size)?;
+            super::system_journal::validate(take(&mut remaining, size)?)?;
         }
         let channels = if head[0] & 0x20 != 0 {
             (head[0] & 15) + 1
@@ -44,7 +44,7 @@ impl<'a> Journal<'a> {
                 return Err(invalid());
             }
             previous = Some(number);
-            validate_chapters(channel[2], &channel[3..])?;
+            validate_chapters(channel[2], &channel[3..], channel[0] & 4 != 0)?;
         }
         if !remaining.is_empty() {
             return Err(invalid());
@@ -56,7 +56,7 @@ impl<'a> Journal<'a> {
         u16::from_be_bytes([self.bytes[1], self.bytes[2]])
     }
 
-    /// Notes, pitch wheel and pressure state are recoverable; other forms retain
+    /// Program, controller, note and pressure state are recoverable; other forms retain
     /// the caller's conservative reset policy. Parsing never implies recovery.
     pub(crate) fn state_channels(&self) -> Option<impl Iterator<Item = (u8, u8, &'a [u8])>> {
         if self.bytes[0] & 0x50 != 0 {
@@ -65,8 +65,23 @@ impl<'a> Journal<'a> {
         let mut remaining = &self.bytes[3..];
         while !remaining.is_empty() {
             let size = length(remaining, 3).ok()?;
-            if remaining[0] & 4 != 0 || remaining[2] & !0x1B != 0 {
+            if remaining[0] & 4 != 0 || remaining[2] & !0xDF != 0 {
                 return None;
+            }
+            let mut chapters = &remaining[3..size];
+            if remaining[2] & 128 != 0 {
+                chapters = &chapters[3..];
+            }
+            if remaining[2] & 64 != 0 {
+                let logs = usize::from(chapters[0] & 127) + 1;
+                // Parameter-system commands need Chapter M context. Do not
+                // apply a partial plan that could alter the wrong RPN/NRPN.
+                if chapters[1..1 + logs * 2]
+                    .chunks_exact(2)
+                    .any(|log| matches!(log[0] & 127, 6 | 38 | 96..=101))
+                {
+                    return None;
+                }
             }
             remaining = &remaining[size..];
         }
@@ -102,7 +117,7 @@ pub(crate) fn note_layout(bytes: &[u8]) -> Result<(usize, usize, usize)> {
     Ok((count, low, off))
 }
 
-fn validate_chapters(toc: u8, mut bytes: &[u8]) -> Result<()> {
+fn validate_chapters(toc: u8, mut bytes: &[u8], enhanced: bool) -> Result<()> {
     for bit in [128, 64, 32, 16, 8, 4, 2, 1] {
         if toc & bit == 0 {
             continue;
@@ -146,6 +161,61 @@ fn validate_chapters(toc: u8, mut bytes: &[u8]) -> Result<()> {
             _ => unreachable!(),
         };
         let chapter = take(&mut bytes, size)?;
+        if bit == 32 {
+            super::parameter_journal::validate(chapter)?;
+        }
+        if bit == 128 && chapter[1] & 128 == 0 && (chapter[1] != 0 || chapter[2] != 0) {
+            return Err(invalid());
+        }
+        if bit == 64 && !enhanced {
+            let mut seen = 0u128;
+            let mut previous = None;
+            let mut last_tool = 0;
+            let mut value = None;
+            for log in chapter[1..].chunks_exact(2) {
+                let number = log[0] & 127;
+                let tool = match log[1] & 0xC0 {
+                    0xC0 => 0,
+                    0x80 => 2,
+                    _ => 1,
+                };
+                if previous == Some(number) {
+                    if tool <= last_tool {
+                        return Err(invalid());
+                    }
+                } else {
+                    if seen & (1u128 << number) != 0 {
+                        return Err(invalid());
+                    }
+                    seen |= 1u128 << number;
+                    value = None;
+                }
+                if tool == 1 {
+                    value = Some(log[1] & 127);
+                }
+                if tool == 2 && value.is_some_and(|v| (v >= 64) != (log[1] & 1 != 0)) {
+                    return Err(invalid());
+                }
+                previous = Some(number);
+                last_tool = tool;
+            }
+        }
+        if bit == 4 {
+            let mut counts = 0u128;
+            let mut velocities = 0u128;
+            for log in chapter[1..].chunks_exact(2) {
+                let seen = if log[1] & 128 == 0 {
+                    &mut counts
+                } else {
+                    &mut velocities
+                };
+                let mask = 1u128 << (log[0] & 127);
+                if *seen & mask != 0 {
+                    return Err(invalid());
+                }
+                *seen |= mask;
+            }
+        }
         if bit == 1 {
             let mut seen = 0u128;
             for log in chapter[1..].chunks_exact(2) {
@@ -166,6 +236,45 @@ fn validate_chapters(toc: u8, mut bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn system_and_parameter_payload_validation_is_bounded_without_allocations() {
+        let mut storage = [0u8; 1026];
+        let allocations = crate::test_alloc::count_allocations(|| {
+            let mut seed = 0xCAFEBABEu32;
+            for size in 3..=1023 {
+                for mode in [0x40, 0x20] {
+                    for byte in &mut storage[3..3 + size] {
+                        seed ^= seed << 13;
+                        seed ^= seed >> 17;
+                        seed ^= seed << 5;
+                        *byte = seed as u8;
+                    }
+                    storage[..3].copy_from_slice(&[mode, 0, 0]);
+                    storage[3] = (storage[3] & 0xFC) | (size >> 8) as u8;
+                    storage[4] = size as u8;
+                    if mode == 0x20 {
+                        storage[5] = 32;
+                    }
+                    if let Ok(journal) = Journal::parse(&storage[..size + 3]) {
+                        assert!(journal.state_channels().is_none());
+                    }
+                }
+            }
+        });
+        assert_eq!(allocations, 0);
+    }
+
+    #[test]
+    fn controller_tools_must_be_ordered_unique_and_agree_on_final_state() {
+        let valid = [0x20, 0, 0, 0, 10, 64, 2, 64, 0xC3, 64, 127, 64, 0x83];
+        assert!(Journal::parse(&valid).is_ok());
+        for (index, byte) in [(8, 127), (12, 0x82), (10, 0xC3)] {
+            let mut invalid = valid;
+            invalid[index] = byte;
+            assert!(Journal::parse(&invalid).is_err());
+        }
+        assert!(Journal::parse(&[0x20, 0, 0, 0, 6, 128, 7, 1, 0]).is_err());
+    }
     #[test]
     fn rejects_truncation_bad_lengths_duplicate_channels_and_note_overlap() {
         // One channel, one NoteOn log, and a NoteOff bitmap for keys 56..63.

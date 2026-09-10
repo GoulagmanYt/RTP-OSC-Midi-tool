@@ -224,27 +224,35 @@ impl MidiPort {
                 } else {
                     None
                 };
-                let repairs = loss.as_mut().and_then(|loss| {
-                    if state.sysex.is_active() {
-                        return None;
-                    }
-                    let journal = crate::packets::midi_packets::recovery_journal::Journal::parse(
-                        midi_packet.journal_bytes()?,
-                    )
-                    .ok()?;
-                    let repairs = super::note_recovery::ChannelRepairs::build(
-                        journal,
-                        loss.expected_sequence,
-                        &mut state.active_notes,
-                    )?;
-                    loss.recovered = true;
-                    Some(repairs)
-                });
-                for event in midi_packet.commands() {
-                    if let RtpMidiMessage::MidiMessage(message) = event.command() {
-                        super::note_recovery::observe(&mut state.active_notes, *message);
-                    }
+                let initial_journal =
+                    state.expected_sequence.is_none() && midi_packet.journal_bytes().is_some();
+                let repairs = if loss.is_some() || initial_journal {
+                    (|| {
+                        if state.sysex.is_active() {
+                            return None;
+                        }
+                        let journal =
+                            crate::packets::midi_packets::recovery_journal::Journal::parse(
+                                midi_packet.journal_bytes()?,
+                            )
+                            .ok()?;
+                        let expected = loss
+                            .as_ref()
+                            .map_or(journal.checkpoint(), |loss| loss.expected_sequence);
+                        super::note_recovery::ChannelRepairs::build_with_state(
+                            journal,
+                            expected,
+                            &mut state.active_notes,
+                            &mut state.channels,
+                        )
+                    })()
+                } else {
+                    None
+                };
+                if let Some(loss) = loss.as_mut() {
+                    loss.recovered = repairs.is_some();
                 }
+                let initial_recovery_failed = initial_journal && repairs.is_none();
                 if loss.is_some() {
                     state.sysex.clear();
                 }
@@ -253,6 +261,9 @@ impl MidiPort {
                 // Snapshot sequence state before invoking user callbacks. One
                 // listener guard covers the whole packet, not each MIDI command.
                 let listeners = listeners.load();
+                if initial_recovery_failed {
+                    listeners.notify_stream_fault(ssrc);
+                }
                 if let Some(loss) = loss {
                     listeners.notify_packet_loss(loss);
                 }
@@ -275,6 +286,11 @@ impl MidiPort {
                         );
                     match command.command() {
                         RtpMidiMessage::MidiMessage(message) => {
+                            super::note_recovery::observe_received(
+                                &mut state.active_notes,
+                                &mut state.channels,
+                                *message,
+                            );
                             if command.command().status() < 0xF8
                                 || matches!(message, midi_types::MidiMessage::Reset)
                             {
@@ -284,14 +300,22 @@ impl MidiPort {
                         }
                         RtpMidiMessage::SysExSegment { head, data, tail } => {
                             match state.sysex.segment(*head, data, *tail, arrived) {
-                                Ok(Some(payload)) => listeners
-                                    .notify_sysex_packet(payload, timestamp, ssrc, deadline),
+                                Ok(Some(payload)) => {
+                                    if state.channels.observe_sysex(payload) {
+                                        state.active_notes.fill(0);
+                                    }
+                                    listeners
+                                        .notify_sysex_packet(payload, timestamp, ssrc, deadline);
+                                }
                                 Ok(None) => {}
                                 Err(()) => listeners.notify_stream_fault(ssrc),
                             }
                         }
                         RtpMidiMessage::SysEx(sysex) => {
                             state.sysex.clear();
+                            if state.channels.observe_sysex(sysex) {
+                                state.active_notes.fill(0);
+                            }
                             listeners.notify_sysex_packet(sysex, timestamp, ssrc, deadline);
                         }
                     }

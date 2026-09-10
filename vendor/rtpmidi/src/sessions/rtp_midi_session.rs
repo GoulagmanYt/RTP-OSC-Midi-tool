@@ -474,6 +474,9 @@ mod shutdown_tests {
             let commands = [MidiEvent::new(None, RtpMidiMessage::MidiMessage(note))];
             let first =
                 MidiPacket::new_as_bytes(U16::new(0), U32::new(0), U32::new(2), &commands, false);
+            let mut first = first.to_vec();
+            first[12] |= 0x40;
+            first.extend_from_slice(&[0x20, 0, 0, 0, 6, 128, 7, 0, 0]);
             let mut buffer = [0; MAX_MIDI_PACKET_SIZE];
             let mut receive_states = crate::sessions::receive_state::ReceiveStates::new();
             sender
@@ -491,6 +494,10 @@ mod shutdown_tests {
                     &mut receive_states,
                 )
                 .await;
+            assert_eq!(
+                rx.recv().await.unwrap(),
+                MidiMessage::ProgramChange(Channel::C1, 7.into())
+            );
             assert_eq!(rx.recv().await.unwrap(), note);
 
             let _held_management_lock = receiver.participants.lock().await;
@@ -533,6 +540,54 @@ mod shutdown_tests {
                     );
                 }
             }
+            // A Reset State SysEx followed by a note in the same command list
+            // must clear the old history before observing that new note.
+            let ordered = [
+                MidiEvent::new(None, RtpMidiMessage::SysEx(&[0x7E, 0x7F, 9, 1])),
+                MidiEvent::new(Some(0), RtpMidiMessage::MidiMessage(note)),
+            ];
+            let packet =
+                MidiPacket::new_as_bytes(U16::new(5), U32::new(0), U32::new(2), &ordered, false);
+            sender
+                .midi_port
+                .socket()
+                .send_to(&packet, destination)
+                .await
+                .unwrap();
+            receiver
+                .midi_port
+                .start(
+                    &receiver,
+                    receiver.listeners.clone(),
+                    &mut buffer,
+                    &mut receive_states,
+                )
+                .await;
+            assert_eq!(rx.try_recv().unwrap(), note);
+            let mut packet =
+                MidiPacket::new_as_bytes(U16::new(7), U32::new(0), U32::new(2), &[], false)
+                    .to_vec();
+            packet[12] |= 0x40;
+            packet.extend_from_slice(&[0x20, 0, 6, 0, 7, 8, 1, 0xF0, 61, 0xE4]);
+            sender
+                .midi_port
+                .socket()
+                .send_to(&packet, destination)
+                .await
+                .unwrap();
+            receiver
+                .midi_port
+                .start(
+                    &receiver,
+                    receiver.listeners.clone(),
+                    &mut buffer,
+                    &mut receive_states,
+                )
+                .await;
+            assert!(
+                rx.try_recv().is_err(),
+                "post-SysEx note was lost from receive history"
+            );
             let (fault_tx, mut fault_rx) = tokio::sync::mpsc::unbounded_channel();
             receiver
                 .add_listener(
@@ -565,6 +620,137 @@ mod shutdown_tests {
         })
         .await
         .expect("RTP recovery test timed out");
+    }
+
+    #[tokio::test]
+    async fn ten_thousand_overlapping_notes_match_releases_across_udp_journal_loss() {
+        use crate::packets::midi_packets::midi_packet::MidiPacket;
+        use crate::sessions::events::event_handling::{MidiMessageEvent, PacketLossEvent};
+        use midi_types::{Channel, MidiMessage};
+        use zerocopy::network_endian::U16;
+
+        tokio::time::timeout(Duration::from_secs(15), async {
+            let receiver = RtpMidiSession::bind(0, "Polyphonic recovery", 1)
+                .await
+                .unwrap();
+            let sender = RtpMidiSession::bind(0, "Source", 2).await.unwrap();
+            let mut source = sender.local_addr().unwrap();
+            source.set_ip(std::net::Ipv4Addr::LOCALHOST.into());
+            receiver.participants.lock().await.insert(
+                U32::new(2),
+                Participant::new(source, true, None, c"Source", U32::new(2)),
+            );
+            let mut destination = receiver.midi_port.socket().local_addr().unwrap();
+            destination.set_ip(std::net::Ipv4Addr::LOCALHOST.into());
+            let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+            receiver
+                .add_listener(MidiMessageEvent, move |(message, _)| {
+                    tx.try_send(message).unwrap();
+                })
+                .await;
+            let (loss_tx, mut loss_rx) = tokio::sync::mpsc::channel(1);
+            receiver
+                .add_listener(PacketLossEvent, move |loss| {
+                    loss_tx.try_send(loss).unwrap();
+                })
+                .await;
+            let mut buffer = [0; MAX_MIDI_PACKET_SIZE];
+            let mut states = crate::sessions::receive_state::ReceiveStates::new();
+            let mut sequence = 65_000u16;
+            let mut notes = [0u16; 128];
+            let (mut ons, mut offs) = (0, 0);
+            for _ in 0..625 {
+                let on: Vec<_> = (0..16)
+                    .map(|index| {
+                        MidiEvent::new(
+                            Some(0),
+                            RtpMidiMessage::MidiMessage(MidiMessage::NoteOn(
+                                Channel::C1,
+                                (48 + index % 8).into(),
+                                100.into(),
+                            )),
+                        )
+                    })
+                    .collect();
+                let off: Vec<_> = (48..56)
+                    .map(|note| {
+                        MidiEvent::new(
+                            Some(0),
+                            RtpMidiMessage::MidiMessage(MidiMessage::NoteOff(
+                                Channel::C1,
+                                note.into(),
+                                64.into(),
+                            )),
+                        )
+                    })
+                    .collect();
+                for commands in [&on[..], &off[..], &[][..]] {
+                    let mut packet = MidiPacket::new_as_bytes(
+                        U16::new(sequence),
+                        U32::new(0),
+                        U32::new(2),
+                        commands,
+                        false,
+                    )
+                    .to_vec();
+                    if commands.is_empty() {
+                        // The second set of eight releases was lost. The next
+                        // packet's Chapter N must release all remaining voices.
+                        packet[12] |= 0x40;
+                        let checkpoint = sequence.wrapping_sub(1).to_be_bytes();
+                        packet.extend_from_slice(&[
+                            0x20,
+                            checkpoint[0],
+                            checkpoint[1],
+                            0,
+                            6,
+                            8,
+                            0,
+                            0x66,
+                            255,
+                        ]);
+                    }
+                    sender
+                        .midi_port
+                        .socket()
+                        .send_to(&packet, destination)
+                        .await
+                        .unwrap();
+                    receiver
+                        .midi_port
+                        .start(
+                            &receiver,
+                            receiver.listeners.clone(),
+                            &mut buffer,
+                            &mut states,
+                        )
+                        .await;
+                    while let Ok(message) = rx.try_recv() {
+                        match message {
+                            MidiMessage::NoteOn(_, note, _) => {
+                                notes[usize::from(u8::from(note))] += 1;
+                                ons += 1;
+                            }
+                            MidiMessage::NoteOff(_, note, _) => {
+                                let count = &mut notes[usize::from(u8::from(note))];
+                                assert!(*count > 0, "unmatched release");
+                                *count -= 1;
+                                offs += 1;
+                            }
+                            _ => {}
+                        }
+                    }
+                    sequence = sequence.wrapping_add(if commands.len() == 8 { 2 } else { 1 });
+                }
+                let loss = loss_rx.try_recv().unwrap();
+                assert!(loss.recovered);
+                assert_eq!(loss.lost_packets, 1);
+                assert_eq!(notes, [0; 128], "journal left an overlapping voice active");
+            }
+            assert_eq!((ons, offs), (10_000, 10_000));
+        })
+        .await
+        .expect("polyphonic journal UDP regression timed out");
     }
 
     #[tokio::test]
