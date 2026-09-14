@@ -61,7 +61,7 @@ pub(crate) async fn run(
         }
         if reset_pending {
             if matches!(
-                tokio::time::timeout(Duration::from_millis(100), panic(&session)).await,
+                tokio::time::timeout(Duration::from_millis(100), send_midi_panic(&session)).await,
                 Ok(Ok(()))
             ) {
                 used = false;
@@ -86,11 +86,11 @@ pub(crate) async fn run(
         }
     }
     if used {
-        let _ = tokio::time::timeout(Duration::from_millis(100), panic(&session)).await;
+        let _ = tokio::time::timeout(Duration::from_millis(100), send_midi_panic(&session)).await;
     }
 }
 
-async fn panic(session: &RtpMidiSession) -> std::io::Result<()> {
+async fn send_midi_panic(session: &RtpMidiSession) -> std::io::Result<()> {
     use midi_types::{Channel, Control, MidiMessage, Value7};
     let commands: [MidiEvent<'static>; 48] = std::array::from_fn(|index| {
         let channel = Channel::from((index / 3) as u8);

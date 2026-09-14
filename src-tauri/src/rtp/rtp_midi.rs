@@ -58,9 +58,6 @@ pub fn midi_to_bytes(message: RtMidiMessage) -> SmallVec<[u8; 32]> {
 }
 
 pub fn participant_matches_target(participant_addr: &str, target: &SocketAddr) -> bool {
-    if participant_addr == target.to_string() {
-        return true;
-    }
     let Ok(participant) = participant_addr.parse::<SocketAddr>() else {
         return false;
     };
