@@ -226,7 +226,11 @@ fn processing_loop(
         }
     }
 
-    audio.request_emergency_midi_reset();
+    for ch in 0..16u8 {
+        audio.send_midi(&[0xB0 | ch, 120, 0]);
+        audio.send_midi(&[0xB0 | ch, 121, 0]);
+        audio.send_midi(&[0xB0 | ch, 123, 0]);
+    }
     drop(midi_thru_tx);
     drop(osc_tx);
     let _ = midi_worker.join();

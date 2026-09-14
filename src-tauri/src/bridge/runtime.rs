@@ -188,7 +188,10 @@ impl BridgeHandle {
                 }
                 runtime.osc_input = replacement;
             }
-            super::pipeline::request_critical_midi_reset();
+            let old_midi = runtime.config.lock().midi.clone();
+            if old_midi != config.midi {
+                super::pipeline::request_critical_midi_reset();
+            }
             *runtime.config.lock() = config.clone();
             refresh_runtime_status(
                 runtime,
