@@ -36,21 +36,18 @@ impl ReceiveState {
 /// before receiving, so reconnecting peers never allocate on the packet path.
 pub(super) struct ReceiveStates {
     slots: Vec<ReceiveState>,
+    repairs: super::note_recovery::ChannelRepairs,
 }
 
 impl ReceiveStates {
     pub fn new() -> Self {
         Self {
             slots: (0..128).map(|_| ReceiveState::new()).collect(),
+            repairs: super::note_recovery::ChannelRepairs::new(),
         }
     }
 
-    pub fn get(
-        &mut self,
-        peer: &Participant,
-        peers: &[Participant],
-        generation: u64,
-    ) -> &mut ReceiveState {
+    fn slot_index(&mut self, peer: &Participant, peers: &[Participant], generation: u64) -> usize {
         let identity = peer.identity();
         let index = self
             .slots
@@ -71,7 +68,26 @@ impl ReceiveStates {
             state.sysex.clear();
             state.generation = generation;
         }
-        state
+        index
+    }
+    #[cfg(test)]
+    pub fn get(
+        &mut self,
+        peer: &Participant,
+        peers: &[Participant],
+        generation: u64,
+    ) -> &mut ReceiveState {
+        let index = self.slot_index(peer, peers, generation);
+        &mut self.slots[index]
+    }
+    pub fn parts(
+        &mut self,
+        peer: &Participant,
+        peers: &[Participant],
+        generation: u64,
+    ) -> (&mut ReceiveState, &mut super::note_recovery::ChannelRepairs) {
+        let index = self.slot_index(peer, peers, generation);
+        (&mut self.slots[index], &mut self.repairs)
     }
 }
 

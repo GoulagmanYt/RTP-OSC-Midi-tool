@@ -13,3 +13,7 @@ mod channel_state;
 mod note_recovery;
 mod peer_registry;
 mod receive_state;
+
+mod parameter_state;
+
+mod system_state;

@@ -754,6 +754,92 @@ mod shutdown_tests {
     }
 
     #[tokio::test]
+    async fn journal_recovers_missing_sysex_fragment_before_current_packet_continuation() {
+        use crate::packets::midi_packets::midi_packet::MidiPacket;
+        use crate::sessions::events::event_handling::{PacketLossEvent, SysExPacketEvent};
+        use zerocopy::network_endian::U16;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            let receiver = RtpMidiSession::bind(0, "Fragment recovery", 1)
+                .await
+                .unwrap();
+            let sender = RtpMidiSession::bind(0, "Source", 2).await.unwrap();
+            let mut source = sender.local_addr().unwrap();
+            source.set_ip(std::net::Ipv4Addr::LOCALHOST.into());
+            receiver.participants.lock().await.insert(
+                U32::new(2),
+                Participant::new(source, true, None, c"Source", U32::new(2)),
+            );
+            let mut destination = receiver.midi_port.socket().local_addr().unwrap();
+            destination.set_ip(std::net::Ipv4Addr::LOCALHOST.into());
+            let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+            receiver
+                .add_listener(SysExPacketEvent, move |payload| {
+                    tx.try_send(payload.to_vec()).unwrap();
+                })
+                .await;
+            let (loss_tx, mut loss_rx) = tokio::sync::mpsc::channel(1);
+            receiver
+                .add_listener(PacketLossEvent, move |loss| {
+                    loss_tx.try_send(loss).unwrap();
+                })
+                .await;
+            let mut states = crate::sessions::receive_state::ReceiveStates::new();
+            let mut buffer = [0; MAX_MIDI_PACKET_SIZE];
+            for (sequence, head, payload, tail, journal) in [
+                (0, 0xF0, &[1, 2][..], 0xF0, &[64, 0, 0, 4, 4, 0x21, 6][..]),
+                (
+                    2,
+                    0xF7,
+                    &[4][..],
+                    0xF7,
+                    &[64, 0, 1, 4, 6, 0x38, 7, 2, 0x83][..],
+                ),
+            ] {
+                let commands = [MidiEvent::new(
+                    None,
+                    RtpMidiMessage::SysExSegment {
+                        head,
+                        data: payload,
+                        tail,
+                    },
+                )];
+                let mut packet = MidiPacket::new_as_bytes(
+                    U16::new(sequence),
+                    U32::new(0),
+                    U32::new(2),
+                    &commands,
+                    false,
+                )
+                .to_vec();
+                packet[12] |= 64;
+                packet.extend_from_slice(journal);
+                sender
+                    .midi_port
+                    .socket()
+                    .send_to(&packet, destination)
+                    .await
+                    .unwrap();
+                receiver
+                    .midi_port
+                    .start(
+                        &receiver,
+                        receiver.listeners.clone(),
+                        &mut buffer,
+                        &mut states,
+                    )
+                    .await;
+            }
+            assert_eq!(rx.try_recv().unwrap(), [1, 2, 3, 4]);
+            assert!(rx.try_recv().is_err());
+            let loss = loss_rx.try_recv().unwrap();
+            assert_eq!(loss.lost_packets, 1);
+            assert!(loss.recovered);
+        })
+        .await
+        .expect("SysEx journal recovery UDP test timed out");
+    }
+
+    #[tokio::test]
     async fn listener_publication_is_concurrent_and_preserves_packet_snapshots() {
         use crate::sessions::events::event_handling::MidiMessageEvent;
         use std::sync::atomic::{AtomicUsize, Ordering};

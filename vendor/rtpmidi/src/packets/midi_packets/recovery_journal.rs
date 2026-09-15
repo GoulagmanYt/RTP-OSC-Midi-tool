@@ -56,36 +56,39 @@ impl<'a> Journal<'a> {
         u16::from_be_bytes([self.bytes[1], self.bytes[2]])
     }
 
-    /// Program, controller, note and pressure state are recoverable; other forms retain
-    /// the caller's conservative reset policy. Parsing never implies recovery.
-    pub(crate) fn state_channels(&self) -> Option<impl Iterator<Item = (u8, u8, &'a [u8])>> {
-        if self.bytes[0] & 0x50 != 0 {
+    pub(crate) fn system_bytes(&self) -> Option<&'a [u8]> {
+        if self.bytes[0] & 64 == 0 {
             return None;
         }
-        let mut remaining = &self.bytes[3..];
+        let size = length(&self.bytes[3..], 2).ok()?;
+        Some(&self.bytes[3..3 + size])
+    }
+
+    /// Program, controller, note and pressure state are recoverable; other forms retain
+    /// the caller's conservative reset policy. Parsing never implies recovery.
+    pub(crate) fn state_channels(&self) -> Option<impl Iterator<Item = (u8, u8, bool, &'a [u8])>> {
+        let skip = self.system_bytes().map_or(0, <[u8]>::len);
+        let mut remaining = &self.bytes[3 + skip..];
         while !remaining.is_empty() {
             let size = length(remaining, 3).ok()?;
-            if remaining[0] & 4 != 0 || remaining[2] & !0xDF != 0 {
-                return None;
-            }
             let mut chapters = &remaining[3..size];
             if remaining[2] & 128 != 0 {
                 chapters = &chapters[3..];
             }
             if remaining[2] & 64 != 0 {
                 let logs = usize::from(chapters[0] & 127) + 1;
-                // Parameter-system commands need Chapter M context. Do not
-                // apply a partial plan that could alter the wrong RPN/NRPN.
+                // General-purpose selector assignments require negotiated
+                // controller semantics; the default receiver uses RPN/NRPN.
                 if chapters[1..1 + logs * 2]
                     .chunks_exact(2)
-                    .any(|log| matches!(log[0] & 127, 6 | 38 | 96..=101))
+                    .any(|log| matches!(log[0] & 127, 98..=101))
                 {
                     return None;
                 }
             }
             remaining = &remaining[size..];
         }
-        let mut remaining = &self.bytes[3..];
+        let mut remaining = &self.bytes[3 + skip..];
         Some(std::iter::from_fn(move || {
             if remaining.is_empty() {
                 return None;
@@ -93,7 +96,12 @@ impl<'a> Journal<'a> {
             let size = length(remaining, 3).ok()?;
             let section = &remaining[..size];
             remaining = &remaining[size..];
-            Some(((section[0] >> 3) & 15, section[2], &section[3..]))
+            Some((
+                (section[0] >> 3) & 15,
+                section[2],
+                section[0] & 4 != 0,
+                &section[3..],
+            ))
         }))
     }
 }
@@ -256,7 +264,7 @@ mod tests {
                         storage[5] = 32;
                     }
                     if let Ok(journal) = Journal::parse(&storage[..size + 3]) {
-                        assert!(journal.state_channels().is_none());
+                        let _ = journal.state_channels();
                     }
                 }
             }

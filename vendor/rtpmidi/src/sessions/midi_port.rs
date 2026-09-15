@@ -143,7 +143,7 @@ impl MidiPort {
             }
             let peers = ctx.participants.snapshot();
             if let Some(peer) = peers.iter().find(|peer| peer.midi_port_addr() == src) {
-                let state = receive_states.get(
+                let (state, _) = receive_states.parts(
                     peer,
                     &peers,
                     ctx.recovery_generation.load(Ordering::Acquire),
@@ -186,7 +186,7 @@ impl MidiPort {
                 else {
                     return;
                 };
-                let state = receive_states.get(
+                let (state, repair_workspace) = receive_states.parts(
                     peer,
                     &peers,
                     ctx.recovery_generation.load(Ordering::Acquire),
@@ -228,9 +228,6 @@ impl MidiPort {
                     state.expected_sequence.is_none() && midi_packet.journal_bytes().is_some();
                 let repairs = if loss.is_some() || initial_journal {
                     (|| {
-                        if state.sysex.is_active() {
-                            return None;
-                        }
                         let journal =
                             crate::packets::midi_packets::recovery_journal::Journal::parse(
                                 midi_packet.journal_bytes()?,
@@ -239,16 +236,19 @@ impl MidiPort {
                         let expected = loss
                             .as_ref()
                             .map_or(journal.checkpoint(), |loss| loss.expected_sequence);
-                        super::note_recovery::ChannelRepairs::build_with_state(
+                        repair_workspace.rebuild(
                             journal,
                             expected,
                             &mut state.active_notes,
                             &mut state.channels,
-                        )
+                            state.sysex.prefix(arrived),
+                        )?;
+                        Some(())
                     })()
                 } else {
                     None
                 };
+                let repairs = repairs.map(|()| &*repair_workspace);
                 if let Some(loss) = loss.as_mut() {
                     loss.recovered = repairs.is_some();
                 }
@@ -268,13 +268,28 @@ impl MidiPort {
                     listeners.notify_packet_loss(loss);
                 }
                 if let Some(repairs) = repairs {
-                    for message in repairs.messages() {
-                        listeners.notify_midi_message(
-                            message,
-                            midi_packet.timestamp().get(),
-                            ssrc,
-                            packet_deadline,
-                        );
+                    if let Some(payload) = repairs.pending_sysex()
+                        && state.sysex.segment(0xF0, payload, 0xF0, arrived).is_err()
+                    {
+                        listeners.notify_stream_fault(ssrc);
+                    }
+                    for event in repairs.events() {
+                        match event {
+                            super::note_recovery::RepairEvent::Midi(message) => listeners
+                                .notify_midi_message(
+                                    message,
+                                    midi_packet.timestamp().get(),
+                                    ssrc,
+                                    packet_deadline,
+                                ),
+                            super::note_recovery::RepairEvent::SysEx(payload) => listeners
+                                .notify_sysex_packet(
+                                    payload,
+                                    midi_packet.timestamp().get(),
+                                    ssrc,
+                                    packet_deadline,
+                                ),
+                        }
                     }
                 }
                 let mut timestamp = u32::from(midi_packet.timestamp());
@@ -299,6 +314,13 @@ impl MidiPort {
                             listeners.notify_midi_message(*message, timestamp, ssrc, deadline);
                         }
                         RtpMidiMessage::SysExSegment { head, data, tail } => {
+                            if *head == 0xF0 {
+                                state.channels.1.sysex_count = state
+                                    .channels
+                                    .1
+                                    .sysex_count
+                                    .map(|count| count.wrapping_add(1));
+                            }
                             match state.sysex.segment(*head, data, *tail, arrived) {
                                 Ok(Some(payload)) => {
                                     if state.channels.observe_sysex(payload) {
@@ -312,6 +334,11 @@ impl MidiPort {
                             }
                         }
                         RtpMidiMessage::SysEx(sysex) => {
+                            state.channels.1.sysex_count = state
+                                .channels
+                                .1
+                                .sysex_count
+                                .map(|count| count.wrapping_add(1));
                             state.sysex.clear();
                             if state.channels.observe_sysex(sysex) {
                                 state.active_notes.fill(0);

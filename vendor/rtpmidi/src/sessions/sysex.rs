@@ -27,8 +27,15 @@ impl SysExAssembly {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn is_active(&self) -> bool {
         self.updated.is_some()
+    }
+
+    pub(crate) fn prefix(&self, now: Instant) -> Option<&[u8]> {
+        self.updated
+            .filter(|last| now.duration_since(*last) < FRAGMENT_TIMEOUT)
+            .map(|_| self.bytes.as_slice())
     }
 
     pub(crate) fn clear(&mut self) {

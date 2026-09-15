@@ -63,6 +63,79 @@ pub(super) fn validate(bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ParameterLog {
+    pub key: u16,
+    pub value_tool: bool,
+    pub msb: Option<u8>,
+    pub lsb: Option<u8>,
+    pub buttons: Option<i16>,
+    pub count: Option<u8>,
+}
+
+// Only constructed from a validated Chapter M slice.
+pub(crate) fn logs(bytes: &[u8]) -> impl Iterator<Item = ParameterLog> + '_ {
+    let compressed = bytes[0] & 4 != 0 && bytes[0] & 0x18 != 0;
+    let nrpn_only = bytes[0] & 8 != 0;
+    let mut remaining = &bytes[2 + usize::from(bytes[0] & 64 != 0)..];
+    std::iter::from_fn(move || {
+        if remaining.is_empty() {
+            return None;
+        }
+        let header = if compressed { 2 } else { 3 };
+        let key = u16::from(remaining[0] & 127)
+            | if compressed {
+                if nrpn_only { 16384 } else { 0 }
+            } else {
+                (u16::from(remaining[1] & 127) << 7)
+                    | if remaining[1] & 128 != 0 { 16384 } else { 0 }
+            };
+        let toc = remaining[header - 1];
+        remaining = &remaining[header..];
+        let mut byte = |flag| {
+            if toc & flag != 0 {
+                let value = remaining[0] & 127;
+                remaining = &remaining[1..];
+                Some(value)
+            } else {
+                None
+            }
+        };
+        let msb = byte(128);
+        let lsb = byte(64);
+        let buttons = if toc & 32 != 0 {
+            let magnitude = i16::from(remaining[0] & 63) * 256 + i16::from(remaining[1]);
+            let value = if remaining[0] & 128 != 0 {
+                -magnitude
+            } else {
+                magnitude
+            };
+            remaining = &remaining[2..];
+            Some(value)
+        } else {
+            None
+        };
+        if toc & 16 != 0 {
+            remaining = &remaining[2..];
+        }
+        let count = if toc & 8 != 0 {
+            let value = remaining[0] & 127;
+            remaining = &remaining[1..];
+            Some(value)
+        } else {
+            None
+        };
+        Some(ParameterLog {
+            key,
+            value_tool: toc & 2 != 0,
+            msb,
+            lsb,
+            buttons,
+            count,
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

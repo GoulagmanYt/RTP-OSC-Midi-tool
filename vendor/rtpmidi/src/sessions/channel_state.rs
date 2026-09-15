@@ -18,6 +18,7 @@ pub(super) struct ProgramState {
 #[derive(Clone, Copy)]
 pub(super) struct ChannelState {
     pub controls: [ControllerState; 128],
+    pub parameters: super::parameter_state::ParameterState,
     pub program: Option<ProgramState>,
     pub notes: [u16; 128],
     pub velocities: [u8; 128],
@@ -27,6 +28,7 @@ impl Default for ChannelState {
     fn default() -> Self {
         Self {
             controls: [ControllerState::default(); 128],
+            parameters: super::parameter_state::ParameterState::default(),
             program: None,
             notes: [0; 128],
             velocities: [64; 128],
@@ -35,15 +37,17 @@ impl Default for ChannelState {
 }
 
 #[derive(Clone, Copy, Default)]
-pub(super) struct ChannelHistory(pub [ChannelState; 16]);
+pub(super) struct ChannelHistory(pub [ChannelState; 16], pub super::system_state::SystemState);
 
 impl ChannelHistory {
     pub fn observe(&mut self, message: MidiMessage) {
+        self.1.observe(message);
         match message {
             MidiMessage::ControlChange(channel, number, value) => {
                 let state = &mut self.0[usize::from(u8::from(channel))];
                 let number = usize::from(u8::from(number));
                 let value = u8::from(value);
+                state.parameters.observe(number as u8, value);
                 let control = &mut state.controls[number];
                 control.count = control.count.wrapping_add(1) & 63;
                 if let Some(previous) = control.value {
@@ -82,7 +86,7 @@ impl ChannelHistory {
                         .map(|msb| (msb, state.controls[32].value.unwrap_or(0))),
                 });
             }
-            MidiMessage::Reset => *self = Self::default(),
+            MidiMessage::Reset => self.0 = Self::default().0,
             MidiMessage::NoteOn(channel, note, velocity) if u8::from(velocity) != 0 => {
                 let state = &mut self.0[usize::from(u8::from(channel))];
                 let index = usize::from(u8::from(note));
@@ -99,9 +103,11 @@ impl ChannelHistory {
     }
 
     pub fn observe_sysex(&mut self, payload: &[u8]) -> bool {
+        self.1.observe_sysex(payload);
         let reset = matches!(payload, [0x7E, _, 9, 0 | 1 | 3] | [0x7E, _, 10, 1 | 2]);
         if reset {
-            *self = Self::default();
+            self.0 = Self::default().0;
+            self.1.reset_render_state();
         }
         reset
     }
