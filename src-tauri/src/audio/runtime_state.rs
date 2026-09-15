@@ -498,30 +498,13 @@ impl AudioCallbackState {
             }
         }
         let now_us = monotonic_us();
-        let measured_frames = self.telemetry.block_size_frames.load(Ordering::Relaxed);
-        let current_frames = if measured_frames == 0 {
-            self.max_frames.min(u32::MAX as usize) as u32
-        } else {
-            measured_frames
-        };
-        let stale_after_us = if self.sample_rate == 0 {
-            u64::MAX
-        } else {
-            u64::from(current_frames)
-                .saturating_mul(2_000_000)
-                .checked_div(u64::from(self.sample_rate))
-                .unwrap_or(u64::MAX)
-        };
+        // Age is telemetry, not an overflow condition. A delayed wake-up must
+        // not discard valid Note-Ons/controllers while queue capacity remains.
+        // Generation resets already invalidate obsolete pre-panic messages.
         for _ in 0..MIDI_DRAIN_BUDGET_PER_CALLBACK {
             let Ok(msg) = self.midi_rx.pop() else {
                 break;
             };
-            if !msg.is_critical_release() && msg.age_us(now_us) > stale_after_us {
-                self.telemetry
-                    .midi_drop_count
-                    .fetch_add(1, Ordering::Relaxed);
-                continue;
-            }
             self.enqueue_midi(msg);
         }
         let depth = self.pending_midi.len().saturating_add(self.midi_rx.slots());

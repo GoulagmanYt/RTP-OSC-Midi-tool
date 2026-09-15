@@ -540,6 +540,29 @@ mod tests {
     }
 
     #[test]
+    fn delayed_callback_preserves_note_and_controller_order_without_dropping() {
+        let (mut tx, rx) = RingBuffer::<MidiPacket>::new(8);
+        let expected = [[0x90, 60, 100], [0xB0, 7, 80], [0x80, 60, 0]];
+        for bytes in expected {
+            tx.push(MidiPacket::from_bytes(&bytes).unwrap()).unwrap();
+        }
+        let mut state = callback_test_state(rx, Arc::new(AtomicBool::new(false)));
+        // Reproduce a wake-up later than two 1024-frame blocks at 48 kHz.
+        thread::sleep(std::time::Duration::from_millis(60));
+        state.drain_midi();
+        assert_eq!(
+            state
+                .pending_midi
+                .iter()
+                .map(|packet| packet.data)
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(state.telemetry.midi_drop_count.load(Ordering::Relaxed), 0);
+        assert!(state.telemetry.audio_midi_oldest_us.load(Ordering::Relaxed) >= 50_000);
+    }
+
+    #[test]
     fn drain_midi_respects_callback_budget() {
         let (mut tx, rx) = RingBuffer::<MidiPacket>::new(MIDI_DRAIN_BUDGET_PER_CALLBACK + 128);
         for i in 0..(MIDI_DRAIN_BUDGET_PER_CALLBACK + 64) {
