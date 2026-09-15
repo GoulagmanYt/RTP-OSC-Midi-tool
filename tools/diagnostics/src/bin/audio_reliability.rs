@@ -14,7 +14,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
     let mut buffer = None;
     let mut notes = 10_000usize;
+    let mut duration_seconds = 0u64;
     let mut report = PathBuf::from("audio-reliability.json");
+    let mut stop_file: Option<PathBuf> = None;
     let mut plugin = None;
     let mut device = String::from("Voicemeeter AUX Virtual ASIO");
     while let Some(flag) = args.next() {
@@ -24,14 +26,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         match flag.as_str() {
             "--buffer" => buffer = Some(value.parse::<u32>()?),
             "--notes" => notes = value.parse()?,
+            "--duration-seconds" => duration_seconds = value.parse()?,
             "--report" => report = value.into(),
             "--vst" => plugin = Some(value),
             "--device" => device = value,
+            "--stop-file" => stop_file = Some(value.into()),
             _ => return Err(format!("Unknown option {flag}").into()),
         }
     }
     if notes == 0 || notes > 100_000 {
         return Err("--notes must be 1..100000".into());
+    }
+    if duration_seconds > 43_200 {
+        return Err("--duration-seconds must be 0..43200".into());
     }
     let config = ConfigStore::new().load();
     let settings = AudioSettings {
@@ -84,12 +91,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut max_xruns = 0;
     let mut max_over_budget = 0;
     let mut max_drops = 0;
-    while sent_on < notes {
+    let transmitting_at = Instant::now();
+    while if duration_seconds == 0 {
+        sent_on < notes
+    } else {
+        transmitting_at.elapsed() < Duration::from_secs(duration_seconds)
+    } {
+        if stop_file.as_ref().is_some_and(|path| path.exists()) {
+            failure = Some("external stop requested");
+            break;
+        }
         if supervisor.snapshot().state != VstWorkerState::Ready {
             failure = Some("worker left ready state");
             break;
         }
-        let count = (notes - sent_on).min(16);
+        let count = if duration_seconds == 0 {
+            (notes - sent_on).min(16)
+        } else {
+            16
+        };
         for index in 0..count {
             if !supervisor.try_send_midi(&[0x90, 48 + index as u8, 80]) {
                 rejected += 1;
@@ -114,7 +134,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_midi_age_us = max_midi_age_us.max(snapshot.metrics.midi_oldest_us);
         if Instant::now() >= next_observation {
             println!(
-                "Notes {sent_on}/{notes}, xruns={}, drops={}, DSP p99={} us",
+                "Notes {sent_on}, xruns={}, drops={}, DSP p99={} us",
                 snapshot.metrics.audio_xruns,
                 snapshot.metrics.audio_midi_drops,
                 snapshot.metrics.dsp_process_p99_us
@@ -123,6 +143,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             next_observation = Instant::now() + Duration::from_secs(1);
         }
     }
+    let transmission_ms = transmitting_at.elapsed().as_millis();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let before_panic = supervisor.snapshot();
     supervisor.request_emergency_reset();
     tokio::time::sleep(Duration::from_secs(3)).await;
     let final_snapshot = supervisor.snapshot();
@@ -130,8 +153,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     max_over_budget = max_over_budget.max(final_snapshot.metrics.callback_over_budget_count);
     max_drops = max_drops.max(final_snapshot.metrics.audio_midi_drops);
     let delivery_passed = failure.is_none()
-        && sent_on == notes
-        && sent_off == notes
+        && (duration_seconds != 0 || sent_on == notes)
+        && sent_off == sent_on
+        && before_panic.metrics.midi_queue_depth == 0
         && rejected == 0
         && max_drops == 0
         && final_snapshot.state == VstWorkerState::Ready
@@ -142,7 +166,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stop = supervisor.stop().await;
     let stop_ms = stopped_at.elapsed().as_millis();
     let result = serde_json::json!({
-        "status": status, "requestedNotes": notes, "noteOnsSubmitted": sent_on,
+        "status": status, "requestedNotes": notes, "requestedDurationSeconds": duration_seconds,
+        "transmissionMs": transmission_ms, "metricsBeforeFinalPanic": before_panic.metrics, "noteOnsSubmitted": sent_on,
         "noteOffsSubmitted": sent_off, "rejectedSubmissions": rejected,
         "peakObserved": peak, "maxObservedMidiAgeUs": max_midi_age_us,
         "finalMetrics": final_snapshot.metrics, "workerStateBeforeStop": final_snapshot.state,

@@ -114,9 +114,9 @@ protocol forms and unproven absolute timing or loss guarantees.
   valid synchronization packet, checked on the 10-second maintenance cycle.
 - Journals validate container lengths, channel order, chapter boundaries and
   parameter/system field layouts before dispatch. Covering journals containing
-  Chapters P/C/W/N/E/T/A recover programs/banks, ordinary controller state,
+  Chapters P/C/M/W/N/E/T/A recover programs/banks, controller/parameter state,
   pitch, notes and pressure. Ambiguous reference counts, missing controller
-  values, parameter context and unsupported recovery forms retain the reset
+  values, missing source context and unnegotiated recovery forms retain the reset
   fallback. A parsed journal is not necessarily a recoverable journal.
 - A proven forward sequence gap without supported recovery triggers a reset;
   late/duplicate packets are discarded. There is no added sequence
@@ -159,11 +159,10 @@ Splice/Voicemeeter run; its raw JSON is tracked in `docs/measurements/`.
 ## Explicit limits
 
 This is a reliability pass over implemented routes, not a certification of full
-RFC 6295/OSC support. Recovery supports Chapters P/C/W/N/E/T/A with the bounded
-policies below. Parameter-system commands (RPN/NRPN), enhanced controller logs
-and system chapters still require the reset fallback. Their structural validation
-prevents malformed lengths and fields from reaching dispatch; it does not restore
-their musical state. Complete RTP SysEx is forwarded to local MIDI
+RFC 6295/OSC support. Default channel recovery now includes P/C/M/W/N/E/T/A,
+enhanced Chapter C with a known count baseline, and system D/V/Q/F/X recovery.
+The later advanced-recovery section specifies bounds and the cases requiring
+source state or negotiated renderer semantics. Complete RTP SysEx is forwarded to local MIDI
 through the synchronized scheduler. A new borrowed timestamped event carries the
 SSRC, RTP timestamp and monotonic deadline while retaining the legacy callback.
 Reassembled SysEx uses the final segment deadline; this whole-message MIDI API
@@ -171,7 +170,8 @@ does not preserve inter-octet timing inside segmented commands. Segmented
 SysEx is reassembled in 128 preallocated 64 KiB receive slots;
 only completed messages are delivered. Cancellation, corruption, packet loss,
 non-real-time interruption, and a 10-second inter-fragment timeout discard the
-partial command. Missing fragments are not reconstructed from journals. The
+partial command. Covering Chapter X logs can reconstruct missing fragments, including a known
+prefix identified by COUNT and FIRST. Insufficient coverage still requests reset. The
 F5 dropped-EOX representation is normalized to a completed SysEx for MIDI APIs. Channel
 voice messages use the same synchronized scheduler. UDP regression covers complete
 and segmented SysEx delta times across timestamp rollover. Per-message packet/MIDI
@@ -410,3 +410,57 @@ with warnings denied. Diagnostic binaries compile and formatting checks pass.
 The existing tracked Splice/Voicemeeter measurement predates these network and
 buffer-pool changes; its provenance remains in AUDIO_RELIABILITY_RESULTS.md.
 These journal tests do not imply a new physical audio latency measurement.
+
+
+## Advanced recovery and endurance follow-up (2026-09-15)
+
+Chapter M now restores RPN/NRPN data-entry values, relative increments/decrements,
+transaction counts, open/null selections and pending MSBs. The receiver handles
+canonical transactions and omitted-MSB/omitted-LSB variants. It retains a fixed
+64-entry parameter cache per channel; eviction makes knowledge unknown, rather
+than inventing a value. RP015 semantics retain parameter values across CC121.
+Unresolved partial values and repairs exceeding the work budget request reset.
+General-purpose Chapter C data entry first closes an open parameter transaction;
+Chapter M then restores the final selection. This prevents writing the wrong RPN.
+
+Enhanced controller lists replay only missing commands, in original order, using
+modulo-64 count alignment. Known identical relative values are still replayed when
+the command count advances. Unknown baselines, inconsistent tools/counts and an
+ambiguous half-range distance reject the entire plan.
+
+System recovery handles Reset/Tune/Song Select and Active Sense reference counts,
+standard sequencer state and residual MIDI clocks, full/partial MTC, and complete
+or unfinished SysEx journal logs. Quarter-frame journal positions are converted
+to Full Frame without applying the RFC's forward-frame compensation twice.
+COUNT identifies already-received SysEx; FIRST may retain an identified prefix.
+Recovered partial data enters assembly before the current packet's continuation.
+A real UDP regression loses an intermediate fragment and verifies the complete
+payload arrives once. Generated SysEx and short MIDI preserve one ordered plan.
+
+The plan's message and 64 KiB SysEx buffers are allocated once per receive task and
+reused across packets. This avoids large stack-return copies and packet-path heap
+allocation. Allocation tests cover 10,000 pairs of parameter/system repairs.
+Source history rolls back if any part of a plan cannot be reconstructed.
+
+Bounds are intentional. Undefined MIDI commands/future LEGAL fields, TIMETOOLS
+without a negotiated nonstandard sequencer/tempo, manufacturer-specific TCOUNT-only
+typing, and nonstandard general-purpose assignments of selectors 98..101 cannot
+be interpreted from raw bytes alone. These request reset. DLS-specific CC121 value
+reset behavior is not substituted for RP015. This is default-renderer recovery,
+not a claim to negotiate all SDP renderer extensions or infer proprietary types.
+
+The first extended Splice run reported 32 audio MIDI drops without xruns and was
+stopped for investigation; its partial console/resource evidence is retained with
+an explicit aborted record. A regression reproduced the two-block age discard in
+an otherwise available audio queue. Age is now telemetry only: bounded capacity,
+callback work budgets and explicit reset invalidation govern overload, while a
+late wake-up alone no longer discards valid notes/controllers.
+
+`tools/diagnostics/audio-soak.ps1` runs a specified duration and records executable
+hashes, UTC start, process private/working-set memory, handles and threads. The
+Rust audio harness records pre-panic queue/signal metrics and supports a stop file
+for graceful interruption with a report. `rtp_reliability` exercises real UDP
+invitations/BY, bidirectional matched notes, repeated SSRC reconnections and
+rebinding both released ports after each cycle. Its batch latency measures both
+software directions, not physical MIDI-to-audio latency. Final observed results
+belong in AUDIO_RELIABILITY_RESULTS.md after each run actually completes.

@@ -1,0 +1,11 @@
+{
+  "durationTargetSeconds": 7200,
+  "observedAudioDrops": 32,
+  "abortedUtc": "2026-09-15T17:55:00.1645926Z",
+  "evidence": [
+    "splice-asio-soak-20260915-processes.jsonl",
+    "splice-asio-soak-20260915-console.log"
+  ],
+  "completed": false,
+  "reason": "Stopped after audio drops appeared. Investigating age-based discard at two audio blocks; this is not a completed two-hour result."
+}
