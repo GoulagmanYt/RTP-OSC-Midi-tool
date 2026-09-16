@@ -464,3 +464,23 @@ invitations/BY, bidirectional matched notes, repeated SSRC reconnections and
 rebinding both released ports after each cycle. Its batch latency measures both
 software directions, not physical MIDI-to-audio latency. Final observed results
 belong in AUDIO_RELIABILITY_RESULTS.md after each run actually completes.
+
+
+## Follow-up validation (2026-09-16)
+
+The default Chapter Q renderer now compares effective transport position and
+running state before reconstructing transport. Once clock position/downbeat
+already identify the running sequencer, the journal's C flag must not cause an
+unrelated loss to Stop/SPP/Continue it again. A regression covers Start plus 14
+clocks followed by a covering Q journal with unchanged position. All 87 vendor
+tests and vendor Clippy passed after this correction. Diagnostics Clippy passed
+with warnings denied after adding active/idle phases and memory containment.
+
+Continuous Splice stress revealed a new unresolved resource issue despite zero
+reported drops/xruns: private memory increased to 4.7 GB within approximately
+eight minutes. It declines when MIDI input stops. An active/idle control passed,
+but cannot validate continuous-load memory stability. See the measurements and
+explicit limitations in AUDIO_RELIABILITY_RESULTS.md. No speculative plugin
+lifecycle patch or periodic restart has been substituted for identifying the
+cause. Windows denied WPR heap tracing; a separate intrusive tracing attempt
+interrupted its worker and is retained as an invalidated profiling run.

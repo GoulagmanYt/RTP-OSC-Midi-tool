@@ -1,0 +1,7 @@
+{
+  "scope": "Profiling-contaminated, incomplete run; not a passed endurance result",
+  "instrumentation": "Frida 17.18.0 attached to owned worker PID 4048, intercepted NtAllocateVirtualMemory to sample allocations >=64 KiB",
+  "outcome": "Worker control connection closed immediately after attachment; supervisor restarted worker; harness stopped with 112 rejected submissions. Allocation trace contains no useful allocation attribution.",
+  "interpretation": "Temporal association with intrusive instrumentation; do not attribute this failure to uninstrumented production operation. No persistent executable or system changes.",
+  "unresolved": "Continuous-load private memory growth remains unattributed; cyclic workload is a separate validation profile."
+}
