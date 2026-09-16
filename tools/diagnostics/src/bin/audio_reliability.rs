@@ -15,6 +15,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut buffer = None;
     let mut notes = 10_000usize;
     let mut duration_seconds = 0u64;
+    let mut active_seconds: Option<u64> = None;
+    let mut cycle_seconds: Option<u64> = None;
     let mut report = PathBuf::from("audio-reliability.json");
     let mut stop_file: Option<PathBuf> = None;
     let mut plugin = None;
@@ -27,6 +29,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--buffer" => buffer = Some(value.parse::<u32>()?),
             "--notes" => notes = value.parse()?,
             "--duration-seconds" => duration_seconds = value.parse()?,
+            "--active-seconds" => active_seconds = Some(value.parse()?),
+            "--cycle-seconds" => cycle_seconds = Some(value.parse()?),
             "--report" => report = value.into(),
             "--vst" => plugin = Some(value),
             "--device" => device = value,
@@ -39,6 +43,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if duration_seconds > 43_200 {
         return Err("--duration-seconds must be 0..43200".into());
+    }
+    if active_seconds.is_some_and(|seconds| duration_seconds == 0 || seconds > duration_seconds) {
+        return Err(
+            "--active-seconds requires duration mode and must not exceed its duration".into(),
+        );
+    }
+    if cycle_seconds.is_some_and(|cycle| {
+        cycle == 0 || cycle > duration_seconds || active_seconds.is_none_or(|active| active > cycle)
+    }) {
+        return Err("--cycle-seconds requires --active-seconds <= cycle <= duration".into());
     }
     let config = ConfigStore::new().load();
     let settings = AudioSettings {
@@ -105,7 +119,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             failure = Some("worker left ready state");
             break;
         }
-        let count = if duration_seconds == 0 {
+        let phase_seconds = cycle_seconds.map_or_else(
+            || transmitting_at.elapsed().as_secs(),
+            |cycle| transmitting_at.elapsed().as_secs() % cycle,
+        );
+        let count = if active_seconds.is_some_and(|seconds| phase_seconds >= seconds) {
+            0
+        } else if duration_seconds == 0 {
             (notes - sent_on).min(16)
         } else {
             16
@@ -167,7 +187,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stop_ms = stopped_at.elapsed().as_millis();
     let result = serde_json::json!({
         "status": status, "requestedNotes": notes, "requestedDurationSeconds": duration_seconds,
-        "transmissionMs": transmission_ms, "metricsBeforeFinalPanic": before_panic.metrics, "noteOnsSubmitted": sent_on,
+        "transmissionMs": transmission_ms, "requestedActiveSeconds": active_seconds, "requestedCycleSeconds": cycle_seconds, "metricsBeforeFinalPanic": before_panic.metrics, "noteOnsSubmitted": sent_on,
         "noteOffsSubmitted": sent_off, "rejectedSubmissions": rejected,
         "peakObserved": peak, "maxObservedMidiAgeUs": max_midi_age_us,
         "finalMetrics": final_snapshot.metrics, "workerStateBeforeStop": final_snapshot.state,
