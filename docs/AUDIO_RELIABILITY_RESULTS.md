@@ -186,3 +186,14 @@ the diagnostic stop before the requested eight minutes completed. The
 [experiment provenance](measurements/splice-segment-experiment-20260916.json)
 and [run report](measurements/splice-segment-continuous-20260916.json) preserve the
 comparison. SegmentHeap is therefore not being adopted as a production fix.
+
+
+### Event-timeline correction: memory issue persists
+
+Worker commit `2fe6f98` aligns Event.ppqPosition with the advancing ProcessContext
+clock. Its [continuous-run report](measurements/splice-ppq-continuous-20260916.json)
+records 89,936 matched submissions and no reported drops/xruns, over-budget
+callbacks or worker restarts. Nevertheless, private memory exceeded 2 GiB and the
+guard stopped the run after 186.811 seconds including startup/drain/shutdown.
+It is not a passed two-hour endurance test. The correction is retained for its
+VST3 timing semantics; memory behavior remains an independent unresolved issue.

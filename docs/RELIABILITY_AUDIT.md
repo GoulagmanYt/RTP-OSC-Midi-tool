@@ -4,6 +4,19 @@ This audit and implementation apply to the local working tree, including the
 existing audio/EQ changes. Those changes were preserved. No deployment or release
 was performed.
 
+## Current validation status (2026-09-16)
+
+The implementation and protocol regressions are committed. The latest checks
+passed 150 application tests and 87 vendor tests; three hardware-specific opt-in
+tests remain ignored. Application/vendor Clippy passed with warnings denied.
+The one-hour RTP endurance passed 3,573 reconnects and 1,143,360 matched note pairs.
+
+**Open:** extended audio validation on the selected Splice/Voicemeeter rig fails
+its memory bound under continuous note bursts, despite zero reported drops/xruns.
+Active/idle cycling and a Windows allocator-only experiment did not resolve it.
+Do not interpret earlier short successful audio runs as a passed long memory soak.
+Exact reports and experiment limitations are in AUDIO_RELIABILITY_RESULTS.md.
+
 ## Architecture and audit priorities
 
 The target is Windows/MSVC with Rust 1.90.0, Tauri 2 and a TypeScript frontend.
@@ -484,3 +497,15 @@ explicit limitations in AUDIO_RELIABILITY_RESULTS.md. No speculative plugin
 lifecycle patch or periodic restart has been substituted for identifying the
 cause. Windows denied WPR heap tracing; a separate intrusive tracing attempt
 interrupted its worker and is retained as an invalidated profiling run.
+
+
+## VST3 event timeline correction
+
+The processing context advanced in sample/musical time, but each incoming VST3
+Event retained its zero-initialized ppqPosition. Events now use the same tempo and
+sample clock as ProcessContext, including their within-block sample offset. This
+matches the [VST3 event contract](https://steinbergmedia.github.io/vst3_doc/vstinterfaces/structSteinberg_1_1Vst_1_1Event.html)
+without changing queue bounds or allocating in the callback. The release worker
+build, 150 application tests and all-target application Clippy passed afterward.
+The Splice run with this correction still crossed the memory limit, so this is
+a protocol correction, not a demonstrated resolution of the memory issue.
