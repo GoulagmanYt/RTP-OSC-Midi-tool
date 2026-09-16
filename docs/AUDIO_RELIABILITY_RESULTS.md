@@ -107,3 +107,37 @@ session-task completion, so its duration is not directly comparable to the older
 acknowledgement-only measurements. This run validates the latest audio/IPC code
 under the stated load, with the physical latency and voice-accounting limitations
 already described above.
+
+
+## Extended validation and memory investigation (2026-09-16)
+
+The continuous high-rate run using worker SHA-256
+`D53C84630E6A0B0DA110522FB0B114E024C2C5E8157E7E460D13BD6E14530889`
+(built from `01ac64d`) was stopped deliberately after 515 seconds, including
+startup and shutdown. It submitted 255,760 matched Note-On/Note-Off pairs with no
+reported audio drops, xruns, over-budget callbacks, lock misses or worker restarts.
+This is **not a passed two-hour soak**: worker private memory reached
+4,713,865,216 bytes at 502 seconds and was still growing during continuous input.
+The [interrupted report](measurements/splice-asio-final-soak-20260916.json),
+[resource samples](measurements/splice-asio-final-soak-20260916-processes.jsonl)
+and executable provenance retain the failure rather than replacing it with a
+shorter successful run. The software timing observations do not establish
+physical audio latency or prove third-party voice release.
+
+A separate control used the same worker, 60 seconds of MIDI followed by 120
+seconds without further MIDI while audio remained running. All 30,384 submitted
+pairs were accepted, delivery/timing checks passed and no restart occurred.
+Worker private memory fell after the active phase and stayed around 735 MB during
+idle. See the [control report](measurements/splice-memory-active-idle-20260916.json)
+and [samples](measurements/splice-memory-active-idle-20260916-processes.jsonl).
+This shows load-dependent retention; it does not identify the allocating module
+or establish a safe upper bound under uninterrupted stress. WPR heap tracing was
+unavailable to this process because Windows denied enabling it; no system tracing
+settings were changed. The VST creation path already executes on the main UI
+thread, so moving its outer lifecycle task is not a justified memory fix.
+
+The diagnostic now supports explicit active/idle cycles and records their timing.
+Its wrapper samples only its own process and immediate children, and requests a
+graceful stop if worker private memory exceeds the configured bound. This is a
+test containment measure, not a production memory fix or automatic worker restart.
+A passed cyclic workload must not be reported as a passed continuous workload.
