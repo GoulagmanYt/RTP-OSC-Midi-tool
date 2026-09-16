@@ -85,7 +85,15 @@ impl ChannelRepairs {
             if !desired.downbeat && !clock.is_multiple_of(6) {
                 return None;
             }
-            if history.1.sequencer != Some(desired) {
+            let already_synchronized = history.1.sequencer.is_some_and(|known| {
+                known.running == desired.running
+                    && known.clock == desired.clock
+                    && known.downbeat == desired.downbeat
+                    && (desired.clock != 0
+                        || desired.downbeat
+                        || known.continued == desired.continued)
+            });
+            if !already_synchronized {
                 let position = (clock / 6).min(16383);
                 let ticks = clock - position * 6 + u32::from(desired.downbeat);
                 if ticks as usize + 4 > super::MAX_REPAIRS.saturating_sub(self.len) {

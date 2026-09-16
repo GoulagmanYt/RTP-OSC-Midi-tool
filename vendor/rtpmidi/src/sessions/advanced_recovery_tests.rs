@@ -303,3 +303,15 @@ fn general_purpose_data_entry_cannot_modify_an_open_parameter() {
     );
     assert_eq!(history.0[0].parameters.get(0).msb, Some(2));
 }
+
+#[test]
+fn unrelated_packet_loss_does_not_restart_a_known_running_sequencer() {
+    let mut history = ChannelHistory::default();
+    history.observe(MidiMessage::Start);
+    for _ in 0..14 {
+        history.observe(MidiMessage::TimingClock);
+    }
+    assert_eq!(history.1.sequencer.unwrap().clock, 13);
+    let bytes = system(16, &[0x70, 0, 13]);
+    assert_eq!(repair(&bytes, &mut history).unwrap().messages().count(), 0);
+}
