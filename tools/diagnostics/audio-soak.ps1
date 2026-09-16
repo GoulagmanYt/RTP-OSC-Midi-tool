@@ -4,6 +4,7 @@ param(
     [int]$CycleSeconds = 0,
     [int]$MaxWorkerPrivateMB = 4096,
     [string]$Plugin = 'C:\Program Files\Common Files\VST3\Splice\Splice INSTRUMENT.vst3',
+    [string]$WorkerBinary = '',
     [string]$ReportName = 'splice-asio-soak'
 )
 $ErrorActionPreference = 'Stop'
@@ -13,7 +14,8 @@ if ($CycleSeconds -lt 0 -or $CycleSeconds -gt $DurationSeconds -or ($CycleSecond
 if ($MaxWorkerPrivateMB -lt 1) { throw 'MaxWorkerPrivateMB must be positive' }
 if ($ReportName -notmatch '^[a-zA-Z0-9_-]+$') { throw 'ReportName must be a filename stem' }
 $repository = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
-$workerPath = (Resolve-Path (Join-Path $repository '.cargo-target/release/vst-host-worker.exe')).Path
+if (-not $WorkerBinary) { $WorkerBinary = Join-Path $repository '.cargo-target/release/vst-host-worker.exe' }
+$workerPath = (Resolve-Path -LiteralPath $WorkerBinary).Path
 $diagnosticPath = (Resolve-Path (Join-Path $repository '.cargo-target/debug/audio_reliability.exe')).Path
 $reportDirectory = Join-Path $repository 'docs/measurements'
 $reportPath = Join-Path $reportDirectory "$ReportName.json"
@@ -26,6 +28,7 @@ $provenance = @{
     startedUtc = $started.ToString('o'); durationSeconds = $DurationSeconds
     activeSeconds = $ActiveSeconds; cycleSeconds = $CycleSeconds; maxWorkerPrivateMB = $MaxWorkerPrivateMB
     codeCommit = (& git -C $repository rev-parse HEAD)
+    workerPath = $workerPath
     workerSha256 = (Get-FileHash -LiteralPath $workerPath -Algorithm SHA256).Hash
     diagnosticSha256 = (Get-FileHash -LiteralPath $diagnosticPath -Algorithm SHA256).Hash
     scope = 'Audio endurance with periodic process resource samples; other workload may run concurrently. No physical loopback latency measurement.'

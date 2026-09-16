@@ -175,3 +175,14 @@ not proof of exact leaked bytes. Its instrumentation also excludes this run from
 clean latency evidence. The raw [audio report](measurements/splice-heap-profile-20260916.json)
 and process samples are retained. Most observed allocated bytes were freed;
 allocator retention and outstanding plugin allocations still need to be separated.
+
+
+### Windows allocator comparison
+
+A copy of the worker was tested with only its manifest changed to request
+Windows SegmentHeap; no plugin or DSP machine code was changed. This did not
+stabilize continuous-load memory. Private memory again exceeded 2 GiB, triggering
+the diagnostic stop before the requested eight minutes completed. The
+[experiment provenance](measurements/splice-segment-experiment-20260916.json)
+and [run report](measurements/splice-segment-continuous-20260916.json) preserve the
+comparison. SegmentHeap is therefore not being adopted as a production fix.
