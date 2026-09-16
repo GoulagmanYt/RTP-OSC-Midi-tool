@@ -141,3 +141,37 @@ Its wrapper samples only its own process and immediate children, and requests a
 graceful stop if worker private memory exceeds the configured bound. This is a
 test containment measure, not a production memory fix or automatic worker restart.
 A passed cyclic workload must not be reported as a passed continuous workload.
+
+
+### Completed RTP endurance
+
+The [one-hour RTP report](measurements/rtp-soak-20260916.json) passed after
+3,600.797 seconds: 3,573 same-SSRC reconnections, 1,143,360 matched Note-On/Note-Off
+pairs, 3,573 released/rebound socket pairs, and zero callback overflows. The
+bidirectional batch round-trip observations (71,460 samples) were p50 83 us,
+p95 138 us, p99 188 us and maximum 1,028 us. These are software loopback batch
+measurements, not physical MIDI or audio latency. The process resource history
+is retained alongside executable provenance. This executable was built before
+the independent Chapter Q transport-comparison correction, which is covered by
+the subsequent vendor regression suite.
+
+### Cyclic memory failure and targeted profiling
+
+The uninstrumented cyclic follow-up also failed the memory bound: the wrapper
+requested graceful stop when private memory exceeded 2 GiB after about 321
+seconds. It submitted 115,728 matched pairs with zero reported drops/xruns and
+no restart, but did not complete its requested two hours. See the
+[report](measurements/splice-cyclic-final-20260916.json) and resource samples.
+A 60-second active / 30-second idle duty cycle is therefore not a workaround for
+the accumulation.
+
+A separate native HeapAlloc/HeapFree profile completed its 180-second diagnostic
+without worker restart or reported delivery loss. It attributed very high gross
+allocation traffic to `Splice INSTRUMENT.vst3+0x20f1c44` in installed version 2.4.2.
+The [allocation trace](measurements/splice-heap-allocations-20260916.jsonl) covers
+requests of at least 8 KiB made after attachment; it excludes pre-existing blocks
+and does not account for HeapReAlloc. It is useful for locating allocation churn,
+not proof of exact leaked bytes. Its instrumentation also excludes this run from
+clean latency evidence. The raw [audio report](measurements/splice-heap-profile-20260916.json)
+and process samples are retained. Most observed allocated bytes were freed;
+allocator retention and outstanding plugin allocations still need to be separated.
