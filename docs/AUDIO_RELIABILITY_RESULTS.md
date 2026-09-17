@@ -197,3 +197,19 @@ callbacks or worker restarts. Nevertheless, private memory exceeded 2 GiB and th
 guard stopped the run after 186.811 seconds including startup/drain/shutdown.
 It is not a passed two-hour endurance test. The correction is retained for its
 VST3 timing semantics; memory behavior remains an independent unresolved issue.
+
+
+### Current Splice version control
+
+The official signed installer was downloaded and its VST3 2.4.17 payload extracted
+into the ignored build directory. The installer was never run and the installed
+2.4.2 copy in Program Files was not replaced. The [candidate provenance](measurements/splice-2417-candidate-20260916.json)
+records installer signature status and both hashes. Version 2.4.17 is documented
+in the [publisher's change log](https://support.splice.com/en/articles/12295094-splice-instrument-change-log).
+
+The [2.4.17 control](measurements/splice-2417-continuous-20260916.json) produced
+an audio signal and submitted 126,320 matched pairs with zero reported drops/xruns
+or restarts. It nevertheless exceeded the same 2 GiB private-memory limit and
+stopped after 257.140 seconds including startup/drain/shutdown. Updating the
+plugin alone is therefore not a demonstrated fix for this stress case. This run
+still predates the per-block MIDI offset-ordering correction being validated.
