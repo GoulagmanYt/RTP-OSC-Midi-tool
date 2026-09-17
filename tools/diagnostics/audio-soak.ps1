@@ -5,6 +5,7 @@ param(
     [int]$MaxWorkerPrivateMB = 4096,
     [string]$Plugin = 'C:\Program Files\Common Files\VST3\Splice\Splice INSTRUMENT.vst3',
     [string]$WorkerBinary = '',
+    [string]$StateDirectory = '',
     [string]$ReportName = 'splice-asio-soak'
 )
 $ErrorActionPreference = 'Stop'
@@ -23,6 +24,15 @@ $memoryPath = Join-Path $reportDirectory "$ReportName-processes.jsonl"
 New-Item -ItemType Directory -Path $reportDirectory -Force | Out-Null
 if ((Test-Path -LiteralPath $reportPath) -or (Test-Path -LiteralPath $memoryPath)) { throw 'Choose a new report name to preserve previous evidence' }
 $env:OSCMIDI_VST_WORKER_X64_PATH = $workerPath
+if ($StateDirectory) {
+    $stateItem = Get-Item -LiteralPath $StateDirectory
+    if (-not $stateItem.PSIsContainer) { throw 'StateDirectory must be an existing directory' }
+    $env:OSCMIDI_VST_STATE_DIR = $stateItem.FullName
+}
+$stateDirectoryInUse = if ($env:OSCMIDI_VST_STATE_DIR) { $env:OSCMIDI_VST_STATE_DIR } else { Join-Path $env:APPDATA 'OSCMIDI/OSCMIDI/config/vst_state' }
+$stateFiles = @(Get-ChildItem -LiteralPath $stateDirectoryInUse -Filter '*.state' -ErrorAction SilentlyContinue | ForEach-Object {
+    @{ name = $_.Name; sha256 = (Get-FileHash -LiteralPath $_.FullName).Hash }
+})
 $started = [DateTime]::UtcNow
 $pluginItem = Get-Item -LiteralPath $Plugin
 $pluginBinary = if ($pluginItem.PSIsContainer) {
@@ -39,9 +49,11 @@ $provenance = @{
     pluginBinaryPath = $pluginBinary.FullName
     pluginVersion = $pluginBinary.VersionInfo.FileVersion
     pluginSha256 = (Get-FileHash -LiteralPath $pluginBinary.FullName -Algorithm SHA256).Hash
+    stateDirectory = $stateDirectoryInUse
+    stateFilesBeforeRun = $stateFiles
     scope = 'Audio endurance with periodic process resource samples; other workload may run concurrently. No physical loopback latency measurement.'
 }
-$provenance | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $reportDirectory "$ReportName-provenance.json") -Encoding UTF8
+$provenance | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $reportDirectory "$ReportName-provenance.json") -Encoding UTF8
 $arguments = @('--vst', ('"' + $Plugin + '"'), '--duration-seconds', $DurationSeconds, '--buffer', 512, '--stop-file', ('"' + $reportPath + '.stop"'), '--report', ('"' + $reportPath + '"'))
 if ($ActiveSeconds -ge 0) { $arguments += @('--active-seconds', $ActiveSeconds) }
 if ($CycleSeconds -gt 0) { $arguments += @('--cycle-seconds', $CycleSeconds) }
