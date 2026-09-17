@@ -276,3 +276,30 @@ two-hour run on the recorded plugin binary with bounded memory. No plugin
 source-level fix, independent-host reproduction or physical-loopback latency
 measurement is claimed. The production timing correction and successful RTP
 endurance remain valid independently of this unresolved audio stress result.
+
+### Matched-state comparison setup (September 17 follow-up)
+
+Inspection found that production startup automatically restores saved plugin
+state even when `supervisor.start(settings, None)` supplies no explicit fallback
+path. Earlier wording about a fresh instance must not be read as proof of a
+factory-default preset. The first independent JUCE exploration used an
+unverified default, was stopped intentionally, and is not a matched-preset
+comparison or completed endurance test. Its retained stop record explains this.
+
+The subsequent control loads the extracted native state from an isolated copy
+of the production v3 state. Splice identifies it as Autograph Grand / The Grand
+1.0.1. JUCE returned the exact same 6,850 component bytes after restoration,
+verified by SHA-256 in the state-check report. The production worker now has
+an opt-in absolute `OSCMIDI_VST_STATE_DIR`; diagnostics use a private copy so
+startup/shutdown no longer read/write the user's state during this comparison.
+The wrapper records initial state hashes. This override is unused in normal
+application operation. All 152 application tests and Clippy passed.
+
+Independent host: JUCE 8.0.15, no production rack/CPAL/IPC code, same Splice
+2.4.17 binary and Voicemeeter AUX ASIO at 48 kHz/512 frames. It sends the same
+16-note pitches/velocity at 500 pairs/second on its sample clock; production
+retains IPC/Windows pacing, so event timestamps are not bit-identical.
+The new safety guard is 6 GiB, not a publisher memory limit or a passing
+stability criterion. Initial concurrent operation is additional system load;
+JUCE recorded callback budget exceedances when the second host started.
+Neither comparison nor a higher safety cap alone certifies memory stability.
