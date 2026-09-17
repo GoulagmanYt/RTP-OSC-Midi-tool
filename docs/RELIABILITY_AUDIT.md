@@ -516,5 +516,7 @@ VST2 and VST3 batches now use one clock snapshot per audio block and clamp
 regressing ingress timestamps to the preceding offset. FIFO event order is
 preserved without sorting or allocation. Two regressions cover timestamp
 regression, late/future bounds and a stable origin across conversion delays.
-All 152 application tests and all-target Clippy pass. Real-rig memory validation
-of this correction is still pending; it is not yet a demonstrated memory fix.
+All 152 application tests and all-target Clippy pass. Real-rig validation
+submitted 664,800 matched pairs with zero reported drops/xruns, but exceeded
+the 2 GiB memory guard after about 22 minutes. The two-hour endurance remains
+unvalidated; this correction does not resolve the observed memory accumulation.

@@ -213,3 +213,24 @@ or restarts. It nevertheless exceeded the same 2 GiB private-memory limit and
 stopped after 257.140 seconds including startup/drain/shutdown. Updating the
 plugin alone is therefore not a demonstrated fix for this stress case. This run
 still predates the per-block MIDI offset-ordering correction being validated.
+
+
+### Fixed MIDI block ordering: delayed but unresolved memory growth
+
+Worker commit `b3da31a` uses one timestamp origin per MIDI batch and preserves
+nondecreasing sample offsets without reordering FIFO messages. The
+[continuous run](measurements/splice-ordered-midi-20260917.json) with installed
+Splice 2.4.2 and Voicemeeter AUX ASIO produced audio and submitted 664,800
+matched pairs with zero reported drops, xruns, over-budget callbacks or worker
+restarts. Shutdown completed in 150 ms. All 152 application tests and Clippy
+passed before the release build.
+
+Private memory remained around 620–675 MiB for approximately 19 minutes, then
+grew rapidly and exceeded the 2 GiB guard. The run stopped after 1,329.972
+seconds including startup/drain/shutdown, not the requested two hours. A longer
+initial plateau is not proof that the memory defect was fixed or of a causal
+improvement; the ordering correction remains independently justified. The
+[process samples](measurements/splice-ordered-midi-20260917-processes.jsonl),
+[binary provenance](measurements/splice-ordered-midi-20260917-provenance.json) and
+[rig identity](measurements/splice-ordered-midi-20260917-rig.json) preserve the
+evidence. The retained stop marker records the memory-limit reason.
