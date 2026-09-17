@@ -220,7 +220,7 @@ still predates the per-block MIDI offset-ordering correction being validated.
 Worker commit `b3da31a` uses one timestamp origin per MIDI batch and preserves
 nondecreasing sample offsets without reordering FIFO messages. The
 [continuous run](measurements/splice-ordered-midi-20260917.json) with installed
-Splice 2.4.2 and Voicemeeter AUX ASIO produced audio and submitted 664,800
+Splice 2.4.17 and Voicemeeter AUX ASIO produced audio and submitted 664,800
 matched pairs with zero reported drops, xruns, over-budget callbacks or worker
 restarts. Shutdown completed in 150 ms. All 152 application tests and Clippy
 passed before the release build.
@@ -234,3 +234,10 @@ improvement; the ordering correction remains independently justified. The
 [binary provenance](measurements/splice-ordered-midi-20260917-provenance.json) and
 [rig identity](measurements/splice-ordered-midi-20260917-rig.json) preserve the
 evidence. The retained stop marker records the memory-limit reason.
+
+Rig identity collected during the September 17 run shows that the installed
+plugin is now 2.4.17 (SHA-256 starts `D4F96862`). The agent did not run an
+installer or replace Program Files. The installation changed since the earlier
+2.4.2 measurements, so this is not a controlled same-plugin comparison against
+those runs. Future wrapper provenance captures plugin version and hash
+automatically instead of relying on a separately collected rig record.

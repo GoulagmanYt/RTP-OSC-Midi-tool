@@ -24,6 +24,10 @@ New-Item -ItemType Directory -Path $reportDirectory -Force | Out-Null
 if ((Test-Path -LiteralPath $reportPath) -or (Test-Path -LiteralPath $memoryPath)) { throw 'Choose a new report name to preserve previous evidence' }
 $env:OSCMIDI_VST_WORKER_X64_PATH = $workerPath
 $started = [DateTime]::UtcNow
+$pluginItem = Get-Item -LiteralPath $Plugin
+$pluginBinary = if ($pluginItem.PSIsContainer) {
+    Get-Item -LiteralPath (Join-Path $pluginItem.FullName ('Contents/x86_64-win/' + $pluginItem.Name))
+} else { $pluginItem }
 $provenance = @{
     startedUtc = $started.ToString('o'); durationSeconds = $DurationSeconds
     activeSeconds = $ActiveSeconds; cycleSeconds = $CycleSeconds; maxWorkerPrivateMB = $MaxWorkerPrivateMB
@@ -31,6 +35,10 @@ $provenance = @{
     workerPath = $workerPath
     workerSha256 = (Get-FileHash -LiteralPath $workerPath -Algorithm SHA256).Hash
     diagnosticSha256 = (Get-FileHash -LiteralPath $diagnosticPath -Algorithm SHA256).Hash
+    pluginPath = $pluginItem.FullName
+    pluginBinaryPath = $pluginBinary.FullName
+    pluginVersion = $pluginBinary.VersionInfo.FileVersion
+    pluginSha256 = (Get-FileHash -LiteralPath $pluginBinary.FullName -Algorithm SHA256).Hash
     scope = 'Audio endurance with periodic process resource samples; other workload may run concurrently. No physical loopback latency measurement.'
 }
 $provenance | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $reportDirectory "$ReportName-provenance.json") -Encoding UTF8
