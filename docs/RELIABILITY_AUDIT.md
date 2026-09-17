@@ -15,6 +15,8 @@ The one-hour RTP endurance passed 3,573 reconnects and 1,143,360 matched note pa
 its memory bound under continuous note bursts, despite zero reported drops/xruns.
 Active/idle cycling and a Windows allocator-only experiment did not resolve it.
 Do not interpret earlier short successful audio runs as a passed long memory soak.
+The latest native profile includes reallocations and observes increasing retained
+plugin allocations across idle pauses; it does not yet establish their cause.
 Exact reports and experiment limitations are in AUDIO_RELIABILITY_RESULTS.md.
 
 ## Architecture and audit priorities

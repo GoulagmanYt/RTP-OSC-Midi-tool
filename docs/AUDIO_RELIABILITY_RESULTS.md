@@ -241,3 +241,38 @@ installer or replace Program Files. The installation changed since the earlier
 2.4.2 measurements, so this is not a controlled same-plugin comparison against
 those runs. Future wrapper provenance captures plugin version and hash
 automatically instead of relying on a separately collected rig record.
+
+
+### Native heap profile with realloc accounting
+
+The follow-up [profile](measurements/splice-realloc-allocations-20260917.jsonl)
+tracks Win32 HeapAlloc/HeapFree/HeapReAlloc using bounded native callbacks. Its
+[controlled fixture](measurements/heap-profile-fixture-20260917.jsonl) verified
+allocation, growth, shrink below threshold, failed resize and free, including
+exclusion of nested allocator calls. No profile snapshot reported table loss
+or script error. Tool source and limitations are in
+[HEAP_PROFILING.md](../tools/diagnostics/HEAP_PROFILING.md).
+
+Four 60-second active / 30-second idle cycles on installed Splice 2.4.17
+submitted 120,864 matched pairs and produced audio. The diagnostic completed
+in 368.630 seconds, with no reported worker restart or MIDI rejection and
+115 ms shutdown. Although its telemetry reports no drops/xruns, this is an
+instrumented run and is excluded from clean latency/endurance evidence.
+
+Tracked live plugin allocations during successive pauses increased from zero
+to approximately 46.45, 75.99 and 101.64 MiB. The final 106,579,232 bytes were
+attributed to `Splice INSTRUMENT.vst3+0x2174ab4`; cumulative allocations at that
+site were about 95.87 GB, most of which were freed. The
+[summary](measurements/splice-realloc-profile-20260917-summary.json) preserves
+exact counts and source revisions. The increasing live subset establishes
+retention in observed allocation calls, rather than only an increase in gross
+allocation traffic or Windows private bytes. It does not establish which
+internal objects retain them, whether this is a cache or leak, or whether host
+interaction triggers the behavior. Direct allocation APIs, small/pre-attachment
+blocks and bulk heap destruction are outside complete accounting.
+
+**Remaining:** identify and correct the retention cause, then complete a clean
+two-hour run on the recorded plugin binary with bounded memory. No plugin
+source-level fix, independent-host reproduction or physical-loopback latency
+measurement is claimed. The production timing correction and successful RTP
+endurance remain valid independently of this unresolved audio stress result.
