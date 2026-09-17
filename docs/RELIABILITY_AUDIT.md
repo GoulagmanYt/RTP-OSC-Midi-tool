@@ -4,10 +4,10 @@ This audit and implementation apply to the local working tree, including the
 existing audio/EQ changes. Those changes were preserved. No deployment or release
 was performed.
 
-## Current validation status (2026-09-16)
+## Current validation status (2026-09-17)
 
 The implementation and protocol regressions are committed. The latest checks
-passed 150 application tests and 87 vendor tests; three hardware-specific opt-in
+passed 152 application tests and 87 vendor tests; three hardware-specific opt-in
 tests remain ignored. Application/vendor Clippy passed with warnings denied.
 The one-hour RTP endurance passed 3,573 reconnects and 1,143,360 matched note pairs.
 
@@ -509,3 +509,12 @@ without changing queue bounds or allocating in the callback. The release worker
 build, 150 application tests and all-target application Clippy passed afterward.
 The Splice run with this correction still crossed the memory limit, so this is
 a protocol correction, not a demonstrated resolution of the memory issue.
+
+## Fixed block origin for MIDI offsets
+
+VST2 and VST3 batches now use one clock snapshot per audio block and clamp
+regressing ingress timestamps to the preceding offset. FIFO event order is
+preserved without sorting or allocation. Two regressions cover timestamp
+regression, late/future bounds and a stable origin across conversion delays.
+All 152 application tests and all-target Clippy pass. Real-rig memory validation
+of this correction is still pending; it is not yet a demonstrated memory fix.
