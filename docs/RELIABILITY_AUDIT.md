@@ -11,16 +11,20 @@ passed 152 application tests and 87 vendor tests; three hardware-specific opt-in
 tests remain ignored. Application/vendor Clippy passed with warnings denied.
 The one-hour RTP endurance passed 3,573 reconnects and 1,143,360 matched note pairs.
 
-**Open:** the two-hour audio endurance remains incomplete. The user confirmed
-that they manually stopped the worker in the latest matched-state run after
-about 82 minutes; this is not evidence of a spontaneous worker crash. That run
-sampled at most 1,262,587,904 private bytes, below its 6 GiB guard, and reported
-zero xruns but 76 callback budget exceedances. The interrupted run's 112 rejected
-submissions and one restart must be interpreted with that manual stop in mind.
-Earlier runs exceeded their lower memory guards. An independent JUCE host with
-the exact same native preset state also grew to 3,685,584,896 bytes in 15 minutes.
-This reproduces growth outside our host, not its precise cause or an unbounded
-leak. Neither this comparison nor the interrupted run validates two hours.
+**Blocked validation:** the September 18 single-host endurance exceeded its
+6 GiB diagnostic memory guard after 859.167 seconds including startup/shutdown.
+It submitted 430,848 matched note pairs with zero reported drops, xruns,
+callback budget exceedances, lock misses or worker restarts. Peak sampled
+private memory was 6,547,107,840 bytes. This run was stopped by the guard, not
+manually by the user; its generic external-stop field is explained by the saved
+stop marker. Two-hour stability of this Splice configuration is not validated.
+
+The user manually stopped the earlier 82-minute run; that run is not evidence
+of a spontaneous crash. Its memory stayed lower, showing variable behavior.
+An independent JUCE host with the exact same native preset state also grew to
+3,685,584,896 bytes in 15 minutes. This reproduces growth outside our host, not
+its precise cause or an unbounded leak. A local investigation package is in
+[SPLICE_REPRODUCTION.md](SPLICE_REPRODUCTION.md); it has not been sent externally.
 Exact reports and experiment limitations are in AUDIO_RELIABILITY_RESULTS.md.
 
 ## Architecture and audit priorities

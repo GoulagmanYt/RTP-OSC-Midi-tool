@@ -330,3 +330,38 @@ concurrent operation with JUCE is documented above.
 **Remaining:** complete an uninterrupted two-hour endurance, assess the timing
 exceedances and memory trajectory, and retain the limits of the Splice comparison.
 There is no spontaneous worker-crash defect established by this particular run.
+
+### September 18 single-host final attempt: memory guard reached
+
+The [final attempt](measurements/splice-final-endurance-20260918.json) used the
+same native state hash `51670769c2a0289fc6d1721a71d5e61fddc05f305072df2815f9759e74aa0310`
+in a new isolated directory. There was no simultaneous JUCE host, build or heap
+instrumentation. The requested two-hour duration was stopped by the wrapper's
+6 GiB memory guard after 859.167 seconds including startup/drain/shutdown
+(849.587 seconds of transmission). Peak sampled worker private memory was
+6,547,107,840 bytes at 853.876 seconds, approximately 6.10 GiB.
+
+The run submitted 430,848 matched pairs and produced audio. It recorded zero
+rejected submissions, MIDI drops, xruns, callback budget exceedances, lock
+misses and worker restarts. Before the final panic the queue was empty; maximum
+callback time was 4,886 us and maximum plugin processing time 4,879 us. Shutdown
+completed in 331 ms. These observations do not imply two-hour success: the
+memory guard stopped the test early and `deliveryPassed` is consequently false.
+
+The generic `external stop requested` field is attributable to the saved
+[guard marker](measurements/splice-final-endurance-20260918.json.stop), which
+states that worker private memory exceeded the diagnostic limit. This is
+distinct from the user's manual termination of the September 17 run.
+
+The earlier 82-minute run had a roughly 1.0–1.1 GiB plateau from approximately
+30 to 80 minutes. The new growth with the same native state shows variability;
+neither that earlier plateau nor the public typical-memory estimate establishes
+stability for every run. No speculative change to opaque voice-limit settings,
+periodic reset workaround, or claim that all memory is leaked was made.
+
+**Result:** the repository changes and automated checks are delivered, but the
+requested two-hour Splice memory validation is blocked by a reproducible stress
+outcome also exhibiting growth in an independent host. The remaining cause is
+not established sufficiently to justify another production patch. The local
+[reproduction report](SPLICE_REPRODUCTION.md) records configuration, evidence,
+limitations and questions for the publisher; no external message was sent.
