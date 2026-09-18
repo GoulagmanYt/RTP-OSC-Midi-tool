@@ -4,19 +4,23 @@ This audit and implementation apply to the local working tree, including the
 existing audio/EQ changes. Those changes were preserved. No deployment or release
 was performed.
 
-## Current validation status (2026-09-17)
+## Current validation status (2026-09-18)
 
 The implementation and protocol regressions are committed. The latest checks
 passed 152 application tests and 87 vendor tests; three hardware-specific opt-in
 tests remain ignored. Application/vendor Clippy passed with warnings denied.
 The one-hour RTP endurance passed 3,573 reconnects and 1,143,360 matched note pairs.
 
-**Open:** extended audio validation on the selected Splice/Voicemeeter rig fails
-its memory bound under continuous note bursts, despite zero reported drops/xruns.
-Active/idle cycling and a Windows allocator-only experiment did not resolve it.
-Do not interpret earlier short successful audio runs as a passed long memory soak.
-The latest native profile includes reallocations and observes increasing retained
-plugin allocations across idle pauses; it does not yet establish their cause.
+**Open:** the two-hour audio endurance remains incomplete. The user confirmed
+that they manually stopped the worker in the latest matched-state run after
+about 82 minutes; this is not evidence of a spontaneous worker crash. That run
+sampled at most 1,262,587,904 private bytes, below its 6 GiB guard, and reported
+zero xruns but 76 callback budget exceedances. The interrupted run's 112 rejected
+submissions and one restart must be interpreted with that manual stop in mind.
+Earlier runs exceeded their lower memory guards. An independent JUCE host with
+the exact same native preset state also grew to 3,685,584,896 bytes in 15 minutes.
+This reproduces growth outside our host, not its precise cause or an unbounded
+leak. Neither this comparison nor the interrupted run validates two hours.
 Exact reports and experiment limitations are in AUDIO_RELIABILITY_RESULTS.md.
 
 ## Architecture and audit priorities

@@ -1,0 +1,21 @@
+{
+  "pluginSha256": "D4F9686268DEBCC7B71C2FF277AB056805EAB67F4C6E99B634E961003C9A2E0F",
+  "scope": "Independent JUCE VST3 host; same serialized native state as isolated production test; ASIO Voicemeeter AUX 48000/512; 500 pairs/sec; scheduling differs from IPC stress.",
+  "pluginVersion": "2.4.17",
+  "referenceSha256": "895A1EDAD1D491FA5A77B7A5E09AF590874FCEB253D4E6A4174794A3D0F158B6",
+  "startedUtc": "2026-09-17T15:00:04.5208160Z",
+  "juceCommit": "91ad83ae34a81e0833b1a2b0866f54846370ae53",
+  "maxPrivateMiB": 6144,
+  "state": {
+    "stateSha256": "5938472eb0688f753be4af669d1aeb9c16d06d0a7a298c2875dc87415586066e",
+    "nativeSha256": "51670769c2a0289fc6d1721a71d5e61fddc05f305072df2815f9759e74aa0310",
+    "stateBytes": 81497,
+    "nativeBytes": 6854,
+    "preset": {
+      "family": "Autograph Grand",
+      "name": "The Grand",
+      "version": "1.0.1"
+    }
+  },
+  "durationSeconds": 900
+}

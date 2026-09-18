@@ -271,11 +271,11 @@ internal objects retain them, whether this is a cache or leak, or whether host
 interaction triggers the behavior. Direct allocation APIs, small/pre-attachment
 blocks and bulk heap destruction are outside complete accounting.
 
-**Remaining:** identify and correct the retention cause, then complete a clean
-two-hour run on the recorded plugin binary with bounded memory. No plugin
-source-level fix, independent-host reproduction or physical-loopback latency
-measurement is claimed. The production timing correction and successful RTP
-endurance remain valid independently of this unresolved audio stress result.
+At that stage, the retention cause and two-hour endurance remained unresolved.
+No plugin source-level fix or physical-loopback latency measurement was claimed.
+The later independent-host comparison and user-confirmed interruption are
+documented below. The production timing correction and successful RTP endurance
+remain valid independently of these audio stress results.
 
 ### Matched-state comparison setup (September 17 follow-up)
 
@@ -303,3 +303,30 @@ The new safety guard is 6 GiB, not a publisher memory limit or a passing
 stability criterion. Initial concurrent operation is additional system load;
 JUCE recorded callback budget exceedances when the second host started.
 Neither comparison nor a higher safety cap alone certifies memory stability.
+
+### Completed control and user-interrupted endurance (clarified September 18)
+
+The matched-state JUCE control completed 900 seconds and 450,016 matched note
+pairs. Its final private memory was 3,685,584,896 bytes (approximately 3.43 GiB),
+below its 6 GiB safety cap. It recorded 32 callback budget exceedances. This
+reproduces memory growth outside the production host with the exact same native
+component state; it does not prove a leak, a normal cache plateau, or a clean
+timing pass. Its `completed` flag is a duration/memory/count/signal check only.
+
+The production run lasted 4,946.844 seconds including startup/drain/shutdown
+and submitted 2,524,048 Note-On/Off pairs. On September 18 the user explicitly
+confirmed that they manually stopped the worker. Consequently the recorded
+control-channel EOF, one restart and 112 rejected submissions are observations
+of an interrupted run, not evidence of an unexplained spontaneous crash.
+The raw failure fields are preserved; the companion interruption record adds
+the user's clarification rather than rewriting the telemetry as a pass.
+
+Sampled worker private memory peaked at 1,262,587,904 bytes (about 1.18 GiB),
+below the configured 6 GiB guard. The run reported zero xruns, but 76 callback
+budget exceedances were already present before the interruption. These timing
+observations remain valid and are not erased by the clarification. Initial
+concurrent operation with JUCE is documented above.
+
+**Remaining:** complete an uninterrupted two-hour endurance, assess the timing
+exceedances and memory trajectory, and retain the limits of the Splice comparison.
+There is no spontaneous worker-crash defect established by this particular run.
