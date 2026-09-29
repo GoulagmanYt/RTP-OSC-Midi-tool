@@ -163,6 +163,7 @@ mod fixture {
                         | ControlMessage::SetParameter { request_id, .. }
                         | ControlMessage::SetGain { request_id, .. }
                         | ControlMessage::SetLimiter { request_id, .. }
+                        | ControlMessage::SetEq { request_id, .. }
                         | ControlMessage::SaveState { request_id }
                         | ControlMessage::Panic { request_id } => ControlMessage::Ack { request_id },
                         _ => ControlMessage::Error { request_id: None, code: "fixture.invalid-command".into(), message: "invalid fixture command".into() },

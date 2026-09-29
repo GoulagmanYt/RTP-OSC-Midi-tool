@@ -8,6 +8,7 @@ pub mod engine;
 mod engine_editor;
 mod engine_lifecycle;
 mod engine_status;
+mod equalizer;
 mod plugin_host;
 #[cfg(target_os = "windows")]
 mod remote_bridge;
@@ -19,6 +20,7 @@ mod thread_affinity;
 pub mod windows_tuning;
 
 pub use engine::AudioEngine;
+pub(crate) use engine::MidiSendOutcome;
 #[cfg(target_os = "windows")]
 pub use remote_bridge::run_dsp_bridge_from_env;
 pub use runtime_state::{AudioError, AudioSettings};

@@ -42,17 +42,17 @@ mod tests {
     }
 
     #[test]
-    fn keeps_raw_order_for_14bit_and_system_messages() {
-        let bend = RtMidiMessage::PitchBendChange(Channel::C2, Value14::from((2, 1)));
+    fn serializes_14bit_values_lsb_first_and_preserves_system_messages() {
+        let bend = RtMidiMessage::PitchBendChange(Channel::C2, Value14::from(257u16));
         assert_eq!(
             midi_to_bytes(bend).as_slice(),
-            [status::PITCH_BEND_CHANGE | u8::from(Channel::C2), 2, 1]
+            [status::PITCH_BEND_CHANGE | u8::from(Channel::C2), 1, 2]
         );
 
-        let spp = RtMidiMessage::SongPositionPointer(Value14::from((4, 3)));
+        let spp = RtMidiMessage::SongPositionPointer(Value14::from(515u16));
         assert_eq!(
             midi_to_bytes(spp).as_slice(),
-            [status::SONG_POSITION_POINTER, 4, 3]
+            [status::SONG_POSITION_POINTER, 3, 4]
         );
 
         assert_eq!(
@@ -99,3 +99,5 @@ mod tests {
         assert!(!participant_matches_target("not-an-addr", &target));
     }
 }
+
+pub(crate) mod rtp_output;

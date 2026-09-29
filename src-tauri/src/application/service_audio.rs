@@ -194,6 +194,14 @@ pub fn set_audio_limiter(enabled: bool, state: &AppState) -> Result<(), CommandE
     Ok(())
 }
 
+pub fn set_vst_eq(
+    settings: crate::config::VstEqSettings,
+    state: &AppState,
+) -> Result<(), CommandError> {
+    state.audio.set_vst_eq(settings);
+    Ok(())
+}
+
 pub fn ping_audio(app: &AppHandle, window: &Window, state: &AppState) -> Result<(), CommandError> {
     let cfg = state.config_store.load();
     if !cfg.audio.enabled {

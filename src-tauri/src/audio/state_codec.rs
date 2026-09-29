@@ -92,6 +92,12 @@ pub(super) struct StateDocument {
 }
 
 fn state_dir() -> Option<PathBuf> {
+    // Explicit per-process override for isolated diagnostics. Never redirect the
+    // user's persisted state to a path relative to an arbitrary working folder.
+    if let Some(path) = std::env::var_os("OSCMIDI_VST_STATE_DIR") {
+        let path = PathBuf::from(path);
+        return path.is_absolute().then_some(path);
+    }
     ProjectDirs::from("com", "OSCMIDI", "OSCMIDI").map(|dirs| dirs.config_dir().join("vst_state"))
 }
 

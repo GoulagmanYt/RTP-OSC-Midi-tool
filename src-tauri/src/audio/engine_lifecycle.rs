@@ -22,6 +22,7 @@ use super::{
     callback_midi::reset_all_notes,
     device_selection::{select_device, select_host},
     engine::{db_to_linear, requires_vst3_destructor_quarantine, AudioEngine},
+    equalizer::PublishedEq,
     runtime_state::{
         AudioControls, AudioError, AudioLifecycleState, AudioRuntime, AudioSettings,
         AudioTelemetry, EditorWindow,
@@ -226,7 +227,7 @@ impl AudioEngine {
         let app_handle_for_drop = app_handle.clone();
         let runtime = self.runtime.lock().take();
         let mut retained_device = None;
-        *self.midi_tx.lock() = None;
+        self.midi_tx.store(None);
         self.midi_emergency_reset_requested
             .store(false, Ordering::Relaxed);
 
@@ -545,6 +546,7 @@ impl AudioEngine {
         let controls = Arc::new(AudioControls {
             gain_bits: AtomicU32::new(db_to_linear(settings.gain_db).to_bits()),
             limiter_enabled: AtomicBool::new(settings.limiter_enabled),
+            equalizer: PublishedEq::new(&settings.vst_eq, settings.sample_rate),
         });
         let telemetry = Arc::new(AudioTelemetry::new());
 
@@ -727,6 +729,7 @@ impl AudioEngine {
                 &dev_name,
                 prefer_low_latency,
                 &vst_probe,
+                &settings.vst_eq,
             ) {
                 Ok(res) => {
                     let (
@@ -874,7 +877,11 @@ impl AudioEngine {
         };
 
         *self.last_vst.lock() = Some(vst_path);
-        *self.midi_tx.lock() = Some(midi_tx);
+        self.midi_tx
+            .store(Some(Arc::new(super::engine::MidiIngress::new(
+                midi_tx,
+                runtime.telemetry.clone(),
+            ))));
         *self.runtime.lock() = Some(runtime);
         Ok(())
     }

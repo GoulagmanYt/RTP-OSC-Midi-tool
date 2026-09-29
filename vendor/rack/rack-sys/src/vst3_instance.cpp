@@ -44,6 +44,16 @@ using namespace Steinberg::Vst;
 // VST3 module loading/unloading is not guaranteed to be thread-safe
 static std::mutex g_vst3_lifecycle_mutex;
 
+static constexpr double kHostTempo = 120.0;
+
+static double project_quarter_notes(TSamples block_start, uint32_t sample_offset,
+                                    double sample_rate) noexcept {
+    return sample_rate > 0.0
+        ? (static_cast<double>(block_start) + static_cast<double>(sample_offset))
+            / sample_rate * (kHostTempo / 60.0)
+        : 0.0;
+}
+
 static constexpr size_t kRealtimeEventCapacity = 512;
 static constexpr size_t kParameterTransferCapacity = 4096;
 
@@ -1404,9 +1414,8 @@ int rack_vst3_plugin_process(
         context.continousTimeSamples = plugin->sample_position;
         context.state |= ProcessContext::kContTimeValid;
     }
-    const double quarter_notes = plugin->sample_rate > 0.0
-        ? static_cast<double>(plugin->sample_position) / plugin->sample_rate * (120.0 / 60.0)
-        : 0.0;
+    const double quarter_notes =
+        project_quarter_notes(plugin->sample_position, 0, plugin->sample_rate);
     if (requirements & IProcessContextRequirements::kNeedProjectTimeMusic) {
         context.projectTimeMusic = quarter_notes;
         context.state |= ProcessContext::kProjectTimeMusicValid;
@@ -1416,7 +1425,7 @@ int rack_vst3_plugin_process(
         context.state |= ProcessContext::kBarPositionValid;
     }
     if (requirements & IProcessContextRequirements::kNeedTempo) {
-        context.tempo = 120.0;
+        context.tempo = kHostTempo;
         context.state |= ProcessContext::kTempoValid;
     }
     if (requirements & IProcessContextRequirements::kNeedTimeSignature) {
@@ -2265,6 +2274,10 @@ int rack_vst3_plugin_send_midi(
         Event vst3_event;
         memset(&vst3_event, 0, sizeof(Event));
         vst3_event.sampleOffset = midi_event.sample_offset;
+        // Event and ProcessContext positions must describe the same timeline.
+        // Leaving ppqPosition at zero timestamps every note at project start.
+        vst3_event.ppqPosition = project_quarter_notes(
+            plugin->sample_position, midi_event.sample_offset, plugin->sample_rate);
         vst3_event.busIndex = 0;
 
         uint8_t status = midi_event.status & 0xF0;

@@ -32,6 +32,7 @@ pub(super) const BRIDGE_MIDI_QUEUE_CAPACITY: usize = 8192;
 
 pub(super) fn rtp_requested(config: &Config) -> bool {
     config.rtp.enabled
+        || config.rtp.thru_enabled
         || config.rtp.remote_enabled
         || config
             .midi
@@ -43,11 +44,12 @@ pub(super) fn rtp_requested(config: &Config) -> bool {
 
 pub(super) fn sync_rtp(
     rtp_server: &Arc<Mutex<Option<RtpServer>>>,
-    rtp_sink: &Arc<parking_lot::RwLock<Option<Sender<MidiFrame>>>>,
+    rtp_sink: &Arc<arc_swap::ArcSwapOption<Sender<MidiFrame>>>,
     rtp_config: &Arc<Mutex<Option<RtpConfigSnapshot>>>,
     config: &Config,
     logger: &FrontendLogger,
     force_restart: bool,
+    rtp_output: &crate::rtp::rtp_output::RtpOutputRoute,
 ) -> Result<(), String> {
     let should_run = rtp_requested(config);
     let mut server_guard = rtp_server.lock();
@@ -69,6 +71,7 @@ pub(super) fn sync_rtp(
                 .unwrap_or(true);
 
         if needs_restart {
+            rtp_output.set(None);
             if let Some(existing) = server_guard.take() {
                 crate::tauri::utils::safe_block_on(existing.stop());
             }
@@ -91,9 +94,11 @@ pub(super) fn sync_rtp(
                 log_rtp: config.rtp.log_messages,
                 advertisement,
             });
+            rtp_output.set(Some(server.outgoing()));
             *server_guard = Some(server);
         }
     } else {
+        rtp_output.set(None);
         if let Some(existing) = server_guard.take() {
             crate::tauri::utils::safe_block_on(existing.stop());
         }
@@ -113,8 +118,9 @@ pub(super) fn start_runtime(
     dev_logging: Arc<AtomicBool>,
     audio: AudioEngine,
     rtp_server: &Arc<Mutex<Option<RtpServer>>>,
-    rtp_sink: &Arc<parking_lot::RwLock<Option<Sender<MidiFrame>>>>,
+    rtp_sink: &Arc<arc_swap::ArcSwapOption<Sender<MidiFrame>>>,
     rtp_config: &Arc<Mutex<Option<RtpConfigSnapshot>>>,
+    rtp_output: crate::rtp::rtp_output::RtpOutputRoute,
 ) -> Result<BridgeRuntime, String> {
     let logger = FrontendLogger::new(window.clone(), dev_logging);
     let osc = OscClient::new(&config.osc.target_ip, config.osc.target_port)?;
@@ -136,9 +142,21 @@ pub(super) fn start_runtime(
     status.midi_input = actual_midi_in.lock().clone();
     status.midi_output = actual_midi_out.lock().clone();
 
-    *rtp_sink.write() = Some(midi_tx.clone());
-    if let Err(error) = sync_rtp(rtp_server, rtp_sink, rtp_config, &config, &logger, false) {
-        *rtp_sink.write() = None;
+    let osc_input = crate::osc_input::OscInputServer::start(&config.osc, midi_tx.clone())?;
+    rtp_sink.store(Some(Arc::new(midi_tx.clone())));
+    if let Err(error) = sync_rtp(
+        rtp_server,
+        rtp_sink,
+        rtp_config,
+        &config,
+        &logger,
+        false,
+        &rtp_output,
+    ) {
+        rtp_sink.store(None);
+        if let Some(server) = osc_input {
+            server.stop();
+        }
         return Err(error);
     }
     let reliable_playback =
@@ -146,6 +164,9 @@ pub(super) fn start_runtime(
             Ok(server) => Some(server),
             Err(error) => {
                 cleanup_startup_rtp(rtp_server, rtp_sink, rtp_config);
+                if let Some(server) = osc_input {
+                    server.stop();
+                }
                 return Err(error);
             }
         };
@@ -189,6 +210,7 @@ pub(super) fn start_runtime(
         osc_counter.clone(),
         actual_midi_out.clone(),
         midi_event_tx,
+        rtp_output,
     ));
 
     let midi_event_emitter = Some(spawn_midi_event_emitter(
@@ -213,9 +235,9 @@ pub(super) fn start_runtime(
         activity_emitter,
         midi_event_emitter,
         reliable_playback,
+        osc_input,
         config: shared_config,
         config_rev,
-        panic_revision,
         actual_midi_in,
         actual_midi_out,
     })
@@ -224,11 +246,15 @@ pub(super) fn start_runtime(
 pub(super) fn stop_runtime(
     runtime: BridgeRuntime,
     rtp_server: &Arc<Mutex<Option<RtpServer>>>,
-    rtp_sink: &Arc<parking_lot::RwLock<Option<Sender<MidiFrame>>>>,
+    rtp_sink: &Arc<arc_swap::ArcSwapOption<Sender<MidiFrame>>>,
     rtp_config: &Arc<Mutex<Option<RtpConfigSnapshot>>>,
 ) {
     let config_for_reset = runtime.config.lock().clone();
+    rtp_sink.store(None);
     runtime.stop.store(true, Ordering::Relaxed);
+    if let Some(server) = runtime.osc_input {
+        server.stop();
+    }
     if let Some(handle) = runtime.processing {
         let _ = handle.join();
     }
@@ -253,7 +279,7 @@ pub(super) fn stop_runtime(
         }
     }
 
-    *rtp_sink.write() = None;
+    rtp_sink.store(None);
     if let Some(server) = rtp_server.lock().take() {
         crate::tauri::utils::safe_block_on(server.stop());
     }
@@ -262,10 +288,10 @@ pub(super) fn stop_runtime(
 
 fn cleanup_startup_rtp(
     rtp_server: &Arc<Mutex<Option<RtpServer>>>,
-    rtp_sink: &Arc<parking_lot::RwLock<Option<Sender<MidiFrame>>>>,
+    rtp_sink: &Arc<arc_swap::ArcSwapOption<Sender<MidiFrame>>>,
     rtp_config: &Arc<Mutex<Option<RtpConfigSnapshot>>>,
 ) {
-    *rtp_sink.write() = None;
+    rtp_sink.store(None);
     if let Some(server) = rtp_server.lock().take() {
         crate::tauri::utils::safe_block_on(server.stop());
     }

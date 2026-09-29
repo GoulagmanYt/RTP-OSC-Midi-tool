@@ -12,6 +12,7 @@ use crate::tauri::utils::load_vst_cache_from_disk;
 
 pub struct AppState {
     pub config_store: ConfigStore,
+    pub config_change: Mutex<()>,
     pub bridge: BridgeHandle,
     pub dev_logging: Arc<AtomicBool>,
     pub audio: AudioEngine,
@@ -23,6 +24,7 @@ impl AppState {
     pub fn new() -> Self {
         Self {
             config_store: ConfigStore::new(),
+            config_change: Mutex::new(()),
             bridge: BridgeHandle::new(),
             dev_logging: Arc::new(AtomicBool::new(false)),
             audio: AudioEngine::new(),

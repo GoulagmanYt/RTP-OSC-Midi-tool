@@ -171,6 +171,22 @@ const en: TranslationTree = {
       bufferStream: "Stream buffer",
       midiVstCompat: "MIDI VST",
       bufferMismatchWarning: "The audio driver enforces a buffer size different from the requested value.",
+      eq: {
+        open: "Equalizer",
+        active: "Active",
+        title: "VST Equalizer",
+        description: "Output settings for {{plugin}}. Changes are applied and saved automatically.",
+        enabled: "Enable equalizer",
+        enabledHint: "Bypass keeps the curve so it can be enabled again later.",
+        responseGraph: "Equalizer frequency response curve",
+        lowBand: "Low",
+        midBand: "Mid",
+        highBand: "High",
+        frequency: "Frequency",
+        gain: "Gain",
+        q: "Width (Q)",
+        reset: "Reset",
+      },
       estRoundtrip: "Estimated audio latency",
       vstHealth: "VST Health",
       loaded: "Loaded",
@@ -292,6 +308,12 @@ const en: TranslationTree = {
       bufferMismatchWarning: "The audio driver enforces a buffer size different from the requested value.",
     },
     osc: {
+      inputTitle: "OSC input",
+      inputHint: "Receive note and sustain parameters, or MIDI messages at /midi. Timed bundles are scheduled automatically.",
+      inputEnable: "Enable OSC input",
+      listenIp: "Listen address",
+      listenPort: "Listen port",
+
       title: "OSC Configuration",
       description: "Configure the OSC server and transmission settings.",
       enable: "Enable OSC",
@@ -313,6 +335,8 @@ const en: TranslationTree = {
       defaultPort: "Default port:",
     },
     rtp: {
+      thruEnable: "Forward MIDI to RTP peers",
+      thruHint: "Send local MIDI and OSC input to connected RTP peers. Received RTP is not echoed.",
       title: "RTP-MIDI / AppleMIDI Configuration",
       description: "Configure the network MIDI server (RTP-MIDI / AppleMIDI).",
       enable: "Enable RTP-MIDI server",
@@ -495,6 +519,7 @@ const en: TranslationTree = {
         dropouts:
           "Audio incidents (+{{count}}) — stream/DSP: {{xruns}}, deadlines: {{deadlines}}, locks: {{lockMisses}}, MIDI: {{midiDrops}}, resets: {{resets}}",
         vstParamFailed: "Could not update VST3 parameter",
+        eqFailed: "Could not apply the VST equalizer",
       },
       bridge: {
         preflightFailed: "Preflight check failed",

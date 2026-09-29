@@ -3,8 +3,7 @@ use osc_midi_bridge::{
     audio::AudioEngine, bridge::BridgeHandle, config::ConfigStore, midi::MidiFrame,
 };
 use smallvec::SmallVec;
-use std::hint::black_box;
-use std::sync::Arc;
+use std::{hint::black_box, sync::Arc};
 
 /// Benchmark du parsing de frames MIDI
 fn bench_midi_frame_parsing(c: &mut Criterion) {

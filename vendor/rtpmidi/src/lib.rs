@@ -15,3 +15,6 @@
 pub mod packets;
 mod participant;
 pub mod sessions;
+
+#[cfg(test)]
+mod test_alloc;

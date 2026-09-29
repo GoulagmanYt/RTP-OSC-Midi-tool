@@ -1,7 +1,8 @@
 use mdns_sd::{ServiceDaemon, ServiceInfo};
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -125,10 +126,7 @@ impl RtpMdnsAdvertisement {
     }
 
     pub fn status(&self) -> RtpAdvertisementStatus {
-        self.status
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
+        self.status.lock().clone()
     }
 
     pub fn shutdown(mut self) {
@@ -166,19 +164,13 @@ fn spawn_interface_monitor(
                 .iter()
                 .map(ToString::to_string)
                 .collect::<Vec<_>>();
-            let unchanged = status
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .advertised_addresses
-                == address_text;
+            let unchanged = status.lock().advertised_addresses == address_text;
             if unchanged {
                 continue;
             }
             if addresses.is_empty() {
                 let _ = daemon.unregister(&config.service_fullname);
-                let mut current = status
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let mut current = status.lock();
                 current.advertised_addresses.clear();
                 current.warning =
                     Some("RTP-MIDI mDNS has no usable local IPv4 address to advertise".to_string());
@@ -196,19 +188,14 @@ fn spawn_interface_monitor(
                         "RTP-MIDI mDNS interfaces updated: {}",
                         address_text.join(", ")
                     ));
-                    let mut current = status
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let mut current = status.lock();
                     current.advertised_addresses = address_text;
                     current.warning = None;
                 }
                 Err(error) => {
                     let warning = format!("RTP-MIDI mDNS interface update failed: {error}");
                     logger.warn(warning.clone());
-                    status
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .warning = Some(warning);
+                    status.lock().warning = Some(warning);
                 }
             }
         })

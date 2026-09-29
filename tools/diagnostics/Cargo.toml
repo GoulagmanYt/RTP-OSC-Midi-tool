@@ -1,6 +1,6 @@
 [package]
 name = "oscmidi-diagnostics"
-version = "2.5.0"
+version = "2.6.0"
 edition = "2021"
 description = "Developer-only diagnostics for OSCMidi"
 publish = false
@@ -22,6 +22,14 @@ path = "src/bin/vst_probe.rs"
 name = "midi_stress"
 path = "src/bin/midi_stress.rs"
 
+[[bin]]
+name = "audio_reliability"
+path = "src/bin/audio_reliability.rs"
+
+[[bin]]
+name = "rtp_reliability"
+path = "src/bin/rtp_reliability.rs"
+
 [dependencies]
 osc-midi-bridge = { path = "../../src-tauri" }
 midi-types = "0.2.1"
@@ -34,6 +42,7 @@ rack = { version = "0.4.8", path = "../../vendor/rack" }
 vst = { version = "0.4", path = "../../vendor/vst" }
 
 [patch.crates-io]
+midi-types = { path = "../../vendor/midi-types" }
 rack = { path = "../../vendor/rack" }
 vst = { path = "../../vendor/vst" }
 rtpmidi = { path = "../../vendor/rtpmidi" }

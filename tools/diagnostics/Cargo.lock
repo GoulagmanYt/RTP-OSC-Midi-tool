@@ -129,6 +129,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "arc-swap"
+version = "1.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c049c0be4daef0b145cb3555416b3b8ef5b7888a38aea1a3a155801fe7b0810b"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "asio-sys"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -895,7 +904,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1710,7 +1719,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.61.2",
+ "windows-core 0.62.2",
 ]
 
 [[package]]
@@ -2263,8 +2272,6 @@ dependencies = [
 [[package]]
 name = "midi-types"
 version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c25dc5a1d7f293669c2dce9e5608e5ab2e295d2440363790b625f755ae8fdf78"
 
 [[package]]
 name = "midir"
@@ -2284,7 +2291,7 @@ dependencies = [
  "parking_lot",
  "wasm-bindgen",
  "web-sys",
- "windows 0.61.3",
+ "windows 0.62.2",
 ]
 
 [[package]]
@@ -2480,7 +2487,7 @@ version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
 dependencies = [
- "proc-macro-crate 1.3.1",
+ "proc-macro-crate 2.0.2",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -2754,8 +2761,9 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "osc-midi-bridge"
-version = "2.5.0"
+version = "2.6.0"
 dependencies = [
+ "arc-swap",
  "chrono",
  "cpal",
  "crc32fast",
@@ -2789,7 +2797,7 @@ dependencies = [
 
 [[package]]
 name = "oscmidi-diagnostics"
-version = "2.5.0"
+version = "2.6.0"
 dependencies = [
  "midi-types",
  "midir",
@@ -3295,6 +3303,7 @@ name = "rtpmidi"
 version = "0.4.4"
 dependencies = [
  "anyhow",
+ "arc-swap",
  "bytes",
  "futures",
  "midi-types",
@@ -4935,7 +4944,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

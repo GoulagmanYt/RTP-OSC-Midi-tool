@@ -6,6 +6,7 @@ use osc_midi_bridge::{
     audio::AudioSettings,
     types::VstPluginEntry,
     vst_worker::{VstWorkerState, VstWorkerSupervisor},
+    VstEqSettings,
 };
 
 #[test]
@@ -48,6 +49,7 @@ fn fixture_settings() -> AudioSettings {
         buffer_size: 512,
         gain_db: 0.0,
         limiter_enabled: false,
+        vst_eq: Default::default(),
         vst_plugin_id: None,
         vst_path: Some("fixture.vst3".into()),
     }
@@ -89,6 +91,10 @@ async fn isolated_worker_survives_midi_and_contains_process_crashes() {
         .expect("fixture worker should become ready");
     assert_eq!(status.stream_buffer_size, 512);
     assert_eq!(supervisor.snapshot().state, VstWorkerState::Ready);
+    assert!(supervisor.try_set_eq(VstEqSettings {
+        enabled: true,
+        ..VstEqSettings::default()
+    }));
     for sequence in 0..10_000u32 {
         let note = 36 + (sequence % 48) as u8;
         assert!(supervisor.try_send_midi(&[0x90, note, 100]));

@@ -11,24 +11,42 @@ use vst::{
     plugin::Plugin,
 };
 
-use super::runtime_state::{
-    monotonic_us, AudioCallbackState, MidiPacket, PluginBackend, RESET_CONTROLLERS,
-};
+use super::runtime_state::{monotonic_us, AudioCallbackState, PluginBackend, RESET_CONTROLLERS};
 
-fn sample_offset(packet: MidiPacket, state: &AudioCallbackState) -> u32 {
-    let frames = state.last_frames.max(1);
-    let period_us = (frames as u64)
-        .saturating_mul(1_000_000)
-        .checked_div(u64::from(state.sample_rate.max(1)))
-        .unwrap_or(0);
-    let block_start = monotonic_us().saturating_sub(period_us);
-    packet
-        .timestamp_us
-        .saturating_sub(block_start)
-        .saturating_mul(u64::from(state.sample_rate))
-        .checked_div(1_000_000)
-        .unwrap_or(0)
-        .min(frames.saturating_sub(1) as u64) as u32
+// One origin per block prevents conversion work itself from shifting later events
+// backwards. Clamp regressing ingress timestamps without reordering Note-Off/On.
+struct MidiBlockTiming {
+    start_us: u64,
+    sample_rate: u32,
+    last_frame: u32,
+    last_offset: u32,
+}
+
+impl MidiBlockTiming {
+    fn new(frames: usize, sample_rate: u32, now_us: u64) -> Self {
+        let frames = frames.max(1);
+        let period_us = (frames as u64)
+            .saturating_mul(1_000_000)
+            .checked_div(u64::from(sample_rate.max(1)))
+            .unwrap_or(0);
+        Self {
+            start_us: now_us.saturating_sub(period_us),
+            sample_rate,
+            last_frame: frames.saturating_sub(1).min(u32::MAX as usize) as u32,
+            last_offset: 0,
+        }
+    }
+
+    fn offset(&mut self, timestamp_us: u64) -> u32 {
+        let offset = timestamp_us
+            .saturating_sub(self.start_us)
+            .saturating_mul(u64::from(self.sample_rate))
+            .checked_div(1_000_000)
+            .unwrap_or(0)
+            .min(u64::from(self.last_frame)) as u32;
+        self.last_offset = self.last_offset.max(offset);
+        self.last_offset
+    }
 }
 
 pub(super) fn midi_to_rack_event(data: [u8; 3]) -> Option<RackMidiEvent> {
@@ -91,11 +109,12 @@ pub(super) fn process_pending_vst2_midi(
     instance: &mut PluginInstance,
 ) {
     state.vst2_midi_events.clear();
+    let mut timing = MidiBlockTiming::new(state.last_frames, state.sample_rate, monotonic_us());
     while state.vst2_midi_events.len() < state.vst2_midi_events.capacity() {
         let Some(msg) = state.pending_midi.pop_front() else {
             break;
         };
-        let delta_frames = sample_offset(msg, state) as i32;
+        let delta_frames = timing.offset(msg.timestamp_us) as i32;
         state.vst2_midi_events.push(api::MidiEvent {
             event_type: api::EventType::Midi,
             byte_size: std::mem::size_of::<api::MidiEvent>() as i32,
@@ -136,6 +155,7 @@ pub(super) fn process_pending_vst3_midi(
     }
 
     state.midi_events.clear();
+    let mut timing = MidiBlockTiming::new(state.last_frames, state.sample_rate, monotonic_us());
     let mut consumed = 0usize;
     while consumed < state.midi_events.capacity() {
         let Some(msg) = state.pending_midi.pop_front() else {
@@ -143,7 +163,7 @@ pub(super) fn process_pending_vst3_midi(
         };
         consumed += 1;
         if let Some(mut event) = midi_to_rack_event(msg.data) {
-            event.sample_offset = sample_offset(msg, state);
+            event.sample_offset = timing.offset(msg.timestamp_us);
             state.midi_events.push(event);
         }
     }
@@ -218,4 +238,32 @@ pub(super) fn reset_messages_for_channel(ch: u8) -> [[u8; 3]; 4] {
         [0xB0 | ch, 121, 0],
         [0xB0 | ch, 123, 0],
     ]
+}
+
+#[cfg(test)]
+mod timing_tests {
+    use super::MidiBlockTiming;
+
+    #[test]
+    fn block_offsets_preserve_fifo_order_for_regressing_ingress_timestamps() {
+        let mut timing = MidiBlockTiming::new(1000, 100_000, 1_010_000);
+        // A release followed by a retrigger must retain that order even when
+        // independently measured ingress ages place the retrigger slightly earlier.
+        let timestamps = [1_001_000, 1_001_000, 1_000_990, 1_002_000];
+        assert_eq!(
+            timestamps.map(|stamp| timing.offset(stamp)),
+            [100, 100, 100, 200]
+        );
+    }
+
+    #[test]
+    fn block_offsets_bound_late_and_future_events_without_resampling_the_clock() {
+        let mut timing = MidiBlockTiming::new(480, 48_000, 1_010_000);
+        assert_eq!(timing.offset(0), 0);
+        assert_eq!(timing.offset(1_005_000), 240);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        assert_eq!(timing.offset(1_005_000), 240);
+        assert_eq!(timing.offset(u64::MAX), 479);
+        assert_eq!(MidiBlockTiming::new(0, 0, 0).offset(u64::MAX), 0);
+    }
 }

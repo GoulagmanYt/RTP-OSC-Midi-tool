@@ -47,6 +47,7 @@ src/
 - Windows x64 is the only supported target.
 - One instrument plug-in owns the configured output device at a time.
 - Audio callbacks use bounded/preallocated queues and never wait on frontend work.
+- Per-instrument EQ coefficients are calculated off the audio thread, published through a versioned atomic snapshot, and smoothed inside the callback before master gain and limiting.
 - Note-off, sustain-off, and reset messages remain recoverable under queue pressure.
 - Control messages are versioned and bounded; each worker session uses unpredictable pipe names and a random authentication token.
 - Plug-in scanning runs out of process with a per-candidate timeout and cached class identity.

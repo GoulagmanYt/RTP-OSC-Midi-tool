@@ -6,7 +6,11 @@ pub fn midi_to_bytes(message: RtMidiMessage) -> SmallVec<[u8; 32]> {
     use RtMidiMessage::*;
     match message {
         NoteOn(channel, note, velocity) => SmallVec::from_slice(&[
-            status::NOTE_ON | u8::from(channel),
+            (if u8::from(velocity) == 0 {
+                status::NOTE_OFF
+            } else {
+                status::NOTE_ON
+            }) | u8::from(channel),
             u8::from(note),
             u8::from(velocity),
         ]),
@@ -35,12 +39,12 @@ pub fn midi_to_bytes(message: RtMidiMessage) -> SmallVec<[u8; 32]> {
         ]),
         PitchBendChange(channel, bend) => {
             let (b1, b2): (u8, u8) = bend.into();
-            SmallVec::from_slice(&[status::PITCH_BEND_CHANGE | u8::from(channel), b1, b2])
+            SmallVec::from_slice(&[status::PITCH_BEND_CHANGE | u8::from(channel), b2, b1])
         }
         QuarterFrame(frame) => SmallVec::from_slice(&[status::QUARTER_FRAME, frame.into()]),
         SongPositionPointer(pos) => {
             let (b1, b2): (u8, u8) = pos.into();
-            SmallVec::from_slice(&[status::SONG_POSITION_POINTER, b1, b2])
+            SmallVec::from_slice(&[status::SONG_POSITION_POINTER, b2, b1])
         }
         SongSelect(song) => SmallVec::from_slice(&[status::SONG_SELECT, song.into()]),
         TuneRequest => SmallVec::from_slice(&[status::TUNE_REQUEST]),
@@ -54,9 +58,6 @@ pub fn midi_to_bytes(message: RtMidiMessage) -> SmallVec<[u8; 32]> {
 }
 
 pub fn participant_matches_target(participant_addr: &str, target: &SocketAddr) -> bool {
-    if participant_addr == target.to_string() {
-        return true;
-    }
     let Ok(participant) = participant_addr.parse::<SocketAddr>() else {
         return false;
     };

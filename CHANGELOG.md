@@ -4,6 +4,18 @@ All notable changes to OSCMidi are documented here.
 
 ## Unreleased
 
+### Fixed
+
+- Give dedicated MIDI processing, MIDI Thru and OSC workers Windows multimedia scheduling priority and disable their power throttling to reduce delivery delays during CPU contention.
+- Match output queue capacity to the 8,192-message input queue so a scheduling interruption can be absorbed without overflowing a smaller downstream queue.
+- Stop feeding disabled MIDI Thru outputs and prevent UI-only OSC queue overflow from resetting VST notes and sustain. Active outputs retain emergency recovery when a critical release is lost.
+
+## 2.6.0 - 2026-09-02
+
+### Added
+
+- Added a live, per-instrument three-band VST equalizer with a response graph, click-free parameter smoothing and support for direct x64 and bridged x86 plug-ins.
+
 ### Changed
 
 - Split pull-request validation into parallel frontend, dependency-audit and Windows Rust jobs while reserving MSI packaging for release-producing events.
@@ -14,6 +26,7 @@ All notable changes to OSCMidi are documented here.
 
 ### Fixed
 
+- Restored strict CI compatibility with Criterion 0.8 and upgraded `rtrb` to 0.3.5 to address RUSTSEC-2026-0274.
 - Prevented pull-request artifact uploads from failing when GitHub exposes merge refs containing `/`.
 - Updated the locked transitive Nano ID dependency to remove its high-severity zero-length generator advisory.
 - Updated rtrb to 0.3.5 to resolve the RUSTSEC-2026-0274 double free advisory.
