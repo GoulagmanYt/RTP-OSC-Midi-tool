@@ -2,6 +2,14 @@
 
 All notable changes to OSCMidi are documented here.
 
+## Unreleased
+
+### Fixed
+
+- Give dedicated MIDI processing, MIDI Thru and OSC workers Windows multimedia scheduling priority and disable their power throttling to reduce delivery delays during CPU contention.
+- Match output queue capacity to the 8,192-message input queue so a scheduling interruption can be absorbed without overflowing a smaller downstream queue.
+- Stop feeding disabled MIDI Thru outputs and prevent UI-only OSC queue overflow from resetting VST notes and sustain. Active outputs retain emergency recovery when a critical release is lost.
+
 ## 2.6.0 - 2026-09-02
 
 ### Added

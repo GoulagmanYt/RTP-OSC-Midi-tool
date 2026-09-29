@@ -28,7 +28,8 @@ use std::{
 use tauri::{Emitter, Window};
 
 const MIDI_NOTE_EVENT: &str = "midi:note";
-const FANOUT_QUEUE_CAPACITY: usize = 2048;
+// Absorb the same bounded burst as the input after a scheduling interruption.
+const FANOUT_QUEUE_CAPACITY: usize = super::lifecycle::BRIDGE_MIDI_QUEUE_CAPACITY;
 const PROCESSING_BATCH_LIMIT: usize = 256;
 
 struct FanoutFrame {
@@ -90,6 +91,7 @@ fn processing_loop(
     midi_event_tx: Sender<MidiNoteEvent>,
     rtp_output: crate::rtp::rtp_output::RtpOutputRoute,
 ) {
+    let _priority = crate::audio::windows_tuning::prioritize_midi_thread();
     let initial_cfg = shared_config.lock().clone();
     logger.info(format!(
         "Bridge actif vers {}:{}",
@@ -182,8 +184,10 @@ fn processing_loop(
                     false,
                     &mut unused_notes,
                 );
-                send_fanout(&midi_thru_tx, midi_thru_frame, generation);
-                send_fanout(&osc_tx, osc_frame, generation);
+                if snapshot.midi_thru {
+                    send_fanout(&midi_thru_tx, midi_thru_frame, generation, true);
+                }
+                send_fanout(&osc_tx, osc_frame, generation, snapshot.osc_enabled);
                 // Drain remaining buffered messages without waiting.
                 for _ in 1..PROCESSING_BATCH_LIMIT {
                     if stop.load(Ordering::Relaxed) || midi_reset_generation() != generation {
@@ -216,8 +220,10 @@ fn processing_loop(
                         false,
                         &mut unused_notes,
                     );
-                    send_fanout(&midi_thru_tx, midi_thru_frame, generation);
-                    send_fanout(&osc_tx, osc_frame, generation);
+                    if snapshot.midi_thru {
+                        send_fanout(&midi_thru_tx, midi_thru_frame, generation, true);
+                    }
+                    send_fanout(&osc_tx, osc_frame, generation, snapshot.osc_enabled);
                 }
                 update_pipeline_queue_depth(midi_rx.len());
             }
@@ -237,11 +243,13 @@ fn processing_loop(
     let _ = osc_worker.join();
 }
 
-fn send_fanout(tx: &Sender<FanoutFrame>, frame: MidiFrame, generation: u64) {
+fn send_fanout(tx: &Sender<FanoutFrame>, frame: MidiFrame, generation: u64, carries_output: bool) {
     if let Err(error) = tx.try_send(FanoutFrame { frame, generation }) {
         let lost = error.into_inner();
         record_fanout_drop();
-        if is_critical_release_message(lost.frame.data.as_slice()) {
+        // The OSC worker also feeds the UI when OSC is disabled. Losing a UI
+        // update must never silence audio or release the sustain pedal.
+        if carries_output && is_critical_release_message(lost.frame.data.as_slice()) {
             request_critical_midi_reset();
         }
     }
@@ -273,6 +281,7 @@ fn spawn_midi_thru_worker(
     midi_event_tx: Sender<MidiNoteEvent>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
+        let _priority = crate::audio::windows_tuning::prioritize_midi_thread();
         let initial = shared_config.lock().clone();
         let mut snapshot = ConfigSnapshot::from(&initial);
         let mut cached_rev = 0;
@@ -387,6 +396,7 @@ fn spawn_osc_worker(
     midi_event_tx: Sender<MidiNoteEvent>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
+        let _priority = crate::audio::windows_tuning::prioritize_midi_thread();
         let initial = shared_config.lock().clone();
         let mut snapshot = ConfigSnapshot::from(&initial);
         let mut cached_rev = 0;
@@ -549,7 +559,7 @@ mod recovery_tests {
                     );
                 }
                 for frame in receiver.try_iter() {
-                    send_fanout(&output, frame, 0);
+                    send_fanout(&output, frame, 0, true);
                 }
                 for envelope in sink.try_iter() {
                     if envelope.frame.data[0] & 0xF0 == 0x90 {
@@ -566,12 +576,69 @@ mod recovery_tests {
     }
 
     #[test]
+    fn ui_only_overflow_does_not_reset_notes_or_sustain() {
+        let _guard = crate::bridge::pipeline::TEST_PIPELINE_LOCK.lock().unwrap();
+        let (tx, _rx) = bounded(1);
+        let generation = midi_reset_generation();
+        send_fanout(&tx, note(0x90, 0, 60), generation, false);
+        send_fanout(&tx, note(0x80, 0, 60), generation, false);
+        send_fanout(
+            &tx,
+            MidiFrame {
+                data: smallvec::smallvec![0xB0, 64, 0],
+                source: Arc::from("regression"),
+            },
+            generation,
+            false,
+        );
+        assert_eq!(midi_reset_generation(), generation);
+    }
+
+    #[test]
+    fn full_input_burst_preserves_sustain_and_release_order() {
+        let _guard = crate::bridge::pipeline::TEST_PIPELINE_LOCK.lock().unwrap();
+        let (tx, rx) = bounded(FANOUT_QUEUE_CAPACITY);
+        let generation = midi_reset_generation();
+        for i in 0..super::super::lifecycle::BRIDGE_MIDI_QUEUE_CAPACITY {
+            let data = match i % 4 {
+                0 => smallvec::smallvec![0xB0, 64, 127],
+                1 => smallvec::smallvec![0x90, 60, 100],
+                2 => smallvec::smallvec![0x80, 60, 0],
+                _ => smallvec::smallvec![0xB0, 64, 0],
+            };
+            send_fanout(
+                &tx,
+                MidiFrame {
+                    data,
+                    source: Arc::from("regression"),
+                },
+                generation,
+                true,
+            );
+        }
+        assert_eq!(midi_reset_generation(), generation);
+        assert_eq!(
+            rx.len(),
+            super::super::lifecycle::BRIDGE_MIDI_QUEUE_CAPACITY
+        );
+        for (i, event) in rx.try_iter().enumerate() {
+            let expected: &[u8] = match i % 4 {
+                0 => &[0xB0, 64, 127],
+                1 => &[0x90, 60, 100],
+                2 => &[0x80, 60, 0],
+                _ => &[0xB0, 64, 0],
+            };
+            assert_eq!(event.frame.data.as_slice(), expected);
+        }
+    }
+
+    #[test]
     fn release_overflow_invalidates_queued_note_on_without_waiting() {
         let _guard = crate::bridge::pipeline::TEST_PIPELINE_LOCK.lock().unwrap();
         let (tx, rx) = bounded(1);
         let generation = midi_reset_generation();
-        send_fanout(&tx, note(0x90, 0, 60), generation);
-        send_fanout(&tx, note(0x80, 0, 60), generation);
+        send_fanout(&tx, note(0x90, 0, 60), generation, true);
+        send_fanout(&tx, note(0x80, 0, 60), generation, true);
         assert_ne!(rx.recv().unwrap().generation, midi_reset_generation());
     }
 }

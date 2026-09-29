@@ -120,9 +120,70 @@ fn is_thread_already_in_task_error(err: &windows::core::Error) -> bool {
 /// Owns only registrations created by OSCMidi. Driver-owned MMCSS registrations
 /// deliberately do not create this guard and must not be reverted by the app.
 #[cfg(target_os = "windows")]
-pub(super) struct MmcssRegistration {
+pub(crate) struct MmcssRegistration {
     handle: windows::Win32::Foundation::HANDLE,
     owner_thread_id: u32,
+}
+
+/// Keep MIDI delivery eligible for multimedia scheduling while a game is busy.
+/// Call only on dedicated workers, and keep the guard on that thread until exit.
+#[cfg(target_os = "windows")]
+pub(crate) fn prioritize_midi_thread() -> Option<MmcssRegistration> {
+    use windows::Win32::System::Threading::AVRT_PRIORITY_HIGH;
+
+    unsafe {
+        let mut task_index = 0;
+        let registration = match AvSetMmThreadCharacteristicsW(w!("Pro Audio"), &mut task_index)
+            .or_else(|pro_audio_error| {
+                AvSetMmThreadCharacteristicsW(w!("Audio"), &mut task_index)
+                    .map_err(|audio_error| (pro_audio_error, audio_error))
+            }) {
+            Ok(handle) => {
+                if AvSetMmThreadPriority(handle, AVRT_PRIORITY_HIGH).is_err() {
+                    background_log("warn", "Failed to raise MIDI MMCSS priority");
+                }
+                Some(MmcssRegistration {
+                    handle,
+                    owner_thread_id: GetCurrentThreadId(),
+                })
+            }
+            Err((pro_audio_error, audio_error)) => {
+                if !is_thread_already_in_task_error(&pro_audio_error)
+                    && !is_thread_already_in_task_error(&audio_error)
+                {
+                    background_log(
+                        "warn",
+                        "MIDI MMCSS unavailable; using thread priority fallback",
+                    );
+                    if SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST).is_err() {
+                        background_log("warn", "Failed to raise MIDI worker priority");
+                    }
+                }
+                None
+            }
+        };
+        let throttle = THREAD_POWER_THROTTLING_STATE {
+            Version: THREAD_POWER_THROTTLING_CURRENT_VERSION,
+            ControlMask: THREAD_POWER_THROTTLING_EXECUTION_SPEED,
+            StateMask: 0,
+        };
+        if SetThreadInformation(
+            GetCurrentThread(),
+            ThreadPowerThrottling,
+            &throttle as *const _ as *const std::ffi::c_void,
+            std::mem::size_of::<THREAD_POWER_THROTTLING_STATE>() as u32,
+        )
+        .is_err()
+        {
+            background_log("warn", "Failed to disable MIDI thread power throttling");
+        }
+        registration
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn prioritize_midi_thread() -> Option<()> {
+    None
 }
 
 #[cfg(target_os = "windows")]
