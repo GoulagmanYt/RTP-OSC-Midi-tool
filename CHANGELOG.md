@@ -9,12 +9,14 @@ All notable changes to OSCMidi are documented here.
 - Split pull-request validation into parallel frontend, dependency-audit and Windows Rust jobs while reserving MSI packaging for release-producing events.
 - Made pull requests restore the shared Rust cache without creating isolated multi-gigabyte cache entries.
 - Consolidated the pending React, Radix UI, Vite, PostCSS, CPAL, Criterion, Chrono and Serde JSON maintenance updates.
+- Consolidated the pending Dependabot maintenance updates for Radix UI Select, Tailwind merge, Tailwind PostCSS, React types, Log, Env Logger, Serde, SmallVec, and Crossbeam Channel.
 - Pinned the Rust Analyzer component to the workspace Rust toolchain for compatible editor diagnostics.
 
 ### Fixed
 
 - Prevented pull-request artifact uploads from failing when GitHub exposes merge refs containing `/`.
 - Updated the locked transitive Nano ID dependency to remove its high-severity zero-length generator advisory.
+- Updated rtrb to 0.3.5 to resolve the RUSTSEC-2026-0274 double free advisory.
 
 ## 2.5.0 - 2026-08-24
 
