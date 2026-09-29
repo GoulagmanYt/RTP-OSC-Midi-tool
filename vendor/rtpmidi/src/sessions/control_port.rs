@@ -54,7 +54,25 @@ impl ControlPort {
 
     #[instrument(skip_all, fields(name = %ctx.name(), addr = %addr))]
     pub async fn invite_participant(&self, ctx: &RtpMidiSession, addr: SocketAddr) {
-        let initiator_token = U32::new(rand::random::<u32>());
+        let mut pending = ctx.pending_invitations.lock().await;
+        if ctx.is_stopped() || addr.port() == u16::MAX || pending.len() >= 256 {
+            return;
+        }
+        let mut initiator_token = U32::new(rand::random::<u32>());
+        while pending.contains_key(&initiator_token) {
+            initiator_token = U32::new(rand::random::<u32>());
+        }
+        pending.insert(
+            initiator_token,
+            PendingInvitation {
+                addr,
+                token: initiator_token,
+                name: CString::default(),
+                created: std::time::Instant::now(),
+                ssrc: U32::ZERO,
+            },
+        );
+        drop(pending);
         let invitation =
             ControlPacket::new_invitation_as_bytes(initiator_token, self.ssrc, &self.session_name);
         let result = self.socket.send_to(&invitation, addr).await;
@@ -63,14 +81,6 @@ impl ControlPort {
             return;
         }
         event!(Level::INFO, "Sent session invitation");
-        ctx.pending_invitations.lock().await.insert(
-            U32::new(0),
-            PendingInvitation {
-                addr,
-                token: initiator_token,
-                name: CString::new("Test Name").unwrap(),
-            },
-        );
     }
 
     #[instrument(skip_all, name = "CTRL", fields(name = %self.session_name.to_string_lossy(), src))]
@@ -92,7 +102,7 @@ impl ControlPort {
         }
 
         let (amt, src) = recv.unwrap();
-        tracing::Span::current().record("src", src.to_string());
+        tracing::Span::current().record("src", tracing::field::display(src));
         event!(Level::TRACE, "Received {} bytes", amt);
 
         let maybe_ctrl_packet = ControlPacket::try_from_bytes(&buf[..amt]);
@@ -120,7 +130,7 @@ impl ControlPort {
                 self.handle_rejection(body, ctx, src).await;
             }
             ControlPacket::Termination(body) => {
-                self.handle_termination(body.sender_ssrc, src, &ctx.participants)
+                ctx.handle_termination(body.sender_ssrc, body.initiator_token, src, false)
                     .await;
             }
             _ => {
@@ -147,15 +157,29 @@ impl ControlPort {
             token = invitation.initiator_token.get(),
             "Received session invitation"
         );
+        if src.port() == u16::MAX {
+            return;
+        }
+        let pending = ctx.pending_invitations.lock().await;
+        if pending.len() >= 256
+            || pending
+                .get(&invitation.initiator_token)
+                .is_some_and(|p| p.addr != src)
+        {
+            return;
+        }
+        drop(pending);
         let accept = invite_handler.handle(invitation, inviter_name, &src);
         if accept {
             event!(Level::INFO, "Accepted session invitation");
             ctx.pending_invitations.lock().await.insert(
-                invitation.sender_ssrc,
+                invitation.initiator_token,
                 PendingInvitation {
                     addr: src,
                     token: invitation.initiator_token,
                     name: inviter_name.to_owned(),
+                    created: std::time::Instant::now(),
+                    ssrc: invitation.sender_ssrc,
                 },
             );
             self.send_invitation_acceptance(invitation.initiator_token, src)
@@ -198,14 +222,14 @@ impl ControlPort {
             src
         );
         let mut locked_pending_invitations = ctx.pending_invitations.lock().await;
-        if locked_pending_invitations.contains_key(&invitation_response.sender_ssrc) {
-            locked_pending_invitations.remove(&invitation_response.sender_ssrc)
-        } else if !locked_pending_invitations.contains_key(&invitation_response.sender_ssrc)
-            && locked_pending_invitations.contains_key(&U32::ZERO)
-            && locked_pending_invitations[&U32::ZERO].token == invitation_response.initiator_token
-            && locked_pending_invitations[&U32::ZERO].addr == src
-        {
-            locked_pending_invitations.remove(&U32::ZERO)
+        let key = invitation_response.initiator_token;
+        let matches = locked_pending_invitations.get(&key).is_some_and(|inv| {
+            inv.addr == src
+                && inv.created.elapsed() < std::time::Duration::from_secs(30)
+                && (inv.ssrc == U32::ZERO || inv.ssrc == invitation_response.sender_ssrc)
+        });
+        if matches {
+            locked_pending_invitations.remove(&key)
         } else {
             None
         }
@@ -247,21 +271,26 @@ impl ControlPort {
             inv.addr
         );
 
-        let midi_addr = SocketAddr::new(inv.addr.ip(), inv.addr.port() + 1);
+        let Some(port) = inv.addr.port().checked_add(1) else {
+            return;
+        };
+        let midi_addr = SocketAddr::new(inv.addr.ip(), port);
 
-        // Generate a new token specifically for the MIDI port invitation
-        let midi_token = U32::new(rand::random::<u32>());
+        let midi_token = inv.token;
 
         let mut lock = ctx.pending_invitations.lock().await;
         lock.insert(
-            ack_body.sender_ssrc,
+            midi_token,
             PendingInvitation {
                 addr: midi_addr,
                 token: midi_token,
                 name: name.to_owned(),
+                created: std::time::Instant::now(),
+                ssrc: ack_body.sender_ssrc,
             },
         );
 
+        drop(lock);
         let response_packet = ControlPacket::new_invitation_as_bytes(
             midi_token,
             self.ssrc,

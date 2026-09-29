@@ -9,6 +9,7 @@ import type {
   StressTestMode,
   StressTestResult,
   VstParameter,
+  VstEqSettings,
   VstPluginEntry,
 } from "./api-types";
 
@@ -105,6 +106,10 @@ export async function setMasterGain(gainDb: number): Promise<void> {
 
 export async function setAudioLimiter(enabled: boolean): Promise<void> {
   return invokeCommand("set_audio_limiter", { enabled });
+}
+
+export async function setVstEq(settings: VstEqSettings): Promise<void> {
+  return invokeCommand("set_vst_eq", { settings });
 }
 
 export async function pingAudio(): Promise<void> {

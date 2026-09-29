@@ -187,6 +187,14 @@ pub fn set_audio_limiter(enabled: bool, state: State<AppState>) -> Result<(), Co
 }
 
 #[::tauri::command]
+pub fn set_vst_eq(
+    settings: crate::config::VstEqSettings,
+    state: State<AppState>,
+) -> Result<(), CommandError> {
+    services::set_vst_eq(settings, state.inner())
+}
+
+#[::tauri::command]
 pub async fn ping_audio(
     app: AppHandle,
     window: Window,

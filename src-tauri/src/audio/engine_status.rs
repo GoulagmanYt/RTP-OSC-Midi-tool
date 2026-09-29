@@ -5,6 +5,7 @@ use super::{
     runtime_state::{AudioError, AudioLifecycleState},
 };
 
+use crate::config::VstEqSettings;
 use crate::logger::FrontendLogger;
 
 impl AudioEngine {
@@ -50,6 +51,20 @@ impl AudioEngine {
             rt.controls
                 .limiter_enabled
                 .store(enabled, Ordering::Relaxed);
+        }
+    }
+
+    pub fn set_vst_eq(&self, settings: VstEqSettings) {
+        #[cfg(target_os = "windows")]
+        if self.is_worker_enabled() {
+            let _ = self.worker.try_set_eq(settings);
+            return;
+        }
+        if let Some(runtime) = self.runtime.lock().as_ref() {
+            runtime
+                .controls
+                .equalizer
+                .publish(&settings, runtime.sample_rate);
         }
     }
 

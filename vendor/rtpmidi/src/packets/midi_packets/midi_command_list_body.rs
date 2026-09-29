@@ -16,7 +16,7 @@ impl<'a> MidiEventList for [MidiEvent<'a>] {
         let mut running_status: Option<u8> = None;
         for command in self.iter() {
             command.write(buffer, running_status, write_delta_time);
-            running_status = Some(command.command().status());
+            update_running_status(&mut running_status, command.command().status());
             write_delta_time = true;
         }
     }
@@ -28,14 +28,24 @@ impl<'a> MidiEventList for [MidiEvent<'a>] {
             if i > 0 || z_flag {
                 length += delta_time_size(command.delta_time())
             }
-            if Some(command.command().status()) != running_status {
+            if command.command().status() >= 0xF0
+                || Some(command.command().status()) != running_status
+            {
                 length += command.command().len();
             } else {
                 length += command.command().len() - 1;
             }
-            running_status = Some(command.command().status());
+            update_running_status(&mut running_status, command.command().status());
         }
 
         length
+    }
+}
+
+fn update_running_status(running: &mut Option<u8>, status: u8) {
+    match status {
+        0x80..=0xEF => *running = Some(status),
+        0xF0..=0xF7 => *running = None,
+        _ => {}
     }
 }

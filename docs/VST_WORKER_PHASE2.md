@@ -24,7 +24,7 @@ is converted into message age in the worker so phase 1 stale-message policy is
 still effective across the process boundary.
 
 Supported control operations are `Load`, `OpenEditor`, `CloseEditor`,
-`ListParameters`, `SetParameter`, `SetGain`, `SetLimiter`, `Panic`, `Stop`, and
+`ListParameters`, `SetParameter`, `SetGain`, `SetLimiter`, `SetEq`, `Panic`, `Stop`, and
 `Ping`. State is saved by the serialized stop/reload transition before the
 worker exits.
 

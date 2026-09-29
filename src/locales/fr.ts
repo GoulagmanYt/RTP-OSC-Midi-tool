@@ -171,6 +171,22 @@ const fr: TranslationTree = {
       bufferStream: "Buffer stream",
       midiVstCompat: "MIDI VST",
       bufferMismatchWarning: "Le driver audio impose une taille de buffer différente de la valeur demandée.",
+      eq: {
+        open: "Égaliseur",
+        active: "Actif",
+        title: "Égaliseur VST",
+        description: "Réglage de la sortie de {{plugin}}. Les modifications sont appliquées et sauvegardées automatiquement.",
+        enabled: "Activer l’égaliseur",
+        enabledHint: "Le bypass conserve la courbe pour pouvoir la réactiver plus tard.",
+        responseGraph: "Courbe de réponse fréquentielle de l’égaliseur",
+        lowBand: "Graves",
+        midBand: "Médiums",
+        highBand: "Aigus",
+        frequency: "Fréquence",
+        gain: "Gain",
+        q: "Largeur (Q)",
+        reset: "Réinitialiser",
+      },
       estRoundtrip: "Latence audio estimée",
       vstHealth: "Santé VST",
       loaded: "Chargé",
@@ -292,6 +308,12 @@ const fr: TranslationTree = {
       bufferMismatchWarning: "Le driver audio impose une taille de buffer différente de la valeur demandée.",
     },
     osc: {
+      inputTitle: "Entrée OSC",
+      inputHint: "Recevoir les paramètres de notes et de sustain, ou des messages MIDI sur /midi. Les bundles datés sont programmés automatiquement.",
+      inputEnable: "Activer l’entrée OSC",
+      listenIp: "Adresse d’écoute",
+      listenPort: "Port d’écoute",
+
       title: "Configuration OSC",
       description: "Configurez le serveur OSC et les paramètres de transmission.",
       enable: "Activer OSC",
@@ -313,6 +335,8 @@ const fr: TranslationTree = {
       defaultPort: "Port par défaut :",
     },
     rtp: {
+      thruEnable: "Envoyer le MIDI aux pairs RTP",
+      thruHint: "Transmettre les entrées MIDI et OSC aux pairs RTP connectés. Le RTP reçu n’est pas renvoyé.",
       remoteConfig: "Connexion distante",
       remoteEnable: "Se connecter a une session RTP-MIDI distante",
       remoteEnableHint: "Invite une session distante a envoyer du MIDI ici",
@@ -495,6 +519,7 @@ const fr: TranslationTree = {
         dropouts:
           "Incidents audio (+{{count}}) — flux/DSP : {{xruns}}, deadlines : {{deadlines}}, verrous : {{lockMisses}}, MIDI : {{midiDrops}}, resets : {{resets}}",
         vstParamFailed: "Impossible de modifier le paramètre VST3",
+        eqFailed: "Impossible d’appliquer l’égaliseur VST",
       },
       bridge: {
         preflightFailed: "La vérification préalable a échoué",

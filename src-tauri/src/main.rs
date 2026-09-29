@@ -108,6 +108,7 @@ fn run_app() -> Result<(), Box<dyn std::error::Error>> {
             close_vst_ui,
             set_master_gain,
             set_audio_limiter,
+            set_vst_eq,
             send_test_midi,
             run_automated_stress_test
         ])
@@ -132,6 +133,35 @@ fn run_app() -> Result<(), Box<dyn std::error::Error>> {
                 .ok();
             Ok(())
         })
-        .run(::tauri::generate_context!())
-        .map_err(Into::into)
+        .build(::tauri::generate_context!())?
+        .run({
+            let exiting = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            move |app, event| {
+                if let ::tauri::RunEvent::ExitRequested { api, .. } = event {
+                    use std::sync::atomic::Ordering;
+                    if finished.load(Ordering::Acquire) {
+                        return;
+                    }
+                    api.prevent_exit();
+                    if !exiting.swap(true, Ordering::AcqRel) {
+                        let app = app.clone();
+                        let finished = finished.clone();
+                        ::tauri::async_runtime::spawn(async move {
+                            let state = app.state::<AppState>();
+                            state.rtp_discovery.stop();
+                            if let Err(error) =
+                                osc_midi_bridge::application::services::stop_bridge(&app, &state)
+                                    .await
+                            {
+                                log::error!("Shutdown failed: {error}");
+                            }
+                            finished.store(true, Ordering::Release);
+                            app.exit(0);
+                        });
+                    }
+                }
+            }
+        });
+    Ok(())
 }

@@ -9,6 +9,76 @@ pub struct MidiFrame {
     pub source: std::sync::Arc<str>,
 }
 
+type MidiBytes = smallvec::SmallVec<[u8; 32]>;
+const MAX_BUFFERED_MIDI_BYTES: usize = 65_538;
+const MIDI_BUFFER_COUNT: usize = 128;
+struct MidiBufferPool {
+    free_tx: crossbeam_channel::Sender<MidiBytes>,
+    free_rx: crossbeam_channel::Receiver<MidiBytes>,
+}
+static MIDI_BUFFERS: std::sync::OnceLock<MidiBufferPool> = std::sync::OnceLock::new();
+
+/// Call on the setup path before enabling MIDI callbacks or RTP reception.
+pub(crate) fn initialize_midi_buffers() {
+    MIDI_BUFFERS.get_or_init(|| {
+        let (free_tx, free_rx) = crossbeam_channel::bounded(MIDI_BUFFER_COUNT);
+        for _ in 0..MIDI_BUFFER_COUNT {
+            free_tx
+                .try_send(MidiBytes::with_capacity(MAX_BUFFERED_MIDI_BYTES))
+                .unwrap();
+        }
+        MidiBufferPool { free_tx, free_rx }
+    });
+}
+
+impl MidiFrame {
+    /// Bounded, fallible copy for processing paths. Ordinary messages stay inline.
+    /// Large messages borrow reserved storage and fail explicitly on exhaustion.
+    pub(crate) fn copy_realtime(bytes: &[u8], source: std::sync::Arc<str>) -> Option<Self> {
+        let mut data = if bytes.len() <= 32 {
+            MidiBytes::new()
+        } else if bytes.len() <= MAX_BUFFERED_MIDI_BYTES {
+            MIDI_BUFFERS.get()?.free_rx.try_recv().ok()?
+        } else {
+            return None;
+        };
+        data.extend_from_slice(bytes);
+        Some(Self { data, source })
+    }
+
+    pub(crate) fn clone_realtime(&self) -> Option<Self> {
+        Self::copy_realtime(&self.data, self.source.clone())
+    }
+
+    pub(crate) fn sysex_realtime(payload: &[u8], source: std::sync::Arc<str>) -> Option<Self> {
+        let len = payload.len().checked_add(2)?;
+        let mut frame = Self::copy_realtime(payload, source)?;
+        if len > 32 && !frame.data.spilled() {
+            let mut reserved = MIDI_BUFFERS.get()?.free_rx.try_recv().ok()?;
+            reserved.extend_from_slice(&frame.data);
+            frame.data = reserved;
+        }
+        if len > MAX_BUFFERED_MIDI_BYTES {
+            return None;
+        }
+        frame.data.insert(0, 0xF0);
+        frame.data.push(0xF7);
+        Some(frame)
+    }
+}
+
+impl Drop for MidiFrame {
+    fn drop(&mut self) {
+        if self.data.spilled() && self.data.capacity() >= MAX_BUFFERED_MIDI_BYTES {
+            if let Some(pool) = MIDI_BUFFERS.get() {
+                let mut data = std::mem::take(&mut self.data);
+                data.clear();
+                let _ = pool.free_tx.try_send(data);
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MidiKind {
     NoteOn,
@@ -31,7 +101,7 @@ pub struct MidiSustain {
 }
 
 pub fn parse_note(data: &[u8]) -> Option<MidiNote> {
-    if data.len() < 2 {
+    if data.len() != 3 || data[1..].iter().any(|byte| *byte >= 0x80) {
         return None;
     }
     let status = data[0];
@@ -76,13 +146,76 @@ pub fn parse_sustain(data: &[u8]) -> Option<MidiSustain> {
 }
 
 pub fn is_critical_release_message(data: &[u8]) -> bool {
+    if data == [0xFF] {
+        return true;
+    }
     if data.len() < 3 {
         return false;
     }
     let status = data[0] & 0xF0;
     matches!(status, 0x80)
         || (status == 0x90 && data[2] == 0)
-        || (status == 0xB0 && data[1] == 64 && data[2] < 64)
+        || (status == 0xB0
+            && ((data[1] == 64 && data[2] < 64) || matches!(data[1], 120 | 121 | 123)))
+}
+
+/// Validate complete driver/bridge messages before indexing or dispatching them.
+pub fn normalize_message(data: &mut [u8]) -> bool {
+    let Some(&status) = data.first() else {
+        return false;
+    };
+    let len = match status {
+        0x80..=0xBF | 0xE0..=0xEF | 0xF2 => 3,
+        0xC0..=0xDF | 0xF1 | 0xF3 => 2,
+        0xF6 | 0xF8 | 0xFA..=0xFC | 0xFE..=0xFF => 1,
+        0xF0 => {
+            return data.len() >= 2
+                && data.last() == Some(&0xF7)
+                && data[1..data.len() - 1].iter().all(|b| *b < 0x80)
+        }
+        _ => return false,
+    };
+    if data.len() != len || data[1..].iter().any(|byte| *byte >= 0x80) {
+        return false;
+    }
+    if status & 0xF0 == 0x90 && data[2] == 0 {
+        data[0] = 0x80 | (status & 0x0F);
+    }
+    true
+}
+
+/// Owned by the MIDI destination thread; no shared mutation or heap allocation.
+#[derive(Default)]
+pub(crate) struct ActiveNotes {
+    notes: [u128; 16],
+}
+
+impl ActiveNotes {
+    pub(crate) fn observe(&mut self, data: &[u8]) {
+        if let Some(note) = parse_note(data) {
+            let channel = usize::from(note.channel - 1);
+            let mask = 1u128 << note.note;
+            if note.kind == MidiKind::NoteOn {
+                self.notes[channel] |= mask;
+            } else {
+                self.notes[channel] &= !mask;
+            }
+        } else if data == [0xFF] {
+            self.notes.fill(0);
+        } else if data.len() == 3 && data[0] & 0xF0 == 0xB0 && matches!(data[1], 120 | 123) {
+            self.notes[usize::from(data[0] & 0x0F)] = 0;
+        }
+    }
+
+    pub(crate) fn release_all(&mut self, mut send: impl FnMut([u8; 3])) {
+        for (channel, notes) in self.notes.iter_mut().enumerate() {
+            while *notes != 0 {
+                let note = notes.trailing_zeros() as u8;
+                send([0x80 | channel as u8, note, 0]);
+                *notes &= !(1u128 << note);
+            }
+        }
+    }
 }
 
 pub fn adjust_note(note: u8) -> Option<u8> {
@@ -95,6 +228,43 @@ pub fn adjust_note(note: u8) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pooled_sysex_and_fanout_copies_do_not_allocate() {
+        super::initialize_midi_buffers();
+        let payload = [1u8; 65_536];
+        let source: std::sync::Arc<str> = std::sync::Arc::from("allocation test");
+        let allocations = crate::test_alloc::count_allocations(|| {
+            for _ in 0..10_000 {
+                let frame = super::MidiFrame::sysex_realtime(&payload, source.clone()).unwrap();
+                let copy = frame.clone_realtime().unwrap();
+                assert_eq!(copy.data.len(), 65_538);
+            }
+        });
+        assert_eq!(allocations, 0);
+    }
+
+    #[test]
+    fn realtime_sysex_buffers_cover_inline_boundary_and_recycle_large_storage() {
+        super::initialize_midi_buffers();
+        let source: std::sync::Arc<str> = std::sync::Arc::from("pool test");
+        for payload_size in [0, 30, 31, 32, 33, 65_536] {
+            let payload = vec![1; payload_size];
+            for _ in 0..256 {
+                let frame = super::MidiFrame::sysex_realtime(&payload, source.clone()).unwrap();
+                assert_eq!(frame.data.len(), payload_size + 2);
+                assert_eq!(frame.data.first(), Some(&0xF0));
+                assert_eq!(frame.data.last(), Some(&0xF7));
+                assert_eq!(&frame.data[1..frame.data.len() - 1], payload);
+                let copy = frame.clone_realtime().unwrap();
+                assert_eq!(copy.data, frame.data);
+                if frame.data.spilled() {
+                    assert_eq!(frame.data.capacity(), super::MAX_BUFFERED_MIDI_BYTES);
+                }
+            }
+        }
+        assert!(super::MidiFrame::sysex_realtime(&vec![1; 65_537], source).is_none());
+    }
+
     use super::*;
     use crossbeam_channel::unbounded;
     use std::{thread, time::Instant};

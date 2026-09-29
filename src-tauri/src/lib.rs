@@ -9,6 +9,7 @@ pub mod error;
 pub mod logger;
 pub mod midi;
 pub mod osc;
+pub(crate) mod osc_input;
 pub mod plugin_probe;
 pub mod reliable_playback;
 pub mod rtp;
@@ -20,8 +21,9 @@ pub mod vst_worker;
 pub use audio::AudioEngine;
 pub use bridge::BridgeHandle;
 pub use config::{
-    AppConfig, AudioConfig, Config, ConfigStore, LoggingConfig, MidiConfig, OscConfig,
-    RoutingAssignment, RoutingMapping, RoutingProfile, RtpConfig, RtpRemoteEntry, Theme, UiConfig,
+    AppConfig, AudioConfig, Config, ConfigStore, EqPeakSettings, EqShelfSettings, LoggingConfig,
+    MidiConfig, OscConfig, RoutingAssignment, RoutingMapping, RoutingProfile, RtpConfig,
+    RtpRemoteEntry, Theme, UiConfig, VstEqSettings, BUNDLED_VST_EQ_KEY,
 };
 pub use error::{
     AppError, AudioError, BridgeError, CommandError, ConfigError as AppConfigError, TauriError,
@@ -32,3 +34,7 @@ pub use types::{
     MidiActivitySnapshot, PreflightReport, RuntimeMetrics, RuntimeStatus, VstParameter,
     VstPluginEntry,
 };
+
+#[cfg(test)]
+#[path = "../../vendor/rtpmidi/src/test_alloc.rs"]
+mod test_alloc;

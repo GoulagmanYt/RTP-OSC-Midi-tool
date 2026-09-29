@@ -22,5 +22,9 @@ function mergeValue<T>(current: T, patch: DeepPartial<T>): T {
 }
 
 export function mergeConfig(config: AppConfig, patch: DeepPartial<AppConfig>): AppConfig {
-  return mergeValue(config, patch);
+  const next = mergeValue(config, patch);
+  if (patch.audio?.vstEqByPlugin !== undefined) {
+    next.audio.vstEqByPlugin = patch.audio.vstEqByPlugin as AppConfig["audio"]["vstEqByPlugin"];
+  }
+  return next;
 }

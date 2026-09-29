@@ -13,6 +13,7 @@ use crossbeam_channel::Sender;
 use parking_lot::Mutex;
 use rtrb::{Producer, RingBuffer};
 
+use crate::config::VstEqSettings;
 use crate::logger::FrontendLogger;
 use crate::types::VstParameter;
 use crate::types::VstPluginEntry;
@@ -53,6 +54,7 @@ pub(super) fn build_stream(
     device_name: &str,
     prefer_low_latency: bool,
     vst_probe: &VstPluginEntry,
+    vst_eq: &VstEqSettings,
 ) -> Result<BuiltStream, AudioError> {
     let supported: Vec<_> = device
         .supported_output_configs()
@@ -67,6 +69,7 @@ pub(super) fn build_stream(
     }
 
     let (desired, actual_sample_rate) = select_output_config(&supported, sample_rate)?;
+    controls.equalizer.publish(vst_eq, actual_sample_rate);
     if actual_sample_rate != sample_rate {
         logger.warn(format!(
             "Requested sample rate {} Hz not supported on '{}'. Using {} Hz instead.",

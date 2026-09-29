@@ -1,0 +1,5 @@
+{
+  "stoppedUtc": "2026-09-17T14:57:37.0006538Z",
+  "reason": "Exploratory comparison stopped: production automatically restores saved Autograph Grand / The Grand state, while this JUCE instance used unspecified plugin default. Not a matched-preset comparison or completed endurance test.",
+  "termination": "Owned diagnostic process stopped; no graceful-shutdown claim"
+}

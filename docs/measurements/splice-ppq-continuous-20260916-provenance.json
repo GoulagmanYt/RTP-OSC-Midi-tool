@@ -1,0 +1,12 @@
+﻿{
+    "startedUtc":  "2026-09-16T20:51:32.1488706Z",
+    "durationSeconds":  7200,
+    "workerPath":  "C:\\Users\\robin\\Documents\\GitHub\\RTP-OSC-Midi-tool\\.cargo-target\\release\\vst-host-worker.exe",
+    "cycleSeconds":  0,
+    "codeCommit":  "2fe6f981358faf1ebd147b985c639c9ca5581276",
+    "workerSha256":  "08955038A86383CC8D6A71182F25E50ADAAAFC2FEAC9338D61E4121D6F5EFD60",
+    "scope":  "Audio endurance with periodic process resource samples; other workload may run concurrently. No physical loopback latency measurement.",
+    "diagnosticSha256":  "B7A649A8B362392763EBC65A1C7FD4C9BCA0990FC5F002A051FCBB3634038AD7",
+    "maxWorkerPrivateMB":  2048,
+    "activeSeconds":  -1
+}

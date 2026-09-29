@@ -10,7 +10,6 @@ use crate::{
     config::Config,
     logger::FrontendLogger,
     midi::MidiFrame,
-    osc::OscClient,
     reliable_playback::ReliablePlaybackServer,
     rtp::{rtp_advertisement::RtpAdvertisementStatus, RtpRemoteTarget, RtpServer},
     types::{BridgeStatus, RtpParticipantInfo},
@@ -30,9 +29,10 @@ use tauri::Window;
 
 #[derive(Clone)]
 pub struct BridgeHandle {
+    rtp_output: crate::rtp::rtp_output::RtpOutputRoute,
     inner: Arc<Mutex<Option<BridgeRuntime>>>,
     rtp_server: Arc<Mutex<Option<RtpServer>>>,
-    rtp_sink: Arc<parking_lot::RwLock<Option<Sender<MidiFrame>>>>,
+    rtp_sink: Arc<arc_swap::ArcSwapOption<Sender<MidiFrame>>>,
     rtp_config: Arc<Mutex<Option<RtpConfigSnapshot>>>,
 }
 
@@ -55,19 +55,21 @@ pub(super) struct BridgeRuntime {
     pub(super) activity_emitter: Option<thread::JoinHandle<()>>,
     pub(super) midi_event_emitter: Option<thread::JoinHandle<()>>,
     pub(super) reliable_playback: Option<ReliablePlaybackServer>,
+    pub(super) osc_input: Option<crate::osc_input::OscInputServer>,
     pub(super) config: Arc<Mutex<Config>>,
     pub(super) config_rev: Arc<AtomicU64>,
-    pub(super) panic_revision: Arc<AtomicU64>,
     pub(super) actual_midi_in: Arc<Mutex<Option<String>>>,
     pub(super) actual_midi_out: Arc<Mutex<Option<String>>>,
 }
 
 impl BridgeHandle {
     pub fn new() -> Self {
+        crate::midi::initialize_midi_buffers();
         Self {
+            rtp_output: crate::rtp::rtp_output::RtpOutputRoute::default(),
             inner: Arc::new(Mutex::new(None)),
             rtp_server: Arc::new(Mutex::new(None)),
-            rtp_sink: Arc::new(parking_lot::RwLock::new(None)),
+            rtp_sink: Arc::new(arc_swap::ArcSwapOption::empty()),
             rtp_config: Arc::new(Mutex::new(None)),
         }
     }
@@ -85,6 +87,7 @@ impl BridgeHandle {
             config,
             logger,
             force_restart,
+            &self.rtp_output,
         )
     }
 
@@ -108,6 +111,7 @@ impl BridgeHandle {
             &self.rtp_server,
             &self.rtp_sink,
             &self.rtp_config,
+            self.rtp_output.clone(),
         )?;
         let status = runtime.status.clone();
         *self.inner.lock() = Some(runtime);
@@ -116,19 +120,18 @@ impl BridgeHandle {
 
     pub fn stop(&self) -> Result<(), String> {
         self.stop_internal();
+        self.rtp_output.set(None);
+        // RTP discovery/session setup may have run before the bridge started.
+        if let Some(server) = self.rtp_server.lock().take() {
+            crate::tauri::utils::safe_block_on(server.stop());
+        }
+        self.rtp_sink.store(None);
+        *self.rtp_config.lock() = None;
         Ok(())
     }
 
     pub fn reset_keys(&self) -> Result<(), String> {
-        let guard = self.inner.lock();
-        if let Some(runtime) = guard.as_ref() {
-            runtime.panic_revision.fetch_add(1, Ordering::Release);
-            let cfg = runtime.config.lock().clone();
-            if cfg.osc.enabled {
-                let osc = OscClient::new(&cfg.osc.target_ip, cfg.osc.target_port)?;
-                osc.send_reset_all()?;
-            }
-        }
+        super::pipeline::request_critical_midi_reset();
         Ok(())
     }
 
@@ -144,7 +147,7 @@ impl BridgeHandle {
         thread::spawn(move || {
             thread::sleep(Duration::from_millis(200));
             let off = smallvec::SmallVec::from_slice(&[0x80 | ch, note, 0]);
-            if let Some(tx) = sink.read().as_ref().cloned() {
+            if let Some(tx) = sink.load_full() {
                 let _ = try_enqueue_midi_frame(
                     &tx,
                     MidiFrame {
@@ -169,6 +172,26 @@ impl BridgeHandle {
     pub fn update_config(&self, config: Config, _logger: &FrontendLogger) -> Result<(), String> {
         let mut guard = self.inner.lock();
         if let Some(runtime) = guard.as_mut() {
+            let old = runtime.config.lock().osc.clone();
+            if old.input_enabled != config.osc.input_enabled
+                || old.listen_ip != config.osc.listen_ip
+                || old.listen_port != config.osc.listen_port
+            {
+                let sink = self
+                    .rtp_sink
+                    .load_full()
+                    .map(|sender| (*sender).clone())
+                    .ok_or("Bridge MIDI input unavailable")?;
+                let replacement = crate::osc_input::OscInputServer::start(&config.osc, sink)?;
+                if let Some(previous) = runtime.osc_input.take() {
+                    previous.stop();
+                }
+                runtime.osc_input = replacement;
+            }
+            let old_midi = runtime.config.lock().midi.clone();
+            if old_midi != config.midi {
+                super::pipeline::request_critical_midi_reset();
+            }
             *runtime.config.lock() = config.clone();
             refresh_runtime_status(
                 runtime,
@@ -228,7 +251,7 @@ impl BridgeHandle {
 
     /// Inject a MIDI frame directly into the bridge pipeline (for testing).
     pub fn inject_frame(&self, data: SmallVec<[u8; 32]>, source: String) -> Result<(), String> {
-        if let Some(tx) = self.rtp_sink.read().as_ref().cloned() {
+        if let Some(tx) = self.rtp_sink.load_full() {
             try_enqueue_midi_frame(
                 &tx,
                 MidiFrame {
@@ -236,7 +259,12 @@ impl BridgeHandle {
                     source: std::sync::Arc::from(source.as_str()),
                 },
             )
-            .map(|_| ())
+            .and_then(|outcome| match outcome {
+                super::pipeline::EnqueueOutcome::Enqueued => Ok(()),
+                super::pipeline::EnqueueOutcome::DroppedNonCritical => {
+                    Err(super::pipeline::EnqueueError::QueueFull)
+                }
+            })
             .map_err(|error| error.to_string())
         } else {
             Err("Bridge not running".to_string())

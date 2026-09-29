@@ -1,6 +1,6 @@
 use std::ffi::CStr;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use bytes::{Bytes, BytesMut};
 use zerocopy::{
     FromBytes, Immutable, IntoBytes, KnownLayout, TryFromBytes, Unaligned,
@@ -54,13 +54,17 @@ impl<'a> ControlPacket<'a> {
     }
 
     pub fn try_from_bytes(buffer: &'a [u8]) -> Result<Self> {
+        Self::parse_borrowed(buffer).map_err(Into::into)
+    }
+
+    pub(crate) fn parse_borrowed(buffer: &'a [u8]) -> std::result::Result<Self, PacketParseError> {
         if buffer.len() < 4 {
-            return Err(anyhow::Error::new(PacketParseError::NotEnoughData));
+            return Err(PacketParseError::NotEnoughData);
         }
 
         // Validate marker (2 bytes)
         if !buffer.starts_with(&CONTROL_PACKET_MARKER_VALUE) {
-            return Err(anyhow::Error::new(PacketParseError::InvalidData));
+            return Err(PacketParseError::InvalidData);
         }
 
         // Parse command type (2 bytes)
@@ -71,17 +75,19 @@ impl<'a> ControlPacket<'a> {
         let result = match command {
             b"CK" => {
                 let clock_sync = ClockSyncPacket::ref_from_bytes(remaining)
-                    .map_err(|_| PacketParseError::InvalidData)
-                    .context("Failed to parse Clock Sync Packet")?;
+                    .map_err(|_| PacketParseError::InvalidData)?;
                 ControlPacket::ClockSync(clock_sync)
             }
             b"IN" => {
                 let (session_body, name_bytes) =
                     SessionInitiationPacketBody::ref_from_prefix(remaining)
-                        .map_err(|_| PacketParseError::InvalidData)
-                        .context("Failed to parse Session Invitation Packet")?;
-                let name = CStr::from_bytes_with_nul(name_bytes)
-                    .context("Failed to parse Session name from Session Invitation Packet")?;
+                        .map_err(|_| PacketParseError::InvalidData)?;
+                let name = CStr::from_bytes_with_nul(if name_bytes.is_empty() {
+                    b"\0"
+                } else {
+                    name_bytes
+                })
+                .map_err(|_| PacketParseError::InvalidData)?;
                 ControlPacket::Invitation {
                     body: session_body,
                     name,
@@ -90,10 +96,13 @@ impl<'a> ControlPacket<'a> {
             b"OK" => {
                 let (session_body, name_bytes) =
                     SessionInitiationPacketBody::ref_from_prefix(remaining)
-                        .map_err(|_| PacketParseError::InvalidData)
-                        .context("Failed to parse Session Acceptance Packet")?;
-                let name = CStr::from_bytes_with_nul(name_bytes)
-                    .context("Failed to parse Session name from Session Acceptance Packet")?;
+                        .map_err(|_| PacketParseError::InvalidData)?;
+                let name = CStr::from_bytes_with_nul(if name_bytes.is_empty() {
+                    b"\0"
+                } else {
+                    name_bytes
+                })
+                .map_err(|_| PacketParseError::InvalidData)?;
                 ControlPacket::Acceptance {
                     body: session_body,
                     name,
@@ -101,21 +110,32 @@ impl<'a> ControlPacket<'a> {
             }
             b"NO" => {
                 let session_body = SessionInitiationPacketBody::ref_from_bytes(remaining)
-                    .map_err(|_| PacketParseError::InvalidData)
-                    .context("Failed to parse Session Rejection Packet")?;
+                    .map_err(|_| PacketParseError::InvalidData)?;
                 ControlPacket::Rejection(session_body)
             }
             b"BY" => {
                 let session_body = SessionInitiationPacketBody::ref_from_bytes(remaining)
-                    .map_err(|_| PacketParseError::InvalidData)
-                    .context("Failed to parse Session Termination Packet")?;
+                    .map_err(|_| PacketParseError::InvalidData)?;
                 ControlPacket::Termination(session_body)
             }
             _ => {
-                return Err(anyhow::Error::new(PacketParseError::InvalidData)
-                    .context(format!("Unknown control packet command: {command:?}")));
+                return Err(PacketParseError::InvalidData);
             }
         };
+        match &result {
+            ControlPacket::Invitation { body, .. }
+            | ControlPacket::Acceptance { body, .. }
+            | ControlPacket::Rejection(body)
+            | ControlPacket::Termination(body)
+                if body.protocol_version.get() != 2 =>
+            {
+                return Err(PacketParseError::InvalidData);
+            }
+            ControlPacket::ClockSync(packet) if packet.count > 2 => {
+                return Err(PacketParseError::InvalidData);
+            }
+            _ => {}
+        }
         Ok(result)
     }
 

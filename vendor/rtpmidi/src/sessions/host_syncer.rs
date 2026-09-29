@@ -20,8 +20,7 @@ impl HostSyncer {
         let stale_participants: Vec<_> = lock
             .values()
             .filter(|p| {
-                p.is_invited_by_us()
-                    && Instant::now().duration_since(p.last_clock_sync()) >= Duration::from_secs(30)
+                Instant::now().duration_since(p.last_clock_sync()) >= Duration::from_secs(60)
             })
             .cloned()
             .collect();
@@ -44,7 +43,11 @@ impl HostSyncer {
     async fn send_clock_syncs(&self, ctx: &RtpMidiSession) {
         let timestamps = [U64::new(0); 3];
         let lock = ctx.participants.lock().await;
-        let participants: Vec<_> = lock.values().cloned().collect();
+        let participants: Vec<_> = lock
+            .values()
+            .filter(|p| p.is_invited_by_us())
+            .cloned()
+            .collect();
         drop(lock);
 
         if !participants.is_empty() {
@@ -63,6 +66,10 @@ impl HostSyncer {
 
     #[instrument(skip_all, fields(name = %ctx.name()))]
     pub async fn cleanup(&self, ctx: &RtpMidiSession) {
+        ctx.pending_invitations
+            .lock()
+            .await
+            .retain(|_, invitation| invitation.created.elapsed() < Duration::from_secs(30));
         self.cleanup_stale_participants(ctx).await;
         self.send_clock_syncs(ctx).await;
     }

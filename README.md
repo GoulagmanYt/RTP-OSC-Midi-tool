@@ -74,6 +74,8 @@ The portable package contains `OSCMidi.exe`, `vst-host-worker-x64.exe`, and `vst
 
 For a first audio test, start with **48 kHz / 512 samples**. Reduce the buffer only after the complete route is stable with the selected driver and plug-in.
 
+Use **Audio → Equalizer** to shape the selected instrument with low-shelf, parametric-mid and high-shelf bands. EQ curves are saved independently for each VST, and bypass keeps the current curve available for later use.
+
 ## Architecture
 
 ```mermaid
@@ -89,7 +91,8 @@ flowchart LR
     IPC <--> WORKER64[vst-host-worker-x64.exe]
     WORKER64 <-- shared memory / one buffer --> WORKER32[vst-host-worker-x86.exe]
     WORKER --> VST[VST2 / VST3 instrument]
-    VST --> AUDIO[ASIO / WASAPI output]
+    VST --> EQ[Per-instrument 3-band EQ]
+    EQ --> AUDIO[ASIO / WASAPI output]
 ```
 
 The desktop process owns configuration, routing and supervision. The worker owns the active VST instance, its native editor, the audio device and the real-time callback. Control and MIDI messages cross a versioned, authenticated local IPC channel. If the worker crashes or stops responding, the desktop interface remains available and can return the audio system to a coherent state.

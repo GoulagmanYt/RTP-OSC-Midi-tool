@@ -2,7 +2,7 @@ use std::{
     ffi::{CStr, CString},
     fmt::Display,
     net::SocketAddr,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use zerocopy::network_endian::U32;
@@ -15,6 +15,15 @@ pub struct Participant {
     name: CString,
     invited_by_us: bool,
     ssrc: U32,
+    clock: Option<ClockMapping>,
+    identity: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ClockMapping {
+    remote: u64,
+    local: Instant,
+    rate_ppb: i64,
 }
 
 impl Participant {
@@ -32,7 +41,16 @@ impl Participant {
             last_clock_sync: Instant::now(),
             invited_by_us,
             ssrc,
+            clock: None,
+            identity: {
+                static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            },
         }
+    }
+
+    pub(crate) fn identity(&self) -> u64 {
+        self.identity
     }
 
     pub(super) fn midi_port_addr(&self) -> SocketAddr {
@@ -45,6 +63,41 @@ impl Participant {
 
     pub(super) fn received_clock_sync(&mut self) {
         self.last_clock_sync = Instant::now();
+    }
+
+    pub(super) fn synchronize(&mut self, remote: u64, local: Instant) {
+        let rate_ppb = self
+            .clock
+            .as_ref()
+            .and_then(|previous| {
+                let remote_ns = i128::from(remote.checked_sub(previous.remote)?) * 100_000;
+                if remote_ns < 100_000_000 {
+                    return None;
+                }
+                let local_ns = local.checked_duration_since(previous.local)?.as_nanos() as i128;
+                Some(
+                    ((local_ns - remote_ns) * 1_000_000_000 / remote_ns)
+                        .clamp(-1_000_000, 1_000_000) as i64,
+                )
+            })
+            .unwrap_or(0);
+        self.clock = Some(ClockMapping {
+            remote,
+            local,
+            rate_ppb,
+        });
+    }
+
+    pub(super) fn deadline(&self, timestamp: u32) -> Option<Instant> {
+        let clock = self.clock.as_ref()?;
+        let ticks = i128::from(timestamp.wrapping_sub(clock.remote as u32) as i32);
+        let ns = ticks * 100_000 * (1_000_000_000 + i128::from(clock.rate_ppb)) / 1_000_000_000;
+        let duration = Duration::from_nanos(ns.unsigned_abs().try_into().ok()?);
+        if ns >= 0 {
+            clock.local.checked_add(duration)
+        } else {
+            clock.local.checked_sub(duration)
+        }
     }
 
     pub(super) fn is_invited_by_us(&self) -> bool {
@@ -77,5 +130,32 @@ impl Display for Participant {
             self.ctrl_addr,
             self.ssrc.get()
         )
+    }
+}
+
+#[cfg(test)]
+mod clock_tests {
+    use super::*;
+
+    #[test]
+    fn maps_offset_rollover_and_clock_rate_without_float_rounding() {
+        let mut peer = Participant::new(
+            "127.0.0.1:5004".parse().unwrap(),
+            true,
+            Some(U32::new(1)),
+            c"test",
+            U32::new(2),
+        );
+        let now = Instant::now();
+        let remote = u64::from(u32::MAX) - 5;
+        peer.synchronize(remote, now);
+        assert_eq!(peer.deadline(4).unwrap(), now + Duration::from_millis(1));
+        assert_eq!(
+            peer.deadline((remote - 10) as u32).unwrap(),
+            now - Duration::from_millis(1)
+        );
+        peer.synchronize(remote + 100_000, now + Duration::from_micros(10_001_000));
+        let deadline = peer.deadline((remote + 110_000) as u32).unwrap();
+        assert_eq!(deadline, now + Duration::from_micros(11_001_100));
     }
 }

@@ -30,11 +30,9 @@ async fn main() {
         })
         .await;
 
-    // tokio::signal::ctrl_c().await.expect("Failed to listen for Ctrl+C");
-    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
-        .expect("Failed to set up Ctrl+C signal handler")
-        .recv()
-        .await;
+    tokio::signal::ctrl_c()
+        .await
+        .expect("Failed to listen for Ctrl+C");
     println!("Ctrl+C received, stopping session...");
     event!(Level::INFO, "Stopping RTP-MIDI session gracefully");
     session.stop_gracefully().await;

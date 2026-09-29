@@ -19,6 +19,7 @@ repository = "https://github.com/iKadmium/rtp-midi-rs"
 include = ["src", "examples", "tests", "Cargo.toml", "README.md", "LICENSE.md"]
 
 [dependencies]
+arc-swap = "1.9.2"
 mdns-sd = { version = "0.13.9", optional = true }
 hostname = { version = "0.4.1", optional = true }
 local-ip-address = { version = "0.6.5", optional = true }

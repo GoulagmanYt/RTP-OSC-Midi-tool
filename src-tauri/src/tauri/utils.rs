@@ -149,6 +149,11 @@ pub fn sync_rtp_discovery(config: &Config, state: &AppState, app: &AppHandle) {
 }
 
 pub fn audio_settings_from_config(config: &Config) -> crate::audio::AudioSettings {
+    let eq_key = config
+        .audio
+        .vst_plugin_id
+        .as_deref()
+        .unwrap_or(crate::config::BUNDLED_VST_EQ_KEY);
     crate::audio::AudioSettings {
         enabled: config.audio.enabled,
         backend: config.audio.backend.clone(),
@@ -158,6 +163,12 @@ pub fn audio_settings_from_config(config: &Config) -> crate::audio::AudioSetting
         buffer_size: config.audio.buffer_size,
         gain_db: config.audio.gain_db,
         limiter_enabled: config.audio.limiter_enabled,
+        vst_eq: config
+            .audio
+            .vst_eq_by_plugin
+            .get(eq_key)
+            .cloned()
+            .unwrap_or_default(),
         vst_plugin_id: config.audio.vst_plugin_id.clone(),
         vst_path: config.audio.vst_path.clone(),
     }

@@ -52,6 +52,7 @@ use vst::api;
 use vst::{editor::Editor, host::PluginInstance};
 use windows::Win32::Foundation::HWND;
 
+use crate::config::VstEqSettings;
 use crate::types::VstParameter;
 
 pub(super) const MAX_PLUGIN_CHANNELS: usize = 256;
@@ -70,6 +71,8 @@ pub struct AudioSettings {
     #[serde(default)]
     pub limiter_enabled: bool,
     #[serde(default)]
+    pub vst_eq: VstEqSettings,
+    #[serde(default)]
     pub vst_plugin_id: Option<String>,
     pub vst_path: Option<String>,
 }
@@ -85,6 +88,7 @@ impl Default for AudioSettings {
             buffer_size: 256,
             gain_db: 0.0,
             limiter_enabled: false,
+            vst_eq: VstEqSettings::default(),
             vst_plugin_id: None,
             vst_path: None,
         }
@@ -138,6 +142,7 @@ impl Vst2TimeContext {
 pub(super) struct AudioControls {
     pub(super) gain_bits: AtomicU32,
     pub(super) limiter_enabled: AtomicBool,
+    pub(super) equalizer: super::equalizer::PublishedEq,
 }
 
 #[repr(align(64))]
@@ -314,13 +319,16 @@ impl MidiPacket {
     }
 
     pub(super) fn from_bytes_with_age(bytes: &[u8], age_us: u64) -> Option<Self> {
-        if bytes.is_empty() {
+        if bytes.is_empty() || bytes.len() > 3 || bytes[0] == 0xF0 {
             return None;
         }
         let mut data = [0u8; 3];
-        let len = bytes.len().min(3);
+        let len = bytes.len();
         for (idx, byte) in bytes.iter().take(len).enumerate() {
             data[idx] = *byte;
+        }
+        if !crate::midi::normalize_message(&mut data[..len]) {
+            return None;
         }
         Some(Self {
             data,
@@ -347,7 +355,9 @@ impl MidiPacket {
     }
 
     pub(super) fn is_critical_release(self) -> bool {
-        self.is_note_off() || self.is_cc64_off()
+        self.is_note_off()
+            || self.is_cc64_off()
+            || crate::midi::is_critical_release_message(&self.data[..usize::from(self.len)])
     }
 
     pub(super) fn age_us(self, now_us: u64) -> u64 {
@@ -371,6 +381,7 @@ pub(super) struct AudioCallbackState {
     pub(super) plugin_outputs: usize,
     pub(super) max_frames: usize,
     pub(super) controls: Arc<AudioControls>,
+    pub(super) equalizer: super::equalizer::StereoEqualizer,
     pub(super) telemetry: Arc<AudioTelemetry>,
     pub(super) emergency_reset_requested: Arc<AtomicBool>,
     pub(super) sample_rate: u32,
@@ -411,6 +422,11 @@ impl AudioCallbackState {
             (0..plugin_outputs).map(|_| vec![0.0; max_frames]).collect();
         let output_ptrs = outputs.iter_mut().map(Vec::as_mut_ptr).collect();
 
+        let (eq_revision, eq_target) = controls
+            .equalizer
+            .load()
+            .expect("initial EQ snapshot must be coherent");
+
         Self {
             midi_rx,
             pending_midi: VecDeque::with_capacity(MAX_PENDING_MIDI),
@@ -431,6 +447,7 @@ impl AudioCallbackState {
             plugin_outputs,
             max_frames,
             controls,
+            equalizer: super::equalizer::StereoEqualizer::new(eq_revision, eq_target, sample_rate),
             telemetry,
             emergency_reset_requested,
             sample_rate,
@@ -476,32 +493,18 @@ impl AudioCallbackState {
         {
             self.needs_emergency_reset = true;
             self.pending_midi.clear();
+            for _ in 0..self.midi_rx.slots() {
+                let _ = self.midi_rx.pop();
+            }
         }
         let now_us = monotonic_us();
-        let measured_frames = self.telemetry.block_size_frames.load(Ordering::Relaxed);
-        let current_frames = if measured_frames == 0 {
-            self.max_frames.min(u32::MAX as usize) as u32
-        } else {
-            measured_frames
-        };
-        let stale_after_us = if self.sample_rate == 0 {
-            u64::MAX
-        } else {
-            u64::from(current_frames)
-                .saturating_mul(2_000_000)
-                .checked_div(u64::from(self.sample_rate))
-                .unwrap_or(u64::MAX)
-        };
+        // Age is telemetry, not an overflow condition. A delayed wake-up must
+        // not discard valid Note-Ons/controllers while queue capacity remains.
+        // Generation resets already invalidate obsolete pre-panic messages.
         for _ in 0..MIDI_DRAIN_BUDGET_PER_CALLBACK {
             let Ok(msg) = self.midi_rx.pop() else {
                 break;
             };
-            if !msg.is_critical_release() && msg.age_us(now_us) > stale_after_us {
-                self.telemetry
-                    .midi_drop_count
-                    .fetch_add(1, Ordering::Relaxed);
-                continue;
-            }
             self.enqueue_midi(msg);
         }
         let depth = self.pending_midi.len().saturating_add(self.midi_rx.slots());
@@ -560,8 +563,8 @@ impl AudioCallbackState {
     fn drop_oldest_note_on(&mut self) -> bool {
         let pos = self.pending_midi.iter().position(|m| m.is_note_on());
         if let Some(idx) = pos {
-            self.pending_midi.swap(0, idx);
-            self.pending_midi.pop_front();
+            // Preserve release/controller ordering when evicting a lower-priority message.
+            self.pending_midi.remove(idx);
             return true;
         }
         false
@@ -573,8 +576,8 @@ impl AudioCallbackState {
             .iter()
             .position(|m| !m.is_critical_release());
         if let Some(idx) = pos {
-            self.pending_midi.swap(0, idx);
-            self.pending_midi.pop_front();
+            // Preserve release/controller ordering when evicting a lower-priority message.
+            self.pending_midi.remove(idx);
             return true;
         }
         false
@@ -601,15 +604,6 @@ impl AudioCallbackState {
             }
         }
     }
-}
-
-pub(super) fn timestamp_ms() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 pub(super) fn monotonic_us() -> u64 {

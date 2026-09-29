@@ -269,6 +269,10 @@ mod windows_worker {
             let frame = read_midi_frame(&mut pipe)
                 .await
                 .map_err(|error| format!("MIDI pipe failed: {error}"))?;
+            if frame.bytes() == [0xFF] {
+                audio.request_emergency_midi_reset();
+                continue;
+            }
             let age_us = qpc_elapsed_us(frame.monotonic_qpc, monotonic_qpc());
             audio.send_midi_with_age(frame.bytes(), age_us);
         }
@@ -437,6 +441,10 @@ mod windows_worker {
                         }
                         ControlMessage::SetLimiter { request_id, enabled } => {
                             audio.set_limiter_enabled(enabled);
+                            ControlMessage::Ack { request_id }
+                        }
+                        ControlMessage::SetEq { request_id, settings } => {
+                            audio.set_vst_eq(settings);
                             ControlMessage::Ack { request_id }
                         }
                         ControlMessage::Panic { request_id } => {
