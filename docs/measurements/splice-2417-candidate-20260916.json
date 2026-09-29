@@ -1,9 +1,0 @@
-{
-  "installerSignatureStatus": "Valid",
-  "installerSigner": "CN=Distributed Creation Inc., O=Distributed Creation Inc., L=New York, S=New York, C=US, SERIALNUMBER=5331087, OID.2.5.4.15=Private Organization, OID.1.3.6.1.4.1.311.60.2.1.2=Delaware, OID.1.3.6.1.4.1.311.60.2.1.3=US",
-  "pluginSha256": "D4F9686268DEBCC7B71C2FF277AB056805EAB67F4C6E99B634E961003C9A2E0F",
-  "installerSha256": "CAEEE237DC933303C732CA150D7181CA32257A4E17817166BD41D85A0EF94AD9",
-  "source": "https://splice.com/instrument/download",
-  "scope": "VST3 payload extracted into the ignored build directory from the signed official installer; installer never executed, existing Program Files installation not replaced.",
-  "pluginVersion": "2.4.17"
-}

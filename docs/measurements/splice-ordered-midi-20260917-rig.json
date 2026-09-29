@@ -1,9 +1,0 @@
-{
-  "presetScope": "Fresh plugin instance; no explicit saved plugin state passed by diagnostic",
-  "collectedUtc": "2026-09-17T06:35:16.3343301Z",
-  "pluginBytes": 62637056,
-  "pluginSha256": "D4F9686268DEBCC7B71C2FF277AB056805EAB67F4C6E99B634E961003C9A2E0F",
-  "settings": "ASIO / Voicemeeter AUX Virtual ASIO / 48000 Hz / 512 frames",
-  "pluginPath": "C:\\Program Files\\Common Files\\VST3\\Splice\\Splice INSTRUMENT.vst3\\Contents\\x86_64-win\\Splice INSTRUMENT.vst3",
-  "pluginVersion": "2.4.17"
-}

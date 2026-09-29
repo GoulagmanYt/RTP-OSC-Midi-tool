@@ -1,8 +1,0 @@
-{
-  "clarifiedOn": "2026-09-18",
-  "source": "User clarification in this conversation",
-  "userStatement": "j'ai arr^té moi même le worker la dernière fois",
-  "classification": "user-initiated worker termination",
-  "interpretation": "The EOF, restart and rejected submissions do not establish a spontaneous worker crash. The endurance remains incomplete, and pre-interruption callback budget exceedances remain relevant.",
-  "rawTelemetryPreserved": true
-}

@@ -97,7 +97,7 @@ flowchart LR
 
 The desktop process owns configuration, routing and supervision. The worker owns the active VST instance, its native editor, the audio device and the real-time callback. Control and MIDI messages cross a versioned, authenticated local IPC channel. If the worker crashes or stops responding, the desktop interface remains available and can return the audio system to a coherent state.
 
-More detail is available in [src-tauri/ARCHITECTURE.md](src-tauri/ARCHITECTURE.md) and [docs/VST_WORKER_PHASE2.md](docs/VST_WORKER_PHASE2.md).
+More detail is available in [src-tauri/ARCHITECTURE.md](src-tauri/ARCHITECTURE.md).
 
 ## System requirements
 

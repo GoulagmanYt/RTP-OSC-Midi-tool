@@ -1,8 +1,0 @@
-﻿{
-    "scope":  "Audio endurance with periodic process resource samples; other workload may run concurrently. No physical loopback latency measurement.",
-    "workerSha256":  "786A9DC633BAB18BE31E53D897527B7DE609D011D04D2E3240AF4B419DC2121A",
-    "startedUtc":  "2026-09-15T17:37:18.8487966Z",
-    "codeCommit":  "149fbb258918a38b6e11065788fa4d94b7739e9d",
-    "durationSeconds":  7200,
-    "diagnosticSha256":  "C9E91E5A3AB206C9406E34B48957B3357DE2149B7C9EB5ED8BBBDDF055A0275A"
-}

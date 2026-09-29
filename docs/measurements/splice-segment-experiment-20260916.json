@@ -1,7 +1,0 @@
-{
-  "pluginSha256": "72C2D4351CCAC7A16FB22562AA388ED1EF581E8C84B742C53B766FB5A3606E1A",
-  "codeCommit": "a0f83eb72ef5a5bd86165efb7b85aec28bdd8b84",
-  "segmentWorkerSha256": "3B66100D496F34C46DDD7E9F7A7E27410831CC98BA2478D84AAB8FB62F72C43A",
-  "originalWorkerSha256": "8B6E44C00F625BC0F2C6969FF70224839859344D722E44E10E61FD2EC17631B5",
-  "scope": "A/B experiment only: same worker machine code, manifest additionally opts into Windows SegmentHeap; no source implementation change."
-}
