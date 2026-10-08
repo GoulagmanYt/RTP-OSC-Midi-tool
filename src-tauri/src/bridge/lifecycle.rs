@@ -130,6 +130,7 @@ pub(super) fn start_runtime(
     use crate::midi_queue::bounded;
     let stop = Arc::new(AtomicBool::new(false));
     let (midi_tx, midi_rx) = bounded::<MidiFrame>(BRIDGE_MIDI_QUEUE_CAPACITY);
+    super::pipeline::prepare_input_routing(&midi_tx, &config);
     let (midi_event_tx, midi_event_rx) = bounded::<MidiNoteEvent>(1024);
     let shared_config = Arc::new(Mutex::new(config.clone()));
     let config_rev = Arc::new(AtomicU64::new(1));

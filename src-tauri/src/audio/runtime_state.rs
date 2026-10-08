@@ -150,6 +150,10 @@ pub(super) struct AudioControls {
 
 #[repr(align(64))]
 pub(super) struct AudioTelemetry {
+    pub(super) editor_open: AtomicBool,
+    pub(super) parameter_accepted_sequence: AtomicU64,
+    pub(super) parameter_failed_sequence: AtomicU64,
+    pub(super) parameter_applied_sequence: AtomicU64,
     pub(super) midi_generation: AtomicU64,
     pub(super) pipe_wait_max_us: AtomicU64,
     pub(super) audio_wait_max_us: AtomicU64,
@@ -190,6 +194,10 @@ pub(super) const DSP_HISTOGRAM_BUCKET_US: u32 = 250;
 impl AudioTelemetry {
     pub(super) fn new() -> Self {
         Self {
+            editor_open: AtomicBool::new(false),
+            parameter_accepted_sequence: AtomicU64::new(0),
+            parameter_applied_sequence: AtomicU64::new(0),
+            parameter_failed_sequence: AtomicU64::new(0),
             midi_generation: AtomicU64::new(0),
             pipe_wait_max_us: AtomicU64::new(0),
             audio_wait_max_us: AtomicU64::new(0),
@@ -355,6 +363,7 @@ pub(super) const PARAMETER_COMMAND_CAPACITY: usize = 4096;
 #[derive(Clone, Copy, Debug)]
 #[cfg_attr(target_pointer_width = "32", allow(dead_code))]
 pub(super) struct ParameterCommand {
+    pub(super) sequence: u64,
     pub(super) index: usize,
     pub(super) id: u32,
     pub(super) flags: u32,
@@ -683,8 +692,12 @@ impl AudioCallbackState {
     }
 
     pub(super) fn drain_parameter_commands(&mut self) {
+        self.drain_parameter_commands_limit(MIDI_EVENT_BATCH_CAPACITY);
+    }
+
+    pub(super) fn drain_parameter_commands_limit(&mut self, limit: usize) {
         self.parameter_commands.clear();
-        for _ in 0..MIDI_EVENT_BATCH_CAPACITY {
+        for _ in 0..limit.min(MIDI_EVENT_BATCH_CAPACITY) {
             let Ok(command) = self.parameter_rx.try_recv() else {
                 break;
             };

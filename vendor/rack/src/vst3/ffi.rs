@@ -352,6 +352,12 @@ extern "C" {
         value: f32,
     ) -> c_int;
 
+    pub fn rack_vst3_plugin_prepare_live_parameter_restore(
+        plugin: *mut RackVST3Plugin,
+        indices: *const u32,
+        count: u32,
+    ) -> c_int;
+
     pub fn rack_vst3_plugin_tracked_parameter_count(plugin: *mut RackVST3Plugin) -> c_int;
 
     pub fn rack_vst3_plugin_get_tracked_parameter(

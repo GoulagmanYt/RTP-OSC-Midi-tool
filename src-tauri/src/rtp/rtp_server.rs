@@ -24,10 +24,11 @@ use rtpmidi::sessions::{
 
 use crate::{
     bridge::pipeline::{
-        midi_reset_generation, request_critical_midi_reset, try_enqueue_midi_frame,
+        classify_input_frame, midi_reset_generation, request_critical_midi_reset,
+        try_enqueue_midi_frame,
     },
     logger::{logs_enabled, FrontendLogger},
-    midi::{is_critical_release_message, MidiFrame},
+    midi::MidiFrame,
     tauri::utils::safe_block_on,
     types::RtpParticipantInfo,
 };
@@ -199,8 +200,11 @@ impl RtpServer {
             ));
             let (scheduled_tx, scheduled_rx) =
                 crate::midi_queue::async_channel(RTP_SCHEDULER_CAPACITY);
-            let scheduler =
-                tokio::spawn(run_rtp_scheduler(scheduled_rx, midi_sink, logger.clone()));
+            let scheduler = tokio::spawn(run_rtp_scheduler(
+                scheduled_rx,
+                midi_sink.clone(),
+                logger.clone(),
+            ));
             // ── Listener MIDI ────────────────────────────────────────────────
             // HOT PATH : ce callback est appelé sur chaque message reçu.
             // Règles :
@@ -226,6 +230,7 @@ impl RtpServer {
                     if sysex_tx
                         .try_send(TimedRtpFrame {
                             generation: frame.generation,
+                            critical: false,
                             frame,
                             deadline: event.deadline,
                             order: 0,
@@ -270,11 +275,17 @@ impl RtpServer {
                         },
                         deadline: event.deadline,
                         generation,
+                        critical: false,
                         order: 0,
                     };
+                    let mut timed = timed;
+                    timed.critical = midi_sink
+                        .load()
+                        .as_ref()
+                        .is_some_and(|sink| classify_input_frame(sink, &timed.frame));
                     if let Err(error) = scheduled_tx.try_send(timed) {
                         DROPPED_MIDI_COUNT.fetch_add(1, Ordering::Relaxed);
-                        if is_critical_release_message(error.into_inner().frame.data.as_slice()) {
+                        if error.into_inner().critical {
                             request_critical_midi_reset();
                         }
                     }
@@ -478,6 +489,7 @@ impl RtpServer {
 }
 
 struct TimedRtpFrame {
+    critical: bool,
     frame: MidiFrame,
     deadline: Instant,
     generation: u64,
@@ -538,10 +550,10 @@ async fn run_rtp_scheduler(
                 // Observe recovery before admitting this new generation; otherwise
                 // the next scheduler turn would clear a freshly admitted event.
                 if event.generation != generation { pending.clear(); generation = event.generation; }
-                let limit = if is_critical_release_message(&event.frame.data) { RTP_PENDING_CAPACITY } else { RTP_PENDING_CAPACITY - crate::realtime::reserve(RTP_PENDING_CAPACITY) };
+                let limit = if event.critical { RTP_PENDING_CAPACITY } else { RTP_PENDING_CAPACITY - crate::realtime::reserve(RTP_PENDING_CAPACITY) };
                 if pending.len() >= limit || event.deadline > Instant::now() + RTP_MAX_SCHEDULE_AHEAD {
                     DROPPED_MIDI_COUNT.fetch_add(1, Ordering::Relaxed);
-                    if is_critical_release_message(&event.frame.data) { request_critical_midi_reset(); }
+                    if event.critical { request_critical_midi_reset(); }
                     continue;
                 }
                 event.order = order;
@@ -559,7 +571,8 @@ fn dispatch_scheduled_frame(sink: &arc_swap::ArcSwapOption<Sender<MidiFrame>>, f
     if let Some(tx) = route.as_ref() {
         if !matches!(
             try_enqueue_midi_frame(tx, frame),
-            Ok(crate::bridge::pipeline::EnqueueOutcome::Enqueued)
+            Ok(crate::bridge::pipeline::EnqueueOutcome::Enqueued
+                | crate::bridge::pipeline::EnqueueOutcome::Filtered)
         ) {
             DROPPED_MIDI_COUNT.fetch_add(1, Ordering::Relaxed);
         }
@@ -586,7 +599,7 @@ fn emit_participants(logger: &FrontendLogger, participants: &Arc<Mutex<Vec<RtpPa
 
 impl crate::midi_queue::Priority for TimedRtpFrame {
     fn critical(&self) -> bool {
-        crate::midi::is_critical_release_message(self.frame.data.as_slice())
+        self.critical
     }
 }
 
@@ -632,6 +645,7 @@ mod tests {
         let mut heap = BinaryHeap::with_capacity(3);
         for order in [2, 0, 1] {
             heap.push(TimedRtpFrame {
+                critical: false,
                 frame: MidiFrame {
                     generation: MidiFrame::current_generation(),
                     ingress_qpc: crate::vst_worker::protocol::monotonic_qpc(),

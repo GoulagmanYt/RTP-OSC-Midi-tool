@@ -96,12 +96,53 @@ async fn isolated_worker_survives_midi_and_contains_process_crashes() {
         enabled: true,
         ..VstEqSettings::default()
     }));
+    supervisor.open_editor().await.unwrap();
+    assert!(!supervisor.snapshot().editor_open);
+    supervisor.set_game_mode(false).await.unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while !supervisor.snapshot().editor_open {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "deferred editor opening was not published"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    supervisor.close_editor().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(!supervisor.snapshot().editor_open);
     for sequence in 0..10_000u32 {
         let note = 36 + (sequence % 48) as u8;
         assert!(supervisor.try_send_midi(&[0x90, note, 100]));
     }
     supervisor.stop().await.expect("fixture worker stop");
     assert_eq!(supervisor.snapshot().state, VstWorkerState::Disabled);
+
+    std::env::set_var("OSCMIDI_VST_FIXTURE_MODE", "recover-controls");
+    let recovered = VstWorkerSupervisor::new();
+    recovered.start(fixture_settings(), None).await.unwrap();
+    let mut expected = fixture_settings();
+    expected.gain_db = -60.0;
+    expected.limiter_enabled = true;
+    expected.vst_eq.enabled = true;
+    assert!(recovered.try_set_gain(expected.gain_db));
+    assert!(recovered.try_set_limiter_enabled(expected.limiter_enabled));
+    assert!(recovered.try_set_eq(expected.vst_eq.clone()));
+    std::env::set_var(
+        "OSCMIDI_VST_FIXTURE_EXPECT_SETTINGS",
+        serde_json::to_string(&expected).unwrap(),
+    );
+    assert!(recovered.save_state().await.is_err());
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while recovered.snapshot().restarts == 0 || !recovered.is_ready() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "recovery did not restore live controls: {:?}",
+            recovered.snapshot()
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    recovered.stop().await.unwrap();
+    std::env::remove_var("OSCMIDI_VST_FIXTURE_EXPECT_SETTINGS");
 
     for mode in ["silence-two-seconds", "slow-command"] {
         std::env::set_var("OSCMIDI_VST_FIXTURE_MODE", mode);

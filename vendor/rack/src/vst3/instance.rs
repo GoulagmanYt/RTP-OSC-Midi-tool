@@ -143,6 +143,29 @@ impl Vst3Plugin {
         }
     }
 
+    /// Prepare sidecar restoration while the audio stream is stopped. Older
+    /// queued UI values must not overwrite the forthcoming audio commands.
+    pub fn prepare_live_parameter_restore(&mut self, indices: &[usize]) -> Result<()> {
+        let indices = indices
+            .iter()
+            .map(|&index| u32::try_from(index).map_err(|_| Error::InvalidParameter(index)))
+            .collect::<Result<Vec<_>>>()?;
+        let count = u32::try_from(indices.len())
+            .map_err(|_| Error::Other("Too many restored parameters".into()))?;
+        let result = unsafe {
+            ffi::rack_vst3_plugin_prepare_live_parameter_restore(
+                self.inner.as_ptr(),
+                indices.as_ptr(),
+                count,
+            )
+        };
+        if result == ffi::RACK_VST3_OK {
+            Ok(())
+        } else {
+            Err(map_error(result))
+        }
+    }
+
     /// Returns the sparse set of persistent parameters explicitly modified by
     /// the host, the native editor, a program change, or the processor.
     pub fn tracked_parameters(&mut self) -> Result<Vec<(u32, f32)>> {

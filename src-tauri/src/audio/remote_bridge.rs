@@ -12,9 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use rack::PluginInstance as _;
 use smallvec::SmallVec;
-use vst::plugin::Plugin as _;
 use windows::{
     core::{w, PCWSTR},
     Win32::{
@@ -60,7 +58,7 @@ use super::{
     callback_midi::midi_to_rack_event,
     plugin_host::{load_plugin_backend, set_active_vst2_editor_window, VST2_RESIZE_MESSAGE},
     runtime_state::{MidiPacket, PluginBackend, Vst2EventBatch, MIDI_EVENT_BATCH_CAPACITY},
-    state_codec::{load_vst_state, save_vst_state_blocking, save_vst_state_checked},
+    state_codec::{load_vst_state, save_vst_state_checked},
 };
 
 #[cfg(target_pointer_width = "64")]
@@ -84,7 +82,7 @@ fn merge_parameter_commands(
 }
 
 const BRIDGE_MAGIC: u32 = 0x4F53_4342;
-const BRIDGE_VERSION: u32 = 6;
+const BRIDGE_VERSION: u32 = 7;
 const BRIDGE_SLOTS: usize = 3;
 const BRIDGE_MAX_FRAMES: usize = 8192;
 const BRIDGE_MAX_CHANNELS: usize = 64;
@@ -100,7 +98,7 @@ const COMMAND_NONE: u32 = 0;
 const COMMAND_OPEN_EDITOR: u32 = 1;
 const COMMAND_CLOSE_EDITOR: u32 = 2;
 const COMMAND_SAVE_STATE: u32 = 3;
-const COMMAND_RESTORE_PARAMETER: u32 = 4;
+const COMMAND_PREPARE_LIVE_RESTORE: u32 = 4;
 const COMMAND_PENDING: u32 = 1;
 const COMMAND_OK: u32 = 2;
 const COMMAND_FAILED: u32 = 3;
@@ -195,6 +193,7 @@ struct BridgeShared {
     version: u32,
     token: u64,
     server_status: AtomicU32,
+    editor_open: AtomicU32,
     shutdown: AtomicU32,
     input_channels: AtomicU32,
     output_channels: AtomicU32,
@@ -354,6 +353,7 @@ pub(super) struct RemotePlugin {
     sample_rate: u32,
     panic_pending: bool,
     pending_parameter_changes: Vec<super::runtime_state::ParameterCommand>,
+    parameter_sequences: [u64; BRIDGE_SLOTS],
     consecutive_missed_frames: u64,
     parameter_cache: Vec<crate::types::VstParameter>,
     last_output_samples: [f32; BRIDGE_MAX_CHANNELS],
@@ -503,6 +503,7 @@ impl RemotePlugin {
             sample_rate,
             panic_pending: false,
             pending_parameter_changes: Vec::with_capacity(BRIDGE_MAX_PARAMETER_CHANGES),
+            parameter_sequences: [0; BRIDGE_SLOTS],
             consecutive_missed_frames: 0,
             parameter_cache,
             last_output_samples: [0.0; BRIDGE_MAX_CHANNELS],
@@ -519,6 +520,10 @@ impl RemotePlugin {
 
     pub(super) fn latency_samples(&self) -> u32 {
         self.latency_samples
+    }
+
+    pub(super) fn parameter_capacity(&self) -> usize {
+        BRIDGE_MAX_PARAMETER_CHANGES.saturating_sub(self.pending_parameter_changes.len())
     }
 
     pub(super) fn parameters(&self) -> &[crate::types::VstParameter] {
@@ -541,9 +546,16 @@ impl RemotePlugin {
         let shared = self.mapping.get_mut();
         let expected_sequence = self.next_sequence.saturating_sub(1);
         let mut rendered = false;
-        for slot in &shared.slots {
+        for (slot_index, slot) in shared.slots.iter().enumerate() {
             if slot.state.load(Ordering::Acquire) != SLOT_READY {
                 continue;
+            }
+            if let Some(telemetry) = telemetry {
+                // DSP completion is independent of whether its audio block is
+                // still useful (late results and frame-size changes included).
+                telemetry
+                    .parameter_applied_sequence
+                    .fetch_max(self.parameter_sequences[slot_index], Ordering::Release);
             }
             let sequence = slot.sequence.load(Ordering::Acquire);
             if sequence < expected_sequence {
@@ -616,10 +628,11 @@ impl RemotePlugin {
             }
         }
 
-        if let Some(slot) = shared
+        if let Some((slot_index, slot)) = shared
             .slots
             .iter_mut()
-            .find(|slot| slot.state.load(Ordering::Acquire) == SLOT_EMPTY)
+            .enumerate()
+            .find(|(_, slot)| slot.state.load(Ordering::Acquire) == SLOT_EMPTY)
         {
             let mut event_count = 0usize;
             if self.panic_pending {
@@ -662,6 +675,12 @@ impl RemotePlugin {
                 .store(event_count as u32, Ordering::Relaxed);
             slot.parameter_change_count
                 .store(parameter_count as u32, Ordering::Relaxed);
+            self.parameter_sequences[slot_index] = self
+                .pending_parameter_changes
+                .iter()
+                .map(|command| command.sequence)
+                .max()
+                .unwrap_or(0);
             self.pending_parameter_changes.clear();
             slot.sequence.store(self.next_sequence, Ordering::Relaxed);
             self.next_sequence = self.next_sequence.wrapping_add(1).max(1);
@@ -677,21 +696,28 @@ impl RemotePlugin {
         self.panic_pending = true;
     }
 
-    pub(super) fn restore_parameter_change(
+    pub(super) fn prepare_live_parameter_restore(
         &mut self,
-        command: super::runtime_state::ParameterCommand,
+        indices: &[usize],
     ) -> Result<(), String> {
-        // Startup restoration runs before the stream starts, on the DSP owner.
-        // Use the control slot rather than a 512-entry callback queue: restoring
-        // a large preset must not silently evict earlier parameter values.
-        self.mapping.get_mut().slots[0].parameter_changes[0] = BridgeParameterChange {
-            index: command.index.min(u32::MAX as usize) as u32,
-            id: command.id,
-            flags: command.flags,
-            step_count: command.step_count,
-            value: command.value,
-        };
-        self.control_command(COMMAND_RESTORE_PARAMETER, "parameter restoration")
+        for chunk in indices.chunks(BRIDGE_MAX_PARAMETER_CHANGES) {
+            let slot = &mut self.mapping.get_mut().slots[0];
+            for (target, &index) in slot.parameter_changes.iter_mut().zip(chunk) {
+                target.index = u32::try_from(index)
+                    .map_err(|_| "Invalid restored parameter index".to_string())?;
+            }
+            slot.parameter_change_count
+                .store(chunk.len() as u32, Ordering::Release);
+            self.control_command(COMMAND_PREPARE_LIVE_RESTORE, "prepare live restoration")?;
+        }
+        self.mapping.get().slots[0]
+            .parameter_change_count
+            .store(0, Ordering::Release);
+        Ok(())
+    }
+
+    pub(super) fn editor_open(&self) -> bool {
+        self.mapping.get().editor_open.load(Ordering::Acquire) != 0
     }
 
     pub(super) fn realtime_health(&self) -> (u32, u32, bool) {
@@ -731,14 +757,9 @@ impl RemotePlugin {
     }
 
     pub(super) fn save_state(&mut self) -> Result<(), String> {
-        self.control_command(COMMAND_SAVE_STATE, "state save")?;
-        // Native capture invalidates the DSP slots during announced maintenance.
-        // Restart the pipeline as a priming block instead of expecting a block
-        // that the DSP deliberately discarded while the stream was paused.
-        self.next_sequence = 1;
-        self.consecutive_missed_frames = 0;
-        self.last_output_samples.fill(0.0);
-        Ok(())
+        // The DSP owner drains accepted slots before capture and retains their
+        // results, including on capture failure. Keep the pipeline sequence.
+        self.control_command(COMMAND_SAVE_STATE, "state save")
     }
 
     fn control_command(&mut self, command: u32, operation: &str) -> Result<(), String> {
@@ -1202,7 +1223,9 @@ fn run_dsp_server(args: DspArgs, logger: FrontendLogger) -> Result<(), String> {
             break;
         }
         pump_remote_editor(&mut editor);
+        let mut internal_state_save = false;
         if REMOTE_EDITOR_CLOSE_REQUESTED.swap(false, Ordering::AcqRel) {
+            mapping.get().editor_open.store(0, Ordering::Release);
             if mapping
                 .get()
                 .command
@@ -1218,18 +1241,15 @@ fn run_dsp_server(args: DspArgs, logger: FrontendLogger) -> Result<(), String> {
                     .get()
                     .command_status
                     .store(COMMAND_PENDING, Ordering::Release);
-                save_vst_state_blocking(&plugin, &selected_probe);
-                mapping
-                    .get()
-                    .command_status
-                    .store(COMMAND_OK, Ordering::Release);
-                mapping.get().command.store(COMMAND_NONE, Ordering::Release);
+                // Capture below, after all accepted DSP requests have run.
+                internal_state_save = true;
             } else {
                 REMOTE_EDITOR_CLOSE_REQUESTED.store(true, Ordering::Release);
             }
         }
         let command = mapping.get().command.load(Ordering::Acquire);
         if command != COMMAND_NONE
+            && command != COMMAND_SAVE_STATE
             && mapping.get().command_status.load(Ordering::Acquire) == COMMAND_PENDING
         {
             let result = match command {
@@ -1238,36 +1258,43 @@ fn run_dsp_server(args: DspArgs, logger: FrontendLogger) -> Result<(), String> {
                     close_remote_editor(&mut editor);
                     Ok(())
                 }
-                COMMAND_SAVE_STATE => {
-                    let saved = save_vst_state_checked(&plugin, &selected_probe);
-                    for slot in &mapping.get().slots {
-                        slot.state.store(SLOT_EMPTY, Ordering::Release);
-                    }
-                    saved
-                }
-                COMMAND_RESTORE_PARAMETER => {
-                    let parameter = mapping.get().slots[0].parameter_changes[0];
-                    match &mut *plugin.lock() {
-                        PluginBackend::Vst2 { instance, .. } => {
-                            instance
-                                .get_parameter_object()
-                                .set_parameter(parameter.index as i32, parameter.value);
-                            Ok(())
+                COMMAND_PREPARE_LIVE_RESTORE => {
+                    let slot = &mapping.get().slots[0];
+                    let count = slot.parameter_change_count.load(Ordering::Acquire) as usize;
+                    if count > BRIDGE_MAX_PARAMETER_CHANGES {
+                        Err("Invalid restored parameter count".into())
+                    } else {
+                        let indices = slot
+                            .parameter_changes
+                            .iter()
+                            .take(count)
+                            .map(|change| change.index as usize)
+                            .collect::<Vec<_>>();
+                        match &mut *plugin.lock() {
+                            PluginBackend::Vst3 { instance, .. } => instance
+                                .prepare_live_parameter_restore(&indices)
+                                .map_err(|e| e.to_string()),
+                            PluginBackend::Vst2 { .. } => Ok(()),
+                            #[cfg(target_pointer_width = "64")]
+                            PluginBackend::Remote { .. } => Err("Nested bridge unsupported".into()),
                         }
-                        PluginBackend::Vst3 { instance, .. } => instance
-                            .set_parameter(parameter.index as usize, parameter.value)
-                            .map_err(|error| error.to_string()),
-                        #[cfg(target_pointer_width = "64")]
-                        PluginBackend::Remote { .. } => Err("nested bridge unsupported".into()),
                     }
                 }
                 _ => Err("unknown x86 control command".to_string()),
             };
             match result {
-                Ok(()) => mapping
-                    .get()
-                    .command_status
-                    .store(COMMAND_OK, Ordering::Release),
+                Ok(()) => {
+                    if command == COMMAND_OPEN_EDITOR {
+                        mapping.get().editor_open.store(1, Ordering::Release);
+                    }
+                    if command == COMMAND_CLOSE_EDITOR {
+                        mapping.get().editor_open.store(0, Ordering::Release);
+                    }
+                    mapping
+                        .get()
+                        .command_status
+                        .store(COMMAND_OK, Ordering::Release);
+                }
                 Err(error) => {
                     set_command_error(mapping.get_mut(), &error);
                     mapping
@@ -1277,53 +1304,34 @@ fn run_dsp_server(args: DspArgs, logger: FrontendLogger) -> Result<(), String> {
                 }
             }
         }
-        loop {
-            let slot_index = (0..BRIDGE_SLOTS)
-                .filter(|index| {
-                    mapping.get().slots[*index].state.load(Ordering::Acquire) == SLOT_REQUESTED
-                })
-                .min_by_key(|index| mapping.get().slots[*index].sequence.load(Ordering::Acquire));
-            let Some(slot_index) = slot_index else {
-                break;
-            };
-            let shared = mapping.get_mut();
-            let slot = &mut shared.slots[slot_index];
-            if slot.state.load(Ordering::Acquire) != SLOT_REQUESTED {
-                continue;
-            }
-            let frames = slot.frames.load(Ordering::Relaxed) as usize;
-            let event_count = slot.event_count.load(Ordering::Relaxed) as usize;
-            let parameter_change_count =
-                slot.parameter_change_count.load(Ordering::Relaxed) as usize;
-            if frames == 0
-                || frames > args.max_block_size
-                || event_count > BRIDGE_MAX_MIDI
-                || parameter_change_count > BRIDGE_MAX_PARAMETER_CHANGES
-            {
-                slot.state.store(SLOT_EMPTY, Ordering::Release);
-                continue;
-            }
-            input_silence[..frames].fill(0.0);
-            let process_result = process_local_plugin(
-                &mut plugin.lock(),
-                slot,
-                frames,
-                event_count,
-                parameter_change_count,
-                &restored_parameter_cache,
-                &input_silence,
-                loaded.input_channels,
-                loaded.output_channels,
-                &mut vst2_events,
-                &mut vst2_batch,
-                &mut rack_events,
-            );
-            if let Err(error) = process_result {
-                background_log("error", format!("x86 DSP bridge process failed: {error}"));
-                mapping.get().shutdown.store(1, Ordering::Release);
-                break;
-            }
-            slot.state.store(SLOT_READY, Ordering::Release);
+        let serviced = service_dsp_cycle(
+            mapping.get_mut(),
+            args.max_block_size,
+            |slot, frames, event_count, parameter_change_count| {
+                input_silence[..frames].fill(0.0);
+                process_local_plugin(
+                    &mut plugin.lock(),
+                    slot,
+                    frames,
+                    event_count,
+                    parameter_change_count,
+                    &restored_parameter_cache,
+                    &input_silence,
+                    loaded.input_channels,
+                    loaded.output_channels,
+                    &mut vst2_events,
+                    &mut vst2_batch,
+                    &mut rack_events,
+                )
+            },
+            || save_vst_state_checked(&plugin, &selected_probe),
+        );
+        if let Err(error) = serviced {
+            background_log("error", format!("x86 DSP bridge process failed: {error}"));
+            mapping.get().shutdown.store(1, Ordering::Release);
+        }
+        if internal_state_save {
+            mapping.get().command.store(COMMAND_NONE, Ordering::Release);
         }
     }
     close_remote_editor(&mut editor);
@@ -1338,7 +1346,9 @@ fn run_dsp_server(args: DspArgs, logger: FrontendLogger) -> Result<(), String> {
         };
         let _ = unsafe { DestroyWindow(hwnd) };
     }
-    save_vst_state_blocking(&plugin, &selected_probe);
+    // Native capture is an explicit parent command after its application
+    // barrier. Destructor/fault cleanup must not overwrite the last valid state
+    // or delete a newer sidecar after the parent deliberately skipped capture.
     if quarantine_destructor {
         background_log(
             "warn",
@@ -1349,6 +1359,60 @@ fn run_dsp_server(args: DspArgs, logger: FrontendLogger) -> Result<(), String> {
         drop(plugin);
     }
     let _ = unsafe { CloseHandle(request_event) };
+    Ok(())
+}
+
+/// One DSP-owner iteration. Native capture follows every previously accepted
+/// request and never invalidates either requested events or completed audio.
+fn service_dsp_cycle(
+    shared: &mut BridgeShared,
+    max_block_size: usize,
+    mut process: impl FnMut(&mut BridgeSlot, usize, usize, usize) -> Result<(), String>,
+    capture: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    loop {
+        let slot_index = (0..BRIDGE_SLOTS)
+            .filter(|index| shared.slots[*index].state.load(Ordering::Acquire) == SLOT_REQUESTED)
+            .min_by_key(|index| shared.slots[*index].sequence.load(Ordering::Acquire));
+        let Some(slot_index) = slot_index else {
+            break;
+        };
+        let slot = &mut shared.slots[slot_index];
+        let frames = slot.frames.load(Ordering::Relaxed) as usize;
+        let event_count = slot.event_count.load(Ordering::Relaxed) as usize;
+        let parameter_count = slot.parameter_change_count.load(Ordering::Relaxed) as usize;
+        if frames == 0
+            || frames > max_block_size
+            || event_count > BRIDGE_MAX_MIDI
+            || parameter_count > BRIDGE_MAX_PARAMETER_CHANGES
+        {
+            slot.state.store(SLOT_EMPTY, Ordering::Release);
+            continue;
+        }
+        if let Err(error) = process(slot, frames, event_count, parameter_count) {
+            if shared.command.load(Ordering::Acquire) == COMMAND_SAVE_STATE {
+                set_command_error(shared, &error);
+                shared
+                    .command_status
+                    .store(COMMAND_FAILED, Ordering::Release);
+            }
+            return Err(error);
+        }
+        slot.state.store(SLOT_READY, Ordering::Release);
+    }
+    if shared.command.load(Ordering::Acquire) == COMMAND_SAVE_STATE
+        && shared.command_status.load(Ordering::Acquire) == COMMAND_PENDING
+    {
+        match capture() {
+            Ok(()) => shared.command_status.store(COMMAND_OK, Ordering::Release),
+            Err(error) => {
+                set_command_error(shared, &error);
+                shared
+                    .command_status
+                    .store(COMMAND_FAILED, Ordering::Release);
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1621,6 +1685,113 @@ fn stable_token(value: &str) -> u64 {
 mod tests {
     use super::*;
 
+    #[cfg(target_pointer_width = "64")]
+    fn test_mapping() -> Mapping {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let serial = NEXT.fetch_add(1, Ordering::Relaxed);
+        let name = format!("Local\\OSCMIDI-DSP-test-{}-{serial}", std::process::id());
+        Mapping::create(&name, serial, 512, &PrivateKernelSecurity::new().unwrap()).unwrap()
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn state_capture_drains_requested_notes_in_sequence_and_preserves_results() {
+        for capture_ok in [true, false] {
+            let mut mapping = test_mapping();
+            let shared = mapping.get_mut();
+            shared.command.store(COMMAND_SAVE_STATE, Ordering::Release);
+            shared
+                .command_status
+                .store(COMMAND_PENDING, Ordering::Release);
+            // The lower slot index contains the newer event.
+            for (index, sequence, data) in [(1, 1, [0x80, 60, 0]), (0, 2, [0x90, 60, 100])] {
+                let slot = &mut shared.slots[index];
+                slot.frames.store(512, Ordering::Relaxed);
+                slot.event_count.store(1, Ordering::Relaxed);
+                slot.events[0].data = data;
+                slot.events[0].len = 3;
+                slot.sequence.store(sequence, Ordering::Relaxed);
+                slot.state.store(SLOT_REQUESTED, Ordering::Release);
+            }
+            let held = std::cell::Cell::new(true);
+            let consumed = std::cell::RefCell::new(Vec::new());
+            let captured = std::cell::Cell::new(false);
+            service_dsp_cycle(
+                shared,
+                512,
+                |slot, _, _, _| {
+                    let data = slot.events[0].data;
+                    consumed.borrow_mut().push(data);
+                    held.set(data[0] == 0x90);
+                    Ok(())
+                },
+                || {
+                    assert_eq!(
+                        consumed.borrow().len(),
+                        2,
+                        "capture preceded pending DSP requests"
+                    );
+                    assert!(held.get());
+                    captured.set(true);
+                    if capture_ok {
+                        Ok(())
+                    } else {
+                        Err("capture failed".into())
+                    }
+                },
+            )
+            .unwrap();
+            assert_eq!(*consumed.borrow(), [[0x80, 60, 0], [0x90, 60, 100]]);
+            assert!(held.get());
+            assert!(captured.get());
+            assert_eq!(shared.slots[0].state.load(Ordering::Acquire), SLOT_READY);
+            assert_eq!(shared.slots[1].state.load(Ordering::Acquire), SLOT_READY);
+            assert_eq!(
+                shared.command_status.load(Ordering::Acquire),
+                if capture_ok {
+                    COMMAND_OK
+                } else {
+                    COMMAND_FAILED
+                }
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn state_capture_does_not_run_after_a_failed_dsp_request() {
+        let mut mapping = test_mapping();
+        let shared = mapping.get_mut();
+        shared.command.store(COMMAND_SAVE_STATE, Ordering::Release);
+        shared
+            .command_status
+            .store(COMMAND_PENDING, Ordering::Release);
+        shared.slots[0].frames.store(512, Ordering::Relaxed);
+        shared.slots[0]
+            .state
+            .store(SLOT_REQUESTED, Ordering::Release);
+        let captured = std::cell::Cell::new(false);
+        assert!(service_dsp_cycle(
+            shared,
+            512,
+            |_, _, _, _| Err("DSP failed".into()),
+            || {
+                captured.set(true);
+                Ok(())
+            }
+        )
+        .is_err());
+        assert!(!captured.get());
+        assert_eq!(
+            shared.command_status.load(Ordering::Acquire),
+            COMMAND_FAILED
+        );
+        assert_eq!(
+            shared.slots[0].state.load(Ordering::Acquire),
+            SLOT_REQUESTED
+        );
+    }
+
     #[test]
     fn shared_bridge_layout_is_versioned_and_bounded() {
         println!(
@@ -1652,6 +1823,7 @@ mod tests {
 
         let mut pending = Vec::with_capacity(BRIDGE_MAX_PARAMETER_CHANGES);
         let first = ParameterCommand {
+            sequence: 0,
             index: 7,
             id: 42,
             flags: 0,
@@ -1659,6 +1831,7 @@ mod tests {
             value: 0.25,
         };
         let latest = ParameterCommand {
+            sequence: 0,
             value: 0.75,
             ..first
         };
@@ -1672,6 +1845,7 @@ mod tests {
             merge_parameter_commands(
                 &mut pending,
                 &[ParameterCommand {
+                    sequence: 0,
                     index: index + 100,
                     id: index as u32 + 100,
                     flags: 0,
@@ -1785,14 +1959,22 @@ mod tests {
             "bridged VST rendered silence"
         );
         assert!(remote.telemetry().2, "x86 worker should remain alive");
+        let sequence_before_save = remote.next_sequence;
+        let underruns_before_save = remote.telemetry().0;
         remote.save_state().expect("native save in maintenance");
-        let underruns = remote.telemetry().0;
-        assert_eq!(remote.next_sequence, 1);
-        assert!(remote.process(&mut midi, &[], &mut outputs, 512, None));
+        assert_eq!(
+            remote.next_sequence, sequence_before_save,
+            "maintenance must preserve the DSP pipeline sequence"
+        );
+        assert!(
+            remote.process(&mut midi, &[], &mut outputs, 512, None),
+            "the completed DSP block must remain available after maintenance"
+        );
+        assert_eq!(remote.next_sequence, sequence_before_save + 1);
         assert_eq!(
             remote.telemetry().0,
-            underruns,
-            "maintenance must re-prime the DSP pipeline"
+            underruns_before_save,
+            "maintenance must resume the existing pipeline without a new underrun"
         );
     }
 }

@@ -164,6 +164,9 @@ impl AudioEngine {
             self.deferred_save.store(true, Ordering::Release);
             return self.persist_live_parameters();
         }
+        // Preserve accepted values even if callback progress or native capture
+        // subsequently fails. The sidecar is removed only after the barrier.
+        self.persist_live_parameters()?;
         let maintenance = self.begin_maintenance()?;
         let Some(_lifecycle_guard) = self.lifecycle_gate.try_lock() else {
             return Err(AudioError::Message(
@@ -232,6 +235,37 @@ impl AudioEngine {
             .store(false, Ordering::Relaxed);
 
         if let Some(runtime) = runtime {
+            self.editor_open.store(false, Ordering::Release);
+            runtime
+                .telemetry
+                .editor_open
+                .store(false, Ordering::Release);
+            let values = {
+                let changes = self.live_parameters.lock();
+                let cache = runtime.parameter_cache.lock();
+                changes
+                    .keys()
+                    .filter_map(|index| cache.get(*index).cloned())
+                    .collect()
+            };
+            if let Err(error) =
+                super::game_mode::persist_parameter_snapshot(&runtime.vst_plugin, values)
+            {
+                background_log(
+                    "error",
+                    format!("Failed to preserve accepted VST parameters before shutdown: {error}"),
+                );
+            }
+            let parameters_applied = match super::game_mode::wait_for_parameters(
+                &runtime.telemetry,
+                std::time::Duration::from_secs(5),
+            ) {
+                Ok(()) => true,
+                Err(error) => {
+                    background_log("warn", format!("Native shutdown capture deferred; live parameter snapshot retained: {error}"));
+                    false
+                }
+            };
             if retain_audio_device {
                 retained_device = Some(RetainedAudioDevice {
                     device: runtime._device.clone(),
@@ -239,6 +273,12 @@ impl AudioEngine {
                     name: runtime.device.clone(),
                     id: runtime.device_id.clone(),
                 });
+            }
+            if let Err(error) = runtime._stream.pause() {
+                background_log(
+                    "warn",
+                    format!("Failed to pause audio stream during shutdown: {error}"),
+                );
             }
             let plugin = runtime.plugin.clone();
             let vst_path = runtime.vst_path.clone();
@@ -250,7 +290,8 @@ impl AudioEngine {
             if let Some(handle) = app_handle {
                 let (tx, rx) = mpsc::channel();
                 let scheduled = handle.run_on_main_thread(move || {
-                    if let Some(mut editor_win) = editor_window_arc.lock().take() {
+                    let editor_win = editor_window_arc.lock().take();
+                    if let Some(mut editor_win) = editor_win {
                         match &mut editor_win {
                             EditorWindow::Vst2 { editor, hwnd } => {
                                 editor.close();
@@ -294,28 +335,25 @@ impl AudioEngine {
                 std::mem::forget(editor_win);
             }
 
-            if let Err(error) = runtime._stream.pause() {
-                background_log(
-                    "warn",
-                    format!("Failed to pause audio stream during shutdown: {error}"),
-                );
-            }
             reset_all_notes(plugin.clone());
             drop(runtime);
-            if let Some(handle) = app_handle_for_drop.as_ref() {
-                let plugin_for_save = plugin.clone();
-                let vst_plugin_for_save = vst_plugin.clone();
-                let (tx, rx) = mpsc::sync_channel(1);
-                let scheduled = handle.run_on_main_thread(move || {
-                    save_vst_state_blocking(&plugin_for_save, &vst_plugin_for_save);
-                    let _ = tx.send(());
-                });
-                if scheduled.is_err() || rx.recv_timeout(std::time::Duration::from_secs(5)).is_err()
-                {
-                    background_log("warn", "Timed out saving VST state on the main thread");
+            if parameters_applied {
+                if let Some(handle) = app_handle_for_drop.as_ref() {
+                    let plugin_for_save = plugin.clone();
+                    let vst_plugin_for_save = vst_plugin.clone();
+                    let (tx, rx) = mpsc::sync_channel(1);
+                    let scheduled = handle.run_on_main_thread(move || {
+                        save_vst_state_blocking(&plugin_for_save, &vst_plugin_for_save);
+                        let _ = tx.send(());
+                    });
+                    if scheduled.is_err()
+                        || rx.recv_timeout(std::time::Duration::from_secs(5)).is_err()
+                    {
+                        background_log("warn", "Timed out saving VST state on the main thread");
+                    }
+                } else {
+                    save_vst_state_blocking(&plugin, &vst_plugin);
                 }
-            } else {
-                save_vst_state_blocking(&plugin, &vst_plugin);
             }
             if quarantine_destructor {
                 background_log(
@@ -835,8 +873,15 @@ impl AudioEngine {
                 active_device, error
             ))
         })?;
-        *self.live_parameters.lock() =
+        let restored =
             restore_vst_state_thread_affine(&plugin, &parameter_cache, &vst_probe, &logger)?;
+        super::game_mode::queue_restored_parameters(
+            &parameter_tx,
+            &parameter_cache.lock(),
+            &restored,
+            &telemetry,
+        )?;
+        *self.live_parameters.lock() = restored;
         #[cfg(all(target_os = "windows", target_pointer_width = "64"))]
         let is_x86_bridge = matches!(
             &*plugin.lock(),

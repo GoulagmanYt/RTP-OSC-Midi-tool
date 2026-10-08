@@ -58,6 +58,8 @@ pub struct WorkerMetrics {
     pub deferred_save: bool,
     #[serde(default)]
     pub deferred_editor: Option<bool>,
+    #[serde(default)]
+    pub editor_open: bool,
     pub audio_peak_l: f32,
     pub audio_peak_r: f32,
     pub audio_xruns: u32,

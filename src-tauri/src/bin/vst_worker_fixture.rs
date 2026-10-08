@@ -131,6 +131,9 @@ mod fixture {
         let mut silence_until = None;
         let mut slow_ack = None;
         let mut loaded = false;
+        let mut game_mode = false;
+        let mut editor_open = false;
+        let mut deferred_editor = None;
         loop {
             if hang_deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
                 std::future::pending::<()>().await;
@@ -148,7 +151,7 @@ mod fixture {
                     write_control_frame(&mut control_writer, &ControlMessage::Heartbeat {
                         sequence,
                         monotonic_qpc: monotonic_qpc(),
-                        metrics: WorkerMetrics { callback_count: if loaded && mode != "callback-blocked" { sequence } else { 0 }, ..WorkerMetrics::default() },
+                        metrics: WorkerMetrics { callback_count: if loaded && mode != "callback-blocked" { sequence } else { 0 }, game_mode, editor_open, deferred_editor, ..WorkerMetrics::default() },
                     }).await.map_err(|error| error.to_string())?;
                 }
                 message = control_rx.recv() => {
@@ -156,7 +159,16 @@ mod fixture {
                         .ok_or_else(|| "control reader exited".to_string())??;
                     let response = match message {
                         ControlMessage::Load { request_id, settings, class_uid, .. } => {
+                            if mode == "recover-controls" {
+                                if let Ok(expected) = std::env::var("OSCMIDI_VST_FIXTURE_EXPECT_SETTINGS") {
+                                    let expected: AudioSettings = serde_json::from_str(&expected).map_err(|e| e.to_string())?;
+                                    if serde_json::to_value(&settings).unwrap() != serde_json::to_value(&expected).unwrap() {
+                                        return Err("recovery settings differ from admitted live controls".into());
+                                    }
+                                }
+                            }
                             loaded = true;
+                            game_mode = settings.game_mode;
                             if mode == "silence-two-seconds" { silence_until = Some(tokio::time::Instant::now() + Duration::from_secs(2)); }
                             match mode.as_str() {
                                 "crash" => std::process::abort(),
@@ -178,10 +190,24 @@ mod fixture {
                             slow_ack = Some((tokio::time::Instant::now() + Duration::from_secs(3), request_id));
                             continue;
                         }
-                        ControlMessage::SetGameMode { request_id, .. }
-                        | ControlMessage::OpenEditor { request_id }
-                        | ControlMessage::CloseEditor { request_id }
-                        | ControlMessage::SetParameter { request_id, .. }
+                        ControlMessage::SaveState { .. } if mode == "recover-controls" => std::process::exit(23),
+                        ControlMessage::SetGameMode { request_id, enabled } => {
+                            game_mode = enabled;
+                            if enabled { editor_open = false; }
+                            else if let Some(open) = deferred_editor.take() { editor_open = open; }
+                            ControlMessage::Ack { request_id }
+                        }
+                        ControlMessage::OpenEditor { request_id } => {
+                            if game_mode { deferred_editor = Some(true); }
+                            else { editor_open = true; }
+                            ControlMessage::Ack { request_id }
+                        }
+                        ControlMessage::CloseEditor { request_id } => {
+                            if game_mode { deferred_editor = Some(false); }
+                            else { editor_open = false; }
+                            ControlMessage::Ack { request_id }
+                        }
+                        ControlMessage::SetParameter { request_id, .. }
                         | ControlMessage::SetGain { request_id, .. }
                         | ControlMessage::SetLimiter { request_id, .. }
                         | ControlMessage::SetEq { request_id, .. }

@@ -190,9 +190,26 @@ impl BridgeHandle {
                 }
                 runtime.osc_input = replacement;
             }
-            let old_midi = runtime.config.lock().midi.clone();
-            if old_midi != config.midi {
+            let old_config = runtime.config.lock().clone();
+            let old_midi = &old_config.midi;
+            let profiles_changed = !super::pipeline::ConfigSnapshot::from(&old_config)
+                .same_profiles(&super::pipeline::ConfigSnapshot::from(&config));
+            let sender = self.rtp_sink.load();
+            if profiles_changed {
+                if let Some(sender) = sender.as_ref() {
+                    sender.invalidate_preparation();
+                }
+            }
+            if profiles_changed
+                || old_midi.input_device != config.midi.input_device
+                || old_midi.hotplug != config.midi.hotplug
+            {
                 super::pipeline::request_critical_midi_reset();
+            }
+            if profiles_changed {
+                if let Some(sender) = sender.as_ref() {
+                    super::pipeline::prepare_input_routing(sender, &config);
+                }
             }
             *runtime.config.lock() = config.clone();
             refresh_runtime_status(
@@ -264,7 +281,8 @@ impl BridgeHandle {
                 },
             )
             .and_then(|outcome| match outcome {
-                super::pipeline::EnqueueOutcome::Enqueued => Ok(()),
+                super::pipeline::EnqueueOutcome::Enqueued
+                | super::pipeline::EnqueueOutcome::Filtered => Ok(()),
                 super::pipeline::EnqueueOutcome::DroppedNonCritical => {
                     Err(super::pipeline::EnqueueError::QueueFull)
                 }

@@ -3,7 +3,8 @@ mod packet;
 use crate::midi_queue::Sender;
 use crate::{
     bridge::pipeline::{
-        midi_reset_generation, request_critical_midi_reset, try_enqueue_midi_frame, EnqueueOutcome,
+        classify_input_frame, midi_reset_generation, request_critical_midi_reset,
+        try_enqueue_midi_frame,
     },
     config::OscConfig,
     midi::MidiFrame,
@@ -106,7 +107,10 @@ async fn receive(
                     let event = pending.pop().unwrap().0;
                     if event.generation != midi_reset_generation() { continue; }
                     let frame = MidiFrame { generation: event.generation, ingress_qpc: event.ingress_qpc, data: smallvec::SmallVec::from_slice(&event.data[..usize::from(event.len)]), source: source.clone() };
-                    if !matches!(try_enqueue_midi_frame(&sink, frame), Ok(EnqueueOutcome::Enqueued)) && crate::midi::is_critical_release_message(&event.data[..usize::from(event.len)]) { request_critical_midi_reset(); pending.clear(); break; }
+                    let _ = try_enqueue_midi_frame(&sink, frame);
+                    // Admission already recovers a lost effective release. Observe its epoch;
+                    // raw CC64 may have been remapped to a noncritical controller.
+                    if event.generation != midi_reset_generation() { pending.clear(); break; }
                 }
             },
             received = socket.recv_from(&mut buffer) => {
@@ -121,7 +125,8 @@ async fn receive(
                 }
                 for (index, mut event) in staging.drain(..).enumerate() {
                     event.ingress_qpc = ingress_qpc;
-                    let critical = crate::midi::is_critical_release_message(&event.data[..usize::from(event.len)]);
+                    let candidate = MidiFrame { generation: event.generation, ingress_qpc: event.ingress_qpc, data: smallvec::SmallVec::from_slice(&event.data[..usize::from(event.len)]), source: source.clone() };
+                    let critical = classify_input_frame(&sink, &candidate);
                     let limit = if critical { PENDING_CAPACITY } else { PENDING_CAPACITY - crate::realtime::reserve(PENDING_CAPACITY) };
                     if pending.len() >= limit {
                         crate::realtime::OSC_OVERFLOWS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

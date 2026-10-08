@@ -57,6 +57,8 @@ pub(crate) struct Recovery {
     consumed: AtomicU64,
     noncritical_drops: AtomicU64,
     critical_drops: AtomicU64,
+    noncritical_rejections: AtomicU64,
+    critical_rejections: AtomicU64,
 }
 #[derive(Clone, Default, serde::Serialize, serde::Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -67,6 +69,10 @@ pub struct QueueDiagnostics {
     pub max_depth: usize,
     pub noncritical_drops: u64,
     pub critical_drops: u64,
+    #[serde(default)]
+    pub noncritical_rejections: u64,
+    #[serde(default)]
+    pub critical_rejections: u64,
     pub resets: u64,
     pub max_wait_us: u64,
 }
@@ -78,22 +84,27 @@ pub fn diagnostics() -> Vec<QueueDiagnostics> {
     queues
         .iter()
         .filter_map(|q| q.upgrade())
-        .map(|q| QueueDiagnostics {
-            name: q.name.clone(),
-            capacity: q.capacity,
-            depth: q
-                .admitted
-                .load(Ordering::Relaxed)
-                .saturating_sub(q.consumed.load(Ordering::Relaxed)),
-            max_depth: q.max_depth.load(Ordering::Relaxed),
-            noncritical_drops: q.noncritical_drops.load(Ordering::Relaxed),
-            critical_drops: q.critical_drops.load(Ordering::Relaxed),
-            resets: q.generation(),
-            max_wait_us: q.max_wait_us.load(Ordering::Relaxed),
-        })
+        .map(|q| q.snapshot())
         .collect()
 }
 impl Recovery {
+    pub(crate) fn snapshot(&self) -> QueueDiagnostics {
+        QueueDiagnostics {
+            name: self.name.clone(),
+            capacity: self.capacity,
+            depth: self
+                .admitted
+                .load(Ordering::Relaxed)
+                .saturating_sub(self.consumed.load(Ordering::Relaxed)),
+            max_depth: self.max_depth.load(Ordering::Relaxed),
+            noncritical_drops: self.noncritical_drops.load(Ordering::Relaxed),
+            critical_drops: self.critical_drops.load(Ordering::Relaxed),
+            noncritical_rejections: self.noncritical_rejections.load(Ordering::Relaxed),
+            critical_rejections: self.critical_rejections.load(Ordering::Relaxed),
+            resets: self.generation(),
+            max_wait_us: self.max_wait_us.load(Ordering::Relaxed),
+        }
+    }
     #[track_caller]
     fn new(capacity: usize) -> Arc<Self> {
         let location = std::panic::Location::caller();
@@ -104,6 +115,14 @@ impl Recovery {
         });
         QUEUES.lock().push(Arc::downgrade(&recovery));
         recovery
+    }
+    fn rejected(&self, critical: bool) {
+        if critical {
+            &self.critical_rejections
+        } else {
+            &self.noncritical_rejections
+        }
+        .fetch_add(1, Ordering::Relaxed);
     }
     fn dropped(&self, critical: bool) {
         if critical {
@@ -150,7 +169,12 @@ struct Entry<T> {
     value: T,
     _permit: Option<Permit>,
 }
+struct Preparation<T> {
+    apply: Box<dyn Fn(&mut T) -> bool + Send + Sync>,
+    valid: std::sync::atomic::AtomicBool,
+}
 pub struct Sender<T> {
+    preparation: Arc<arc_swap::ArcSwapOption<Preparation<T>>>,
     recovery: Arc<Recovery>,
     tx: crossbeam_channel::Sender<Entry<T>>,
     admission: Arc<Admission>,
@@ -159,6 +183,7 @@ pub struct Receiver<T>(crossbeam_channel::Receiver<Entry<T>>, Arc<Recovery>);
 impl<T> Clone for Sender<T> {
     fn clone(&self) -> Self {
         Self {
+            preparation: self.preparation.clone(),
             recovery: self.recovery.clone(),
             tx: self.tx.clone(),
             admission: self.admission.clone(),
@@ -171,6 +196,7 @@ pub fn bounded<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
     let recovery = Recovery::new(capacity);
     (
         Sender {
+            preparation: Arc::new(arc_swap::ArcSwapOption::empty()),
             recovery: recovery.clone(),
             tx,
             admission: Arc::new(Admission {
@@ -181,11 +207,41 @@ pub fn bounded<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
         Receiver(rx, recovery),
     )
 }
+impl<T> Sender<T> {
+    pub(crate) fn set_preparation(&self, prepare: impl Fn(&mut T) -> bool + Send + Sync + 'static) {
+        self.preparation.store(Some(Arc::new(Preparation {
+            apply: Box::new(prepare),
+            valid: std::sync::atomic::AtomicBool::new(true),
+        })));
+    }
+    /// Invalidate every outstanding copy before advancing the routing epoch.
+    pub(crate) fn invalidate_preparation(&self) {
+        if let Some(prepare) = self.preparation.load().as_ref() {
+            prepare.valid.store(false, Ordering::Release);
+        }
+    }
+    pub(crate) fn prepare(&self, value: &mut T) -> bool {
+        self.preparation.load().as_ref().is_none_or(|prepare| {
+            prepare.valid.load(Ordering::Acquire)
+                && (prepare.apply)(value)
+                && prepare.valid.load(Ordering::Acquire)
+        })
+    }
+}
 impl<T: Priority> Sender<T> {
     pub(crate) fn recovery(&self) -> &Recovery {
         &self.recovery
     }
     pub fn try_send(&self, value: T) -> Result<(), TrySendError<T>> {
+        self.try_send_inner(value, true)
+    }
+    pub(crate) fn try_send_retryable(&self, value: T) -> Result<(), TrySendError<T>> {
+        self.try_send_inner(value, false)
+    }
+    pub(crate) fn record_abandoned(&self, value: &T) {
+        self.recovery.dropped(value.critical());
+    }
+    fn try_send_inner(&self, value: T, abandoned: bool) -> Result<(), TrySendError<T>> {
         let critical = value.critical();
         let permit = if critical {
             None
@@ -198,7 +254,10 @@ impl<T: Priority> Sender<T> {
                 })
                 .is_err()
             {
-                self.recovery.dropped(false);
+                self.recovery.rejected(false);
+                if abandoned {
+                    self.recovery.dropped(false);
+                }
                 return Err(TrySendError::Full(value));
             }
             Some(Permit(self.admission.clone()))
@@ -211,7 +270,10 @@ impl<T: Priority> Sender<T> {
             })
             .map(|()| self.recovery.admitted(self.tx.len()))
             .map_err(|e| {
-                self.recovery.dropped(critical);
+                self.recovery.rejected(critical);
+                if abandoned {
+                    self.recovery.dropped(critical);
+                }
                 match e {
                     TrySendError::Full(e) => TrySendError::Full(e.value),
                     TrySendError::Disconnected(e) => TrySendError::Disconnected(e.value),
@@ -220,9 +282,12 @@ impl<T: Priority> Sender<T> {
     }
     pub fn send(&self, mut value: T) -> Result<(), crossbeam_channel::SendError<T>> {
         loop {
-            match self.try_send(value) {
+            match self.try_send_retryable(value) {
                 Ok(()) => return Ok(()),
-                Err(TrySendError::Disconnected(v)) => return Err(crossbeam_channel::SendError(v)),
+                Err(TrySendError::Disconnected(v)) => {
+                    self.record_abandoned(&v);
+                    return Err(crossbeam_channel::SendError(v));
+                }
                 Err(TrySendError::Full(v)) => {
                     value = v;
                     std::thread::sleep(std::time::Duration::from_millis(1));
@@ -312,6 +377,7 @@ impl<T: Priority> AsyncSender<T> {
             match self.admission.clone().try_acquire_owned() {
                 Ok(p) => Some(p),
                 Err(_) => {
+                    self.recovery.rejected(false);
                     self.recovery.dropped(false);
                     return Err(TrySendError::Full(value));
                 }
@@ -328,6 +394,7 @@ impl<T: Priority> AsyncSender<T> {
                     .admitted(self.tx.max_capacity() - self.tx.capacity())
             })
             .map_err(|e| {
+                self.recovery.rejected(critical);
                 self.recovery.dropped(critical);
                 match e {
                     TrySendError::Full(e) => TrySendError::Full(e.value),
@@ -428,6 +495,22 @@ mod tests {
     fn note(status: u8, key: u8) -> crate::midi::MidiFrame {
         crate::midi::MidiFrame::copy_realtime(&[status, key, 100], Arc::from("test")).unwrap()
     }
+    #[test]
+    fn successful_release_retry_counts_rejection_without_a_drop() {
+        let (tx, rx) = bounded(1);
+        tx.try_send(note(0x90, 60)).unwrap();
+        let release = tx
+            .try_send_retryable(note(0x80, 60))
+            .unwrap_err()
+            .into_inner();
+        assert_eq!(tx.recovery().snapshot().critical_rejections, 1);
+        assert_eq!(tx.recovery().snapshot().critical_drops, 0);
+        rx.recv().unwrap();
+        tx.try_send_retryable(release).unwrap();
+        assert_eq!(rx.recv().unwrap().data[0], 0x80);
+        assert_eq!(tx.recovery().snapshot().critical_drops, 0);
+    }
+
     #[test]
     fn reserve_preserves_fifo_and_returns_admission_on_dequeue() {
         let (tx, rx) = bounded(8);

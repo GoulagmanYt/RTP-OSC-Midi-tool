@@ -178,6 +178,10 @@ int rack_vst3_plugin_get_parameter(RackVST3Plugin* plugin, uint32_t index, float
 int rack_vst3_plugin_set_parameter(RackVST3Plugin* plugin, uint32_t index, float value);
 int rack_vst3_plugin_set_parameter_audio(RackVST3Plugin* plugin, uint32_t index, float value);
 
+// Initialization/maintenance only, with audio processing stopped. Discard older
+// UI changes for parameters whose newest live values will be submitted to audio.
+int rack_vst3_plugin_prepare_live_parameter_restore(RackVST3Plugin* plugin, const uint32_t* indices, uint32_t count);
+
 // Parameters explicitly changed since initialization/state restore. This sparse
 // snapshot is intended for compatibility profiles whose native VST3 state is
 // unavailable or unsafe. MIDI controller proxies and read-only telemetry are

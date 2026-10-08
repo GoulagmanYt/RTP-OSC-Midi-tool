@@ -71,6 +71,7 @@ pub struct AudioEngine {
     pub(super) midi_transport_failed: Arc<AtomicBool>,
     pub(super) live_parameters: Arc<Mutex<std::collections::BTreeMap<usize, f32>>>,
     pub(super) game_mode: Arc<AtomicBool>,
+    pub(super) editor_open: Arc<AtomicBool>,
     pub(super) maintenance: Arc<AtomicBool>,
     pub(super) deferred_save: Arc<AtomicBool>,
     pub(super) deferred_editor: Arc<AtomicU8>,
@@ -94,6 +95,7 @@ impl AudioEngine {
             midi_transport_failed: Arc::new(AtomicBool::new(false)),
             live_parameters: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             game_mode: Arc::new(AtomicBool::new(true)),
+            editor_open: Arc::new(AtomicBool::new(false)),
             maintenance: Arc::new(AtomicBool::new(false)),
             deferred_save: Arc::new(AtomicBool::new(false)),
             deferred_editor: Arc::new(AtomicU8::new(0)),
@@ -486,8 +488,9 @@ mod tests {
         let mut callback = callback_test_state(rx, Arc::new(AtomicBool::new(false)));
         let (tx, rx) = crossbeam_channel::bounded(1024);
         callback.parameter_rx = rx;
-        for _ in 0..1024 {
+        for sequence in 1..=1024 {
             tx.try_send(super::super::runtime_state::ParameterCommand {
+                sequence,
                 index: 0,
                 id: 0,
                 flags: 0,
@@ -499,6 +502,61 @@ mod tests {
         callback.drain_parameter_commands();
         assert_eq!(callback.parameter_commands.len(), 1);
         assert_eq!(callback.parameter_rx.len(), 512);
+        assert_eq!(callback.parameter_commands[0].sequence, 512);
+        assert_eq!(
+            callback
+                .telemetry
+                .parameter_applied_sequence
+                .load(Ordering::Acquire),
+            0
+        );
+        super::super::callback::acknowledge_parameters(&callback);
+        assert_eq!(
+            callback
+                .telemetry
+                .parameter_applied_sequence
+                .load(Ordering::Acquire),
+            512
+        );
+        callback.drain_parameter_commands_limit(0);
+        assert!(callback.parameter_commands.is_empty());
+        assert_eq!(callback.parameter_rx.len(), 512);
+    }
+
+    #[test]
+    fn later_success_cannot_hide_a_failed_parameter_application() {
+        let (_tx, rx) = RingBuffer::new(8);
+        let mut callback = callback_test_state(rx, Arc::new(AtomicBool::new(false)));
+        callback
+            .parameter_commands
+            .push(super::super::runtime_state::ParameterCommand {
+                sequence: 1,
+                index: 0,
+                id: 0,
+                flags: 0,
+                step_count: 0,
+                value: 0.25,
+            });
+        super::super::callback::fail_parameters(&callback);
+        callback.parameter_commands[0].sequence = 2;
+        callback.parameter_commands[0].value = 0.75;
+        super::super::callback::acknowledge_parameters(&callback);
+        callback
+            .telemetry
+            .parameter_accepted_sequence
+            .store(2, Ordering::Release);
+        assert_eq!(
+            callback
+                .telemetry
+                .parameter_applied_sequence
+                .load(Ordering::Acquire),
+            2
+        );
+        assert!(super::super::game_mode::wait_for_parameters(
+            &callback.telemetry,
+            std::time::Duration::ZERO
+        )
+        .is_err());
     }
 
     #[test]

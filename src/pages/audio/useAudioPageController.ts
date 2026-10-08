@@ -47,6 +47,8 @@ export function useAudioPageController() {
   );
 
   const [vstUiOpen, setVstUiOpen] = useState(false);
+  const actualEditorOpen = status?.realtime?.worker.editorOpen;
+
   const [vstParameterDialogOpen, setVstParameterDialogOpen] = useState(false);
   const [vstEqDialogOpen, setVstEqDialogOpen] = useState(false);
   const [vstPlugins, setVstPlugins] = useState<VstPluginEntry[]>([]);
@@ -154,8 +156,8 @@ export function useAudioPageController() {
   }, [status?.audioLatencyMs, activeBufferSize, activeSampleRate]);
 
   const updateAudioConfig = useCallback(
-    async (patch: Partial<NonNullable<typeof config>["audio"]>) => {
-      if (!config) return;
+    async (patch: Partial<NonNullable<typeof config>["audio"]>): Promise<boolean> => {
+      if (!config || audioReloadInFlight.current) return false;
       const previousAudio = config.audio;
       const updated = { ...config, audio: { ...config.audio, ...patch } };
       const restartKeys: Array<keyof typeof patch> = [
@@ -168,44 +170,42 @@ export function useAudioPageController() {
       ];
       const requiresRestart = restartKeys.some((key) => patch[key] !== undefined);
       const shouldRestart = requiresRestart && Boolean(status?.audioRunning) && updated.audio.enabled;
-      if (shouldRestart && audioReloadInFlight.current) {
-        return;
-      }
-
-      if (shouldRestart) {
-        audioReloadInFlight.current = true;
-        setAudioReloading(true);
-      }
+      const persistImmediately = requiresRestart || patch.gameMode !== undefined;
+      let reloadAttempted = false;
+      audioReloadInFlight.current = true;
+      if (persistImmediately) setAudioReloading(true);
       try {
         await updateConfig({ audio: patch });
-        if (!shouldRestart) {
-          if (patch.gameMode !== undefined) {
-            await saveConfigApi(updated);
-            if (patch.gameMode) setVstUiOpen(false);
-            await refreshStatus();
-          }
-          return;
-        }
-        await saveConfigApi(updated);
-        await reloadVst();
-        await refreshStatus();
-      } catch (e) {
-        await updateConfig({ audio: previousAudio });
-        try {
-          await saveConfigApi({ ...config, audio: previousAudio });
+        if (persistImmediately) await saveConfigApi(updated);
+        if (shouldRestart) {
+          reloadAttempted = true;
           await reloadVst();
-          await refreshStatus();
+        }
+        if (patch.gameMode) setVstUiOpen(false);
+      } catch (e) {
+        try {
+          await updateConfig({ audio: previousAudio });
+          if (persistImmediately) await saveConfigApi(config);
+          if (reloadAttempted) await reloadVst();
         } catch (rollbackError) {
           console.error("Failed to restore previous audio runtime", rollbackError);
         }
         const message = getErrorMessage(e);
         toast.error(message || t("toasts.audio.vstReloadFailed"));
+        return false;
       } finally {
-        if (shouldRestart) {
-          audioReloadInFlight.current = false;
-          setAudioReloading(false);
+        audioReloadInFlight.current = false;
+        if (persistImmediately) setAudioReloading(false);
+      }
+      // A failed status query must not undo a configuration already accepted by the runtime.
+      if (persistImmediately) {
+        try {
+          await refreshStatus();
+        } catch (error) {
+          console.error("Failed to refresh audio status", error);
         }
       }
+      return true;
     },
     [config, refreshStatus, status?.audioRunning, t, updateConfig]
   );
@@ -276,16 +276,7 @@ export function useAudioPageController() {
         vstEqFrame.current = null;
       }
       setVstParams([]);
-      const updated = {
-        ...config,
-        audio: { ...config.audio, vstPluginId: plugin.id, vstPath: plugin.path },
-      };
       await updateAudioConfig({ vstPluginId: plugin.id, vstPath: plugin.path });
-      try {
-        await saveConfigApi(updated);
-      } catch (e) {
-        console.error("Failed to save VST selection", e);
-      }
     },
     [config, updateAudioConfig]
   );
@@ -464,7 +455,7 @@ export function useAudioPageController() {
     vstParamsLoading,
     vstPlugins,
     vstPluginsLoading,
-    vstUiOpen,
+    vstUiOpen: actualEditorOpen ?? vstUiOpen,
     handleAudioToggle,
     handleBackendChange,
     handleCloseVstUi,

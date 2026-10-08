@@ -29,6 +29,7 @@ use super::protocol::{
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const LOAD_TIMEOUT: Duration = Duration::from_secs(45);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+const CONTROL_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
 const HEARTBEAT_WARNING: Duration = Duration::from_millis(1_500);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(5);
 const PROCESS_POLL_PERIOD: Duration = Duration::from_millis(100);
@@ -235,8 +236,9 @@ impl VstWorkerSupervisor {
         if generation != self.inner.lifecycle_generation.load(Ordering::Acquire) {
             return Err("Worker start superseded by another lifecycle request".into());
         }
-        *self.inner.last_load.lock() = Some((settings.clone(), class_uid.clone()));
         self.stop_session().await.ok();
+        // Old-session controls cannot overwrite the new recovery snapshot.
+        *self.inner.last_load.lock() = Some((settings.clone(), class_uid.clone()));
         self.inner
             .midi_transport_failed
             .store(false, Ordering::Release);
@@ -516,24 +518,45 @@ impl VstWorkerSupervisor {
     }
 
     pub fn try_set_gain(&self, gain_db: f32) -> bool {
-        self.try_notify(ControlMessage::SetGain {
+        let mut load = self.inner.last_load.lock();
+        let admitted = self.try_notify(ControlMessage::SetGain {
             request_id: self.next_request_id(),
             gain_db,
-        })
+        });
+        if admitted {
+            if let Some((settings, _)) = load.as_mut() {
+                settings.gain_db = gain_db;
+            }
+        }
+        admitted
     }
 
     pub fn try_set_limiter_enabled(&self, enabled: bool) -> bool {
-        self.try_notify(ControlMessage::SetLimiter {
+        let mut load = self.inner.last_load.lock();
+        let admitted = self.try_notify(ControlMessage::SetLimiter {
             request_id: self.next_request_id(),
             enabled,
-        })
+        });
+        if admitted {
+            if let Some((settings, _)) = load.as_mut() {
+                settings.limiter_enabled = enabled;
+            }
+        }
+        admitted
     }
 
     pub fn try_set_eq(&self, settings: crate::config::VstEqSettings) -> bool {
-        self.try_notify(ControlMessage::SetEq {
+        let mut load = self.inner.last_load.lock();
+        let admitted = self.try_notify(ControlMessage::SetEq {
             request_id: self.next_request_id(),
-            settings,
-        })
+            settings: settings.clone(),
+        });
+        if admitted {
+            if let Some((audio, _)) = load.as_mut() {
+                audio.vst_eq = settings;
+            }
+        }
+        admitted
     }
 
     pub async fn list_parameters(&self) -> Result<Vec<crate::types::VstParameter>, String> {
@@ -587,17 +610,20 @@ impl VstWorkerSupervisor {
             .map(|session| session.commands.clone())
             .ok_or_else(|| "VST worker is not connected".to_string())?;
         let (response_tx, response_rx) = oneshot::channel();
-        commands
-            .send(SessionCommand::Request {
-                message,
-                response: response_tx,
-            })
-            .await
-            .map_err(|_| "VST worker control channel is closed".to_string())?;
-        tokio::time::timeout(timeout, response_rx)
-            .await
-            .map_err(|_| "VST worker command timed out".to_string())?
-            .map_err(|_| "VST worker response channel closed".to_string())?
+        tokio::time::timeout(timeout, async {
+            commands
+                .send(SessionCommand::Request {
+                    message,
+                    response: response_tx,
+                })
+                .await
+                .map_err(|_| "VST worker control channel is closed".to_string())?;
+            response_rx
+                .await
+                .map_err(|_| "VST worker response channel closed".to_string())?
+        })
+        .await
+        .map_err(|_| "VST worker command timed out".to_string())?
     }
 
     fn try_notify(&self, message: ControlMessage) -> bool {
@@ -920,6 +946,22 @@ async fn control_reader(
     }
 }
 
+async fn control_writer<W: tokio::io::AsyncWrite + Unpin>(
+    mut writer: W,
+    mut commands: mpsc::Receiver<ControlMessage>,
+    timeout: Duration,
+) -> Result<(), String> {
+    while let Some(message) = commands.recv().await {
+        // A timed-out write may have emitted part of a frame. Terminate the
+        // session instead of reusing a stream whose framing is now uncertain.
+        tokio::time::timeout(timeout, write_control_frame(&mut writer, &message))
+            .await
+            .map_err(|_| "worker control write timed out".to_string())?
+            .map_err(|error| format!("worker control write failed: {error}"))?;
+    }
+    Ok(())
+}
+
 async fn midi_writer<W: tokio::io::AsyncWrite + Unpin>(
     mut pipe: W,
     mut midi: crate::midi_queue::AsyncReceiver<MidiWireFrame>,
@@ -1006,19 +1048,26 @@ struct SessionIoTasks {
     midi: tokio::task::JoinHandle<()>,
     _runtime: crate::realtime::MidiRuntime,
     control: tauri::async_runtime::JoinHandle<()>,
+    writer: tauri::async_runtime::JoinHandle<Result<(), String>>,
+    writer_finished: bool,
 }
 impl SessionIoTasks {
     async fn stop(&mut self) {
         self.midi.abort();
         self.control.abort();
+        self.writer.abort();
         let _ = (&mut self.midi).await;
         let _ = (&mut self.control).await;
+        if !self.writer_finished {
+            let _ = (&mut self.writer).await;
+        }
     }
 }
 impl Drop for SessionIoTasks {
     fn drop(&mut self) {
         self.midi.abort();
         self.control.abort();
+        self.writer.abort();
     }
 }
 
@@ -1074,13 +1123,18 @@ async fn run_session(runtime: SessionRuntime) {
     }
 
     let midi_task = midi_runtime.spawn(midi_writer(midi_pipe, midi, inner.clone()));
-    let (reader, mut writer): (ReadHalf<_>, WriteHalf<_>) = tokio::io::split(control);
+    let (reader, writer): (ReadHalf<_>, WriteHalf<_>) = tokio::io::split(control);
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let control_task = tauri::async_runtime::spawn(control_reader(reader, event_tx));
+    let (write_tx, write_rx) = mpsc::channel(64);
+    let writer_task =
+        tauri::async_runtime::spawn(control_writer(writer, write_rx, CONTROL_WRITE_TIMEOUT));
     let mut io_tasks = SessionIoTasks {
         midi: midi_task,
         _runtime: midi_runtime,
         control: control_task,
+        writer: writer_task,
+        writer_finished: false,
     };
 
     let mut pending: HashMap<u64, oneshot::Sender<Result<ControlMessage, String>>> = HashMap::new();
@@ -1090,27 +1144,36 @@ async fn run_session(runtime: SessionRuntime) {
 
     loop {
         tokio::select! {
-            command = commands.recv() => match command {
-                Some(SessionCommand::Request { message, response }) => {
+            command = async {
+                let permit = write_tx.reserve().await.map_err(|error| error.to_string())?;
+                Ok::<_, String>((commands.recv().await, permit))
+            } => match command {
+                Ok((Some(SessionCommand::Request { message, response }), permit)) => {
+                    if response.is_closed() { continue; }
                     let Some(request_id) = message_request_id(&message) else {
                         let _ = response.send(Err("request has no request ID".into()));
                         continue;
                     };
-                    if let Err(error) = write_control_frame(&mut writer, &message).await {
-                        let message = format!("worker control write failed: {error}");
-                        let _ = response.send(Err(message.clone()));
-                        terminal_error = Some(message);
-                        break;
-                    }
                     pending.insert(request_id, response);
+                    permit.send(message);
                 }
-                Some(SessionCommand::Notify(message)) => {
-                    if let Err(error) = write_control_frame(&mut writer, &message).await {
-                        terminal_error = Some(format!("worker control write failed: {error}"));
-                        break;
-                    }
+                Ok((Some(SessionCommand::Notify(message)), permit)) => {
+                    permit.send(message);
                 }
-                Some(SessionCommand::Shutdown) | None => break,
+                Ok((Some(SessionCommand::Shutdown) | None, _)) => break,
+                Err(error) => {
+                    terminal_error = Some(format!("worker control writer unavailable: {error}"));
+                    break;
+                }
+            },
+            result = &mut io_tasks.writer => {
+                io_tasks.writer_finished = true;
+                terminal_error = Some(match result {
+                    Ok(Err(error)) => error,
+                    Ok(Ok(())) => "worker control writer exited".into(),
+                    Err(error) => format!("worker control writer failed: {error}"),
+                });
+                break;
             },
             event = event_rx.recv() => match event {
                 Some(Ok(ControlMessage::Heartbeat { metrics, .. })) => {
@@ -1125,6 +1188,7 @@ async fn run_session(runtime: SessionRuntime) {
                     if metrics.maintenance {
                         guard.maintenance_started.get_or_insert(now);
                     } else if guard.maintenance_started.take().is_some() { guard.callback_progress = Some(now); }
+                    guard.snapshot.editor_open = metrics.editor_open;
                     guard.snapshot.metrics = metrics;
                 }
                 Some(Ok(ControlMessage::EditorHidden)) => {
@@ -1147,6 +1211,7 @@ async fn run_session(runtime: SessionRuntime) {
                 }
             },
             _ = poll.tick() => {
+                pending.retain(|_, response| !response.is_closed());
                 let transport_failed = { let status = inner.status.lock(); status.snapshot.state == VstWorkerState::Ready && (inner.midi_transport_failed.load(Ordering::Acquire) || status.snapshot.metrics.midi_transport_failed) };
                 if transport_failed {
                     terminal_error = Some("worker MIDI transport failed".into()); break;
@@ -1232,6 +1297,108 @@ fn set_session_fault(inner: &Arc<SupervisorInner>, error: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn stalled_control_write_does_not_suspend_surveillance() {
+        let (writer, _reader) = tokio::io::duplex(1);
+        let (tx, rx) = mpsc::channel(2);
+        tx.send(ControlMessage::SaveState { request_id: 1 })
+            .await
+            .unwrap();
+        let mut writer = tokio::spawn(control_writer(writer, rx, Duration::from_millis(100)));
+        let mut poll = tokio::time::interval(Duration::from_millis(5));
+        let mut polls = 0;
+        let result = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                tokio::select! {
+                    result = &mut writer => break result.unwrap(),
+                    _ = poll.tick() => polls += 1,
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            polls > 1,
+            "control write suspended process/heartbeat polling"
+        );
+        assert!(result.unwrap_err().contains("control write timed out"));
+    }
+
+    #[tokio::test]
+    async fn control_writer_preserves_order_across_partial_writes() {
+        let (writer, mut reader) = tokio::io::duplex(7);
+        let (tx, rx) = mpsc::channel(2);
+        let task = tokio::spawn(control_writer(writer, rx, Duration::from_secs(2)));
+        for request_id in [1, 2] {
+            tx.send(ControlMessage::SaveState { request_id })
+                .await
+                .unwrap();
+        }
+        drop(tx);
+        for request_id in [1, 2] {
+            assert_eq!(
+                read_control_frame(&mut reader).await.unwrap(),
+                ControlMessage::SaveState { request_id }
+            );
+        }
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn rejected_control_admission_does_not_change_recovery_settings() {
+        let supervisor = VstWorkerSupervisor::new();
+        *supervisor.inner.last_load.lock() = Some((AudioSettings::default(), None));
+        let (commands, mut rx) = mpsc::channel(1);
+        let task = tauri::async_runtime::spawn(std::future::pending());
+        *supervisor.inner.session.lock() = Some(ActiveSession { commands, task });
+        assert!(supervisor.try_set_gain(-60.0));
+        assert!(!supervisor.try_set_gain(-12.0));
+        assert_eq!(
+            supervisor
+                .inner
+                .last_load
+                .lock()
+                .as_ref()
+                .unwrap()
+                .0
+                .gain_db,
+            -60.0
+        );
+        rx.recv().await.unwrap();
+        assert!(supervisor.try_set_limiter_enabled(true));
+        rx.recv().await.unwrap();
+        let eq = crate::config::VstEqSettings {
+            enabled: true,
+            ..Default::default()
+        };
+        assert!(supervisor.try_set_eq(eq.clone()));
+        let load = supervisor.inner.last_load.lock();
+        assert!(load.as_ref().unwrap().0.limiter_enabled);
+        assert_eq!(load.as_ref().unwrap().0.vst_eq, eq);
+    }
+
+    #[tokio::test]
+    async fn command_timeout_includes_waiting_for_admission() {
+        let supervisor = VstWorkerSupervisor::new();
+        let (commands, _rx) = mpsc::channel(1);
+        commands
+            .try_send(SessionCommand::Notify(ControlMessage::Ping { sequence: 1 }))
+            .unwrap();
+        let task = tauri::async_runtime::spawn(std::future::pending());
+        *supervisor.inner.session.lock() = Some(ActiveSession { commands, task });
+        let error = tokio::time::timeout(
+            Duration::from_secs(2),
+            supervisor.request_with_timeout(
+                ControlMessage::SaveState { request_id: 1 },
+                Duration::from_millis(20),
+            ),
+        )
+        .await
+        .expect("admission wait escaped the command deadline")
+        .unwrap_err();
+        assert!(error.contains("command timed out"));
+    }
 
     #[tokio::test]
     async fn emergency_reset_discards_backlog_and_precedes_new_midi() {

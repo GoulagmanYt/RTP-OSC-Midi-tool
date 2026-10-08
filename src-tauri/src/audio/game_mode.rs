@@ -9,12 +9,10 @@ use crate::{
 };
 use cpal::traits::StreamTrait;
 use parking_lot::Mutex;
-use rack::PluginInstance as _;
 use std::{
     collections::BTreeMap,
     sync::{atomic::Ordering, Arc},
 };
-use vst::plugin::Plugin as _;
 
 pub(super) struct MaintenanceGuard(AudioEngine);
 impl Drop for MaintenanceGuard {
@@ -39,6 +37,14 @@ impl AudioEngine {
             ));
         }
         if let Some(runtime) = self.runtime.lock().as_ref() {
+            // Serialize admission with the runtime lock, but let the audio callback
+            // finish the last accepted command before pausing the stream.
+            if let Err(error) =
+                wait_for_parameters(&runtime.telemetry, std::time::Duration::from_secs(5))
+            {
+                self.maintenance.store(false, Ordering::Release);
+                return Err(error);
+            }
             if let Err(error) = runtime._stream.pause() {
                 self.maintenance.store(false, Ordering::Release);
                 return Err(AudioError::Message(error.to_string()));
@@ -89,6 +95,7 @@ impl AudioEngine {
             midi_transport_failed: self.midi_transport_failed.load(Ordering::Acquire),
             midi_io_threads: crate::realtime::thread_snapshot(),
             game_mode: self.game_mode.load(Ordering::Acquire),
+            editor_open: self.editor_open.load(Ordering::Acquire),
             maintenance: self.maintenance.load(Ordering::Acquire),
             deferred_save: self.deferred_save.load(Ordering::Acquire),
             deferred_editor: match self.deferred_editor.load(Ordering::Acquire) {
@@ -101,6 +108,7 @@ impl AudioEngine {
         };
         let published = self.health_telemetry.load();
         if let Some(t) = published.as_ref() {
+            metrics.editor_open = t.editor_open.load(Ordering::Acquire);
             metrics.pipe_wait_max_us = t.pipe_wait_max_us.load(Ordering::Relaxed);
             metrics.audio_wait_max_us = t.audio_wait_max_us.load(Ordering::Relaxed);
             metrics.midi_delivery_max_us = t.midi_delivery_max_us.load(Ordering::Relaxed);
@@ -174,17 +182,24 @@ impl AudioEngine {
                     .collect::<Vec<_>>(),
             )
         };
-        let path = super::state_codec::state_path_for_plugin(&entry)
-            .ok_or_else(|| AudioError::Message("VST state path unavailable".into()))?
-            .with_extension("live.json");
-        let payload = serde_json::to_vec(&LiveParameters {
-            plugin_id: entry.id,
-            parameters: values,
-        })
-        .map_err(|e| AudioError::Message(e.to_string()))?;
-        crate::atomic_file::write_atomically(&path, &payload)
-            .map_err(|e| AudioError::Message(e.to_string()))
+        persist_parameter_snapshot(&entry, values)
     }
+}
+
+pub(super) fn persist_parameter_snapshot(
+    entry: &VstPluginEntry,
+    values: Vec<VstParameter>,
+) -> Result<(), AudioError> {
+    let path = super::state_codec::state_path_for_plugin(entry)
+        .ok_or_else(|| AudioError::Message("VST state path unavailable".into()))?
+        .with_extension("live.json");
+    let payload = serde_json::to_vec(&LiveParameters {
+        plugin_id: entry.id.clone(),
+        parameters: values,
+    })
+    .map_err(|e| AudioError::Message(e.to_string()))?;
+    crate::atomic_file::write_atomically(&path, &payload)
+        .map_err(|e| AudioError::Message(e.to_string()))
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -214,36 +229,212 @@ pub(super) fn restore_live_parameters(
             "Live parameter identity mismatch".into(),
         ));
     }
-    let mut plugin = plugin.lock();
     let mut cache = cache.lock();
     let mut restored = BTreeMap::new();
     for value in saved.parameters {
         let Some(current) = cache.get_mut(value.index) else {
             continue;
         };
-        if current.id != value.id || current.name != value.name || !value.value.is_finite() {
+        if current.id != value.id
+            || current.name != value.name
+            || !value.value.is_finite()
+            || current.flags & (1 << 1) != 0
+        {
             continue;
         }
-        match &mut *plugin {
-            PluginBackend::Vst2 { instance, .. } => instance
-                .get_parameter_object()
-                .set_parameter(value.index as i32, value.value.clamp(0.0, 1.0)),
-            PluginBackend::Vst3 { instance, .. } => instance
-                .set_parameter(value.index, value.value.clamp(0.0, 1.0))
-                .map_err(|e| AudioError::Message(e.to_string()))?,
-            #[cfg(all(target_os = "windows", target_pointer_width = "64"))]
-            PluginBackend::Remote { instance } => instance
-                .restore_parameter_change(super::runtime_state::ParameterCommand {
-                    index: value.index,
-                    id: current.id,
-                    flags: current.flags,
-                    step_count: current.step_count,
-                    value: value.value.clamp(0.0, 1.0),
-                })
-                .map_err(AudioError::Message)?,
-        }
+        // Submit these values once through the backend's audio parameter path
+        // below. An immediate UI setter would enqueue a second untracked copy
+        // and could let native capture outrun component restoration.
         current.value = value.value.clamp(0.0, 1.0);
         restored.insert(value.index, current.value);
     }
+    let indices = restored.keys().copied().collect::<Vec<_>>();
+    match &mut *plugin.lock() {
+        PluginBackend::Vst3 { instance, .. } => instance
+            .prepare_live_parameter_restore(&indices)
+            .map_err(|e| AudioError::Message(e.to_string()))?,
+        #[cfg(all(target_os = "windows", target_pointer_width = "64"))]
+        PluginBackend::Remote { instance } => instance
+            .prepare_live_parameter_restore(&indices)
+            .map_err(AudioError::Message)?,
+        PluginBackend::Vst2 { .. } => {}
+    }
     Ok(restored)
+}
+
+pub(super) fn queue_restored_parameters(
+    sender: &crossbeam_channel::Sender<super::runtime_state::ParameterCommand>,
+    cache: &[VstParameter],
+    restored: &BTreeMap<usize, f32>,
+    telemetry: &super::runtime_state::AudioTelemetry,
+) -> Result<(), AudioError> {
+    let remaining = sender.capacity().unwrap_or(0).saturating_sub(sender.len());
+    if restored.len() > remaining {
+        return Err(AudioError::Message(
+            "Restored live parameters exceed the existing command queue; sidecar retained".into(),
+        ));
+    }
+    let first = telemetry
+        .parameter_accepted_sequence
+        .load(Ordering::Acquire);
+    first
+        .checked_add(restored.len() as u64)
+        .ok_or_else(|| AudioError::Message("Parameter generation exhausted".into()))?;
+    let mut commands = Vec::with_capacity(restored.len());
+    for (offset, (&index, &value)) in restored.iter().enumerate() {
+        let metadata = cache
+            .get(index)
+            .ok_or_else(|| AudioError::Message("Restored parameter metadata unavailable".into()))?;
+        commands.push(super::runtime_state::ParameterCommand {
+            sequence: first + offset as u64 + 1,
+            index,
+            id: metadata.id,
+            flags: metadata.flags,
+            step_count: metadata.step_count,
+            value,
+        });
+    }
+    for command in commands {
+        let sequence = command.sequence;
+        sender.try_send(command).map_err(|_| {
+            AudioError::Message("Restored parameter queue unavailable; sidecar retained".into())
+        })?;
+        telemetry
+            .parameter_accepted_sequence
+            .store(sequence, Ordering::Release);
+    }
+    Ok(())
+}
+
+pub(super) fn wait_for_parameters(
+    telemetry: &super::runtime_state::AudioTelemetry,
+    timeout: std::time::Duration,
+) -> Result<(), AudioError> {
+    let accepted = telemetry
+        .parameter_accepted_sequence
+        .load(Ordering::Acquire);
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if telemetry.parameter_failed_sequence.load(Ordering::Acquire) != 0 {
+            return Err(AudioError::Message(
+                "An accepted VST parameter could not be applied; native capture deferred".into(),
+            ));
+        }
+        if telemetry.parameter_applied_sequence.load(Ordering::Acquire) >= accepted {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(AudioError::Message(
+                "Timed out waiting for accepted VST parameters; native capture deferred".into(),
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::runtime_state::AudioTelemetry;
+    use super::*;
+
+    fn parameter(index: usize) -> VstParameter {
+        VstParameter {
+            index,
+            id: index as u32,
+            flags: 0,
+            step_count: 0,
+            unit_id: 0,
+            name: format!("parameter{index}"),
+            min: 0.0,
+            max: 1.0,
+            default: 0.0,
+            unit: String::new(),
+            value: 0.0,
+        }
+    }
+
+    #[test]
+    fn restored_sidecar_values_need_audio_acknowledgement_before_capture() {
+        let (sender, receiver) = crossbeam_channel::bounded(2);
+        let telemetry = AudioTelemetry::new();
+        let restored = BTreeMap::from([(0, 0.75), (1, 0.25)]);
+        queue_restored_parameters(
+            &sender,
+            &[parameter(0), parameter(1)],
+            &restored,
+            &telemetry,
+        )
+        .unwrap();
+        assert_eq!(
+            telemetry
+                .parameter_accepted_sequence
+                .load(Ordering::Acquire),
+            2
+        );
+        assert!(wait_for_parameters(&telemetry, std::time::Duration::ZERO).is_err());
+        let first = receiver.try_recv().unwrap();
+        let last = receiver.try_recv().unwrap();
+        assert_eq!((first.sequence, first.index, first.value), (1, 0, 0.75));
+        assert_eq!((last.sequence, last.index, last.value), (2, 1, 0.25));
+        telemetry
+            .parameter_applied_sequence
+            .store(last.sequence, Ordering::Release);
+        assert!(wait_for_parameters(&telemetry, std::time::Duration::ZERO).is_ok());
+    }
+
+    #[test]
+    fn oversized_sidecar_restore_fails_without_partial_admission() {
+        let (sender, receiver) = crossbeam_channel::bounded(1);
+        let telemetry = AudioTelemetry::new();
+        let restored = BTreeMap::from([(0, 0.75), (1, 0.25)]);
+        assert!(queue_restored_parameters(
+            &sender,
+            &[parameter(0), parameter(1)],
+            &restored,
+            &telemetry
+        )
+        .is_err());
+        assert!(receiver.is_empty());
+        assert_eq!(
+            telemetry
+                .parameter_accepted_sequence
+                .load(Ordering::Acquire),
+            0
+        );
+    }
+
+    #[test]
+    fn native_capture_barrier_rejects_unapplied_and_failed_commands() {
+        let telemetry = AudioTelemetry::new();
+        telemetry
+            .parameter_accepted_sequence
+            .store(10, Ordering::Release);
+        telemetry
+            .parameter_applied_sequence
+            .store(9, Ordering::Release);
+        assert!(wait_for_parameters(&telemetry, std::time::Duration::ZERO).is_err());
+        telemetry
+            .parameter_applied_sequence
+            .store(10, Ordering::Release);
+        assert!(wait_for_parameters(&telemetry, std::time::Duration::ZERO).is_ok());
+        telemetry
+            .parameter_failed_sequence
+            .store(8, Ordering::Release);
+        assert!(wait_for_parameters(&telemetry, std::time::Duration::ZERO).is_err());
+    }
+
+    #[test]
+    fn native_capture_barrier_waits_for_audio_application() {
+        let telemetry = Arc::new(AudioTelemetry::new());
+        telemetry
+            .parameter_accepted_sequence
+            .store(1, Ordering::Release);
+        let audio = telemetry.clone();
+        let callback = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            audio.parameter_applied_sequence.store(1, Ordering::Release);
+        });
+        wait_for_parameters(&telemetry, std::time::Duration::from_secs(1)).unwrap();
+        callback.join().unwrap();
+    }
 }

@@ -53,6 +53,8 @@ pub(crate) fn request_critical_midi_reset() {
 pub enum EnqueueOutcome {
     Enqueued,
     DroppedNonCritical,
+    /// Profile rejection or an invalidated preparation during route maintenance.
+    Filtered,
 }
 
 #[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
@@ -77,7 +79,7 @@ pub struct PipelineMetricsSnapshot {
     pub messages_dropped: u64,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 struct RoutingProfileRuntime {
     id: String,
     channel_filter: Option<u8>,
@@ -131,6 +133,37 @@ pub(super) struct ConfigSnapshot {
     pub(super) verbose: bool,
     routing_profiles: Vec<RoutingProfileRuntime>,
     routing_assignments: HashMap<String, usize>,
+}
+
+impl ConfigSnapshot {
+    pub(super) fn same_profiles(&self, other: &Self) -> bool {
+        self.routing_profiles == other.routing_profiles
+            && self.routing_assignments == other.routing_assignments
+    }
+}
+
+/// Upstream deadline queues need the destination's release priority too. A
+/// channel message fits inline; SysEx cannot release a note or sustain.
+pub(crate) fn classify_input_frame(tx: &Sender<MidiFrame>, frame: &MidiFrame) -> bool {
+    if frame.data.len() > 3 {
+        return false;
+    }
+    let Some(mut candidate) = frame.clone_realtime() else {
+        return false;
+    };
+    tx.prepare(&mut candidate) && is_critical_release_message(&candidate.data)
+}
+
+pub(super) fn prepare_input_routing(tx: &Sender<MidiFrame>, cfg: &Config) {
+    let snapshot = ConfigSnapshot::from(cfg);
+    tx.set_preparation(move |frame| {
+        snapshot
+            .routing_assignments
+            .get(&*frame.source)
+            .and_then(|index| snapshot.routing_profiles.get(*index))
+            .filter(|profile| profile.enabled)
+            .is_none_or(|profile| apply_routing_profile(profile, frame))
+    });
 }
 
 impl From<&Config> for ConfigSnapshot {
@@ -190,7 +223,6 @@ pub(super) fn handle_midi_frame(
         PIPELINE_IN_COUNT.fetch_add(1, Ordering::Relaxed);
     }
 
-    let mut frame = frame;
     if deliver_audio && frame.data.as_slice() == [0xFF] {
         if let Some(recovery) = route_recovery {
             recovery.request_reset();
@@ -206,16 +238,7 @@ pub(super) fn handle_midi_frame(
     let log_sample =
         config.verbose && log_frame && should_log_debug() && should_sample_midi_debug(now_ms());
 
-    if let Some(profile_idx) = config.routing_assignments.get(&*frame.source).copied() {
-        if let Some(profile) = config.routing_profiles.get(profile_idx) {
-            if profile.enabled && !apply_routing_profile(profile, &mut frame) {
-                if deliver_audio {
-                    PIPELINE_FILTERED_COUNT.fetch_add(1, Ordering::Relaxed);
-                }
-                return;
-            }
-        }
-    }
+    // Profiles were applied atomically at input admission, before priority classification.
 
     if deliver_audio && config.rtp_thru {
         if let Some(output) = config.rtp_output.as_ref() {
@@ -548,29 +571,39 @@ pub fn try_enqueue_midi_frame(
     if !crate::midi::normalize_message(&mut frame.data) {
         return Err(EnqueueError::InvalidMessage);
     }
-    match tx.try_send(frame) {
+    // Apply the published input profile once, before priority admission.
+    if !tx.prepare(&mut frame) {
+        PIPELINE_IN_COUNT.fetch_add(1, Ordering::Relaxed);
+        PIPELINE_FILTERED_COUNT.fetch_add(1, Ordering::Relaxed);
+        return Ok(EnqueueOutcome::Filtered);
+    }
+    match tx.try_send_retryable(frame) {
         Ok(()) => Ok(EnqueueOutcome::Enqueued),
         Err(TrySendError::Full(frame)) => {
             if is_critical_release_message(frame.data.as_slice()) {
                 std::thread::yield_now();
-                match tx.try_send(frame) {
+                match tx.try_send_retryable(frame) {
                     Ok(()) => Ok(EnqueueOutcome::Enqueued),
-                    Err(TrySendError::Full(_)) => {
+                    Err(TrySendError::Full(frame)) => {
+                        tx.record_abandoned(&frame);
                         PIPELINE_DROPPED_COUNT.fetch_add(1, Ordering::Relaxed);
                         request_critical_midi_reset();
                         Err(EnqueueError::CriticalReleaseDropped)
                     }
-                    Err(TrySendError::Disconnected(_)) => {
+                    Err(TrySendError::Disconnected(frame)) => {
+                        tx.record_abandoned(&frame);
                         request_critical_midi_reset();
                         Err(EnqueueError::Disconnected)
                     }
                 }
             } else {
+                tx.record_abandoned(&frame);
                 PIPELINE_DROPPED_COUNT.fetch_add(1, Ordering::Relaxed);
                 Ok(EnqueueOutcome::DroppedNonCritical)
             }
         }
         Err(TrySendError::Disconnected(frame)) => {
+            tx.record_abandoned(&frame);
             if is_critical_release_message(frame.data.as_slice()) {
                 request_critical_midi_reset();
             }
@@ -602,6 +635,176 @@ mod tests {
             data: smallvec::SmallVec::from_slice(data),
             source: Arc::from("test"),
         }
+    }
+
+    fn remapped_sustain_config() -> Config {
+        let mut config = Config::default();
+        config.midi.routing_profiles.push(RoutingProfile {
+            id: "sustain-map".into(),
+            name: "Sustain".into(),
+            enabled: true,
+            channel_filter: None,
+            note_min: None,
+            note_max: None,
+            cc_map: vec![
+                RoutingMapping { from: 7, to: 64 },
+                RoutingMapping { from: 64, to: 123 },
+            ],
+            program_map: vec![
+                RoutingMapping { from: 1, to: 2 },
+                RoutingMapping { from: 2, to: 3 },
+            ],
+        });
+        config.midi.routing_assignments.push(RoutingAssignment {
+            source: "test".into(),
+            profile_id: "sustain-map".into(),
+        });
+        config
+    }
+
+    #[test]
+    fn mapped_sustain_release_uses_reserved_input_admission_and_is_not_mapped_twice() {
+        let _guard = TEST_PIPELINE_LOCK.lock().unwrap();
+        let config = remapped_sustain_config();
+        let (tx, rx) = bounded(8);
+        prepare_input_routing(&tx, &config);
+        for _ in 0..7 {
+            assert_eq!(
+                try_enqueue_midi_frame(&tx, frame(&[0x90, 60, 100])).unwrap(),
+                EnqueueOutcome::Enqueued
+            );
+        }
+        assert!(classify_input_frame(&tx, &frame(&[0xB0, 7, 0])));
+        assert!(!classify_input_frame(&tx, &frame(&[0xB0, 7, 127])));
+        assert_eq!(
+            try_enqueue_midi_frame(&tx, frame(&[0xB0, 7, 0])).unwrap(),
+            EnqueueOutcome::Enqueued
+        );
+        for _ in 0..7 {
+            rx.recv().unwrap();
+        }
+        let release = rx.recv().unwrap();
+        assert_eq!(release.data.as_slice(), &[0xB0, 64, 0]);
+        assert!(is_critical_release_message(&release.data));
+        assert_eq!(
+            try_enqueue_midi_frame(&tx, frame(&[0xC0, 1])).unwrap(),
+            EnqueueOutcome::Enqueued
+        );
+        let program = rx.recv().unwrap();
+        assert_eq!(program.data.as_slice(), &[0xC0, 2]);
+    }
+
+    #[test]
+    fn sustain_remapped_to_noncritical_control_drops_without_reset() {
+        let _guard = TEST_PIPELINE_LOCK.lock().unwrap();
+        let (tx, _rx) = bounded(8);
+        let mut config = remapped_sustain_config();
+        config.midi.routing_profiles[0].cc_map = vec![RoutingMapping { from: 64, to: 7 }];
+        prepare_input_routing(&tx, &config);
+        for _ in 0..7 {
+            try_enqueue_midi_frame(&tx, frame(&[0x90, 60, 100])).unwrap();
+        }
+        let generation = midi_reset_generation();
+        assert!(!classify_input_frame(&tx, &frame(&[0xB0, 64, 0])));
+        assert_eq!(
+            try_enqueue_midi_frame(&tx, frame(&[0xB0, 64, 0])).unwrap(),
+            EnqueueOutcome::DroppedNonCritical
+        );
+        assert_eq!(midi_reset_generation(), generation);
+        assert_eq!(tx.recovery().snapshot().critical_drops, 0);
+        assert_eq!(tx.recovery().snapshot().noncritical_drops, 1);
+    }
+
+    #[test]
+    fn in_flight_old_profile_cannot_admit_after_new_profile_publication() {
+        let _guard = TEST_PIPELINE_LOCK.lock().unwrap();
+        let (tx, rx) = bounded(8);
+        let old_config = remapped_sustain_config();
+        let old_profile = RoutingProfileRuntime::from_profile(&old_config.midi.routing_profiles[0]);
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+        let (resume_tx, resume_rx) = std::sync::mpsc::sync_channel(1);
+        let resume_rx = std::sync::Mutex::new(resume_rx);
+        tx.set_preparation(move |frame| {
+            entered_tx.send(()).unwrap();
+            resume_rx.lock().unwrap().recv().unwrap();
+            apply_routing_profile(&old_profile, frame)
+        });
+        let old_tx = tx.clone();
+        let pending =
+            std::thread::spawn(move || try_enqueue_midi_frame(&old_tx, frame(&[0xB0, 7, 0])));
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        tx.invalidate_preparation();
+        request_critical_midi_reset();
+        // An arrival in the reset/publication gap must not run the old mapping
+        // while carrying the newly advanced common epoch.
+        assert_eq!(
+            try_enqueue_midi_frame(&tx, frame(&[0xB0, 7, 0])).unwrap(),
+            EnqueueOutcome::Filtered
+        );
+        assert!(rx.try_recv().is_err());
+        let mut next = old_config.clone();
+        next.midi.routing_profiles[0].cc_map[0].to = 123;
+        prepare_input_routing(&tx, &next);
+        assert_eq!(
+            try_enqueue_midi_frame(&tx, frame(&[0xB0, 7, 0])).unwrap(),
+            EnqueueOutcome::Enqueued
+        );
+        resume_tx.send(()).unwrap();
+        assert_eq!(pending.join().unwrap().unwrap(), EnqueueOutcome::Filtered);
+        let admitted = rx.recv().unwrap();
+        assert_eq!(admitted.data.as_slice(), &[0xB0, 123, 0]);
+        assert_eq!(admitted.generation, midi_reset_generation());
+        assert!(rx.try_recv().is_err());
+        assert_eq!(tx.recovery().snapshot().critical_drops, 0);
+    }
+
+    #[test]
+    fn profile_filters_run_before_admission_and_publish_with_mapping() {
+        let _guard = TEST_PIPELINE_LOCK.lock().unwrap();
+        let (tx, rx) = bounded(8);
+        let mut config = remapped_sustain_config();
+        config.midi.routing_profiles[0].channel_filter = Some(2);
+        config.midi.routing_profiles[0].note_min = Some(60);
+        config.midi.routing_profiles[0].note_max = Some(72);
+        prepare_input_routing(&tx, &config);
+        for data in [
+            [0xB0, 7, 0],
+            [0x90, 60, 100],
+            [0x91, 59, 100],
+            [0x81, 73, 0],
+        ] {
+            assert_eq!(
+                try_enqueue_midi_frame(&tx, frame(&data)).unwrap(),
+                EnqueueOutcome::Filtered
+            );
+        }
+        assert!(rx.try_recv().is_err());
+        assert_eq!(
+            try_enqueue_midi_frame(&tx, frame(&[0xB1, 7, 0])).unwrap(),
+            EnqueueOutcome::Enqueued
+        );
+        assert_eq!(rx.recv().unwrap().data.as_slice(), &[0xB1, 64, 0]);
+        assert_eq!(tx.recovery().snapshot().noncritical_drops, 0);
+        assert_eq!(tx.recovery().snapshot().critical_drops, 0);
+    }
+
+    #[test]
+    fn lost_mapped_release_requests_reset_and_counts_one_abandonment() {
+        let _guard = TEST_PIPELINE_LOCK.lock().unwrap();
+        let (tx, _rx) = bounded(1);
+        prepare_input_routing(&tx, &remapped_sustain_config());
+        try_enqueue_midi_frame(&tx, frame(&[0x80, 60, 0])).unwrap();
+        let generation = midi_reset_generation();
+        assert_eq!(
+            try_enqueue_midi_frame(&tx, frame(&[0xB0, 7, 0])),
+            Err(EnqueueError::CriticalReleaseDropped)
+        );
+        assert_eq!(midi_reset_generation(), generation + 1);
+        let diagnostics = tx.recovery().snapshot();
+        assert_eq!(diagnostics.critical_drops, 1);
+        assert_eq!(diagnostics.critical_rejections, 2);
     }
 
     #[test]

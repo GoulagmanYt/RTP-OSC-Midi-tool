@@ -354,13 +354,13 @@ export type RealtimeDiagnostics = {
   controlHealthy: boolean | null;
   callbackHealthy: boolean | null;
   worker: {
-    gameMode: boolean; maintenance: boolean; deferredSave: boolean; deferredEditor: boolean | null;
+    gameMode: boolean; maintenance: boolean; deferredSave: boolean; deferredEditor: boolean | null; editorOpen?: boolean;
     midiTransportFailed?: boolean; pipeWaitMaxUs?: number; audioWaitMaxUs?: number;
     callbackCount: number; callbackIntervalMaxUs: number;
     midiDeliveryMaxUs: number; midiDeliveryP99Us: number;
     midiIoThreads?: Array<{ name: string; mmcssProfile: string; highPriority: boolean; fallbackApplied: boolean }>;
   };
-  queues: Array<{ name: string; capacity: number; depth: number; maxDepth: number; maxWaitUs?: number; noncriticalDrops: number; criticalDrops: number; resets: number }>;
+  queues: Array<{ name: string; capacity: number; depth: number; maxDepth: number; maxWaitUs?: number; noncriticalDrops: number; criticalDrops: number; noncriticalRejections?: number; criticalRejections?: number; resets: number }>;
   threads: Array<{ name: string; mmcssProfile: string; highPriority: boolean; fallbackApplied: boolean }>;
   network: {
     rtpMidiReceiveBufferBytes?: number; rtpControlReceiveBufferBytes?: number;

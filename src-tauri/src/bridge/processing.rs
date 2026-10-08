@@ -281,6 +281,20 @@ fn processing_loop(
     let _ = osc_worker.join();
 }
 
+fn midi_output_route_changed(previous: &Config, next: &Config) -> bool {
+    previous.midi.output_device != next.midi.output_device
+        || previous.midi.thru_enabled != next.midi.thru_enabled
+        || !ConfigSnapshot::from(previous).same_profiles(&ConfigSnapshot::from(next))
+}
+
+fn osc_output_route_changed(previous: &Config, next: &Config) -> bool {
+    previous.osc.enabled != next.osc.enabled
+        || previous.osc.target_ip != next.osc.target_ip
+        || previous.osc.target_port != next.osc.target_port
+        || previous.midi.channel_filter != next.midi.channel_filter
+        || !ConfigSnapshot::from(previous).same_profiles(&ConfigSnapshot::from(next))
+}
+
 fn send_fanout(tx: &Sender<FanoutFrame>, frame: MidiFrame, generation: u64, carries_output: bool) {
     if let Err(error) = tx.try_send(FanoutFrame {
         frame,
@@ -326,6 +340,7 @@ fn spawn_midi_thru_worker(
         let _priority = crate::audio::windows_tuning::prioritize_midi_thread();
         let initial = shared_config.lock().clone();
         let mut snapshot = ConfigSnapshot::from(&initial);
+        let mut previous_config = initial.clone();
         let mut cached_rev = 0;
         let mut cached_panic_revision = panic_revision.load(Ordering::Acquire);
         let mut midi_out_name = initial.midi.output_device;
@@ -358,9 +373,13 @@ fn spawn_midi_thru_worker(
                 let config = shared_config.lock().clone();
                 snapshot = ConfigSnapshot::from(&config);
                 cached_rev = observed_rev;
-                if let Some(out) = midi_out.as_mut() {
-                    flush_midi_output(out, &mut active_notes, &logger);
+                if midi_output_route_changed(&previous_config, &config) {
+                    if let Some(out) = midi_out.as_mut() {
+                        flush_midi_output(out, &mut active_notes, &logger);
+                    }
+                    sustain.fill(None);
                 }
+                previous_config = config.clone();
                 if config.midi.output_device != midi_out_name {
                     let (connection, connected) = open_output(&config, &logger);
                     midi_out = connection;
@@ -456,6 +475,7 @@ fn spawn_osc_worker(
         let _priority = crate::audio::windows_tuning::prioritize_midi_thread();
         let initial = shared_config.lock().clone();
         let mut snapshot = ConfigSnapshot::from(&initial);
+        let mut previous_config = initial.clone();
         let mut cached_rev = 0;
         let mut osc_client = Some(osc);
         let mut current_target = (initial.osc.target_ip, initial.osc.target_port);
@@ -486,10 +506,13 @@ fn spawn_osc_worker(
             let observed_rev = config_rev.load(Ordering::Acquire);
             if observed_rev != cached_rev {
                 let config = shared_config.lock().clone();
-                if let Some(client) = osc_client.as_ref() {
-                    let _ = client.send_reset_all();
+                if osc_output_route_changed(&previous_config, &config) {
+                    if let Some(client) = osc_client.as_ref() {
+                        let _ = client.send_reset_all();
+                    }
+                    sustain.fill(None);
                 }
-                sustain.fill(None);
+                previous_config = config.clone();
                 snapshot = ConfigSnapshot::from(&config);
                 cached_rev = observed_rev;
             }
@@ -619,6 +642,53 @@ mod recovery_tests {
             ],
             source: Arc::from("regression"),
         }
+    }
+
+    #[test]
+    fn sound_and_logging_changes_preserve_auxiliary_notes() {
+        let previous = Config::default();
+        let mut next = previous.clone();
+        next.audio.gain_db = previous.audio.gain_db + 1.0;
+        next.audio.game_mode = !previous.audio.game_mode;
+        next.audio.vst_eq_by_plugin.insert(
+            "regression".into(),
+            crate::config::VstEqSettings {
+                enabled: true,
+                ..Default::default()
+            },
+        );
+        next.logging.verbose = !previous.logging.verbose;
+        next.osc.log_messages = !previous.osc.log_messages;
+        assert!(!midi_output_route_changed(&previous, &next));
+        assert!(!osc_output_route_changed(&previous, &next));
+
+        next.osc.target_port = previous.osc.target_port + 1;
+        assert!(osc_output_route_changed(&previous, &next));
+        assert!(!midi_output_route_changed(&previous, &next));
+        next = previous.clone();
+        next.midi.output_device = Some("Different destination".into());
+        assert!(midi_output_route_changed(&previous, &next));
+        assert!(!osc_output_route_changed(&previous, &next));
+        next = previous.clone();
+        next.midi.channel_filter = Some(2);
+        assert!(osc_output_route_changed(&previous, &next));
+        assert!(!midi_output_route_changed(&previous, &next));
+    }
+
+    #[test]
+    fn fanout_reserve_and_recovery_classify_prepared_sustain_release() {
+        let (tx, rx) = bounded(8);
+        for _ in 0..7 {
+            send_fanout(&tx, note(0x90, 0, 60), 0, true);
+        }
+        let mut release = note(0xB0, 0, 64);
+        release.data[2] = 0;
+        send_fanout(&tx, release, 0, true);
+        assert_eq!(rx.len(), 8);
+        let mut release = note(0xB0, 0, 64);
+        release.data[2] = 0;
+        send_fanout(&tx, release, 0, true);
+        assert_eq!(tx.recovery().generation(), 1);
     }
 
     #[test]

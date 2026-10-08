@@ -28,6 +28,8 @@ use super::{
 };
 
 struct WindowData {
+    editor_open: Arc<std::sync::atomic::AtomicBool>,
+    telemetry: Option<Arc<super::runtime_state::AudioTelemetry>>,
     state: std::sync::Weak<Mutex<Option<EditorWindow>>>,
     app_handle: Option<tauri::AppHandle>,
 }
@@ -85,6 +87,10 @@ unsafe extern "system" fn vst_window_proc(
             if !ptr.is_null() {
                 // SAFETY: ptr comes from our Box<WindowData> stored at WM_CREATE and lives until WM_DESTROY.
                 unsafe {
+                    (*ptr).editor_open.store(false, Ordering::Release);
+                    if let Some(telemetry) = &(*ptr).telemetry {
+                        telemetry.editor_open.store(false, Ordering::Release);
+                    }
                     if let Some(handle) = &(*ptr).app_handle {
                         use tauri::Emitter;
                         let _ = handle.emit("audio:vst-editor-hidden", ());
@@ -99,6 +105,12 @@ unsafe extern "system" fn vst_window_proc(
             let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WindowData };
             if !ptr.is_null() {
                 // SAFETY: ptr was allocated with Box::into_raw and is owned by this window.
+                unsafe {
+                    (*ptr).editor_open.store(false, Ordering::Release);
+                    if let Some(telemetry) = &(*ptr).telemetry {
+                        telemetry.editor_open.store(false, Ordering::Release);
+                    }
+                }
                 let _ = unsafe { Box::from_raw(ptr) };
                 unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) };
             }
@@ -278,6 +290,8 @@ impl AudioEngine {
         let weak_editor_window = Arc::downgrade(&editor_window_arc);
         let (tx, rx) = mpsc::channel();
         let app_handle_clone = app_handle.clone();
+        let editor_open = self.editor_open.clone();
+        let telemetry = self.health_telemetry.load_full();
 
         app_handle
             .run_on_main_thread(move || {
@@ -309,6 +323,8 @@ impl AudioEngine {
                             };
 
                             let window_data = WindowData {
+                                editor_open: editor_open.clone(),
+                                telemetry: telemetry.clone(),
                                 state: weak_editor_window,
                                 app_handle: Some(app_handle_clone),
                             };
@@ -384,6 +400,8 @@ impl AudioEngine {
                             let client_height = height.round() as i32;
 
                             let window_data = WindowData {
+                                editor_open: editor_open.clone(),
+                                telemetry: telemetry.clone(),
                                 state: weak_editor_window,
                                 app_handle: Some(app_handle_clone),
                             };
@@ -433,6 +451,10 @@ impl AudioEngine {
                     }
                 })();
 
+                if result.is_ok() {
+                    editor_open.store(true, Ordering::Release);
+                    if let Some(telemetry) = &telemetry { telemetry.editor_open.store(true, Ordering::Release); }
+                }
                 let _ = tx.send(result);
             })
             .map_err(|_| AudioError::Message("Failed to schedule VST UI on main thread".into()))?;
@@ -465,10 +487,13 @@ impl AudioEngine {
         };
 
         let (tx, rx) = mpsc::sync_channel(1);
+        let editor_open = self.editor_open.clone();
+        let telemetry = self.health_telemetry.load_full();
         app_handle
             .run_on_main_thread(move || {
                 let _maintenance = maintenance;
-                if let Some(mut editor) = editor_window_arc.lock().take() {
+                let editor = editor_window_arc.lock().take();
+                if let Some(mut editor) = editor {
                     let hwnd = match &mut editor {
                         EditorWindow::Vst2 { editor, hwnd } => {
                             editor.close();
@@ -496,6 +521,12 @@ impl AudioEngine {
                     let _ = plugin_arc;
                     Ok(())
                 };
+                if result.is_ok() {
+                    editor_open.store(false, Ordering::Release);
+                    if let Some(telemetry) = &telemetry {
+                        telemetry.editor_open.store(false, Ordering::Release);
+                    }
+                }
                 let _ = tx.send(result);
             })
             .map_err(|_| {
@@ -530,16 +561,36 @@ impl AudioEngine {
         let Some(runtime) = guard.as_ref() else {
             return Err(AudioError::Message("Audio not started".into()));
         };
+        if !value.is_finite() {
+            return Err(AudioError::Message(
+                "VST parameter value must be finite".into(),
+            ));
+        }
+        if self.maintenance.load(Ordering::Acquire) {
+            return Err(AudioError::Message(
+                "Audio maintenance is active; retry the parameter change after maintenance".into(),
+            ));
+        }
         let normalized = value.clamp(0.0, 1.0);
+        let sequence = runtime
+            .telemetry
+            .parameter_accepted_sequence
+            .load(Ordering::Acquire)
+            .checked_add(1)
+            .ok_or_else(|| AudioError::Message("Parameter generation exhausted".into()))?;
         let metadata = runtime
             .parameter_cache
             .lock()
             .get(index)
             .cloned()
             .ok_or_else(|| AudioError::Message("VST parameter index out of range".into()))?;
+        if metadata.flags & (1 << 1) != 0 {
+            return Err(AudioError::Message("VST parameter is read-only".into()));
+        }
         runtime
             .parameter_tx
             .try_send(super::runtime_state::ParameterCommand {
+                sequence,
                 index,
                 id: metadata.id,
                 flags: metadata.flags,
@@ -547,6 +598,10 @@ impl AudioEngine {
                 value: normalized,
             })
             .map_err(|_| AudioError::Message("VST parameter queue is full".into()))?;
+        runtime
+            .telemetry
+            .parameter_accepted_sequence
+            .store(sequence, Ordering::Release);
         self.live_parameters.lock().insert(index, normalized);
         if let Some(parameter) = runtime.parameter_cache.lock().get_mut(index) {
             parameter.value = normalized;

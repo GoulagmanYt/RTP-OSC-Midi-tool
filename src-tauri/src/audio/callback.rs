@@ -257,7 +257,11 @@ fn audio_callback<T: Sample + FromSample<f32>>(
                 record_dsp_timing(&state.telemetry, dsp_started);
             }));
 
+            if result.is_ok() {
+                acknowledge_parameters(state);
+            }
             if result.is_err() {
+                fail_parameters(state);
                 state.telemetry.xruns.fetch_add(1, Ordering::Relaxed);
                 state.record_error();
                 replay_output_or_silence(data, device_channels, silence, state);
@@ -277,6 +281,10 @@ fn audio_callback<T: Sample + FromSample<f32>>(
                     .is_err()
                 {
                     state.telemetry.xruns.fetch_add(1, Ordering::Relaxed);
+                    state
+                        .telemetry
+                        .parameter_failed_sequence
+                        .fetch_max(command.sequence, Ordering::Release);
                 }
             }
             if state.last_frames != frames {
@@ -304,8 +312,9 @@ fn audio_callback<T: Sample + FromSample<f32>>(
             ));
 
             match result {
-                Ok(Ok(())) => {}
+                Ok(Ok(())) => acknowledge_parameters(state),
                 Ok(Err(_)) | Err(_) => {
+                    fail_parameters(state);
                     state.telemetry.xruns.fetch_add(1, Ordering::Relaxed);
                     state.record_error();
                     replay_output_or_silence(data, device_channels, silence, state);
@@ -316,7 +325,7 @@ fn audio_callback<T: Sample + FromSample<f32>>(
         }
         #[cfg(all(target_os = "windows", target_pointer_width = "64"))]
         PluginBackend::Remote { instance } => {
-            state.drain_parameter_commands();
+            state.drain_parameter_commands_limit(instance.parameter_capacity());
             if state.last_frames != frames {
                 state
                     .telemetry
@@ -326,6 +335,10 @@ fn audio_callback<T: Sample + FromSample<f32>>(
             }
             let dsp_started = Instant::now();
             let healthy = instance.realtime_health();
+            state
+                .telemetry
+                .editor_open
+                .store(instance.editor_open(), Ordering::Release);
             state
                 .telemetry
                 .x86_underruns
@@ -477,5 +490,28 @@ fn finish_callback_timing(state: &AudioCallbackState, frames: usize, started: In
                 .consecutive_deadline_misses
                 .store(0, Ordering::Relaxed);
         }
+    }
+}
+
+pub(super) fn acknowledge_parameters(state: &AudioCallbackState) {
+    if let Some(sequence) = state.parameter_commands.iter().map(|c| c.sequence).max() {
+        state
+            .telemetry
+            .parameter_applied_sequence
+            .fetch_max(sequence, Ordering::Release);
+    }
+}
+
+pub(super) fn fail_parameters(state: &AudioCallbackState) {
+    if let Some(sequence) = state
+        .parameter_commands
+        .iter()
+        .map(|command| command.sequence)
+        .max()
+    {
+        state
+            .telemetry
+            .parameter_failed_sequence
+            .fetch_max(sequence, Ordering::Release);
     }
 }

@@ -51,7 +51,7 @@ type Props = {
   onRetestVst: (pluginId: string) => Promise<void>;
   onOpenVstFolder: (pluginId: string) => Promise<void>;
   onToggleAudio: (checked: boolean) => Promise<void>;
-  onUpdateAudioConfig: (patch: Partial<AppConfig["audio"]>) => Promise<void>;
+  onUpdateAudioConfig: (patch: Partial<AppConfig["audio"]>) => Promise<boolean | void>;
 };
 
 export function AudioConfigCard({
@@ -471,7 +471,7 @@ export function AudioConfigCard({
                 ) : null}
                 {filteredVstPlugins.map((plugin) => (
                   <SelectItem key={plugin.id} value={plugin.id} disabled={!plugin.supported}>
-                    {`${plugin.name} Â· ${plugin.format} Â· ${plugin.architecture} Â· ${plugin.status}`}
+                    {[plugin.name, plugin.format, plugin.architecture, plugin.status].join(" \u00b7 ")}
                   </SelectItem>
                 ))}
               </SelectContent>

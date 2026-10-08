@@ -484,7 +484,10 @@ fn run_schedule(
                 source: Arc::clone(&source),
             };
             match try_enqueue_midi_frame(&tx, frame) {
-                Ok(crate::bridge::pipeline::EnqueueOutcome::Enqueued) => {
+                Ok(
+                    crate::bridge::pipeline::EnqueueOutcome::Enqueued
+                    | crate::bridge::pipeline::EnqueueOutcome::Filtered,
+                ) => {
                     processed += 1;
                     MESSAGES_OUT.fetch_add(1, Ordering::Relaxed);
                 }

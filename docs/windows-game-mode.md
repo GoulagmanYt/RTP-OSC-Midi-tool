@@ -30,10 +30,10 @@ Voicemeeter AUX Virtual ASIO, avec les workers isolés x64/x86.
    dans un fichier `.live.json` avec le debounce existant. La sortie du mode jeu
    annonce une maintenance, suspend le stream, capture l'état sur le thread
    requis puis reprend. Une erreur conserve le dernier état natif valide et les
-   demandes différées. Le bridge x86 réamorce son pipeline après cette capture.
+   demandes différées. Le bridge x86 conserve les blocs traités avant capture.
 
 Le protocole de contrôle est **9** ; les trames MIDI font **28 octets**. Le
-protocole mémoire du bridge x86 est **6**. Rebuild et distribution des deux
+protocole mémoire du bridge x86 est **7**. Rebuild et distribution des deux
 workers avec l'application sont nécessaires ; les anciens workers sont refusés.
 
 Le dépôt ne propose pas de commande indépendante de chargement de preset VST.
@@ -55,12 +55,34 @@ npm run lint
 npm exec --yes --package=node@24 -- node ./node_modules/vitest/vitest.mjs run
 npm run build
 cargo build --manifest-path tools/diagnostics/Cargo.toml --bin audio_reliability
+cmake -S vendor/rack/rack-sys/tests -B .cargo-target/mailbox-tests -A x64
+cmake --build .cargo-target/mailbox-tests --config Release
+ctest --test-dir .cargo-target/mailbox-tests -C Release --output-on-failure
 ```
 
 Les fixtures couvrent commande lente avec heartbeat actif, silence de deux
 secondes sans redémarrage, silence prolongé, callback arrêté, crash, budget de
 récupération et refus du protocole 8. Les tests de files couvrent réserve critique,
 FIFO, resets, lectures partielles, échéances futures et datagrammes invalides.
+Les régressions de l'audit vérifient aussi les écritures de contrôle bloquées,
+la restauration des réglages live après un crash, la priorité des libérations
+remappées, les resets limités aux changements de routage et les rollbacks frontend.
+
+L'écriture du contrôle host dispose de sa propre tâche et d'un délai d'une seconde.
+Une écriture interrompue termine la session afin de ne pas réutiliser une trame
+partielle. Les délais de commande incluent l'attente d'admission. Les tentatives
+rejetées par une file sont comptées séparément des événements définitivement perdus.
+
+Avant une capture native, la maintenance attend l'application des paramètres
+acceptés, au plus cinq secondes. En cas d'échec, leur sauvegarde complémentaire
+est conservée. Les paramètres restaurés au démarrage passent par la même barrière ;
+les anciennes valeurs du contrôleur ciblées sont retirées avant le rendu pour
+éviter qu'elles écrasent cette restauration. La persistance VST3 conserve une
+dernière valeur atomique par
+paramètre, sans dépendre d'une consommation périodique par le contrôleur. Le DSP
+x86 traite les blocs acceptés avant capture et conserve leurs résultats même si
+la sauvegarde échoue ; la séquence du pipeline continue après maintenance.
+
 Le test matériel x86 est séparé et ignoré dans la suite standard :
 
 ```powershell
@@ -98,6 +120,17 @@ attendait un bloc invalidé par la sauvegarde. Le réamorçage corrige ce défau
 l'essai répété passe sans xrun. Le test direct `vst_smoke` d'Upright Piano VST3
 a rendu du signal mais a quitté avec le code 1 lors de sa destruction ; la
 validation retenue utilise le worker de production isolé.
+
+Après les corrections de l'audit, quatre nouveaux essais de 10 secondes à
+200 événements/s passent avec Upright Piano VST2/VST3, Church Organ x86 et
+Splice VST3 : aucune perte, aucun reset avant le panic explicite, aucun
+redémarrage, xrun ou contention du verrou audio imposée par le host.
+Les transitions du mode jeu passent pour les quatre plug-ins. Le p99 de
+livraison va de 11,25 à 12,75 ms ; le maximum observé est 19,044 ms.
+Le [résumé des mesures](measurements/audit-fixes-200-summary.json) conserve les
+compteurs, les étapes de maintenance et les SHA-256 des binaires debug testés.
+Le test matériel x86 vérifie désormais la continuité des séquences et l'absence
+d'underrun après capture, sans effacer ni réamorcer les blocs acceptés.
 
 ## Comparatif matériel restant
 
