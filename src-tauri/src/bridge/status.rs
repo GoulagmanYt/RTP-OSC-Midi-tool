@@ -56,6 +56,7 @@ pub(super) fn build_initial_status(
         vst_worker_state: "disabled".to_string(),
         vst_worker_restarts: 0,
         vst_worker_last_exit: None,
+        realtime: audio.realtime_diagnostics(),
         audio_mmcss_enabled: audio.mmcss_enabled(),
         audio_power_throttling_disabled: audio.power_throttling_disabled(),
         audio_limiter_enabled: audio.limiter_enabled(),

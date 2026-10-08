@@ -114,6 +114,7 @@ pub(super) fn process_pending_vst2_midi(
         let Some(msg) = state.pending_midi.pop_front() else {
             break;
         };
+        state.telemetry.record_midi_delivery(msg);
         let delta_frames = timing.offset(msg.timestamp_us) as i32;
         state.vst2_midi_events.push(api::MidiEvent {
             event_type: api::EventType::Midi,
@@ -162,6 +163,7 @@ pub(super) fn process_pending_vst3_midi(
             break;
         };
         consumed += 1;
+        state.telemetry.record_midi_delivery(msg);
         if let Some(mut event) = midi_to_rack_event(msg.data) {
             event.sample_offset = timing.offset(msg.timestamp_us);
             state.midi_events.push(event);

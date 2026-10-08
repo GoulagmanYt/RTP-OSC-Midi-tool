@@ -92,7 +92,11 @@ mod fixture {
         write_control_frame(
             &mut control,
             &ControlMessage::Hello {
-                protocol_version: CONTROL_PROTOCOL_VERSION,
+                protocol_version: if mode == "legacy" {
+                    8
+                } else {
+                    CONTROL_PROTOCOL_VERSION
+                },
                 host_abi_version: HOST_ABI_VERSION,
                 session_id: args.session_id,
                 token: args.token,
@@ -124,6 +128,9 @@ mod fixture {
         let mut heartbeat = tokio::time::interval(Duration::from_millis(100));
         let mut sequence = 0u64;
         let mut hang_deadline = None;
+        let mut silence_until = None;
+        let mut slow_ack = None;
+        let mut loaded = false;
         loop {
             if hang_deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
                 std::future::pending::<()>().await;
@@ -131,10 +138,17 @@ mod fixture {
             tokio::select! {
                 _ = heartbeat.tick() => {
                     sequence = sequence.wrapping_add(1);
+                    if let Some((deadline, request_id)) = slow_ack {
+                        if tokio::time::Instant::now() >= deadline {
+                            write_control_frame(&mut control_writer, &ControlMessage::Ack { request_id }).await.map_err(|e| e.to_string())?;
+                            slow_ack = None;
+                        }
+                    }
+                    if silence_until.is_some_and(|deadline| tokio::time::Instant::now() < deadline) { continue; }
                     write_control_frame(&mut control_writer, &ControlMessage::Heartbeat {
                         sequence,
                         monotonic_qpc: monotonic_qpc(),
-                        metrics: WorkerMetrics::default(),
+                        metrics: WorkerMetrics { callback_count: if loaded && mode != "callback-blocked" { sequence } else { 0 }, ..WorkerMetrics::default() },
                     }).await.map_err(|error| error.to_string())?;
                 }
                 message = control_rx.recv() => {
@@ -142,6 +156,8 @@ mod fixture {
                         .ok_or_else(|| "control reader exited".to_string())??;
                     let response = match message {
                         ControlMessage::Load { request_id, settings, class_uid, .. } => {
+                            loaded = true;
+                            if mode == "silence-two-seconds" { silence_until = Some(tokio::time::Instant::now() + Duration::from_secs(2)); }
                             match mode.as_str() {
                                 "crash" => std::process::abort(),
                                 "hang" => {
@@ -158,7 +174,12 @@ mod fixture {
                         }
                         ControlMessage::ListParameters { request_id } => ControlMessage::Parameters { request_id, parameters: Vec::new() },
                         ControlMessage::Ping { sequence } => ControlMessage::Pong { sequence },
-                        ControlMessage::OpenEditor { request_id }
+                        ControlMessage::SaveState { request_id } if mode == "slow-command" => {
+                            slow_ack = Some((tokio::time::Instant::now() + Duration::from_secs(3), request_id));
+                            continue;
+                        }
+                        ControlMessage::SetGameMode { request_id, .. }
+                        | ControlMessage::OpenEditor { request_id }
                         | ControlMessage::CloseEditor { request_id }
                         | ControlMessage::SetParameter { request_id, .. }
                         | ControlMessage::SetGain { request_id, .. }

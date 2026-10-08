@@ -1,6 +1,6 @@
 #![allow(deprecated)]
 
-use std::sync::{mpsc, Arc};
+use std::sync::{atomic::Ordering, mpsc, Arc};
 
 use parking_lot::Mutex;
 use vst::plugin::Plugin;
@@ -262,6 +262,11 @@ impl AudioEngine {
             return crate::tauri::utils::safe_block_on(self.worker.open_editor())
                 .map_err(AudioError::Message);
         }
+        if self.game_mode.load(Ordering::Acquire) {
+            self.deferred_editor.store(1, Ordering::Release);
+            return Ok(());
+        }
+        let maintenance = self.begin_maintenance()?;
         let (plugin_arc, editor_window_arc) = {
             let mut guard = self.runtime.lock();
             let Some(runtime) = guard.as_mut() else {
@@ -276,6 +281,7 @@ impl AudioEngine {
 
         app_handle
             .run_on_main_thread(move || {
+                let _maintenance = maintenance;
                 let result: Result<(), AudioError> = (|| {
                     if let Some(existing) = editor_window_arc.lock().as_ref() {
                         let hwnd = match existing {
@@ -445,6 +451,11 @@ impl AudioEngine {
             return crate::tauri::utils::safe_block_on(self.worker.close_editor())
                 .map_err(AudioError::Message);
         }
+        if self.game_mode.load(Ordering::Acquire) {
+            self.deferred_editor.store(2, Ordering::Release);
+            return Ok(());
+        }
+        let maintenance = self.begin_maintenance()?;
         let (editor_window_arc, plugin_arc) = {
             let mut guard = self.runtime.lock();
             let Some(runtime) = guard.as_mut() else {
@@ -453,31 +464,45 @@ impl AudioEngine {
             (runtime.editor_window.clone(), runtime.plugin.clone())
         };
 
+        let (tx, rx) = mpsc::sync_channel(1);
         app_handle
             .run_on_main_thread(move || {
-                if let Some(editor_win) = editor_window_arc.lock().as_mut() {
-                    let hwnd = match editor_win {
-                        EditorWindow::Vst2 { hwnd, .. } | EditorWindow::Vst3 { hwnd, .. } => hwnd,
+                let _maintenance = maintenance;
+                if let Some(mut editor) = editor_window_arc.lock().take() {
+                    let hwnd = match &mut editor {
+                        EditorWindow::Vst2 { editor, hwnd } => {
+                            editor.close();
+                            *hwnd
+                        }
+                        EditorWindow::Vst3 { gui, hwnd } => {
+                            let _ = gui.detach();
+                            *hwnd
+                        }
                     };
                     unsafe {
-                        let _ = ShowWindow(*hwnd, SW_HIDE);
+                        let _ = KillTimer(Some(hwnd), 1);
+                        let _ = DestroyWindow(hwnd);
                     }
                 }
                 #[cfg(all(target_os = "windows", target_pointer_width = "64"))]
-                {
-                    let mut plugin_guard = plugin_arc.lock();
-                    if let PluginBackend::Remote { instance } = &mut *plugin_guard {
-                        let _ = instance.close_editor();
+                let result = match &mut *plugin_arc.lock() {
+                    PluginBackend::Remote { instance } => {
+                        instance.close_editor().map_err(AudioError::Message)
                     }
-                }
+                    _ => Ok(()),
+                };
                 #[cfg(not(all(target_os = "windows", target_pointer_width = "64")))]
-                let _ = plugin_arc;
+                let result = {
+                    let _ = plugin_arc;
+                    Ok(())
+                };
+                let _ = tx.send(result);
             })
             .map_err(|_| {
                 AudioError::Message("Failed to schedule VST close on main thread".into())
             })?;
-
-        Ok(())
+        rx.recv_timeout(std::time::Duration::from_secs(10))
+            .map_err(|_| AudioError::Message("Timed out closing VST editor".into()))?
     }
 
     pub fn list_vst_parameters(&self) -> Result<Vec<VstParameter>, AudioError> {
@@ -522,6 +547,7 @@ impl AudioEngine {
                 value: normalized,
             })
             .map_err(|_| AudioError::Message("VST parameter queue is full".into()))?;
+        self.live_parameters.lock().insert(index, normalized);
         if let Some(parameter) = runtime.parameter_cache.lock().get_mut(index) {
             parameter.value = normalized;
         }

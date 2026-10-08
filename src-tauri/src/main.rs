@@ -17,6 +17,7 @@ fn main() {
         }
         std::process::exit(exit_code);
     }
+    osc_midi_bridge::audio::windows_tuning::reapply_process_priority_on_focus_loss();
     std::panic::set_hook(Box::new(|info| {
         let msg = match info.payload().downcast_ref::<&str>() {
             Some(s) => *s,

@@ -12,7 +12,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+use rack::PluginInstance as _;
 use smallvec::SmallVec;
+use vst::plugin::Plugin as _;
 use windows::{
     core::{w, PCWSTR},
     Win32::{
@@ -58,7 +60,7 @@ use super::{
     callback_midi::midi_to_rack_event,
     plugin_host::{load_plugin_backend, set_active_vst2_editor_window, VST2_RESIZE_MESSAGE},
     runtime_state::{MidiPacket, PluginBackend, Vst2EventBatch, MIDI_EVENT_BATCH_CAPACITY},
-    state_codec::{load_vst_state, save_vst_state_blocking},
+    state_codec::{load_vst_state, save_vst_state_blocking, save_vst_state_checked},
 };
 
 #[cfg(target_pointer_width = "64")]
@@ -82,7 +84,7 @@ fn merge_parameter_commands(
 }
 
 const BRIDGE_MAGIC: u32 = 0x4F53_4342;
-const BRIDGE_VERSION: u32 = 5;
+const BRIDGE_VERSION: u32 = 6;
 const BRIDGE_SLOTS: usize = 3;
 const BRIDGE_MAX_FRAMES: usize = 8192;
 const BRIDGE_MAX_CHANNELS: usize = 64;
@@ -98,6 +100,7 @@ const COMMAND_NONE: u32 = 0;
 const COMMAND_OPEN_EDITOR: u32 = 1;
 const COMMAND_CLOSE_EDITOR: u32 = 2;
 const COMMAND_SAVE_STATE: u32 = 3;
+const COMMAND_RESTORE_PARAMETER: u32 = 4;
 const COMMAND_PENDING: u32 = 1;
 const COMMAND_OK: u32 = 2;
 const COMMAND_FAILED: u32 = 3;
@@ -115,11 +118,14 @@ thread_local! {
 // healthy legacy plug-ins to be restarted after ordinary scheduling spikes.
 // Keep the callback non-blocking, but require a sustained two-second DSP stall
 // before declaring the isolated process unhealthy.
-const BRIDGE_STALL_BUDGET_MS: u64 = 2_000;
+const BRIDGE_STALL_BUDGET_MS: u64 = 5_000;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct BridgeMidiEvent {
+    ingress_qpc: u64,
+    worker_qpc: u64,
+    consumed_qpc: u64,
     data: [u8; 3],
     len: u8,
     sample_offset: u32,
@@ -133,6 +139,9 @@ fn write_panic_events(events: &mut [BridgeMidiEvent; BRIDGE_MAX_MIDI]) -> usize 
                 return event_count;
             };
             *event = BridgeMidiEvent {
+                ingress_qpc: 0,
+                worker_qpc: 0,
+                consumed_qpc: 0,
                 data: [0xB0 | channel, controller, 0],
                 len: 3,
                 sample_offset: 0,
@@ -522,6 +531,7 @@ impl RemotePlugin {
         parameters: &[super::runtime_state::ParameterCommand],
         outputs: &mut [Vec<f32>],
         frames: usize,
+        telemetry: Option<&super::runtime_state::AudioTelemetry>,
     ) -> bool {
         if frames == 0 || frames > BRIDGE_MAX_FRAMES {
             return false;
@@ -555,6 +565,21 @@ impl RemotePlugin {
                 output[..frames].copy_from_slice(source);
                 self.last_output_samples[channel] = source[frames.saturating_sub(1)];
             }
+            if let Some(telemetry) = telemetry {
+                for event in slot
+                    .events
+                    .iter()
+                    .take(slot.event_count.load(Ordering::Relaxed) as usize)
+                {
+                    if event.ingress_qpc != 0 && event.consumed_qpc != 0 {
+                        telemetry.record_midi_delivery_at(
+                            event.ingress_qpc,
+                            event.worker_qpc,
+                            event.consumed_qpc,
+                        );
+                    }
+                }
+            }
             slot.state.store(SLOT_EMPTY, Ordering::Release);
             rendered = true;
             break;
@@ -580,7 +605,7 @@ impl RemotePlugin {
             if bridge_stall_budget_exceeded(self.consecutive_missed_frames, self.sample_rate) {
                 set_mapping_error(
                     shared,
-                    "x86 DSP bridge produced no completed block for 2000 ms",
+                    "x86 DSP bridge produced no completed block for 5000 ms",
                 );
             }
         } else if rendered {
@@ -598,15 +623,18 @@ impl RemotePlugin {
         {
             let mut event_count = 0usize;
             if self.panic_pending {
-                midi.clear();
                 event_count = write_panic_events(&mut slot.events);
                 self.panic_pending = false;
-            } else {
+            }
+            {
                 while event_count < BRIDGE_MAX_MIDI {
                     let Some(packet) = midi.pop_front() else {
                         break;
                     };
                     slot.events[event_count] = BridgeMidiEvent {
+                        ingress_qpc: packet.ingress_qpc,
+                        worker_qpc: packet.worker_qpc,
+                        consumed_qpc: 0,
                         data: packet.data,
                         len: packet.len,
                         sample_offset: bridge_sample_offset(packet, frames, self.sample_rate),
@@ -649,6 +677,34 @@ impl RemotePlugin {
         self.panic_pending = true;
     }
 
+    pub(super) fn restore_parameter_change(
+        &mut self,
+        command: super::runtime_state::ParameterCommand,
+    ) -> Result<(), String> {
+        // Startup restoration runs before the stream starts, on the DSP owner.
+        // Use the control slot rather than a 512-entry callback queue: restoring
+        // a large preset must not silently evict earlier parameter values.
+        self.mapping.get_mut().slots[0].parameter_changes[0] = BridgeParameterChange {
+            index: command.index.min(u32::MAX as usize) as u32,
+            id: command.id,
+            flags: command.flags,
+            step_count: command.step_count,
+            value: command.value,
+        };
+        self.control_command(COMMAND_RESTORE_PARAMETER, "parameter restoration")
+    }
+
+    pub(super) fn realtime_health(&self) -> (u32, u32, bool) {
+        let shared = self.mapping.get();
+        (
+            shared.underruns.load(Ordering::Relaxed),
+            shared.overruns.load(Ordering::Relaxed),
+            shared.server_status.load(Ordering::Acquire) == SERVER_READY
+                && shared.shutdown.load(Ordering::Acquire) == 0,
+        )
+    }
+
+    #[cfg(test)]
     pub(super) fn telemetry(&mut self) -> (u32, u32, bool) {
         let shared = self.mapping.get();
         let process_alive = self
@@ -666,26 +722,6 @@ impl RemotePlugin {
         )
     }
 
-    pub(super) fn fault_reason(&mut self) -> Option<String> {
-        let shared = self.mapping.get();
-        if shared.server_status.load(Ordering::Acquire) == SERVER_FAILED {
-            return Some(mapping_error(shared));
-        }
-        if shared.shutdown.load(Ordering::Acquire) != 0 {
-            let reason = mapping_error(shared);
-            return Some(if shared.error_len.load(Ordering::Acquire) == 0 {
-                "x86 DSP worker requested shutdown after a processing failure".to_string()
-            } else {
-                reason
-            });
-        }
-        match self.child.try_wait() {
-            Ok(Some(status)) => Some(format!("x86 DSP worker exited: {status}")),
-            Err(error) => Some(format!("cannot query x86 DSP worker: {error}")),
-            Ok(None) => None,
-        }
-    }
-
     pub(super) fn open_editor(&mut self) -> Result<(), String> {
         self.control_command(COMMAND_OPEN_EDITOR, "editor")
     }
@@ -695,7 +731,14 @@ impl RemotePlugin {
     }
 
     pub(super) fn save_state(&mut self) -> Result<(), String> {
-        self.control_command(COMMAND_SAVE_STATE, "state save")
+        self.control_command(COMMAND_SAVE_STATE, "state save")?;
+        // Native capture invalidates the DSP slots during announced maintenance.
+        // Restart the pipeline as a priming block instead of expecting a block
+        // that the DSP deliberately discarded while the stream was paused.
+        self.next_sequence = 1;
+        self.consecutive_missed_frames = 0;
+        self.last_output_samples.fill(0.0);
+        Ok(())
     }
 
     fn control_command(&mut self, command: u32, operation: &str) -> Result<(), String> {
@@ -1152,6 +1195,7 @@ fn run_dsp_server(args: DspArgs, logger: FrontendLogger) -> Result<(), String> {
     let mut rack_events = Vec::with_capacity(BRIDGE_MAX_MIDI);
     let mut editor = None;
 
+    let _dsp_priority = super::windows_tuning::prioritize_midi_thread();
     while mapping.get().shutdown.load(Ordering::Acquire) == 0 {
         let _ = unsafe { WaitForSingleObject(request_event, 50) };
         if mapping.get().shutdown.load(Ordering::Acquire) != 0 {
@@ -1195,11 +1239,27 @@ fn run_dsp_server(args: DspArgs, logger: FrontendLogger) -> Result<(), String> {
                     Ok(())
                 }
                 COMMAND_SAVE_STATE => {
-                    save_vst_state_blocking(&plugin, &selected_probe);
+                    let saved = save_vst_state_checked(&plugin, &selected_probe);
                     for slot in &mapping.get().slots {
                         slot.state.store(SLOT_EMPTY, Ordering::Release);
                     }
-                    Ok(())
+                    saved
+                }
+                COMMAND_RESTORE_PARAMETER => {
+                    let parameter = mapping.get().slots[0].parameter_changes[0];
+                    match &mut *plugin.lock() {
+                        PluginBackend::Vst2 { instance, .. } => {
+                            instance
+                                .get_parameter_object()
+                                .set_parameter(parameter.index as i32, parameter.value);
+                            Ok(())
+                        }
+                        PluginBackend::Vst3 { instance, .. } => instance
+                            .set_parameter(parameter.index as usize, parameter.value)
+                            .map_err(|error| error.to_string()),
+                        #[cfg(target_pointer_width = "64")]
+                        PluginBackend::Remote { .. } => Err("nested bridge unsupported".into()),
+                    }
                 }
                 _ => Err("unknown x86 control command".to_string()),
             };
@@ -1383,6 +1443,10 @@ fn process_local_plugin(
     vst2_batch: &mut Vst2EventBatch,
     rack_events: &mut Vec<rack::prelude::MidiEvent>,
 ) -> Result<(), String> {
+    let consumed = crate::vst_worker::protocol::monotonic_qpc();
+    for event in slot.events.iter_mut().take(event_count) {
+        event.consumed_qpc = consumed;
+    }
     match plugin {
         PluginBackend::Vst2 { instance, .. } => {
             use vst::plugin::Plugin as _;
@@ -1575,10 +1639,10 @@ mod tests {
     #[test]
     #[cfg(target_pointer_width = "64")]
     fn bridge_stall_budget_is_based_on_audio_time() {
-        assert!(!bridge_stall_budget_exceeded(95_999, 48_000));
-        assert!(bridge_stall_budget_exceeded(96_000, 48_000));
-        assert!(!bridge_stall_budget_exceeded(88_199, 44_100));
-        assert!(bridge_stall_budget_exceeded(88_200, 44_100));
+        assert!(!bridge_stall_budget_exceeded(239_999, 48_000));
+        assert!(bridge_stall_budget_exceeded(240_000, 48_000));
+        assert!(!bridge_stall_budget_exceeded(220_499, 44_100));
+        assert!(bridge_stall_budget_exceeded(220_500, 44_100));
     }
 
     #[test]
@@ -1683,7 +1747,7 @@ mod tests {
         let mut outputs = vec![vec![0.0f32; 512]; remote.output_channels()];
         let mut energy = 0.0f32;
         for _ in 0..32 {
-            if remote.process(&mut midi, &[], &mut outputs, 512) {
+            if remote.process(&mut midi, &[], &mut outputs, 512, None) {
                 energy += outputs
                     .iter()
                     .flat_map(|channel| channel.iter())
@@ -1693,7 +1757,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(12));
         }
         midi.push_back(MidiPacket::from_bytes(&[0x80, 60, 0]).expect("note off"));
-        let _ = remote.process(&mut midi, &[], &mut outputs, 512);
+        let _ = remote.process(&mut midi, &[], &mut outputs, 512, None);
         for sequence in 0..10_000u32 {
             let note = 36 + ((sequence / 2) % 48) as u8;
             let bytes: &[u8] = match sequence % 6 {
@@ -1707,7 +1771,7 @@ mod tests {
             midi.push_back(MidiPacket::from_bytes(bytes).expect("stress MIDI event"));
         }
         for _ in 0..24 {
-            let _ = remote.process(&mut midi, &[], &mut outputs, 512);
+            let _ = remote.process(&mut midi, &[], &mut outputs, 512, None);
             std::thread::sleep(Duration::from_millis(12));
         }
         assert!(
@@ -1715,11 +1779,20 @@ mod tests {
             "the x86 bridge did not drain 10,000 MIDI events"
         );
         remote.panic_all_notes();
-        let _ = remote.process(&mut midi, &[], &mut outputs, 512);
+        let _ = remote.process(&mut midi, &[], &mut outputs, 512, None);
         assert!(
             energy.is_finite() && energy > 0.001,
             "bridged VST rendered silence"
         );
         assert!(remote.telemetry().2, "x86 worker should remain alive");
+        remote.save_state().expect("native save in maintenance");
+        let underruns = remote.telemetry().0;
+        assert_eq!(remote.next_sequence, 1);
+        assert!(remote.process(&mut midi, &[], &mut outputs, 512, None));
+        assert_eq!(
+            remote.telemetry().0,
+            underruns,
+            "maintenance must re-prime the DSP pipeline"
+        );
     }
 }

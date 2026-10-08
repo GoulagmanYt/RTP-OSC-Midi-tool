@@ -63,6 +63,12 @@ fn apply_and_save_config(
         config,
         force_restart,
         |cfg, force| {
+            if state.audio.is_running() {
+                state
+                    .audio
+                    .set_game_mode(cfg.audio.game_mode, window.app_handle().clone())
+                    .map_err(|err| runtime_error("audio.game-mode-failed", err.to_string()))?;
+            }
             // Bind the replacement OSC listener before restarting RTP.
             state
                 .bridge

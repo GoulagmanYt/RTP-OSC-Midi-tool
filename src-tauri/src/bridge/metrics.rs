@@ -75,6 +75,7 @@ pub(super) fn spawn_activity_emitter(
                 vst_worker_state: audio.vst_worker_state(),
                 vst_worker_restarts: audio.vst_worker_restarts(),
                 vst_worker_last_exit: audio.vst_worker_last_exit(),
+                realtime: audio.realtime_diagnostics(),
                 audio_mmcss_enabled: audio.mmcss_enabled(),
                 audio_power_throttling_disabled: audio.power_throttling_disabled(),
                 x86_bridge_underruns: Some(audio.x86_bridge_metrics().0),

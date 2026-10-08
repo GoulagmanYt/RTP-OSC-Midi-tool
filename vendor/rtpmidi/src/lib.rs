@@ -18,3 +18,12 @@ pub mod sessions;
 
 #[cfg(test)]
 mod test_alloc;
+
+/// Process-wide UDP diagnostics. These counters describe transport, not application queues.
+pub mod diagnostics {
+    use std::sync::atomic::{AtomicU64, AtomicUsize};
+    pub static MIDI_RECEIVE_BUFFER: AtomicUsize = AtomicUsize::new(0);
+    pub static CONTROL_RECEIVE_BUFFER: AtomicUsize = AtomicUsize::new(0);
+    pub static INVALID_DATAGRAMS: AtomicU64 = AtomicU64::new(0);
+    pub static SOCKET_ERRORS: AtomicU64 = AtomicU64::new(0);
+}

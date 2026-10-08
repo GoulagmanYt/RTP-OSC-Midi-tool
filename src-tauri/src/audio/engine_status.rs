@@ -204,10 +204,10 @@ impl AudioEngine {
 
     pub fn stream_fault_reason(&self) -> Option<String> {
         let code = self
-            .runtime
-            .lock()
+            .health_telemetry
+            .load()
             .as_ref()
-            .map(|runtime| runtime.telemetry.stream_fatal_error.load(Ordering::Acquire))
+            .map(|telemetry| telemetry.stream_fatal_error.load(Ordering::Acquire))
             .unwrap_or(0);
         let reason = match code {
             1 => "audio device busy",
@@ -364,10 +364,7 @@ impl AudioEngine {
         }
         self.runtime.lock().as_ref().map(|runtime| {
             #[cfg(all(target_os = "windows", target_pointer_width = "64"))]
-            if matches!(
-                &*runtime.plugin.lock(),
-                super::runtime_state::PluginBackend::Remote { .. }
-            ) {
+            if runtime.is_x86_bridge {
                 return runtime
                     .plugin_latency_samples
                     .saturating_sub(runtime.requested_buffer_size);
@@ -387,10 +384,7 @@ impl AudioEngine {
         }
         self.runtime.lock().as_ref().map(|runtime| {
             #[cfg(all(target_os = "windows", target_pointer_width = "64"))]
-            if matches!(
-                &*runtime.plugin.lock(),
-                super::runtime_state::PluginBackend::Remote { .. }
-            ) {
+            if runtime.is_x86_bridge {
                 return runtime.requested_buffer_size;
             }
             #[cfg(not(all(target_os = "windows", target_pointer_width = "64")))]
@@ -426,37 +420,22 @@ impl AudioEngine {
                 metrics.x86_worker_alive,
             );
         }
-        #[cfg(all(target_os = "windows", target_pointer_width = "64"))]
-        if let Some(runtime) = self.runtime.lock().as_ref() {
-            if !runtime.is_x86_bridge {
-                return (0, 0, false);
-            }
-            if let Some(mut plugin) = runtime.plugin.try_lock() {
-                if let super::runtime_state::PluginBackend::Remote { instance } = &mut *plugin {
-                    return instance.telemetry();
-                }
-            }
-            // The ASIO callback owns this mutex while it publishes/consumes a
-            // bridge block. A telemetry lock miss is expected contention, not
-            // evidence that the nested worker died. Reporting false here made
-            // the heartbeat kill a healthy x86 host nondeterministically.
-            return (0, 0, true);
+        if let Some(t) = self.health_telemetry.load().as_ref() {
+            return (
+                t.x86_underruns.load(Ordering::Relaxed),
+                t.x86_overruns.load(Ordering::Relaxed),
+                t.x86_alive.load(Ordering::Relaxed),
+            );
         }
         (0, 0, false)
     }
 
     #[cfg(all(target_os = "windows", target_pointer_width = "64"))]
     pub fn x86_bridge_fault_reason(&self) -> Option<String> {
-        let runtime_guard = self.runtime.lock();
-        let runtime = runtime_guard.as_ref()?;
-        if !runtime.is_x86_bridge {
-            return None;
-        }
-        let mut plugin = runtime.plugin.try_lock()?;
-        match &mut *plugin {
-            super::runtime_state::PluginBackend::Remote { instance } => instance.fault_reason(),
-            _ => None,
-        }
+        let telemetry = self.health_telemetry.load();
+        let telemetry = telemetry.as_ref()?;
+        (!telemetry.x86_alive.load(Ordering::Acquire))
+            .then(|| "x86 DSP bridge stopped or stalled".to_owned())
     }
 
     pub fn midi_drop_count(&self) -> Option<u32> {

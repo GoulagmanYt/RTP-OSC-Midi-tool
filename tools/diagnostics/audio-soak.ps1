@@ -1,5 +1,7 @@
 param(
     [int]$DurationSeconds = 7200,
+    [ValidateRange(1,100000)][int]$EventsPerSecond = 200,
+    [bool]$GameMode = $true,
     [int]$ActiveSeconds = -1,
     [int]$CycleSeconds = 0,
     [int]$MaxWorkerPrivateMB = 4096,
@@ -40,6 +42,7 @@ $pluginBinary = if ($pluginItem.PSIsContainer) {
 } else { $pluginItem }
 $provenance = @{
     startedUtc = $started.ToString('o'); durationSeconds = $DurationSeconds
+    eventsPerSecond = $EventsPerSecond; gameMode = $GameMode
     activeSeconds = $ActiveSeconds; cycleSeconds = $CycleSeconds; maxWorkerPrivateMB = $MaxWorkerPrivateMB
     codeCommit = (& git -C $repository rev-parse HEAD)
     workerPath = $workerPath
@@ -54,7 +57,7 @@ $provenance = @{
     scope = 'Audio endurance with periodic process resource samples; other workload may run concurrently. No physical loopback latency measurement.'
 }
 $provenance | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $reportDirectory "$ReportName-provenance.json") -Encoding UTF8
-$arguments = @('--vst', ('"' + $Plugin + '"'), '--duration-seconds', $DurationSeconds, '--buffer', 512, '--stop-file', ('"' + $reportPath + '.stop"'), '--report', ('"' + $reportPath + '"'))
+$arguments = @('--events-per-second', $EventsPerSecond, '--game-mode', $GameMode.ToString().ToLowerInvariant(), '--vst', ('"' + $Plugin + '"'), '--duration-seconds', $DurationSeconds, '--buffer', 512, '--stop-file', ('"' + $reportPath + '.stop"'), '--report', ('"' + $reportPath + '"'))
 if ($ActiveSeconds -ge 0) { $arguments += @('--active-seconds', $ActiveSeconds) }
 if ($CycleSeconds -gt 0) { $arguments += @('--cycle-seconds', $CycleSeconds) }
 $run = Start-Process -FilePath $diagnosticPath -ArgumentList $arguments -WorkingDirectory $repository -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $repository ".cargo-target/$ReportName.log") -RedirectStandardError (Join-Path $repository ".cargo-target/$ReportName-errors.log")

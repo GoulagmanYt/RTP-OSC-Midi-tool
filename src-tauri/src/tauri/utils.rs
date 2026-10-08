@@ -156,6 +156,7 @@ pub fn audio_settings_from_config(config: &Config) -> crate::audio::AudioSetting
         .unwrap_or(crate::config::BUNDLED_VST_EQ_KEY);
     crate::audio::AudioSettings {
         enabled: config.audio.enabled,
+        game_mode: config.audio.game_mode,
         backend: config.audio.backend.clone(),
         device: config.audio.device.clone(),
         device_id: config.audio.device_id.clone(),

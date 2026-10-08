@@ -250,6 +250,25 @@ export function AudioConfigCard({
           <Switch checked={config?.audio.limiterEnabled ?? false} onCheckedChange={onLimiterToggle} />
         </div>
 
+        <div className="flex items-center justify-between gap-3">
+          <Label htmlFor="audio-game-mode" className="flex flex-col gap-1">
+            <span>{t("audio.gameMode")}</span>
+            <span className="text-xs font-normal text-muted-foreground">{t("audio.gameModeHint")}</span>
+          </Label>
+          <Switch id="audio-game-mode" checked={config?.audio.gameMode ?? true}
+            disabled={!config || audioReloading || status?.realtime?.worker.maintenance}
+            onCheckedChange={(gameMode) => { void onUpdateAudioConfig({ gameMode }); }} />
+        </div>
+        {status?.realtime?.worker.maintenance && <p role="status" className="text-xs text-amber-600">{t("audio.maintenance")}</p>}
+        {(status?.realtime?.worker.deferredSave || status?.realtime?.worker.deferredEditor != null) &&
+          <p role="status" className="text-xs text-muted-foreground">{t("audio.deferredOperations")}</p>}
+        {config?.ui.developerMode && status?.realtime && (
+          <div className="text-xs text-muted-foreground">
+            {t("audio.deliveryLatency")}: p99 {(status.realtime.worker.midiDeliveryP99Us / 1000).toFixed(2)} ms / max {(status.realtime.worker.midiDeliveryMaxUs / 1000).toFixed(2)} ms
+            <br />{t("audio.callbackInterval")}: {(status.realtime.worker.callbackIntervalMaxUs / 1000).toFixed(2)} ms
+          </div>
+        )}
+
         <div className="flex items-center justify-between text-xs text-muted-foreground">
           <span>{t("audio.estimatedLatency")}</span>
           <span className="font-semibold text-foreground">
@@ -452,7 +471,7 @@ export function AudioConfigCard({
                 ) : null}
                 {filteredVstPlugins.map((plugin) => (
                   <SelectItem key={plugin.id} value={plugin.id} disabled={!plugin.supported}>
-                    {`${plugin.name} · ${plugin.format} · ${plugin.architecture} · ${plugin.status}`}
+                    {`${plugin.name} Â· ${plugin.format} Â· ${plugin.architecture} Â· ${plugin.status}`}
                   </SelectItem>
                 ))}
               </SelectContent>

@@ -15,6 +15,8 @@ fn bench_midi_frame_parsing(c: &mut Criterion) {
             let status = if velocity > 0 { 0x90 } else { 0x80 };
 
             MidiFrame {
+                generation: MidiFrame::current_generation(),
+                ingress_qpc: osc_midi_bridge::vst_worker::protocol::monotonic_qpc(),
                 data: SmallVec::from_slice(&[status, note, velocity]),
                 source: Arc::clone(&source),
             }
@@ -29,6 +31,8 @@ fn bench_midi_frame_parsing(c: &mut Criterion) {
                 let status = if velocity > 0 { 0x90 } else { 0x80 };
 
                 black_box(MidiFrame {
+                    generation: MidiFrame::current_generation(),
+                    ingress_qpc: osc_midi_bridge::vst_worker::protocol::monotonic_qpc(),
                     data: SmallVec::from_slice(&[status, note, velocity]),
                     source: Arc::clone(&source),
                 });

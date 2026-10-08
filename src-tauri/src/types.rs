@@ -102,6 +102,8 @@ pub struct RuntimeStatus {
     pub vst_worker_state: String,
     pub vst_worker_restarts: u32,
     pub vst_worker_last_exit: Option<String>,
+    #[serde(default)]
+    pub realtime: crate::realtime::RealtimeDiagnostics,
     pub audio_mmcss_enabled: Option<bool>,
     pub audio_power_throttling_disabled: Option<bool>,
     pub audio_limiter_enabled: Option<bool>,
@@ -141,6 +143,8 @@ pub struct RuntimeMetrics {
     pub vst_worker_state: String,
     pub vst_worker_restarts: u32,
     pub vst_worker_last_exit: Option<String>,
+    #[serde(default)]
+    pub realtime: crate::realtime::RealtimeDiagnostics,
     pub audio_mmcss_enabled: Option<bool>,
     pub audio_power_throttling_disabled: Option<bool>,
     pub x86_bridge_underruns: Option<u32>,

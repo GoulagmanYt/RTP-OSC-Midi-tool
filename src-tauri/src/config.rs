@@ -223,6 +223,8 @@ pub const BUNDLED_VST_EQ_KEY: &str = "__bundled_default__";
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioConfig {
+    #[serde(default = "default_game_mode")]
+    pub game_mode: bool,
     pub enabled: bool,
     pub backend: Option<String>,
     pub device: Option<String>,
@@ -249,7 +251,8 @@ impl Default for AudioConfig {
             device: None,
             device_id: None,
             sample_rate: 48_000,
-            buffer_size: 256,
+            buffer_size: 512,
+            game_mode: true,
             gain_db: 0.0,
             limiter_enabled: false,
             vst_plugin_id: None,
@@ -520,6 +523,7 @@ impl From<&AppConfig> for RuntimeStatus {
             vst_worker_state: "disabled".to_string(),
             vst_worker_restarts: 0,
             vst_worker_last_exit: None,
+            realtime: Default::default(),
             audio_mmcss_enabled: None,
             audio_power_throttling_disabled: None,
             audio_limiter_enabled: None,
@@ -530,8 +534,28 @@ impl From<&AppConfig> for RuntimeStatus {
     }
 }
 
+fn default_game_mode() -> bool {
+    true
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn legacy_audio_config_enables_game_mode_without_changing_explicit_audio_format() {
+        let mut legacy = serde_json::to_value(super::AudioConfig::default()).unwrap();
+        legacy.as_object_mut().unwrap().remove("gameMode");
+        legacy["sampleRate"] = 48_000.into();
+        legacy["bufferSize"] = 512.into();
+        let config: super::AudioConfig = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(config.game_mode);
+        assert_eq!((config.sample_rate, config.buffer_size), (48_000, 512));
+        legacy["gameMode"] = false.into();
+        legacy["bufferSize"] = 256.into();
+        let explicit: super::AudioConfig = serde_json::from_value(legacy).unwrap();
+        assert!(!explicit.game_mode);
+        assert_eq!(explicit.buffer_size, 256);
+    }
+
     use super::*;
     use tempfile::tempdir;
 

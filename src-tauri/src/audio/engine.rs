@@ -45,10 +45,13 @@ use crate::plugin_probe::detect_vst3_channels;
 pub(super) struct MidiIngress {
     producer: Mutex<Producer<MidiPacket>>,
     telemetry: Arc<AudioTelemetry>,
+    reserve: usize,
 }
 impl MidiIngress {
     pub(super) fn new(producer: Producer<MidiPacket>, telemetry: Arc<AudioTelemetry>) -> Self {
+        let reserve = crate::realtime::reserve(producer.slots());
         Self {
+            reserve,
             producer: Mutex::new(producer),
             telemetry,
         }
@@ -65,6 +68,13 @@ pub(crate) enum MidiSendOutcome {
 
 #[derive(Clone)]
 pub struct AudioEngine {
+    pub(super) midi_transport_failed: Arc<AtomicBool>,
+    pub(super) live_parameters: Arc<Mutex<std::collections::BTreeMap<usize, f32>>>,
+    pub(super) game_mode: Arc<AtomicBool>,
+    pub(super) maintenance: Arc<AtomicBool>,
+    pub(super) deferred_save: Arc<AtomicBool>,
+    pub(super) deferred_editor: Arc<AtomicU8>,
+    pub(super) health_telemetry: Arc<ArcSwapOption<AudioTelemetry>>,
     pub(super) lifecycle_gate: Arc<Mutex<()>>,
     pub(super) lifecycle_state: Arc<AtomicU8>,
     pub(super) runtime: Arc<Mutex<Option<AudioRuntime>>>,
@@ -81,6 +91,13 @@ impl AudioEngine {
     pub fn new() -> Self {
         super::thread_affinity::register_main_ui_thread();
         Self {
+            midi_transport_failed: Arc::new(AtomicBool::new(false)),
+            live_parameters: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            game_mode: Arc::new(AtomicBool::new(true)),
+            maintenance: Arc::new(AtomicBool::new(false)),
+            deferred_save: Arc::new(AtomicBool::new(false)),
+            deferred_editor: Arc::new(AtomicU8::new(0)),
+            health_telemetry: Arc::new(ArcSwapOption::empty()),
             lifecycle_gate: Arc::new(Mutex::new(())),
             lifecycle_state: Arc::new(AtomicU8::new(AudioLifecycleState::Stopped as u8)),
             runtime: Arc::new(Mutex::new(None)),
@@ -121,6 +138,13 @@ impl AudioEngine {
             self.worker.request_emergency_reset();
             return;
         }
+        if let Some(ingress) = self.midi_tx.load().as_ref() {
+            ingress
+                .telemetry
+                .midi_generation
+                .fetch_add(1, Ordering::AcqRel);
+            return;
+        }
         self.midi_emergency_reset_requested
             .store(true, Ordering::Release);
     }
@@ -133,9 +157,13 @@ impl AudioEngine {
     }
 
     pub(crate) fn send_midi_with_outcome(&self, bytes: &[u8]) -> MidiSendOutcome {
+        self.send_midi_at(bytes, crate::vst_worker::protocol::monotonic_qpc())
+    }
+
+    pub(crate) fn send_midi_at(&self, bytes: &[u8], ingress_qpc: u64) -> MidiSendOutcome {
         #[cfg(target_os = "windows")]
         if self.is_worker_enabled() {
-            return if self.worker.try_send_midi(bytes) {
+            return if self.worker.try_send_midi_at(bytes, ingress_qpc) {
                 MidiSendOutcome::Sent
             } else if crate::midi::is_critical_release_message(bytes) {
                 self.worker.request_emergency_reset();
@@ -149,19 +177,49 @@ impl AudioEngine {
             return MidiSendOutcome::DroppedNonCritical;
         };
 
+        let mut packet = packet;
+        packet.ingress_qpc = ingress_qpc;
         self.send_midi_packet_with_outcome(packet)
     }
 
-    fn send_midi_packet_with_outcome(&self, packet: MidiPacket) -> MidiSendOutcome {
+    pub fn report_midi_transport_failure(&self) {
+        self.midi_transport_failed.store(true, Ordering::Release);
+    }
+
+    pub fn deliver_midi_wire(&self, frame: crate::vst_worker::MidiWireFrame) {
+        if frame.pipe_qpc != 0 {
+            if let Some(ingress) = self.midi_tx.load().as_ref() {
+                ingress.telemetry.pipe_wait_max_us.fetch_max(
+                    crate::vst_worker::protocol::qpc_elapsed_us(
+                        frame.pipe_qpc,
+                        crate::vst_worker::protocol::monotonic_qpc(),
+                    ),
+                    Ordering::Relaxed,
+                );
+            }
+        }
+        let age = crate::vst_worker::protocol::qpc_elapsed_us(
+            frame.monotonic_qpc,
+            crate::vst_worker::protocol::monotonic_qpc(),
+        );
+        if let Some(mut packet) = MidiPacket::from_bytes_with_age(frame.bytes(), age) {
+            packet.ingress_qpc = frame.monotonic_qpc;
+            let _ = self.send_midi_packet_with_outcome(packet);
+        }
+    }
+
+    fn send_midi_packet_with_outcome(&self, mut packet: MidiPacket) -> MidiSendOutcome {
         let route = self.midi_tx.load();
         let Some(ingress) = route.as_ref() else {
             return MidiSendOutcome::AudioStopped;
         };
-        if ingress
-            .producer
-            .try_lock()
-            .is_some_and(|mut producer| producer.push(packet).is_ok())
-        {
+        packet.generation = ingress.telemetry.midi_generation.load(Ordering::Acquire);
+        if ingress.producer.try_lock().is_some_and(|mut producer| {
+            if !packet.is_critical_release() && producer.slots() <= ingress.reserve {
+                return false;
+            }
+            producer.push(packet).is_ok()
+        }) {
             return MidiSendOutcome::Sent;
         }
         ingress
@@ -169,8 +227,7 @@ impl AudioEngine {
             .midi_drop_count
             .fetch_add(1, Ordering::Relaxed);
         if packet.is_critical_release() {
-            self.midi_emergency_reset_requested
-                .store(true, Ordering::Release);
+            self.request_emergency_midi_reset();
             MidiSendOutcome::CriticalFallbackReset
         } else {
             MidiSendOutcome::DroppedNonCritical
@@ -325,9 +382,13 @@ mod tests {
             .unwrap();
         let reset_flag = Arc::new(AtomicBool::new(true));
         let mut state = callback_test_state(rx, reset_flag);
+        state.telemetry.midi_generation.store(1, Ordering::Release);
         // Pre-fill pending MIDI with note-on events
         for note in 0..10u8 {
             state.pending_midi.push_back(MidiPacket {
+                worker_qpc: crate::vst_worker::protocol::monotonic_qpc(),
+                generation: 0,
+                ingress_qpc: crate::vst_worker::protocol::monotonic_qpc(),
                 data: [0x90, note, 100],
                 len: 3,
                 timestamp_us: 0,
@@ -402,6 +463,55 @@ mod tests {
     }
 
     #[test]
+    fn reset_invalidates_old_ring_events_but_keeps_new_fifo_events() {
+        let engine = AudioEngine::new();
+        let (tx, rx) = RingBuffer::new(32);
+        let mut callback = callback_test_state(rx, engine.midi_emergency_reset_requested.clone());
+        let ingress = Arc::new(MidiIngress::new(tx, callback.telemetry.clone()));
+        engine.midi_tx.store(Some(ingress));
+        engine.send_midi(&[0x90, 60, 100]);
+        engine.request_emergency_midi_reset();
+        engine.send_midi(&[0x90, 61, 100]);
+        engine.send_midi(&[0x80, 61, 0]);
+        callback.drain_midi();
+        assert!(callback.needs_emergency_reset);
+        assert_eq!(callback.pending_midi.len(), 2);
+        assert_eq!(callback.pending_midi[0].data, [0x90, 61, 100]);
+        assert_eq!(callback.pending_midi[1].data, [0x80, 61, 0]);
+    }
+
+    #[test]
+    fn duplicate_parameters_count_toward_callback_budget() {
+        let (_tx, rx) = RingBuffer::new(8);
+        let mut callback = callback_test_state(rx, Arc::new(AtomicBool::new(false)));
+        let (tx, rx) = crossbeam_channel::bounded(1024);
+        callback.parameter_rx = rx;
+        for _ in 0..1024 {
+            tx.try_send(super::super::runtime_state::ParameterCommand {
+                index: 0,
+                id: 0,
+                flags: 0,
+                step_count: 0,
+                value: 0.5,
+            })
+            .unwrap();
+        }
+        callback.drain_parameter_commands();
+        assert_eq!(callback.parameter_commands.len(), 1);
+        assert_eq!(callback.parameter_rx.len(), 512);
+    }
+
+    #[test]
+    fn heartbeat_snapshot_does_not_wait_for_host_runtime_lock() {
+        let engine = AudioEngine::new();
+        let telemetry = Arc::new(AudioTelemetry::new());
+        telemetry.callback_count.store(123, Ordering::Relaxed);
+        engine.health_telemetry.store(Some(telemetry));
+        let _runtime = engine.runtime.lock();
+        assert_eq!(engine.realtime_metrics().callback_count, 123);
+    }
+
+    #[test]
     fn audio_packets_reject_truncation_and_normalize_zero_velocity() {
         for bytes in [
             &[][..],
@@ -438,9 +548,7 @@ mod tests {
             MidiSendOutcome::CriticalFallbackReset
         );
         assert_eq!(telemetry.midi_drop_count.load(Ordering::Relaxed), 1);
-        assert!(engine
-            .midi_emergency_reset_requested
-            .load(Ordering::Acquire));
+        assert_eq!(telemetry.midi_generation.load(Ordering::Acquire), 1);
     }
 
     #[test]
@@ -451,6 +559,9 @@ mod tests {
         let producer = thread::spawn(move || {
             for i in 0..TOTAL {
                 let packet = MidiPacket {
+                    worker_qpc: crate::vst_worker::protocol::monotonic_qpc(),
+                    generation: 0,
+                    ingress_qpc: crate::vst_worker::protocol::monotonic_qpc(),
                     data: [0x90, (i % 88) as u8 + 21, 100],
                     len: 3,
                     timestamp_us: i,
@@ -524,11 +635,17 @@ mod tests {
         let outcome = engine.send_midi_with_outcome(&[0x80, 60, 0]);
 
         assert_eq!(outcome, MidiSendOutcome::CriticalFallbackReset);
-        assert!(
+        assert_eq!(
             engine
-                .midi_emergency_reset_requested
-                .load(Ordering::Relaxed),
-            "critical release overflow should request an emergency reset"
+                .midi_tx
+                .load()
+                .as_ref()
+                .unwrap()
+                .telemetry
+                .midi_generation
+                .load(Ordering::Acquire),
+            1,
+            "critical release overflow must invalidate the old admission epoch"
         );
 
         let first = rx.pop().expect("first packet still queued");

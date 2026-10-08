@@ -1,4 +1,4 @@
-use crossbeam_channel::unbounded;
+use osc_midi_bridge::midi_queue::bounded;
 use osc_midi_bridge::reliable_playback::{
     reliable_playback_metrics_snapshot, reset_reliable_playback_metrics, ReliablePlaybackServer,
 };
@@ -46,7 +46,7 @@ fn connect(server: &ReliablePlaybackServer, read_timeout: Duration) -> TcpStream
 fn reliable_server_preserves_duplicates_and_reports_completion() {
     let _guard = test_guard();
     reset_reliable_playback_metrics();
-    let (tx, rx) = unbounded();
+    let (tx, rx) = bounded(16384);
     let server = ReliablePlaybackServer::start("127.0.0.1:0", tx).expect("start server");
     let mut stream = connect(&server, Duration::from_secs(3));
 
@@ -103,7 +103,7 @@ fn reliable_server_preserves_duplicates_and_reports_completion() {
 fn reliable_server_rejects_missing_or_out_of_order_sequences() {
     let _guard = test_guard();
     reset_reliable_playback_metrics();
-    let (tx, _rx) = unbounded();
+    let (tx, _rx) = bounded(16384);
     let server = ReliablePlaybackServer::start("127.0.0.1:0", tx).expect("start server");
     let mut stream = connect(&server, Duration::from_secs(3));
 
@@ -137,7 +137,7 @@ fn reliable_server_rejects_missing_or_out_of_order_sequences() {
 fn reliable_server_stop_cancels_session_and_injects_all_notes_off() {
     let _guard = test_guard();
     reset_reliable_playback_metrics();
-    let (tx, rx) = unbounded();
+    let (tx, rx) = bounded(16384);
     let server = ReliablePlaybackServer::start("127.0.0.1:0", tx).expect("start server");
     let mut stream = connect(&server, Duration::from_secs(3));
 
@@ -192,7 +192,7 @@ fn reliable_server_stop_cancels_session_and_injects_all_notes_off() {
 fn reliable_server_processes_50k_preloaded_events_without_drops() {
     let _guard = test_guard();
     reset_reliable_playback_metrics();
-    let (tx, rx) = unbounded();
+    let (tx, rx) = bounded(65536);
     let server = ReliablePlaybackServer::start("127.0.0.1:0", tx).expect("start server");
     let mut stream = connect(&server, Duration::from_secs(20));
     let total = 50_000usize;
@@ -254,7 +254,7 @@ fn reliable_server_processes_50k_preloaded_events_without_drops() {
 fn reliable_server_shutdown_cancels_scheduled_playback() {
     let _guard = test_guard();
     reset_reliable_playback_metrics();
-    let (tx, rx) = unbounded();
+    let (tx, rx) = bounded(16384);
     let server = ReliablePlaybackServer::start("127.0.0.1:0", tx).expect("start server");
     let mut stream = connect(&server, Duration::from_secs(3));
 

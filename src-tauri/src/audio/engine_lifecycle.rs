@@ -91,11 +91,11 @@ fn restore_vst_state_thread_affine(
     parameter_cache: &Arc<parking_lot::Mutex<Vec<crate::types::VstParameter>>>,
     vst_plugin: &crate::types::VstPluginEntry,
     logger: &FrontendLogger,
-) -> Result<(), AudioError> {
+) -> Result<std::collections::BTreeMap<usize, f32>, AudioError> {
     if super::thread_affinity::is_main_ui_thread() {
         load_vst_state(plugin, vst_plugin, logger);
         refresh_vst_parameter_cache(plugin, parameter_cache);
-        return Ok(());
+        return super::game_mode::restore_live_parameters(plugin, parameter_cache, vst_plugin);
     }
 
     let plugin = plugin.clone();
@@ -109,13 +109,17 @@ fn restore_vst_state_thread_affine(
         .run_on_main_thread(move || {
             load_vst_state(&plugin, &vst_plugin, &logger_for_main);
             refresh_vst_parameter_cache(&plugin, &parameter_cache);
-            let _ = tx.send(());
+            let _ = tx.send(super::game_mode::restore_live_parameters(
+                &plugin,
+                &parameter_cache,
+                &vst_plugin,
+            ));
         })
         .map_err(|_| {
             AudioError::Message("Failed to schedule VST state restoration on main thread".into())
         })?;
     rx.recv_timeout(std::time::Duration::from_secs(30))
-        .map_err(|_| AudioError::Message("Timed out restoring VST state on main thread".into()))
+        .map_err(|_| AudioError::Message("Timed out restoring VST state on main thread".into()))?
 }
 
 fn refresh_vst_parameter_cache(
@@ -156,6 +160,11 @@ impl AudioEngine {
                 .map_err(AudioError::Message);
         }
 
+        if self.game_mode.load(Ordering::Acquire) {
+            self.deferred_save.store(true, Ordering::Release);
+            return self.persist_live_parameters();
+        }
+        let maintenance = self.begin_maintenance()?;
         let Some(_lifecycle_guard) = self.lifecycle_gate.try_lock() else {
             return Err(AudioError::Message(
                 "An audio start/reload/stop operation is already in progress".into(),
@@ -166,34 +175,25 @@ impl AudioEngine {
             let runtime = runtime_guard
                 .as_mut()
                 .ok_or_else(|| AudioError::Message("Audio not started".into()))?;
-            runtime._stream.pause().map_err(|error| {
-                AudioError::Message(format!("Failed to pause audio for VST state save: {error}"))
-            })?;
             (runtime.plugin.clone(), runtime.vst_plugin.clone())
         };
 
         let plugin_for_main = plugin.clone();
         let (tx, rx) = mpsc::sync_channel(1);
         let scheduled = app_handle.run_on_main_thread(move || {
-            save_vst_state_blocking(&plugin_for_main, &vst_plugin);
-            let _ = tx.send(());
+            let _maintenance = maintenance;
+            let result = super::state_codec::save_vst_state_checked(&plugin_for_main, &vst_plugin);
+            let _ = tx.send(result);
         });
-        let saved = match scheduled {
+        match scheduled {
             Ok(()) => rx
                 .recv_timeout(std::time::Duration::from_secs(5))
-                .map_err(|_| AudioError::Message("Timed out saving VST state".into())),
+                .map_err(|_| AudioError::Message("Timed out saving VST state".into()))
+                .and_then(|result| result.map_err(AudioError::Message)),
             Err(_) => Err(AudioError::Message(
                 "Failed to schedule VST state save on main thread".into(),
             )),
-        };
-        if let Some(runtime) = self.runtime.lock().as_mut() {
-            if let Err(error) = runtime._stream.play() {
-                return Err(AudioError::Message(format!(
-                    "Failed to resume audio after VST state save: {error}"
-                )));
-            }
         }
-        saved
     }
 
     pub fn stop(&self, app_handle: Option<tauri::AppHandle>) {
@@ -424,6 +424,9 @@ impl AudioEngine {
             ));
         };
         let retained_device = self.stop_locked(Some(logger.app_handle()), true);
+        self.game_mode.store(settings.game_mode, Ordering::Release);
+        self.deferred_editor.store(0, Ordering::Release);
+        self.deferred_save.store(false, Ordering::Release);
         self.lifecycle_state
             .store(AudioLifecycleState::Loading as u8, Ordering::Release);
 
@@ -623,7 +626,7 @@ impl AudioEngine {
             if attempt > 0 {
                 let delay_ms = ASIO_RETRY_DELAYS_MS[attempt as usize];
                 logger.debug(format!(
-                    "Retrying ASIO device acquisition (attempt {}/{}), waiting {}ms…",
+                    "Retrying ASIO device acquisition (attempt {}/{}), waiting {}msâ€¦",
                     attempt + 1,
                     ASIO_RETRY_DELAYS_MS.len(),
                     delay_ms
@@ -710,7 +713,7 @@ impl AudioEngine {
 
             if !has_stereo {
                 logger.info(format!(
-                    "Device '{}' skipped — VST requires stereo output.",
+                    "Device '{}' skipped â€” VST requires stereo output.",
                     dev_name
                 ));
                 continue;
@@ -775,7 +778,7 @@ impl AudioEngine {
 
                     if err_str.contains("no longer available") || err_str.contains("unplugged") {
                         logger.warn(format!(
-                            "Device '{}' reported unavailable (attempt {}). Retrying…",
+                            "Device '{}' reported unavailable (attempt {}). Retryingâ€¦",
                             dev_name,
                             attempt + 1
                         ));
@@ -832,7 +835,8 @@ impl AudioEngine {
                 active_device, error
             ))
         })?;
-        restore_vst_state_thread_affine(&plugin, &parameter_cache, &vst_probe, &logger)?;
+        *self.live_parameters.lock() =
+            restore_vst_state_thread_affine(&plugin, &parameter_cache, &vst_probe, &logger)?;
         #[cfg(all(target_os = "windows", target_pointer_width = "64"))]
         let is_x86_bridge = matches!(
             &*plugin.lock(),
@@ -876,6 +880,7 @@ impl AudioEngine {
             vst_plugin: vst_probe.clone(),
         };
 
+        self.health_telemetry.store(Some(runtime.telemetry.clone()));
         *self.last_vst.lock() = Some(vst_path);
         self.midi_tx
             .store(Some(Arc::new(super::engine::MidiIngress::new(

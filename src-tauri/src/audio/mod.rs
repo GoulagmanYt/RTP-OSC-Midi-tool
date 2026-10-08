@@ -9,6 +9,7 @@ mod engine_editor;
 mod engine_lifecycle;
 mod engine_status;
 mod equalizer;
+mod game_mode;
 mod plugin_host;
 #[cfg(target_os = "windows")]
 mod remote_bridge;

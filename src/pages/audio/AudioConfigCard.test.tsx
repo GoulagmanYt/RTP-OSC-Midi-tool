@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { AppConfig, RuntimeStatus, VstPluginEntry } from "../../api-types";
 import { AudioConfigCard } from "./AudioConfigCard";
@@ -96,9 +96,18 @@ function renderCard(developerMode: boolean, vstEqEnabled = false) {
       onUpdateAudioConfig={noop}
     />
   );
+  return noop;
 }
 
 describe("AudioConfigCard VST diagnostics", () => {
+  it("enables game mode for legacy configs and submits an additive toggle", () => {
+    const update = renderCard(false);
+    const toggle = screen.getByRole("switch", { name: /audio.gameMode/ });
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
+    fireEvent.click(toggle);
+    expect(update).toHaveBeenCalledWith({ gameMode: false });
+  });
+
   it("hides vendor, channel layout, and bridge diagnostics outside developer mode", () => {
     renderCard(false);
 

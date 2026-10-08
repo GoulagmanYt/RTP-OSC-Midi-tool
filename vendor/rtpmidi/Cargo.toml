@@ -149,3 +149,6 @@ inherits = "release"
 
 [patch.crates-io]
 midi-types = { path = "../midi-types" }
+
+[dependencies.socket2]
+version = "0.6"

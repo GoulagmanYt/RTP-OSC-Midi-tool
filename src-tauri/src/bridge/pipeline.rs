@@ -1,3 +1,4 @@
+use crate::midi_queue::Sender;
 use crate::{
     audio::AudioEngine,
     config::{Config, RoutingAssignment, RoutingMapping, RoutingProfile},
@@ -6,7 +7,7 @@ use crate::{
     osc::OscClient,
     types::MidiNoteEvent,
 };
-use crossbeam_channel::{Sender, TrySendError};
+use crossbeam_channel::TrySendError;
 use midir::MidiOutputConnection;
 use std::{
     collections::HashMap,
@@ -159,8 +160,8 @@ impl From<&Config> for ConfigSnapshot {
             osc_enabled: cfg.osc.enabled,
             channel_filter: cfg.midi.channel_filter,
             midi_thru: cfg.midi.thru_enabled,
-            log_osc: cfg.osc.log_messages,
-            verbose: cfg.logging.verbose,
+            log_osc: cfg.osc.log_messages && !cfg.audio.game_mode,
+            verbose: cfg.logging.verbose && !cfg.audio.game_mode,
             routing_profiles,
             routing_assignments,
         }
@@ -182,6 +183,7 @@ pub(super) fn handle_midi_frame(
     deliver_midi_thru: bool,
     deliver_osc_ui: bool,
     active_notes: &mut crate::midi::ActiveNotes,
+    route_recovery: Option<&crate::midi_queue::Recovery>,
 ) {
     // Compteur entrée pipeline (stress test metrics)
     if deliver_audio {
@@ -190,7 +192,11 @@ pub(super) fn handle_midi_frame(
 
     let mut frame = frame;
     if deliver_audio && frame.data.as_slice() == [0xFF] {
-        request_critical_midi_reset();
+        if let Some(recovery) = route_recovery {
+            recovery.request_reset();
+        } else {
+            request_critical_midi_reset();
+        }
         return;
     }
     let mut filtered = false;
@@ -245,7 +251,7 @@ pub(super) fn handle_midi_frame(
         if let Some(status) = frame.data.first() {
             let is_channel_voice = (0x80..0xF0).contains(status);
             if is_channel_voice {
-                match audio.send_midi_with_outcome(frame.data.as_slice()) {
+                match audio.send_midi_at(frame.data.as_slice(), frame.ingress_qpc) {
                     crate::audio::MidiSendOutcome::Sent => {
                         PIPELINE_OUT_COUNT.fetch_add(1, Ordering::Relaxed);
                     }
@@ -275,7 +281,11 @@ pub(super) fn handle_midi_frame(
             if let Err(error) = out.send(frame.data.as_slice()) {
                 logger.warn(format!("Sortie MIDI déconnectée: {error}"));
                 *midi_out = None;
-                request_critical_midi_reset();
+                if let Some(recovery) = route_recovery {
+                    recovery.request_reset();
+                } else {
+                    request_critical_midi_reset();
+                }
             } else {
                 active_notes.observe(frame.data.as_slice());
             }
@@ -320,7 +330,11 @@ pub(super) fn handle_midi_frame(
         if let Some(osc_client) = osc {
             if let Err(err) = osc_client.send_sustain(sustain.pressed) {
                 if !sustain.pressed {
-                    request_critical_midi_reset();
+                    if let Some(recovery) = route_recovery {
+                        recovery.request_reset();
+                    } else {
+                        request_critical_midi_reset();
+                    }
                 }
                 if logs_enabled() {
                     logger.error(format!("Envoi OSC echoue: {err}"));
@@ -393,7 +407,11 @@ pub(super) fn handle_midi_frame(
             if let Some(osc_client) = osc {
                 if let Err(err) = osc_client.send_note(index, pressed) {
                     if !pressed {
-                        request_critical_midi_reset();
+                        if let Some(recovery) = route_recovery {
+                            recovery.request_reset();
+                        } else {
+                            request_critical_midi_reset();
+                        }
                     }
                     if logs_enabled() {
                         logger.error(format!("Envoi OSC echoue: {err}"));
@@ -574,11 +592,13 @@ pub fn reset_pipeline_stats() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossbeam_channel::bounded;
+    use crate::midi_queue::bounded;
     use std::sync::Arc;
 
     fn frame(data: &[u8]) -> MidiFrame {
         MidiFrame {
+            generation: MidiFrame::current_generation(),
+            ingress_qpc: crate::vst_worker::protocol::monotonic_qpc(),
             data: smallvec::SmallVec::from_slice(data),
             source: Arc::from("test"),
         }

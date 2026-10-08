@@ -26,6 +26,8 @@ const WARN_THREAD_PRIORITY: u32 = 1 << 3;
 const WARN_PRIORITY_BOOST: u32 = 1 << 4;
 #[cfg(target_os = "windows")]
 const WARN_POWER_THROTTLING: u32 = 1 << 5;
+#[cfg(target_os = "windows")]
+const WARN_MMCSS_RELEASE: u32 = 1 << 6;
 
 #[cfg(target_os = "windows")]
 fn record_audio_tuning_warning(bit: u32) {
@@ -37,6 +39,11 @@ fn record_audio_tuning_warning(bit: u32) {
 pub(super) fn flush_audio_tuning_warnings() {
     let warnings = AUDIO_TUNING_WARNINGS.swap(0, Ordering::AcqRel);
     for (bit, level, message) in [
+        (
+            WARN_MMCSS_RELEASE,
+            "warn",
+            "Failed to release MMCSS registration on its owner thread",
+        ),
         (
             WARN_MMCSS_PRIORITY,
             "warn",
@@ -133,13 +140,18 @@ pub(crate) fn prioritize_midi_thread() -> Option<MmcssRegistration> {
 
     unsafe {
         let mut task_index = 0;
+        let mut profile = "Pro Audio";
+        let mut high = false;
+        let mut fallback = false;
         let registration = match AvSetMmThreadCharacteristicsW(w!("Pro Audio"), &mut task_index)
             .or_else(|pro_audio_error| {
+                profile = "Audio";
                 AvSetMmThreadCharacteristicsW(w!("Audio"), &mut task_index)
                     .map_err(|audio_error| (pro_audio_error, audio_error))
             }) {
             Ok(handle) => {
-                if AvSetMmThreadPriority(handle, AVRT_PRIORITY_HIGH).is_err() {
+                high = AvSetMmThreadPriority(handle, AVRT_PRIORITY_HIGH).is_ok();
+                if !high {
                     background_log("warn", "Failed to raise MIDI MMCSS priority");
                 }
                 Some(MmcssRegistration {
@@ -155,7 +167,10 @@ pub(crate) fn prioritize_midi_thread() -> Option<MmcssRegistration> {
                         "warn",
                         "MIDI MMCSS unavailable; using thread priority fallback",
                     );
-                    if SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST).is_err() {
+                    profile = "unavailable";
+                    fallback =
+                        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST).is_ok();
+                    if !fallback {
                         background_log("warn", "Failed to raise MIDI worker priority");
                     }
                 }
@@ -177,6 +192,7 @@ pub(crate) fn prioritize_midi_thread() -> Option<MmcssRegistration> {
         {
             background_log("warn", "Failed to disable MIDI thread power throttling");
         }
+        crate::realtime::record_thread(profile, high, fallback);
         registration
     }
 }
@@ -196,7 +212,9 @@ impl Drop for MmcssRegistration {
             return;
         }
         unsafe {
-            let _ = AvRevertMmThreadCharacteristics(self.handle);
+            if AvRevertMmThreadCharacteristics(self.handle).is_err() {
+                record_audio_tuning_warning(WARN_MMCSS_RELEASE);
+            }
         }
     }
 }
@@ -275,28 +293,31 @@ pub(super) struct AudioProcessTuning {
 impl Drop for AudioProcessTuning {
     fn drop(&mut self) {
         unsafe {
-            let _ = timeEndPeriod(self.timer_period_ms);
+            if self.timer_period_ms != 0 && timeEndPeriod(self.timer_period_ms) != 0 {
+                background_log("warn", "Windows rejected timer resolution release");
+            }
         }
     }
 }
 
 #[cfg(target_os = "windows")]
 pub(super) fn apply_audio_process_tuning(logger: &FrontendLogger) -> AudioProcessTuning {
-    // Request 1ms timer resolution. This is CRITICAL for audio apps — without it,
-    // Windows uses a 15.6ms default resolution and coarsens scheduling when the app
-    // loses focus, causing the ASIO callback to miss deadlines.
-    unsafe {
-        let _ = timeBeginPeriod(1);
-    }
-    logger.debug("Requested 1ms system timer resolution (timeBeginPeriod)");
+    // Timer resolution improves timeout accuracy; driver callbacks keep their
+    // own cadence, and this request does not reserve CPU time.
+    let timer_period_ms = if unsafe { timeBeginPeriod(1) } == 0 {
+        1
+    } else {
+        logger.warn("Windows rejected 1ms timer resolution");
+        0
+    };
 
     apply_process_priority(logger);
-    AudioProcessTuning { timer_period_ms: 1 }
+    AudioProcessTuning { timer_period_ms }
 }
 
 /// Re-apply process priority class and power throttling.
 /// Called once at startup and again whenever the window loses focus,
-/// to counteract Windows downgrading the process scheduling.
+/// to keep the explicitly requested scheduling policy consistent.
 #[cfg(target_os = "windows")]
 pub fn apply_process_priority(logger: &FrontendLogger) {
     unsafe {
@@ -328,26 +349,32 @@ pub fn apply_process_priority(logger: &FrontendLogger) {
 }
 
 /// Lightweight re-application of process priority on focus loss.
-/// Does not require a FrontendLogger — logs via background_log.
+/// Does not require a FrontendLogger â€” logs via background_log.
 #[cfg(target_os = "windows")]
 pub fn reapply_process_priority_on_focus_loss() {
     unsafe {
-        let _ = SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
+        if SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS).is_err() {
+            background_log("warn", "Failed to set process priority policy");
+        }
 
         // Re-assert power throttling disabled. On Windows 11, focus loss can
-        // trigger EcoQoS evaluation that we need to counteract.
+        // affect timer resolution policy. Check failures at startup.
         let throttle = PROCESS_POWER_THROTTLING_STATE {
             Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
             ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED
                 | PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION,
             StateMask: 0,
         };
-        let _ = SetProcessInformation(
+        if SetProcessInformation(
             GetCurrentProcess(),
             ProcessPowerThrottling,
             &throttle as *const _ as *const std::ffi::c_void,
             std::mem::size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
-        );
+        )
+        .is_err()
+        {
+            background_log("warn", "Failed to disable process power throttling");
+        }
     }
 }
 

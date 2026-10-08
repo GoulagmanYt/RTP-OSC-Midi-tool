@@ -585,40 +585,46 @@ fn capture_all_vst3_parameters(instance: &mut rack::vst3::Vst3Plugin) -> Vec<Sta
 }
 
 pub(super) fn save_vst_state_blocking(plugin: &Arc<Mutex<PluginBackend>>, entry: &VstPluginEntry) {
+    if let Err(error) = save_vst_state_checked(plugin, entry) {
+        background_log("error", format!("VST state save failed: {error}"));
+    }
+}
+
+pub(super) fn save_vst_state_checked(
+    plugin: &Arc<Mutex<PluginBackend>>,
+    entry: &VstPluginEntry,
+) -> Result<(), String> {
     #[cfg(all(target_os = "windows", target_pointer_width = "64"))]
     {
         let mut guard = plugin.lock();
         if let PluginBackend::Remote { instance } = &mut *guard {
-            match instance.save_state() {
-                Ok(()) => background_log(
-                    "info",
-                    format!("VST state saved inside x86 worker for {}", entry.id),
-                ),
-                Err(error) => background_log(
-                    "error",
-                    format!("Failed to save VST state in x86 worker: {error}"),
-                ),
+            instance.save_state()?;
+            if let Some(path) = state_path_for_plugin(entry).map(|p| p.with_extension("live.json"))
+            {
+                if path.exists() {
+                    std::fs::remove_file(path).map_err(|e| e.to_string())?;
+                }
             }
-            return;
+            return Ok(());
         }
     }
     let Some(state_path) = state_path_for_plugin(entry) else {
         background_log("warn", "Could not determine VST state path");
-        return;
+        return Err("VST state unavailable".into());
     };
     let Some(document) = capture_document(&mut plugin.lock(), entry) else {
         background_log(
             "debug",
             "VST state not saved (no persistent state available)",
         );
-        return;
+        return Err("VST state unavailable".into());
     };
     let parameter_count = document.parameters.len();
     let native_bytes =
         document.vst2_bank.len() + document.vst2_preset.len() + document.vst3_state.len();
     let payload = encode_state_document(&document);
     if let Err(error) = crate::atomic_file::write_atomically(&state_path, &payload) {
-        background_log("error", format!("Failed to save VST state: {error}"));
+        return Err(error.to_string());
     } else {
         background_log(
             "info",
@@ -633,6 +639,11 @@ pub(super) fn save_vst_state_blocking(plugin: &Arc<Mutex<PluginBackend>>, entry:
             ),
         );
     }
+    let sidecar = state_path.with_extension("live.json");
+    if sidecar.exists() {
+        std::fs::remove_file(sidecar).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 fn apply_vst3_parameters(instance: &mut rack::vst3::Vst3Plugin, saved: &[StateParameter]) {

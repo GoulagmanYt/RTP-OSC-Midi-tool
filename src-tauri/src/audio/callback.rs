@@ -130,6 +130,21 @@ fn audio_callback<T: Sample + FromSample<f32>>(
     info: &OutputCallbackInfo,
 ) {
     let callback_started = Instant::now();
+    let now = crate::vst_worker::protocol::monotonic_qpc();
+    let previous = state
+        .telemetry
+        .callback_last_qpc
+        .swap(now, Ordering::Relaxed);
+    state
+        .telemetry
+        .callback_count
+        .fetch_add(1, Ordering::Relaxed);
+    if previous != 0 {
+        state.telemetry.callback_interval_max_us.fetch_max(
+            crate::vst_worker::protocol::qpc_elapsed_us(previous, now),
+            Ordering::Relaxed,
+        );
+    }
     let timestamp = info.timestamp();
     let backend_latency = timestamp
         .playback
@@ -209,6 +224,11 @@ fn audio_callback<T: Sample + FromSample<f32>>(
 
     match &mut *plugin {
         PluginBackend::Vst2 { instance, time } => {
+            state.drain_parameter_commands();
+            let parameters = instance.get_parameter_object();
+            for command in &state.parameter_commands {
+                parameters.set_parameter(command.index as i32, command.value);
+            }
             if state.last_frames != frames {
                 // instance.set_block_size(frames as i64); // Removed to prevent VST reset during playback
                 state
@@ -305,11 +325,25 @@ fn audio_callback<T: Sample + FromSample<f32>>(
                 state.last_frames = frames;
             }
             let dsp_started = Instant::now();
+            let healthy = instance.realtime_health();
+            state
+                .telemetry
+                .x86_underruns
+                .store(healthy.0, Ordering::Relaxed);
+            state
+                .telemetry
+                .x86_overruns
+                .store(healthy.1, Ordering::Relaxed);
+            state
+                .telemetry
+                .x86_alive
+                .store(healthy.2, Ordering::Relaxed);
             if !instance.process(
                 &mut state.pending_midi,
                 &state.parameter_commands,
                 &mut state.outputs,
                 frames,
+                Some(&state.telemetry),
             ) {
                 state.telemetry.xruns.fetch_add(1, Ordering::Relaxed);
                 replay_output_or_silence(data, device_channels, silence, state);

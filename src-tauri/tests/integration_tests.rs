@@ -20,6 +20,7 @@ fn test_audio_engine_lifecycle() {
 
     // Test de configuration audio valide
     let settings = AudioSettings {
+        game_mode: true,
         enabled: true,
         backend: Some("auto".to_string()),
         device: None,
@@ -55,6 +56,8 @@ fn test_bridge_midi_flow() {
 
     // Test de création de frames MIDI
     let test_frame = MidiFrame {
+        generation: MidiFrame::current_generation(),
+        ingress_qpc: osc_midi_bridge::vst_worker::protocol::monotonic_qpc(),
         data: smallvec::SmallVec::from_slice(&[0x90, 60, 100]), // Note On C4
         source: Arc::from("test"),
     };
@@ -140,6 +143,8 @@ fn test_bridge_stress() {
         while start.elapsed() < Duration::from_millis(100) {
             // Simuler injection MIDI (ne fera rien si bridge pas démarré)
             let _frame = MidiFrame {
+                generation: MidiFrame::current_generation(),
+                ingress_qpc: osc_midi_bridge::vst_worker::protocol::monotonic_qpc(),
                 data: smallvec::SmallVec::from_slice(&[0x90, (count % 128) as u8, 100]),
                 source: Arc::from("stress_test"),
             };

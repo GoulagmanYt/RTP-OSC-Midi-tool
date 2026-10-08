@@ -5,6 +5,7 @@ use super::{
     pipeline::try_enqueue_midi_frame,
     status::{enrich_status_from_runtime, refresh_runtime_status},
 };
+use crate::midi_queue::Sender;
 use crate::{
     audio::AudioEngine,
     config::Config,
@@ -14,7 +15,6 @@ use crate::{
     rtp::{rtp_advertisement::RtpAdvertisementStatus, RtpRemoteTarget, RtpServer},
     types::{BridgeStatus, RtpParticipantInfo},
 };
-use crossbeam_channel::Sender;
 use parking_lot::Mutex;
 use smallvec::SmallVec;
 use std::{
@@ -151,6 +151,8 @@ impl BridgeHandle {
                 let _ = try_enqueue_midi_frame(
                     &tx,
                     MidiFrame {
+                        generation: MidiFrame::current_generation(),
+                        ingress_qpc: crate::vst_worker::protocol::monotonic_qpc(),
                         data: off,
                         source: std::sync::Arc::from(source.as_str()),
                     },
@@ -255,6 +257,8 @@ impl BridgeHandle {
             try_enqueue_midi_frame(
                 &tx,
                 MidiFrame {
+                    generation: MidiFrame::current_generation(),
+                    ingress_qpc: crate::vst_worker::protocol::monotonic_qpc(),
                     data,
                     source: std::sync::Arc::from(source.as_str()),
                 },

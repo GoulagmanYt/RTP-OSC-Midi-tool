@@ -7,6 +7,7 @@ use super::{
     runtime::{BridgeRuntime, RtpConfigSnapshot},
     status::build_initial_status,
 };
+use crate::midi_queue::Sender;
 use crate::{
     audio::AudioEngine,
     config::{Config, RTP_VIRTUAL_INPUT},
@@ -17,7 +18,6 @@ use crate::{
     rtp::RtpServer,
     types::{MidiNoteEvent, RtpParticipantInfo},
 };
-use crossbeam_channel::Sender;
 use parking_lot::Mutex;
 use std::{
     sync::{
@@ -127,7 +127,7 @@ pub(super) fn start_runtime(
     let wants_rtp = rtp_requested(&config);
     let mut status = build_initial_status(&config, &audio, wants_rtp);
 
-    use crossbeam_channel::bounded;
+    use crate::midi_queue::bounded;
     let stop = Arc::new(AtomicBool::new(false));
     let (midi_tx, midi_rx) = bounded::<MidiFrame>(BRIDGE_MIDI_QUEUE_CAPACITY);
     let (midi_event_tx, midi_event_rx) = bounded::<MidiNoteEvent>(1024);

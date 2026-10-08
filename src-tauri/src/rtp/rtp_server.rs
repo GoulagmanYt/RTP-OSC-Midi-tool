@@ -1,4 +1,4 @@
-use crossbeam_channel::Sender;
+use crate::midi_queue::Sender;
 use parking_lot::Mutex;
 use std::collections::BinaryHeap;
 use std::net::SocketAddr;
@@ -7,9 +7,10 @@ use std::sync::{
     Arc,
 };
 use std::time::{Duration, Instant};
-use tauri::async_runtime::{self, JoinHandle};
+use tauri::async_runtime;
 use tauri::Emitter;
-use tokio::sync::{mpsc, oneshot, Notify};
+use tokio::sync::{oneshot, Notify};
+use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use rtpmidi::sessions::{
@@ -67,7 +68,8 @@ struct RemoteTargetState {
 }
 
 pub struct RtpServer {
-    outgoing: mpsc::Sender<super::rtp_output::OutgoingFrame>,
+    _runtime: crate::realtime::MidiRuntime,
+    outgoing: crate::midi_queue::AsyncSender<super::rtp_output::OutgoingFrame>,
     stop_tx: Option<oneshot::Sender<()>>,
     handle: JoinHandle<()>,
     bound_port: u16,
@@ -91,7 +93,12 @@ impl RtpServer {
             return Err("Port RTP invalide: 65535 reserve".to_string());
         }
 
-        let (session, bound_port) = safe_block_on(async {
+        let runtime = crate::realtime::MidiRuntime::new("rtp-network")?;
+        let session_name = name.clone();
+        let setup_logger = logger.clone();
+        let (session, bound_port) = safe_block_on(runtime.spawn(async move {
+            let name = session_name;
+            let logger = setup_logger;
             let ssrc = (Uuid::new_v4().as_u128() & 0xFFFF_FFFF) as u32;
             let try_ports = [0u16, 2, 4]
                 .into_iter()
@@ -151,7 +158,8 @@ impl RtpServer {
                 }
             }
             Err("Impossible de démarrer RTP-MIDI (ports occupés)".to_string())
-        })?;
+        }))
+        .map_err(|error| error.to_string())??;
 
         logger.info(format!(
             "Serveur RTP-MIDI \"{name}\" ouvert sur ports {}/{} (control/data)",
@@ -180,18 +188,19 @@ impl RtpServer {
         let notify_for_left = notify.clone();
         emit_participants(&logger, &participants);
 
-        let (outgoing, outgoing_rx) = mpsc::channel(2048);
-        let handle = async_runtime::spawn(async move {
+        let (outgoing, outgoing_rx) = crate::midi_queue::async_channel(2048);
+        let handle = runtime.spawn(async move {
             let (sender_stop, sender_cancelled) = oneshot::channel();
             let mut sender_stop = Some(sender_stop);
-            let mut sender_task = async_runtime::spawn(super::rtp_output::run(
+            let mut sender_task = tokio::spawn(super::rtp_output::run(
                 session.clone(),
                 outgoing_rx,
                 sender_cancelled,
             ));
-            let (scheduled_tx, scheduled_rx) = mpsc::channel(RTP_SCHEDULER_CAPACITY);
+            let (scheduled_tx, scheduled_rx) =
+                crate::midi_queue::async_channel(RTP_SCHEDULER_CAPACITY);
             let scheduler =
-                async_runtime::spawn(run_rtp_scheduler(scheduled_rx, midi_sink, logger.clone()));
+                tokio::spawn(run_rtp_scheduler(scheduled_rx, midi_sink, logger.clone()));
             // ── Listener MIDI ────────────────────────────────────────────────
             // HOT PATH : ce callback est appelé sur chaque message reçu.
             // Règles :
@@ -206,18 +215,19 @@ impl RtpServer {
             let sysex_source = rtp_source.clone();
             session
                 .add_listener(TimestampedSysExEvent, move |event| {
-                    let Some(frame) =
+                    let Some(mut frame) =
                         MidiFrame::sysex_realtime(event.payload, sysex_source.clone())
                     else {
                         record_rtp_drop();
                         request_critical_midi_reset();
                         return;
                     };
+                    frame.ingress_qpc = crate::vst_worker::protocol::qpc_at(event.received_at);
                     if sysex_tx
                         .try_send(TimedRtpFrame {
+                            generation: frame.generation,
                             frame,
                             deadline: event.deadline,
-                            generation: midi_reset_generation(),
                             order: 0,
                         })
                         .is_err()
@@ -250,13 +260,16 @@ impl RtpServer {
                         });
                     }
 
+                    let generation = MidiFrame::current_generation();
                     let timed = TimedRtpFrame {
                         frame: MidiFrame {
+                            generation,
+                            ingress_qpc: crate::vst_worker::protocol::qpc_at(event.received_at),
                             data: bytes,
                             source: std::sync::Arc::clone(&rtp_source),
                         },
                         deadline: event.deadline,
-                        generation: midi_reset_generation(),
+                        generation,
                         order: 0,
                     };
                     if let Err(error) = scheduled_tx.try_send(timed) {
@@ -314,6 +327,8 @@ impl RtpServer {
             let loss_logger = logger.clone();
             session
                 .add_listener(PacketLossEvent, move |loss| {
+                    crate::realtime::RTP_LOST_PACKETS
+                        .fetch_add(u64::from(loss.lost_packets), Ordering::Relaxed);
                     // RFC 6295 recovery journals are not emitted by every peer. A
                     // deterministic controller reset is safer than leaving notes or
                     // sustain latched after a proven RTP sequence gap.
@@ -420,6 +435,7 @@ impl RtpServer {
         });
 
         Ok(Self {
+            _runtime: runtime,
             outgoing,
             stop_tx: Some(stop_tx),
             handle,
@@ -439,7 +455,9 @@ impl RtpServer {
         let _ = self.handle.await;
     }
 
-    pub(crate) fn outgoing(&self) -> mpsc::Sender<super::rtp_output::OutgoingFrame> {
+    pub(crate) fn outgoing(
+        &self,
+    ) -> crate::midi_queue::AsyncSender<super::rtp_output::OutgoingFrame> {
         self.outgoing.clone()
     }
 
@@ -484,7 +502,7 @@ impl Ord for TimedRtpFrame {
 }
 
 async fn run_rtp_scheduler(
-    mut receiver: mpsc::Receiver<TimedRtpFrame>,
+    mut receiver: crate::midi_queue::AsyncReceiver<TimedRtpFrame>,
     sink: Arc<arc_swap::ArcSwapOption<Sender<MidiFrame>>>,
     logger: FrontendLogger,
 ) {
@@ -498,7 +516,10 @@ async fn run_rtp_scheduler(
             generation = current;
         }
         let now = Instant::now();
-        while pending.peek().is_some_and(|event| event.deadline <= now) {
+        for _ in 0..256 {
+            if pending.peek().is_none_or(|event| event.deadline > now) {
+                break;
+            }
             let event = pending.pop().expect("peeked scheduled frame");
             if event.generation != midi_reset_generation() {
                 continue;
@@ -514,7 +535,11 @@ async fn run_rtp_scheduler(
             event = receiver.recv() => {
                 let Some(mut event) = event else { break; };
                 if event.generation != midi_reset_generation() { continue; }
-                if pending.len() == RTP_PENDING_CAPACITY || event.deadline > Instant::now() + RTP_MAX_SCHEDULE_AHEAD {
+                // Observe recovery before admitting this new generation; otherwise
+                // the next scheduler turn would clear a freshly admitted event.
+                if event.generation != generation { pending.clear(); generation = event.generation; }
+                let limit = if is_critical_release_message(&event.frame.data) { RTP_PENDING_CAPACITY } else { RTP_PENDING_CAPACITY - crate::realtime::reserve(RTP_PENDING_CAPACITY) };
+                if pending.len() >= limit || event.deadline > Instant::now() + RTP_MAX_SCHEDULE_AHEAD {
                     DROPPED_MIDI_COUNT.fetch_add(1, Ordering::Relaxed);
                     if is_critical_release_message(&event.frame.data) { request_critical_midi_reset(); }
                     continue;
@@ -559,6 +584,12 @@ fn emit_participants(logger: &FrontendLogger, participants: &Arc<Mutex<Vec<RtpPa
     let _ = logger.app_handle().emit(RTP_PARTICIPANTS_EVENT, snapshot);
 }
 
+impl crate::midi_queue::Priority for TimedRtpFrame {
+    fn critical(&self) -> bool {
+        crate::midi::is_critical_release_message(self.frame.data.as_slice())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -566,8 +597,8 @@ mod tests {
     #[test]
     fn scheduler_routes_during_concurrent_publication_without_contention_drops() {
         let _guard = crate::bridge::pipeline::TEST_PIPELINE_LOCK.lock().unwrap();
-        let (first_tx, first_rx) = crossbeam_channel::bounded(1000);
-        let (second_tx, second_rx) = crossbeam_channel::bounded(1000);
+        let (first_tx, first_rx) = crate::midi_queue::bounded(1000);
+        let (second_tx, second_rx) = crate::midi_queue::bounded(1000);
         let first_tx = Arc::new(first_tx);
         let second_tx = Arc::new(second_tx);
         let sink = Arc::new(arc_swap::ArcSwapOption::from(Some(first_tx.clone())));
@@ -583,6 +614,8 @@ mod tests {
             dispatch_scheduled_frame(
                 &sink,
                 MidiFrame {
+                    generation: MidiFrame::current_generation(),
+                    ingress_qpc: crate::vst_worker::protocol::monotonic_qpc(),
                     data: smallvec::smallvec![0x80, 60, 0],
                     source: Arc::from("RTP:test"),
                 },
@@ -600,6 +633,8 @@ mod tests {
         for order in [2, 0, 1] {
             heap.push(TimedRtpFrame {
                 frame: MidiFrame {
+                    generation: MidiFrame::current_generation(),
+                    ingress_qpc: crate::vst_worker::protocol::monotonic_qpc(),
                     data: smallvec::smallvec![0x90, 60, 1],
                     source: Arc::from("test"),
                 },

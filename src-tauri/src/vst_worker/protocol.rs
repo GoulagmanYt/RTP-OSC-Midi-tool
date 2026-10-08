@@ -5,12 +5,12 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::{audio::AudioSettings, config::VstEqSettings, types::VstParameter};
 
-// Version 8 requires ordered, in-band emergency resets on the MIDI pipe.
-pub const CONTROL_PROTOCOL_VERSION: u32 = 8;
+// Version 9 carries game-mode health and ingress timestamps.
+pub const CONTROL_PROTOCOL_VERSION: u32 = 9;
 pub const HOST_ABI_VERSION: u32 = crate::types::VST_HOST_ABI_VERSION;
 pub const MAX_CONTROL_FRAME_BYTES: usize = 1024 * 1024;
 pub const MAX_MIDI_BYTES: usize = 3;
-const MIDI_FRAME_BYTES: usize = 8 + 8 + 1 + MAX_MIDI_BYTES;
+pub const MIDI_FRAME_BYTES: usize = 8 + 8 + 8 + 1 + MAX_MIDI_BYTES;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -34,6 +34,30 @@ pub struct WorkerAudioStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkerMetrics {
+    #[serde(default)]
+    pub midi_transport_failed: bool,
+    #[serde(default)]
+    pub pipe_wait_max_us: u64,
+    #[serde(default)]
+    pub audio_wait_max_us: u64,
+    #[serde(default)]
+    pub midi_io_threads: Vec<crate::realtime::ThreadDiagnostics>,
+    #[serde(default)]
+    pub midi_delivery_max_us: u64,
+    #[serde(default)]
+    pub midi_delivery_p99_us: u64,
+    #[serde(default)]
+    pub callback_count: u64,
+    #[serde(default)]
+    pub callback_interval_max_us: u64,
+    #[serde(default)]
+    pub game_mode: bool,
+    #[serde(default)]
+    pub maintenance: bool,
+    #[serde(default)]
+    pub deferred_save: bool,
+    #[serde(default)]
+    pub deferred_editor: Option<bool>,
     pub audio_peak_l: f32,
     pub audio_peak_r: f32,
     pub audio_xruns: u32,
@@ -101,6 +125,10 @@ pub enum ControlMessage {
         request_id: u64,
         settings: VstEqSettings,
     },
+    SetGameMode {
+        request_id: u64,
+        enabled: bool,
+    },
     SaveState {
         request_id: u64,
     },
@@ -145,6 +173,9 @@ pub enum ControlMessage {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MidiWireFrame {
+    /// Local admission epoch, never transmitted: the in-band reset carries it across processes.
+    pub generation: u64,
+    pub pipe_qpc: u64,
     pub sequence: u64,
     pub monotonic_qpc: u64,
     pub len: u8,
@@ -162,6 +193,8 @@ impl MidiWireFrame {
             return None;
         }
         Some(Self {
+            generation: 0,
+            pipe_qpc: 0,
             sequence,
             monotonic_qpc,
             len: bytes.len() as u8,
@@ -177,13 +210,14 @@ impl MidiWireFrame {
         let mut encoded = [0u8; MIDI_FRAME_BYTES];
         encoded[0..8].copy_from_slice(&self.sequence.to_le_bytes());
         encoded[8..16].copy_from_slice(&self.monotonic_qpc.to_le_bytes());
-        encoded[16] = self.len;
-        encoded[17..20].copy_from_slice(&self.data);
+        encoded[16..24].copy_from_slice(&self.pipe_qpc.to_le_bytes());
+        encoded[24] = self.len;
+        encoded[25..28].copy_from_slice(&self.data);
         encoded
     }
 
     pub fn decode(encoded: [u8; MIDI_FRAME_BYTES]) -> io::Result<Self> {
-        let len = encoded[16];
+        let len = encoded[24];
         if len == 0 || len as usize > MAX_MIDI_BYTES {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -195,7 +229,7 @@ impl MidiWireFrame {
         let mut qpc = [0u8; 8];
         qpc.copy_from_slice(&encoded[8..16]);
         let mut data = [0u8; MAX_MIDI_BYTES];
-        data.copy_from_slice(&encoded[17..20]);
+        data.copy_from_slice(&encoded[25..28]);
         if data[0] == 0xF0
             || data[usize::from(len)..].iter().any(|byte| *byte != 0)
             || !crate::midi::normalize_message(&mut data[..usize::from(len)])
@@ -206,6 +240,8 @@ impl MidiWireFrame {
             ));
         }
         Ok(Self {
+            generation: 0,
+            pipe_qpc: u64::from_le_bytes(encoded[16..24].try_into().unwrap()),
             sequence: u64::from_le_bytes(sequence),
             monotonic_qpc: u64::from_le_bytes(qpc),
             len,
@@ -302,6 +338,13 @@ fn qpc_frequency() -> u64 {
     1_000_000_000
 }
 
+pub fn qpc_at(instant: Instant) -> u64 {
+    let elapsed = instant.elapsed().as_nanos();
+    monotonic_qpc().saturating_sub(
+        ((elapsed * u128::from(qpc_frequency())) / 1_000_000_000).min(u64::MAX as u128) as u64,
+    )
+}
+
 pub fn qpc_elapsed_us(earlier: u64, later: u64) -> u64 {
     let ticks = later.saturating_sub(earlier) as u128;
     ((ticks * 1_000_000) / u128::from(qpc_frequency())).min(u64::MAX as u128) as u64
@@ -333,10 +376,10 @@ mod tests {
         let zero_velocity = MidiWireFrame::new(1, 1, &[0x91, 60, 0]).unwrap();
         assert_eq!(zero_velocity.bytes(), &[0x81, 60, 0]);
         let mut truncated = frame.encode();
-        truncated[16] = 2;
+        truncated[24] = 2;
         assert!(MidiWireFrame::decode(truncated).is_err());
         let mut bad_data = frame.encode();
-        bad_data[18] = 128;
+        bad_data[26] = 128;
         assert!(MidiWireFrame::decode(bad_data).is_err());
     }
 
@@ -381,6 +424,27 @@ mod tests {
         );
         write_result.unwrap();
         assert_eq!(read_result.unwrap(), message);
+    }
+
+    #[tokio::test]
+    async fn complete_frames_survive_bytewise_delivery_and_unrelated_wakeups() {
+        let (mut writer, reader) = tokio::io::duplex(1);
+        let first = MidiWireFrame::new(1, 10, &[0x90, 60, 100]).unwrap();
+        let second = MidiWireFrame::new(2, 20, &[0x80, 60, 0]).unwrap();
+        let receiving = tokio::spawn(async move {
+            let mut reader = reader;
+            (
+                read_midi_frame(&mut reader).await.unwrap(),
+                read_midi_frame(&mut reader).await.unwrap(),
+            )
+        });
+        for frame in [first, second] {
+            for byte in frame.encode() {
+                writer.write_all(&[byte]).await.unwrap();
+                tokio::task::yield_now().await;
+            }
+        }
+        assert_eq!(receiving.await.unwrap(), (first, second));
     }
 
     #[tokio::test]

@@ -5,6 +5,10 @@ pub const NOTE_MAX: u8 = 108;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MidiFrame {
+    #[serde(default = "MidiFrame::current_generation")]
+    pub generation: u64,
+    #[serde(default)]
+    pub ingress_qpc: u64,
     pub data: smallvec::SmallVec<[u8; 32]>,
     pub source: std::sync::Arc<str>,
 }
@@ -32,6 +36,10 @@ pub(crate) fn initialize_midi_buffers() {
 }
 
 impl MidiFrame {
+    #[doc(hidden)]
+    pub fn current_generation() -> u64 {
+        crate::bridge::pipeline::midi_reset_generation()
+    }
     /// Bounded, fallible copy for processing paths. Ordinary messages stay inline.
     /// Large messages borrow reserved storage and fail explicitly on exhaustion.
     pub(crate) fn copy_realtime(bytes: &[u8], source: std::sync::Arc<str>) -> Option<Self> {
@@ -43,11 +51,19 @@ impl MidiFrame {
             return None;
         };
         data.extend_from_slice(bytes);
-        Some(Self { data, source })
+        Some(Self {
+            generation: Self::current_generation(),
+            data,
+            source,
+            ingress_qpc: crate::vst_worker::protocol::monotonic_qpc(),
+        })
     }
 
     pub(crate) fn clone_realtime(&self) -> Option<Self> {
-        Self::copy_realtime(&self.data, self.source.clone())
+        let mut copy = Self::copy_realtime(&self.data, self.source.clone())?;
+        copy.ingress_qpc = self.ingress_qpc;
+        copy.generation = self.generation;
+        Some(copy)
     }
 
     pub(crate) fn sysex_realtime(payload: &[u8], source: std::sync::Arc<str>) -> Option<Self> {
@@ -307,6 +323,8 @@ mod tests {
                 let status = if i % 2 == 0 { 0x90 } else { 0x80 };
                 let velocity = if status == 0x90 { 100 } else { 0 };
                 tx.send(MidiFrame {
+                    generation: MidiFrame::current_generation(),
+                    ingress_qpc: crate::vst_worker::protocol::monotonic_qpc(),
                     data: smallvec::SmallVec::from_slice(&[status, note, velocity]),
                     source: std::sync::Arc::from("stress"),
                 })

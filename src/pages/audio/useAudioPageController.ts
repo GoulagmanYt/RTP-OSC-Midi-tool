@@ -179,6 +179,11 @@ export function useAudioPageController() {
       try {
         await updateConfig({ audio: patch });
         if (!shouldRestart) {
+          if (patch.gameMode !== undefined) {
+            await saveConfigApi(updated);
+            if (patch.gameMode) setVstUiOpen(false);
+            await refreshStatus();
+          }
           return;
         }
         await saveConfigApi(updated);
@@ -319,8 +324,9 @@ export function useAudioPageController() {
   const handleOpenVstUi = async () => {
     try {
       await openVstUi();
-      setVstUiOpen(true);
-      toast.success(t("toasts.audio.vstOpened"));
+      setVstUiOpen(!(config?.audio.gameMode ?? true));
+      toast.success(t((config?.audio.gameMode ?? true) ? "audio.deferredOperations" : "toasts.audio.vstOpened"));
+      await refreshStatus();
     } catch (e) {
       const message = getErrorMessage(e);
       toast.error(message || t("toasts.audio.vstOpenFailed"));

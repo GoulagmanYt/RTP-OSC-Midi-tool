@@ -6,6 +6,7 @@ use super::{
         take_critical_midi_reset_request, update_pipeline_queue_depth, ConfigSnapshot,
     },
 };
+use crate::midi_queue::{bounded, generation_action, GenerationAction, Receiver, Sender};
 use crate::{
     audio::AudioEngine,
     config::Config,
@@ -14,7 +15,7 @@ use crate::{
     osc::OscClient,
     types::MidiNoteEvent,
 };
-use crossbeam_channel::{bounded, Receiver, RecvTimeoutError, Sender};
+use crossbeam_channel::RecvTimeoutError;
 use midir::MidiOutputConnection;
 use parking_lot::Mutex;
 use std::{
@@ -32,9 +33,17 @@ const MIDI_NOTE_EVENT: &str = "midi:note";
 const FANOUT_QUEUE_CAPACITY: usize = super::lifecycle::BRIDGE_MIDI_QUEUE_CAPACITY;
 const PROCESSING_BATCH_LIMIT: usize = 256;
 
+fn spawn_named(name: &str, run: impl FnOnce() + Send + 'static) -> thread::JoinHandle<()> {
+    thread::Builder::new()
+        .name(name.into())
+        .spawn(run)
+        .expect("routing thread creation")
+}
+
 struct FanoutFrame {
     frame: MidiFrame,
     generation: u64,
+    route_generation: u64,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -54,7 +63,7 @@ pub(super) fn spawn_processing_loop(
     midi_event_tx: Sender<MidiNoteEvent>,
     rtp_output: crate::rtp::rtp_output::RtpOutputRoute,
 ) -> thread::JoinHandle<()> {
-    thread::spawn(move || {
+    spawn_named("midi-routing", move || {
         processing_loop(
             shared_config,
             config_rev,
@@ -131,17 +140,18 @@ fn processing_loop(
     let mut sustain_pressed_state = [None; 16];
     let mut unused_midi_out = None;
     let mut unused_notes = crate::midi::ActiveNotes::default();
+    let mut generation = midi_reset_generation();
+    let mut pending = None;
 
     while !stop.load(Ordering::Relaxed) {
-        if take_critical_midi_reset_request() {
+        let observed_generation = midi_reset_generation();
+        let _ = take_critical_midi_reset_request();
+        if generation != observed_generation {
+            generation = observed_generation;
             // Invalidate queued work before allowing new notes after the reset.
-            for _ in 0..midi_rx.len() {
-                let _ = midi_rx.try_recv();
-            }
             audio.request_emergency_midi_reset();
             panic_revision.fetch_add(1, Ordering::AcqRel);
         }
-        let generation = midi_reset_generation();
         let rev_now = config_rev.load(Ordering::Relaxed);
         if rev_now != cached_rev {
             let cfg = shared_config.lock().clone();
@@ -154,11 +164,25 @@ fn processing_loop(
 
         // Batch-drain the bounded input queue. Audio injection happens first;
         // OSC and MIDI Thru are dispatched to independent bounded workers.
-        let first = midi_rx.recv_timeout(Duration::from_millis(1));
+        let first = pending
+            .take()
+            .map_or_else(|| midi_rx.recv_timeout(Duration::from_millis(1)), Ok);
         match first {
             Ok(frame) => {
-                if stop.load(Ordering::Relaxed) || generation != midi_reset_generation() {
-                    continue;
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                match generation_action(
+                    (frame.generation, 0),
+                    (generation, 0),
+                    (midi_reset_generation(), 0),
+                ) {
+                    GenerationAction::Discard => continue,
+                    GenerationAction::Defer => {
+                        pending = Some(frame);
+                        continue;
+                    }
+                    GenerationAction::Ready => {}
                 }
                 update_pipeline_queue_depth(midi_rx.len());
                 record_activity(&activity, &frame);
@@ -183,6 +207,7 @@ fn processing_loop(
                     false,
                     false,
                     &mut unused_notes,
+                    None,
                 );
                 if snapshot.midi_thru {
                     send_fanout(&midi_thru_tx, midi_thru_frame, generation, true);
@@ -196,6 +221,18 @@ fn processing_loop(
                     let Ok(frame) = midi_rx.try_recv() else {
                         break;
                     };
+                    match generation_action(
+                        (frame.generation, 0),
+                        (generation, 0),
+                        (midi_reset_generation(), 0),
+                    ) {
+                        GenerationAction::Discard => continue,
+                        GenerationAction::Defer => {
+                            pending = Some(frame);
+                            break;
+                        }
+                        GenerationAction::Ready => {}
+                    }
                     update_pipeline_queue_depth(midi_rx.len());
                     record_activity(&activity, &frame);
                     let Some((midi_thru_frame, osc_frame)) =
@@ -219,6 +256,7 @@ fn processing_loop(
                         false,
                         false,
                         &mut unused_notes,
+                        None,
                     );
                     if snapshot.midi_thru {
                         send_fanout(&midi_thru_tx, midi_thru_frame, generation, true);
@@ -244,13 +282,17 @@ fn processing_loop(
 }
 
 fn send_fanout(tx: &Sender<FanoutFrame>, frame: MidiFrame, generation: u64, carries_output: bool) {
-    if let Err(error) = tx.try_send(FanoutFrame { frame, generation }) {
+    if let Err(error) = tx.try_send(FanoutFrame {
+        frame,
+        generation,
+        route_generation: tx.recovery().generation(),
+    }) {
         let lost = error.into_inner();
         record_fanout_drop();
         // The OSC worker also feeds the UI when OSC is disabled. Losing a UI
         // update must never silence audio or release the sustain pedal.
         if carries_output && is_critical_release_message(lost.frame.data.as_slice()) {
-            request_critical_midi_reset();
+            tx.recovery().request_reset();
         }
     }
 }
@@ -280,7 +322,7 @@ fn spawn_midi_thru_worker(
     osc_counter: Arc<AtomicU32>,
     midi_event_tx: Sender<MidiNoteEvent>,
 ) -> thread::JoinHandle<()> {
-    thread::spawn(move || {
+    spawn_named("midi-thru", move || {
         let _priority = crate::audio::windows_tuning::prioritize_midi_thread();
         let initial = shared_config.lock().clone();
         let mut snapshot = ConfigSnapshot::from(&initial);
@@ -292,6 +334,8 @@ fn spawn_midi_thru_worker(
         let mut sustain = [None; 16];
         let mut active_notes = crate::midi::ActiveNotes::default();
         let mut cached_generation = midi_reset_generation();
+        let mut route_generation = rx.recovery().generation();
+        let mut pending = None;
         if let Some(out) = midi_out.as_mut() {
             flush_midi_output(out, &mut active_notes, &logger);
         }
@@ -299,8 +343,10 @@ fn spawn_midi_thru_worker(
             let current_panic_revision = panic_revision.load(Ordering::Acquire);
             if current_panic_revision != cached_panic_revision
                 || cached_generation != midi_reset_generation()
+                || route_generation != rx.recovery().generation()
             {
                 cached_generation = midi_reset_generation();
+                route_generation = rx.recovery().generation();
                 if let Some(out) = midi_out.as_mut() {
                     flush_midi_output(out, &mut active_notes, &logger);
                 }
@@ -345,12 +391,22 @@ fn spawn_midi_thru_worker(
                 }
                 next_output_reconnect = std::time::Instant::now() + output_reconnect_backoff;
             }
-            match rx.recv_timeout(Duration::from_millis(5)) {
+            match pending
+                .take()
+                .map_or_else(|| rx.recv_timeout(Duration::from_millis(5)), Ok)
+            {
                 Ok(envelope) => {
-                    if envelope.generation != cached_generation
-                        || cached_generation != midi_reset_generation()
-                    {
-                        continue;
+                    match generation_action(
+                        (envelope.generation, envelope.route_generation),
+                        (cached_generation, route_generation),
+                        (midi_reset_generation(), rx.recovery().generation()),
+                    ) {
+                        GenerationAction::Discard => continue,
+                        GenerationAction::Defer => {
+                            pending = Some(envelope);
+                            continue;
+                        }
+                        GenerationAction::Ready => {}
                     }
                     let frame = envelope.frame;
                     let deliver_external = !frame.source.starts_with("StressTest");
@@ -368,6 +424,7 @@ fn spawn_midi_thru_worker(
                         deliver_external,
                         false,
                         &mut active_notes,
+                        Some(rx.recovery()),
                     );
                     if midi_out.is_none() {
                         *actual_midi_out.lock() = None;
@@ -395,7 +452,7 @@ fn spawn_osc_worker(
     osc_counter: Arc<AtomicU32>,
     midi_event_tx: Sender<MidiNoteEvent>,
 ) -> thread::JoinHandle<()> {
-    thread::spawn(move || {
+    spawn_named("osc-send", move || {
         let _priority = crate::audio::windows_tuning::prioritize_midi_thread();
         let initial = shared_config.lock().clone();
         let mut snapshot = ConfigSnapshot::from(&initial);
@@ -405,11 +462,14 @@ fn spawn_osc_worker(
         let mut sustain = [None; 16];
         let mut active_notes = crate::midi::ActiveNotes::default();
         let mut cached_generation = midi_reset_generation();
+        let mut route_generation = rx.recovery().generation();
+        let mut pending = None;
         let mut no_midi_out = None;
         let mut reset_pending = false;
         while !stop.load(Ordering::Relaxed) {
             let generation = midi_reset_generation();
-            if cached_generation != generation {
+            if cached_generation != generation || route_generation != rx.recovery().generation() {
+                route_generation = rx.recovery().generation();
                 cached_generation = generation;
                 reset_pending = true;
                 sustain.fill(None);
@@ -434,12 +494,22 @@ fn spawn_osc_worker(
                 cached_rev = observed_rev;
             }
             update_osc_client(&snapshot, &logger, &mut osc_client, &mut current_target);
-            match rx.recv_timeout(Duration::from_millis(5)) {
+            match pending
+                .take()
+                .map_or_else(|| rx.recv_timeout(Duration::from_millis(5)), Ok)
+            {
                 Ok(envelope) => {
-                    if envelope.generation != cached_generation
-                        || cached_generation != midi_reset_generation()
-                    {
-                        continue;
+                    match generation_action(
+                        (envelope.generation, envelope.route_generation),
+                        (cached_generation, route_generation),
+                        (midi_reset_generation(), rx.recovery().generation()),
+                    ) {
+                        GenerationAction::Discard => continue,
+                        GenerationAction::Defer => {
+                            pending = Some(envelope);
+                            continue;
+                        }
+                        GenerationAction::Ready => {}
                     }
                     let frame = envelope.frame;
                     let deliver_external = !frame.source.starts_with("StressTest");
@@ -457,6 +527,7 @@ fn spawn_osc_worker(
                         false,
                         deliver_external,
                         &mut active_notes,
+                        Some(rx.recovery()),
                     )
                 }
                 Err(RecvTimeoutError::Timeout) => {}
@@ -513,7 +584,7 @@ pub(super) fn spawn_midi_event_emitter(
     window: Window,
     rx: Receiver<MidiNoteEvent>,
 ) -> thread::JoinHandle<()> {
-    thread::spawn(move || {
+    spawn_named("midi-ui-events", move || {
         while !stop.load(Ordering::Relaxed) {
             match rx.recv_timeout(Duration::from_millis(50)) {
                 Ok(event) => {
@@ -526,6 +597,12 @@ pub(super) fn spawn_midi_event_emitter(
     })
 }
 
+impl crate::midi_queue::Priority for FanoutFrame {
+    fn critical(&self) -> bool {
+        crate::midi::is_critical_release_message(self.frame.data.as_slice())
+    }
+}
+
 #[cfg(test)]
 mod recovery_tests {
     use super::*;
@@ -533,6 +610,8 @@ mod recovery_tests {
 
     fn note(status: u8, channel: u8, pitch: u8) -> MidiFrame {
         MidiFrame {
+            generation: MidiFrame::current_generation(),
+            ingress_qpc: crate::vst_worker::protocol::monotonic_qpc(),
             data: smallvec::smallvec![
                 status | channel,
                 pitch,
@@ -585,6 +664,8 @@ mod recovery_tests {
         send_fanout(
             &tx,
             MidiFrame {
+                generation: MidiFrame::current_generation(),
+                ingress_qpc: crate::vst_worker::protocol::monotonic_qpc(),
                 data: smallvec::smallvec![0xB0, 64, 0],
                 source: Arc::from("regression"),
             },
@@ -609,6 +690,8 @@ mod recovery_tests {
             send_fanout(
                 &tx,
                 MidiFrame {
+                    generation: MidiFrame::current_generation(),
+                    ingress_qpc: crate::vst_worker::protocol::monotonic_qpc(),
                     data,
                     source: Arc::from("regression"),
                 },
@@ -639,6 +722,8 @@ mod recovery_tests {
         let generation = midi_reset_generation();
         send_fanout(&tx, note(0x90, 0, 60), generation, true);
         send_fanout(&tx, note(0x80, 0, 60), generation, true);
-        assert_ne!(rx.recv().unwrap().generation, midi_reset_generation());
+        let old = rx.recv().unwrap();
+        assert_eq!(old.generation, midi_reset_generation());
+        assert!(old.route_generation < rx.recovery().generation());
     }
 }

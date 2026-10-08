@@ -29,7 +29,8 @@ use super::protocol::{
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const LOAD_TIMEOUT: Duration = Duration::from_secs(45);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
-const HEARTBEAT_TIMEOUT: Duration = Duration::from_millis(1_500);
+const HEARTBEAT_WARNING: Duration = Duration::from_millis(1_500);
+const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(5);
 const PROCESS_POLL_PERIOD: Duration = Duration::from_millis(100);
 const MIDI_PIPE_CAPACITY: usize = 16_384;
 const RESTART_WINDOW: Duration = Duration::from_secs(60);
@@ -72,12 +73,18 @@ pub struct SupervisorSnapshot {
     pub metrics: WorkerMetrics,
     pub midi_drops: u32,
     pub editor_open: bool,
+    pub heartbeat_delayed: bool,
+    pub midi_transport_failed: bool,
+    pub callback_healthy: bool,
 }
 
 #[derive(Default)]
 struct SupervisorStatus {
     snapshot: SupervisorSnapshot,
     last_heartbeat: Option<Instant>,
+    last_callback: u64,
+    callback_progress: Option<Instant>,
+    maintenance_started: Option<Instant>,
 }
 
 enum SessionCommand {
@@ -106,12 +113,14 @@ struct SupervisorInner {
     lifecycle_generation: AtomicU64,
     status: Mutex<SupervisorStatus>,
     session: Mutex<Option<ActiveSession>>,
-    midi_route: ArcSwapOption<mpsc::Sender<MidiWireFrame>>,
+    midi_route: ArcSwapOption<crate::midi_queue::AsyncSender<MidiWireFrame>>,
     midi_drops: AtomicU32,
     request_sequence: AtomicU64,
     midi_sequence: AtomicU64,
     state_generation: AtomicU64,
     emergency_reset_pending: AtomicBool,
+    midi_generation: AtomicU64,
+    midi_transport_failed: AtomicBool,
     emergency_reset_notify: tokio::sync::Notify,
     last_load: Mutex<Option<(AudioSettings, Option<String>)>>,
     restart_history: Mutex<VecDeque<Instant>>,
@@ -167,6 +176,8 @@ impl VstWorkerSupervisor {
             midi_sequence: AtomicU64::new(1),
             state_generation: AtomicU64::new(0),
             emergency_reset_pending: AtomicBool::new(false),
+            midi_generation: AtomicU64::new(0),
+            midi_transport_failed: AtomicBool::new(false),
             emergency_reset_notify: tokio::sync::Notify::new(),
             last_load: Mutex::new(None),
             restart_history: Mutex::new(VecDeque::new()),
@@ -185,8 +196,15 @@ impl VstWorkerSupervisor {
     }
 
     pub fn snapshot(&self) -> SupervisorSnapshot {
-        let mut snapshot = self.inner.status.lock().snapshot.clone();
+        let status = self.inner.status.lock();
+        let mut snapshot = status.snapshot.clone();
+        snapshot.callback_healthy = status.maintenance_started.is_some()
+            || (snapshot.metrics.callback_count > 0
+                && status
+                    .callback_progress
+                    .is_some_and(|last| last.elapsed() < HEARTBEAT_WARNING));
         snapshot.midi_drops = self.inner.midi_drops.load(Ordering::Relaxed);
+        snapshot.midi_transport_failed = self.inner.midi_transport_failed.load(Ordering::Acquire);
         snapshot
     }
 
@@ -219,12 +237,20 @@ impl VstWorkerSupervisor {
         }
         *self.inner.last_load.lock() = Some((settings.clone(), class_uid.clone()));
         self.stop_session().await.ok();
+        self.inner
+            .midi_transport_failed
+            .store(false, Ordering::Release);
         self.set_state(VstWorkerState::Starting);
 
         let credentials = SessionCredentials::new();
         let control_server =
             create_pipe_server(&credentials.control_pipe, CONTROL_PIPE_BUFFER_BYTES)?;
-        let midi_server = create_pipe_server(&credentials.midi_pipe, MIDI_PIPE_BUFFER_BYTES)?;
+        let midi_runtime = crate::realtime::MidiRuntime::new("vst-midi-write")?;
+        let midi_name = credentials.midi_pipe.clone();
+        let midi_server = midi_runtime
+            .spawn(async move { create_pipe_server(&midi_name, MIDI_PIPE_BUFFER_BYTES) })
+            .await
+            .map_err(|error| error.to_string())??;
         let child = match spawn_worker(&credentials) {
             Ok(child) => child,
             Err(error) => {
@@ -234,7 +260,7 @@ impl VstWorkerSupervisor {
         };
 
         let (command_tx, command_rx) = mpsc::channel(64);
-        let (midi_tx, midi_rx) = mpsc::channel(MIDI_PIPE_CAPACITY);
+        let (midi_tx, midi_rx) = crate::midi_queue::async_channel(MIDI_PIPE_CAPACITY);
         let (connected_tx, connected_rx) = oneshot::channel();
         let inner = self.inner.clone();
         let mut pending_task = PendingSessionTask(Some(tauri::async_runtime::spawn(async move {
@@ -243,6 +269,7 @@ impl VstWorkerSupervisor {
                 credentials,
                 control: control_server,
                 midi_pipe: midi_server,
+                midi_runtime,
                 child,
                 commands: command_rx,
                 midi: midi_rx,
@@ -272,6 +299,7 @@ impl VstWorkerSupervisor {
         self.inner.midi_route.store(Some(Arc::new(midi_tx)));
         self.set_state(VstWorkerState::Loading);
 
+        let game_mode = settings.game_mode;
         let request_id = self.next_request_id();
         let response = match self
             .request_with_timeout(
@@ -297,6 +325,10 @@ impl VstWorkerSupervisor {
                 let mut guard = self.inner.status.lock();
                 guard.snapshot.status = Some(status.clone());
                 guard.snapshot.state = VstWorkerState::Ready;
+                guard.snapshot.metrics.game_mode = game_mode;
+                guard.callback_progress = Some(Instant::now());
+                guard.last_callback = 0;
+                guard.maintenance_started = None;
                 Ok(status)
             }
             ControlMessage::Error { message, .. } => {
@@ -377,14 +409,19 @@ impl VstWorkerSupervisor {
     }
 
     pub fn try_send_midi(&self, bytes: &[u8]) -> bool {
+        self.try_send_midi_at(bytes, monotonic_qpc())
+    }
+
+    pub fn try_send_midi_at(&self, bytes: &[u8], ingress_qpc: u64) -> bool {
         let frame = MidiWireFrame::new(
             self.inner.midi_sequence.fetch_add(1, Ordering::Relaxed),
-            monotonic_qpc(),
+            ingress_qpc,
             bytes,
         );
-        let Some(frame) = frame else {
+        let Some(mut frame) = frame else {
             return false;
         };
+        frame.generation = self.inner.midi_generation.load(Ordering::Acquire);
         let sent = self
             .inner
             .midi_route
@@ -403,10 +440,28 @@ impl VstWorkerSupervisor {
     }
 
     pub fn request_emergency_reset(&self) {
+        self.inner.midi_generation.fetch_add(1, Ordering::AcqRel);
         self.inner
             .emergency_reset_pending
             .store(true, Ordering::Release);
         self.inner.emergency_reset_notify.notify_one();
+    }
+
+    pub async fn set_game_mode(&self, enabled: bool) -> Result<(), String> {
+        self.expect_ack(ControlMessage::SetGameMode {
+            request_id: self.next_request_id(),
+            enabled,
+        })
+        .await?;
+        let mut status = self.inner.status.lock();
+        status.snapshot.metrics.game_mode = enabled;
+        if let Some((settings, _)) = self.inner.last_load.lock().as_mut() {
+            settings.game_mode = enabled;
+        }
+        if enabled {
+            status.snapshot.editor_open = false;
+        }
+        Ok(())
     }
 
     pub async fn open_editor(&self) -> Result<(), String> {
@@ -414,7 +469,8 @@ impl VstWorkerSupervisor {
             request_id: self.next_request_id(),
         })
         .await?;
-        self.inner.status.lock().snapshot.editor_open = true;
+        let mut status = self.inner.status.lock();
+        status.snapshot.editor_open = !status.snapshot.metrics.game_mode;
         Ok(())
     }
 
@@ -866,14 +922,17 @@ async fn control_reader(
 
 async fn midi_writer<W: tokio::io::AsyncWrite + Unpin>(
     mut pipe: W,
-    mut midi: mpsc::Receiver<MidiWireFrame>,
+    mut midi: crate::midi_queue::AsyncReceiver<MidiWireFrame>,
     inner: Arc<SupervisorInner>,
 ) {
+    let mut generation = 0;
+    let mut saved = None;
+    let mut batch = [0u8; crate::vst_worker::protocol::MIDI_FRAME_BYTES * 256];
     loop {
-        if inner.emergency_reset_pending.swap(false, Ordering::AcqRel) {
-            for _ in 0..midi.len() {
-                let _ = midi.try_recv();
-            }
+        if inner.emergency_reset_pending.swap(false, Ordering::AcqRel)
+            || generation != inner.midi_generation.load(Ordering::Acquire)
+        {
+            generation = inner.midi_generation.load(Ordering::Acquire);
             // An in-band reset cannot overtake older bytes already in the MIDI pipe.
             let reset = MidiWireFrame::new(
                 inner.midi_sequence.fetch_add(1, Ordering::Relaxed),
@@ -888,21 +947,42 @@ async fn midi_writer<W: tokio::io::AsyncWrite + Unpin>(
         tokio::select! {
             biased;
             _ = inner.emergency_reset_notify.notified() => continue,
-            frame = midi.recv() => {
-                let Some(frame) = frame else { break; };
-                if inner.emergency_reset_pending.load(Ordering::Acquire) { continue; }
-                if let Err(error) = write_midi_frame(&mut pipe, frame).await {
+            frame = async { if let Some(frame) = saved.take() { Some(frame) } else { midi.recv().await } } => {
+                let Some(mut frame) = frame else { break; };
+                frame.pipe_qpc = monotonic_qpc();
+                if frame.generation < generation { tokio::task::yield_now().await; continue; }
+                if frame.generation > generation || inner.midi_generation.load(Ordering::Acquire) != generation {
+                    saved = Some(frame); continue;
+                }
+                let width = crate::vst_worker::protocol::MIDI_FRAME_BYTES;
+                batch[..width].copy_from_slice(&frame.encode());
+                let mut count = 1;
+                let mut consumed = 1;
+                while consumed < 256 && !inner.emergency_reset_pending.load(Ordering::Acquire) {
+                    let Ok(mut frame) = midi.try_recv() else { break; };
+                    consumed += 1;
+                    if frame.generation < generation { continue; }
+                    if frame.generation > generation { saved = Some(frame); break; }
+                    frame.pipe_qpc = monotonic_qpc();
+                    batch[count * width..(count + 1) * width].copy_from_slice(&frame.encode());
+                    count += 1;
+                }
+                if inner.emergency_reset_pending.load(Ordering::Acquire) || generation != inner.midi_generation.load(Ordering::Acquire) { continue; }
+                if let Err(error) = tokio::io::AsyncWriteExt::write_all(&mut pipe, &batch[..count * width]).await {
                     background_log("error", format!("VST worker MIDI pipe failed: {error}"));
                     break;
                 }
+                tokio::task::yield_now().await;
             }
         }
     }
+    inner.midi_transport_failed.store(true, Ordering::Release);
 }
 
 fn message_request_id(message: &ControlMessage) -> Option<u64> {
     match message {
         ControlMessage::Load { request_id, .. }
+        | ControlMessage::SetGameMode { request_id, .. }
         | ControlMessage::OpenEditor { request_id }
         | ControlMessage::CloseEditor { request_id }
         | ControlMessage::ListParameters { request_id }
@@ -923,7 +1003,8 @@ fn message_request_id(message: &ControlMessage) -> Option<u64> {
 }
 
 struct SessionIoTasks {
-    midi: tauri::async_runtime::JoinHandle<()>,
+    midi: tokio::task::JoinHandle<()>,
+    _runtime: crate::realtime::MidiRuntime,
     control: tauri::async_runtime::JoinHandle<()>,
 }
 impl SessionIoTasks {
@@ -946,9 +1027,10 @@ struct SessionRuntime {
     credentials: SessionCredentials,
     control: NamedPipeServer,
     midi_pipe: NamedPipeServer,
+    midi_runtime: crate::realtime::MidiRuntime,
     child: WorkerProcess,
     commands: mpsc::Receiver<SessionCommand>,
-    midi: mpsc::Receiver<MidiWireFrame>,
+    midi: crate::midi_queue::AsyncReceiver<MidiWireFrame>,
     connected: oneshot::Sender<Result<(), String>>,
     inner: Arc<SupervisorInner>,
 }
@@ -959,6 +1041,7 @@ async fn run_session(runtime: SessionRuntime) {
         credentials,
         mut control,
         midi_pipe,
+        midi_runtime,
         mut child,
         mut commands,
         midi,
@@ -990,12 +1073,13 @@ async fn run_session(runtime: SessionRuntime) {
         }
     }
 
-    let midi_task = tauri::async_runtime::spawn(midi_writer(midi_pipe, midi, inner.clone()));
+    let midi_task = midi_runtime.spawn(midi_writer(midi_pipe, midi, inner.clone()));
     let (reader, mut writer): (ReadHalf<_>, WriteHalf<_>) = tokio::io::split(control);
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let control_task = tauri::async_runtime::spawn(control_reader(reader, event_tx));
     let mut io_tasks = SessionIoTasks {
         midi: midi_task,
+        _runtime: midi_runtime,
         control: control_task,
     };
 
@@ -1031,7 +1115,16 @@ async fn run_session(runtime: SessionRuntime) {
             event = event_rx.recv() => match event {
                 Some(Ok(ControlMessage::Heartbeat { metrics, .. })) => {
                     let mut guard = inner.status.lock();
-                    guard.last_heartbeat = Some(Instant::now());
+                    let now = Instant::now();
+                    guard.last_heartbeat = Some(now);
+                    guard.snapshot.heartbeat_delayed = false;
+                    if metrics.callback_count != guard.last_callback {
+                        guard.last_callback = metrics.callback_count;
+                        guard.callback_progress = Some(now);
+                    }
+                    if metrics.maintenance {
+                        guard.maintenance_started.get_or_insert(now);
+                    } else if guard.maintenance_started.take().is_some() { guard.callback_progress = Some(now); }
                     guard.snapshot.metrics = metrics;
                 }
                 Some(Ok(ControlMessage::EditorHidden)) => {
@@ -1054,6 +1147,10 @@ async fn run_session(runtime: SessionRuntime) {
                 }
             },
             _ = poll.tick() => {
+                let transport_failed = { let status = inner.status.lock(); status.snapshot.state == VstWorkerState::Ready && (inner.midi_transport_failed.load(Ordering::Acquire) || status.snapshot.metrics.midi_transport_failed) };
+                if transport_failed {
+                    terminal_error = Some("worker MIDI transport failed".into()); break;
+                }
                 match child.child.try_wait() {
                     Ok(Some(status)) => {
                         terminal_error = Some(format!("worker exited with {status}"));
@@ -1066,14 +1163,25 @@ async fn run_session(runtime: SessionRuntime) {
                     Ok(None) => {}
                 }
                 let heartbeat_expired = {
-                    let guard = inner.status.lock();
+                    let mut guard = inner.status.lock();
+                    guard.snapshot.heartbeat_delayed = guard.last_heartbeat.is_some_and(|last| last.elapsed() >= HEARTBEAT_WARNING);
                     guard.snapshot.state == VstWorkerState::Ready
                         && guard
                             .last_heartbeat
                             .is_some_and(|last| last.elapsed() >= HEARTBEAT_TIMEOUT)
                 };
-                if heartbeat_expired {
-                    terminal_error = Some("worker missed three consecutive heartbeats".into());
+                let callback_stalled = {
+                    let guard = inner.status.lock();
+                    guard.snapshot.state == VstWorkerState::Ready
+                        && !guard.snapshot.metrics.maintenance
+                        && guard.callback_progress.is_some_and(|last| last.elapsed() >= HEARTBEAT_TIMEOUT)
+                };
+                let maintenance_expired = inner.status.lock().maintenance_started
+                    .is_some_and(|start| start.elapsed() >= COMMAND_TIMEOUT);
+                if heartbeat_expired || callback_stalled || maintenance_expired {
+                    terminal_error = Some(if heartbeat_expired { "worker heartbeat timed out after 5 seconds" }
+                        else if maintenance_expired { "worker maintenance exceeded 10 seconds" }
+                        else { "worker audio callback stalled for 5 seconds" }.into());
                     break;
                 }
             }
@@ -1130,20 +1238,27 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(2), async {
             let supervisor = VstWorkerSupervisor::new();
             let (writer, mut reader) = tokio::io::duplex(256);
-            let (tx, rx) = mpsc::channel(8);
+            let (tx, rx) = crate::midi_queue::async_channel(8);
             tx.send(MidiWireFrame::new(1, 1, &[0x90, 60, 100]).unwrap())
                 .await
                 .unwrap();
             supervisor.request_emergency_reset();
+            let mut fresh = MidiWireFrame::new(2, 2, &[0x90, 62, 100]).unwrap();
+            fresh.generation = supervisor.inner.midi_generation.load(Ordering::Acquire);
+            tx.send(fresh).await.unwrap();
             let task = tokio::spawn(midi_writer(writer, rx, supervisor.inner.clone()));
             let reset = super::super::protocol::read_midi_frame(&mut reader)
                 .await
                 .unwrap();
             assert_eq!(reset.bytes(), &[0xFF]);
+            let fresh = super::super::protocol::read_midi_frame(&mut reader)
+                .await
+                .unwrap();
+            assert_eq!(fresh.bytes(), &[0x90, 62, 100]);
             for bytes in [[0x90, 61, 100], [0x80, 61, 0]] {
-                tx.send(MidiWireFrame::new(2, 2, &bytes).unwrap())
-                    .await
-                    .unwrap();
+                let mut frame = MidiWireFrame::new(2, 2, &bytes).unwrap();
+                frame.generation = supervisor.inner.midi_generation.load(Ordering::Acquire);
+                tx.send(frame).await.unwrap();
                 let received = super::super::protocol::read_midi_frame(&mut reader)
                     .await
                     .unwrap();
@@ -1280,7 +1395,7 @@ mod tests {
     #[test]
     fn midi_submission_does_not_wait_for_control_or_status_locks() {
         let supervisor = VstWorkerSupervisor::new();
-        let (tx, mut rx) = mpsc::channel(1);
+        let (tx, mut rx) = crate::midi_queue::async_channel(1);
         supervisor.inner.midi_route.store(Some(Arc::new(tx)));
         let _session = supervisor.inner.session.lock();
         let status = supervisor.inner.status.lock();

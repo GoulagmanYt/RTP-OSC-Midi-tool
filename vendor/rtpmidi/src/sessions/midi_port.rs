@@ -84,7 +84,18 @@ struct SendState {
 
 impl MidiPort {
     pub async fn bind(port: u16, name: CString, ssrc: U32) -> std::io::Result<Self> {
-        let socket = Arc::new(UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, port)).await?);
+        let raw = std::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, port))?;
+        raw.set_nonblocking(true)?;
+        let options = socket2::SockRef::from(&raw);
+        options.set_recv_buffer_size(1024 * 1024)?;
+        let effective = options.recv_buffer_size()?;
+        crate::diagnostics::MIDI_RECEIVE_BUFFER
+            .store(effective, std::sync::atomic::Ordering::Relaxed);
+        tracing::info!(
+            receive_buffer_bytes = effective,
+            "RTP UDP receive buffer configured"
+        );
+        let socket = Arc::new(UdpSocket::from_std(raw)?);
 
         let (control_tx, control_rx) = std::sync::mpsc::sync_channel(64);
         Ok(MidiPort {
@@ -120,6 +131,7 @@ impl MidiPort {
     ) {
         let recv = self.socket.recv_from(buf).await;
         if recv.is_err() {
+            crate::diagnostics::SOCKET_ERRORS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             // Windows can reject an oversized UDP datagram without returning
             // its source. A lost final release must still trigger recovery.
             listeners.load().notify_stream_fault(0);
@@ -131,9 +143,12 @@ impl MidiPort {
         }
 
         let (amt, src) = recv.unwrap();
+        let arrived = Instant::now();
 
         let packet = RtpMidiPacket::parse(&buf[..amt]);
         if packet.is_err() {
+            crate::diagnostics::INVALID_DATAGRAMS
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if let Some(rejected_packets) = self.sampled_rejection_count() {
                 event!(
                     Level::ERROR,
@@ -177,7 +192,6 @@ impl MidiPort {
             }
             RtpMidiPacket::Midi(midi_packet) => {
                 let ssrc = midi_packet.ssrc().get();
-                let arrived = Instant::now();
                 let peers = ctx.participants.snapshot();
                 let Some(peer) = peers
                     .iter()
@@ -281,6 +295,7 @@ impl MidiPort {
                                     midi_packet.timestamp().get(),
                                     ssrc,
                                     packet_deadline,
+                                    arrived,
                                 ),
                             super::note_recovery::RepairEvent::SysEx(payload) => listeners
                                 .notify_sysex_packet(
@@ -288,12 +303,16 @@ impl MidiPort {
                                     midi_packet.timestamp().get(),
                                     ssrc,
                                     packet_deadline,
+                                    arrived,
                                 ),
                         }
                     }
                 }
                 let mut timestamp = u32::from(midi_packet.timestamp());
-                for command in midi_packet.commands() {
+                for (command_index, command) in midi_packet.commands().enumerate() {
+                    if command_index > 0 && command_index % 256 == 0 {
+                        tokio::task::yield_now().await;
+                    }
                     timestamp = timestamp.wrapping_add(command.delta_time());
                     let deadline = packet_deadline
                         + std::time::Duration::from_micros(
@@ -311,7 +330,8 @@ impl MidiPort {
                             {
                                 state.sysex.clear();
                             }
-                            listeners.notify_midi_message(*message, timestamp, ssrc, deadline);
+                            listeners
+                                .notify_midi_message(*message, timestamp, ssrc, deadline, arrived);
                         }
                         RtpMidiMessage::SysExSegment { head, data, tail } => {
                             if *head == 0xF0 {
@@ -326,8 +346,9 @@ impl MidiPort {
                                     if state.channels.observe_sysex(payload) {
                                         state.active_notes.fill(0);
                                     }
-                                    listeners
-                                        .notify_sysex_packet(payload, timestamp, ssrc, deadline);
+                                    listeners.notify_sysex_packet(
+                                        payload, timestamp, ssrc, deadline, arrived,
+                                    );
                                 }
                                 Ok(None) => {}
                                 Err(()) => listeners.notify_stream_fault(ssrc),
@@ -343,7 +364,8 @@ impl MidiPort {
                             if state.channels.observe_sysex(sysex) {
                                 state.active_notes.fill(0);
                             }
-                            listeners.notify_sysex_packet(sysex, timestamp, ssrc, deadline);
+                            listeners
+                                .notify_sysex_packet(sysex, timestamp, ssrc, deadline, arrived);
                         }
                     }
                 }

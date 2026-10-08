@@ -232,6 +232,12 @@ const en: TranslationTree = {
       vstInternalOutput: "VST (Internal)",
     },
     audio: {
+      gameMode: "Game mode",
+      gameModeHint: "Native saves and editor changes wait until game mode is turned off. Notes and sound controls remain available.",
+      maintenance: "Audio maintenance in progress",
+      deferredOperations: "Operations deferred until game mode is turned off",
+      deliveryLatency: "MIDI reception to audio",
+      callbackInterval: "Maximum callback interval",
       title: "Audio Engine Configuration",
       description: "Configure ASIO/WASAPI backend and VST host settings.",
       enableEngine: "Enable Audio Engine",

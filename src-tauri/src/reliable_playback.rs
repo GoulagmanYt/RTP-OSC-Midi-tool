@@ -1,4 +1,4 @@
-use crossbeam_channel::Sender;
+use crate::midi_queue::Sender;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
@@ -478,6 +478,8 @@ fn run_schedule(
         while index < session.events.len() && session.events[index].due_us == due_us {
             let event = &session.events[index];
             let frame = MidiFrame {
+                generation: MidiFrame::current_generation(),
+                ingress_qpc: crate::vst_worker::protocol::monotonic_qpc(),
                 data: SmallVec::from_slice(&event.data),
                 source: Arc::clone(&source),
             };
@@ -533,6 +535,8 @@ fn inject_all_notes_off(tx: &Sender<MidiFrame>, source: &str) {
             let _ = try_enqueue_midi_frame(
                 tx,
                 MidiFrame {
+                    generation: MidiFrame::current_generation(),
+                    ingress_qpc: crate::vst_worker::protocol::monotonic_qpc(),
                     data: SmallVec::from_slice(&data),
                     source: Arc::clone(&source),
                 },

@@ -31,6 +31,7 @@ pub struct TimestampedMidiMessage {
     pub ssrc: u32,
     /// Monotonic local rendering deadline derived from the latest CK exchange.
     pub deadline: std::time::Instant,
+    pub received_at: std::time::Instant,
 }
 
 /// Completed SysEx payload. For segmented transfers the deadline is that of
@@ -41,6 +42,7 @@ pub struct TimestampedSysEx<'a> {
     pub timestamp: u32,
     pub ssrc: u32,
     pub deadline: std::time::Instant,
+    pub received_at: std::time::Instant,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -197,6 +199,7 @@ impl EventListeners {
         timestamp: u32,
         ssrc: u32,
         deadline: std::time::Instant,
+        received_at: std::time::Instant,
     ) {
         for listener in &self.midi_message {
             listener((message, timestamp));
@@ -206,6 +209,7 @@ impl EventListeners {
             timestamp,
             ssrc,
             deadline,
+            received_at,
         };
         for listener in &self.timestamped_midi_message {
             listener(event);
@@ -218,12 +222,14 @@ impl EventListeners {
         timestamp: u32,
         ssrc: u32,
         deadline: std::time::Instant,
+        received_at: std::time::Instant,
     ) {
         let event = TimestampedSysEx {
             payload: bytes,
             timestamp,
             ssrc,
             deadline,
+            received_at,
         };
         for listener in &self.timestamped_sysex {
             listener(event);
