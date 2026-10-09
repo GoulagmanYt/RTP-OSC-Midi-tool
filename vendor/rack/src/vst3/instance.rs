@@ -48,6 +48,14 @@ unsafe impl Send for Vst3PluginGui {}
 // This is intentional - VST3 instances require synchronization for shared access
 
 impl Vst3Plugin {
+    /// Remaining space in the preallocated MIDI batch, including any events
+    /// already queued by earlier calls to `send_midi` before `process`.
+    pub fn remaining_midi_capacity(&self) -> usize {
+        self.midi_events
+            .capacity()
+            .saturating_sub(self.midi_events.len())
+    }
+
     /// Create a new VST3 plugin instance
     pub(crate) fn new(info: &PluginInfo) -> Result<Self> {
         unsafe {

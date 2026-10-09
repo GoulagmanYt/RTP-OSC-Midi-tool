@@ -151,6 +151,15 @@ pub(super) fn process_pending_vst3_midi(
     state: &mut AudioCallbackState,
     instance: &mut rack::vst3::Vst3Plugin,
 ) -> Result<(), rack::Error> {
+    let available = instance.remaining_midi_capacity();
+    submit_pending_vst3_midi(state, available, |events| instance.send_midi(events))
+}
+
+pub(super) fn submit_pending_vst3_midi(
+    state: &mut AudioCallbackState,
+    available: usize,
+    send: impl FnOnce(&[RackMidiEvent]) -> Result<(), rack::Error>,
+) -> Result<(), rack::Error> {
     if state.pending_midi.is_empty() {
         return Ok(());
     }
@@ -158,20 +167,26 @@ pub(super) fn process_pending_vst3_midi(
     state.midi_events.clear();
     let mut timing = MidiBlockTiming::new(state.last_frames, state.sample_rate, monotonic_us());
     let mut consumed = 0usize;
-    while consumed < state.midi_events.capacity() {
-        let Some(msg) = state.pending_midi.pop_front() else {
-            break;
-        };
-        consumed += 1;
-        state.telemetry.record_midi_delivery(msg);
+    let event_limit = available.min(state.midi_events.capacity());
+    // A reset may already occupy part of the backend batch. Keep unadmitted
+    // messages in FIFO order, including when the backend rejects submission.
+    for msg in state.pending_midi.iter().take(state.midi_events.capacity()) {
         if let Some(mut event) = midi_to_rack_event(msg.data) {
+            if state.midi_events.len() == event_limit {
+                break;
+            }
             event.sample_offset = timing.offset(msg.timestamp_us);
             state.midi_events.push(event);
         }
+        consumed += 1;
     }
     if !state.midi_events.is_empty() {
-        instance.send_midi(&state.midi_events)?;
+        let result = send(&state.midi_events);
         state.midi_events.clear();
+        result?;
+    }
+    for msg in state.pending_midi.drain(..consumed) {
+        state.telemetry.record_midi_delivery(msg);
     }
     Ok(())
 }

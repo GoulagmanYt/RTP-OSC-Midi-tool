@@ -322,6 +322,113 @@ mod tests {
     }
 
     #[test]
+    fn vst3_reset_batch_preserves_notes_across_capacity_boundary() {
+        use super::super::callback_midi::submit_pending_vst3_midi;
+
+        for count in [448, 449, 512] {
+            let (_, rx) = RingBuffer::new(1024);
+            let mut state = callback_test_state(rx, Arc::new(AtomicBool::new(false)));
+            let mut expected = Vec::new();
+            for index in 0..count {
+                let bytes = if index == count - 2 {
+                    [0x80, 60, 0]
+                } else if index == count - 1 {
+                    [0x90, 60, 100]
+                } else {
+                    [0xB0, 1, (index % 128) as u8]
+                };
+                state
+                    .pending_midi
+                    .push_back(MidiPacket::from_bytes(&bytes).unwrap());
+                expected.push(midi_to_rack_event(bytes).unwrap().kind);
+            }
+            let scratch_capacity = state.midi_events.capacity();
+            let pending_capacity = state.pending_midi.capacity();
+            let resets = (0..16)
+                .flat_map(reset_messages_for_channel)
+                .map(|bytes| midi_to_rack_event(bytes).unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(resets.len(), 64);
+            let mut backend = Vec::with_capacity(512);
+            backend.extend_from_slice(&resets);
+            submit_pending_vst3_midi(&mut state, 512 - backend.len(), |events| {
+                assert!(backend.len() + events.len() <= backend.capacity());
+                backend.extend_from_slice(events);
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(&backend[..64], resets.as_slice());
+            assert_eq!(backend.len(), 512);
+            assert_eq!(state.pending_midi.len(), count - 448);
+            let mut delivered = backend[64..]
+                .iter()
+                .map(|event| event.kind)
+                .collect::<Vec<_>>();
+            // Processing the first block frees backend capacity for the next.
+            backend.clear();
+            submit_pending_vst3_midi(&mut state, 512, |events| {
+                backend.extend_from_slice(events);
+                Ok(())
+            })
+            .unwrap();
+            delivered.extend(backend.iter().map(|event| event.kind));
+            assert_eq!(delivered, expected, "FIFO order changed at count {count}");
+            assert!(state.pending_midi.is_empty());
+            assert_eq!(state.midi_events.capacity(), scratch_capacity);
+            assert_eq!(state.pending_midi.capacity(), pending_capacity);
+        }
+    }
+
+    #[test]
+    fn vst3_failed_admission_preserves_note_off_and_retrigger_for_retry() {
+        use super::super::callback_midi::submit_pending_vst3_midi;
+
+        let (_, rx) = RingBuffer::new(8);
+        let mut state = callback_test_state(rx, Arc::new(AtomicBool::new(false)));
+        for bytes in [[0x80, 60, 0], [0x90, 60, 100]] {
+            state
+                .pending_midi
+                .push_back(MidiPacket::from_bytes(&bytes).unwrap());
+        }
+        assert!(submit_pending_vst3_midi(&mut state, 512, |_| {
+            Err(rack::Error::Other("admission rejected".into()))
+        })
+        .is_err());
+        assert_eq!(state.pending_midi.len(), 2);
+        assert!(state.midi_events.is_empty());
+        submit_pending_vst3_midi(&mut state, 512, |events| {
+            assert_eq!(
+                events[0].kind,
+                midi_to_rack_event([0x80, 60, 0]).unwrap().kind
+            );
+            assert_eq!(
+                events[1].kind,
+                midi_to_rack_event([0x90, 60, 100]).unwrap().kind
+            );
+            Ok(())
+        })
+        .unwrap();
+        assert!(state.pending_midi.is_empty());
+    }
+
+    #[test]
+    fn vst3_full_backend_preserves_pending_notes_and_allows_dsp_to_run() {
+        use super::super::callback_midi::submit_pending_vst3_midi;
+
+        let (_, rx) = RingBuffer::new(8);
+        let mut state = callback_test_state(rx, Arc::new(AtomicBool::new(false)));
+        state
+            .pending_midi
+            .push_back(MidiPacket::from_bytes(&[0x80, 60, 0]).unwrap());
+        submit_pending_vst3_midi(&mut state, 0, |_| {
+            panic!("a full backend must not receive another batch")
+        })
+        .unwrap();
+        assert_eq!(state.pending_midi.len(), 1);
+        assert!(state.midi_events.is_empty());
+    }
+
+    #[test]
     fn midi_to_rack_event_handles_zero_velocity_note_on() {
         let event = midi_to_rack_event([0x90, 60, 0]).expect("event");
         assert!(matches!(

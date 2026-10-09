@@ -242,8 +242,21 @@ export function useAudioPageController() {
   };
 
   const handleAudioToggle = async (checked: boolean) => {
-    await updateConfig({ audio: { enabled: checked } });
-    await persistConfig();
+    if (!config || audioReloadInFlight.current) return;
+    audioReloadInFlight.current = true;
+    setAudioReloading(true);
+    try {
+      const updated = { ...config, audio: { ...config.audio, enabled: checked } };
+      await updateConfig({ audio: { enabled: checked } });
+      await saveConfigApi(updated);
+      await refreshStatus();
+    } catch (error) {
+      await updateConfig({ audio: { enabled: config.audio.enabled } });
+      toast.error(getErrorMessage(error) || t("toasts.settings.configSaveFailed"));
+    } finally {
+      audioReloadInFlight.current = false;
+      setAudioReloading(false);
+    }
   };
 
   const handleGainChange = async (value: number) => {

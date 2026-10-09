@@ -201,6 +201,95 @@ impl From<&Config> for ConfigSnapshot {
     }
 }
 
+/// OSC parameters combine every accepted source and channel into one switch.
+#[derive(Default)]
+pub(super) struct OscOutputState {
+    sources: HashMap<std::sync::Arc<str>, OscSourceState>,
+    sent_notes: u128,
+    sent_sustain: bool,
+}
+
+#[derive(Default)]
+struct OscSourceState {
+    notes: [u128; 16],
+    sustain: [bool; 16],
+}
+
+impl OscOutputState {
+    pub(super) fn clear(&mut self) {
+        self.sources.clear();
+        self.sent_notes = 0;
+        self.sent_sustain = false;
+    }
+
+    fn observe(&mut self, frame: &MidiFrame) {
+        let Some(&status) = frame.data.first() else {
+            return;
+        };
+        if !(0x80..0xF0).contains(&status) {
+            return;
+        }
+        let channel = usize::from(status & 15);
+        let source = self.sources.entry(frame.source.clone()).or_default();
+        if let Some(note) = parse_note(&frame.data) {
+            if let Some(index) = note.index {
+                let mask = 1u128 << (index - 1);
+                if matches!(note.kind, MidiKind::NoteOn) {
+                    source.notes[channel] |= mask;
+                } else {
+                    source.notes[channel] &= !mask;
+                }
+            }
+        } else if let Some(sustain) = parse_sustain(&frame.data) {
+            source.sustain[channel] = sustain.pressed;
+        } else if status & 0xF0 == 0xB0 && frame.data.len() == 3 {
+            match frame.data[1] {
+                120 | 123 => source.notes[channel] = 0,
+                121 => source.sustain[channel] = false,
+                _ => {}
+            }
+        }
+        if source.notes.iter().all(|notes| *notes == 0)
+            && source.sustain.iter().all(|pressed| !pressed)
+        {
+            self.sources.remove(&frame.source);
+        }
+    }
+
+    /// Commit each switch only after a successful send so failures remain retryable.
+    fn flush(
+        &mut self,
+        mut send: impl FnMut(Option<u8>, bool) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let notes = self
+            .sources
+            .values()
+            .flat_map(|source| source.notes)
+            .fold(0, |all, notes| all | notes);
+        let sustain = self
+            .sources
+            .values()
+            .any(|source| source.sustain.iter().any(|pressed| *pressed));
+        for index in 1..=crate::midi::NOTE_MAX - crate::midi::NOTE_MIN + 1 {
+            let mask = 1u128 << (index - 1);
+            let pressed = notes & mask != 0;
+            if pressed != (self.sent_notes & mask != 0) {
+                send(Some(index), pressed)?;
+                if pressed {
+                    self.sent_notes |= mask;
+                } else {
+                    self.sent_notes &= !mask;
+                }
+            }
+        }
+        if sustain != self.sent_sustain {
+            send(None, sustain)?;
+            self.sent_sustain = sustain;
+        }
+        Ok(())
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn handle_midi_frame(
     config: &ConfigSnapshot,
@@ -210,7 +299,7 @@ pub(super) fn handle_midi_frame(
     frame: MidiFrame,
     audio: &AudioEngine,
     osc_counter: &AtomicU32,
-    sustain_pressed_state: &mut [Option<bool>; 16],
+    osc_state: &mut OscOutputState,
     midi_event_tx: &Sender<MidiNoteEvent>,
     deliver_audio: bool,
     deliver_midi_thru: bool,
@@ -319,146 +408,58 @@ pub(super) fn handle_midi_frame(
         return;
     }
 
-    if let Some(sustain) = parse_sustain(frame.data.as_slice()) {
-        if let Some(filter) = config.channel_filter {
-            if sustain.channel != filter {
-                if log_sample {
-                    logger.debug(format!(
-                        "Sustain canal {} filtre (filtre: {})",
-                        sustain.channel, filter
-                    ));
-                }
-                return;
-            }
-        }
-
-        let channel_idx = usize::from(sustain.channel.saturating_sub(1)).min(15);
-        if sustain_pressed_state[channel_idx]
-            .map(|previous| previous == sustain.pressed)
-            .unwrap_or(false)
-        {
-            return;
-        }
-
-        if !config.osc_enabled || frame.source.starts_with("OSC:") {
-            if log_sample {
-                logger.debug(format!(
-                    "OSC desactive -> sustain ignoree pour OSC depuis {}",
-                    frame.source
-                ));
-            }
-            return;
-        }
-
-        if let Some(osc_client) = osc {
-            if let Err(err) = osc_client.send_sustain(sustain.pressed) {
-                if !sustain.pressed {
-                    if let Some(recovery) = route_recovery {
-                        recovery.request_reset();
-                    } else {
-                        request_critical_midi_reset();
-                    }
-                }
-                if logs_enabled() {
-                    logger.error(format!("Envoi OSC echoue: {err}"));
-                }
-            } else if config.log_osc && logs_enabled() {
-                sustain_pressed_state[channel_idx] = Some(sustain.pressed);
-                logger.info(format!(
-                    "{OSC_SUSTAIN_PARAM} -> {}",
-                    if sustain.pressed { 1 } else { 0 }
-                ));
-                osc_counter.fetch_add(1, Ordering::Relaxed);
-            } else {
-                sustain_pressed_state[channel_idx] = Some(sustain.pressed);
-                osc_counter.fetch_add(1, Ordering::Relaxed);
-            }
-        } else if log_sample && logs_enabled() {
-            logger.warn(format!(
-                "OSC actif mais client indisponible pour {}:{}",
-                config.osc_target_ip, config.osc_target_port
-            ));
-        }
-    } else if let Some(note) = parse_note(frame.data.as_slice()) {
+    if let Some(note) = parse_note(frame.data.as_slice()) {
         if note.index.is_some() {
-            let pressed = matches!(note.kind, MidiKind::NoteOn);
             let event = MidiNoteEvent {
                 source: frame.source.to_string(),
                 note: note.note,
                 channel: note.channel,
-                pressed,
+                pressed: matches!(note.kind, MidiKind::NoteOn),
                 timestamp_ms: now_ms(),
             };
             let _ = midi_event_tx.try_send(event);
         }
-
-        if let Some(filter) = config.channel_filter {
-            if note.channel != filter {
-                if log_sample {
-                    logger.debug(format!(
-                        "Note canal {} filtree (filtre: {})",
-                        note.channel, filter
-                    ));
-                }
-                return;
-            }
-        }
-
-        if note.index.is_none() && log_sample && logs_enabled() {
-            logger.warn(format!(
-                "Note hors plage ({}) recue depuis {}",
-                note.note, frame.source
-            ));
+    }
+    if !config.osc_enabled || frame.source.starts_with("OSC:") {
+        return;
+    }
+    if let Some(filter) = config.channel_filter {
+        if frame
+            .data
+            .first()
+            .is_some_and(|status| (status & 15) + 1 != filter)
+        {
             return;
         }
-
-        if let Some(index) = note.index {
-            if !config.osc_enabled || frame.source.starts_with("OSC:") {
-                if log_sample {
-                    logger.debug(format!(
-                        "OSC desactive -> note {} ignoree pour OSC depuis {}",
-                        index, frame.source
-                    ));
-                }
-                return;
-            }
-            let pressed = match note.kind {
-                MidiKind::NoteOn => true,
-                MidiKind::NoteOff => false,
+    }
+    osc_state.observe(&frame);
+    if let Some(client) = osc {
+        if let Err(error) = osc_state.flush(|index, pressed| {
+            let result = match index {
+                Some(index) => client.send_note(index, pressed),
+                None => client.send_sustain(pressed),
             };
-
-            if let Some(osc_client) = osc {
-                if let Err(err) = osc_client.send_note(index, pressed) {
-                    if !pressed {
-                        if let Some(recovery) = route_recovery {
-                            recovery.request_reset();
-                        } else {
-                            request_critical_midi_reset();
-                        }
-                    }
-                    if logs_enabled() {
-                        logger.error(format!("Envoi OSC echoue: {err}"));
-                    }
-                } else if config.log_osc && logs_enabled() {
-                    let param = crate::osc::parameter_name(index);
-                    logger.info(format!("{param} -> {}", if pressed { 1 } else { 0 }));
-                    osc_counter.fetch_add(1, Ordering::Relaxed);
+            if result.is_err() && !pressed {
+                if let Some(recovery) = route_recovery {
+                    recovery.request_reset();
                 } else {
-                    osc_counter.fetch_add(1, Ordering::Relaxed);
+                    request_critical_midi_reset();
                 }
-            } else if log_sample && logs_enabled() {
-                logger.warn(format!(
-                    "OSC actif mais client indisponible pour {}:{}",
-                    config.osc_target_ip, config.osc_target_port
-                ));
+            }
+            result?;
+            osc_counter.fetch_add(1, Ordering::Relaxed);
+            if config.log_osc && logs_enabled() {
+                let parameter = index
+                    .map(crate::osc::parameter_name)
+                    .unwrap_or_else(|| OSC_SUSTAIN_PARAM.to_owned());
+                logger.info(format!("{parameter} -> {}", i32::from(pressed)));
+            }
+            Ok(())
+        }) {
+            if logs_enabled() {
+                logger.error(format!("Envoi OSC echoue: {error}"));
             }
         }
-    } else if log_sample {
-        logger.debug(format!(
-            "Message ignore depuis {}: {:?}",
-            frame.source,
-            frame.data.as_slice()
-        ));
     }
 }
 
@@ -635,6 +636,81 @@ mod tests {
             data: smallvec::SmallVec::from_slice(data),
             source: Arc::from("test"),
         }
+    }
+
+    fn observe_osc(
+        state: &mut OscOutputState,
+        source: &str,
+        data: &[u8],
+        sent: &mut Vec<(Option<u8>, bool)>,
+    ) {
+        let mut input = frame(data);
+        input.source = Arc::from(source);
+        state.observe(&input);
+        state
+            .flush(|index, pressed| {
+                sent.push((index, pressed));
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn osc_sustain_aggregates_channels_and_sources() {
+        let mut state = OscOutputState::default();
+        let mut sent = Vec::new();
+        observe_osc(&mut state, "a", &[0xB0, 64, 127], &mut sent);
+        observe_osc(&mut state, "a", &[0xB1, 64, 0], &mut sent);
+        observe_osc(&mut state, "a", &[0xB0, 64, 127], &mut sent);
+        assert_eq!(sent, vec![(None, true)]);
+        observe_osc(&mut state, "b", &[0xB0, 64, 127], &mut sent);
+        observe_osc(&mut state, "a", &[0xB0, 121, 0], &mut sent);
+        assert_eq!(sent, vec![(None, true)]);
+        observe_osc(&mut state, "b", &[0xB0, 121, 0], &mut sent);
+        assert_eq!(sent, vec![(None, true), (None, false)]);
+    }
+
+    #[test]
+    fn osc_channel_mode_releases_preserve_other_held_notes() {
+        for controller in [120, 123] {
+            let mut state = OscOutputState::default();
+            let mut sent = Vec::new();
+            observe_osc(&mut state, "a", &[0x90, 60, 100], &mut sent);
+            observe_osc(&mut state, "a", &[0x91, 60, 100], &mut sent);
+            observe_osc(&mut state, "b", &[0x90, 60, 100], &mut sent);
+            observe_osc(&mut state, "a", &[0xB0, controller, 0], &mut sent);
+            observe_osc(&mut state, "a", &[0x81, 60, 0], &mut sent);
+            assert_eq!(sent, vec![(Some(40), true)]);
+            observe_osc(&mut state, "b", &[0xB0, controller, 0], &mut sent);
+            assert_eq!(sent, vec![(Some(40), true), (Some(40), false)]);
+            assert!(state.sources.is_empty());
+        }
+    }
+
+    #[test]
+    fn osc_failed_release_remains_pending_and_clear_forgets_previous_route() {
+        let mut state = OscOutputState::default();
+        let mut sent = Vec::new();
+        observe_osc(&mut state, "a", &[0x90, 60, 100], &mut sent);
+        // Release the actual source, then fail the destination write.
+        let mut off = frame(&[0x80, 60, 0]);
+        off.source = Arc::from("a");
+        state.observe(&off);
+        assert!(state.flush(|_, _| Err("socket failure".into())).is_err());
+        state
+            .flush(|index, pressed| {
+                sent.push((index, pressed));
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(sent, vec![(Some(40), true), (Some(40), false)]);
+        observe_osc(&mut state, "a", &[0x90, 60, 100], &mut sent);
+        state.clear();
+        state
+            .flush(|_, _| panic!("old route must have been reset"))
+            .unwrap();
+        observe_osc(&mut state, "a", &[0x90, 60, 100], &mut sent);
+        assert_eq!(sent.last(), Some(&(Some(40), true)));
     }
 
     fn remapped_sustain_config() -> Config {

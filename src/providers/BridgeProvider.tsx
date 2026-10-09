@@ -1,5 +1,7 @@
 import { useCallback, useState } from "react";
 import * as api from "../api";
+import { getErrorMessage } from "../api-errors";
+import { toast } from "sonner";
 import { BridgeContext } from "./bridge/BridgeContext";
 import { useAppBootstrap } from "./bridge/useAppBootstrap";
 import { useAutosaveSettings } from "./bridge/useAutosaveSettings";
@@ -86,9 +88,16 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
     t,
   });
 
+  const handleAutosaveError = useCallback((error: unknown) => {
+    toast.error(getErrorMessage(error) || t("toasts.settings.configSaveFailed"));
+  }, [t]);
+
   useAutosaveSettings({
     config,
     save: api.saveConfig,
+    setConfig,
+    onError: handleAutosaveError,
+    loadAccepted: api.getConfig,
   });
 
   return (

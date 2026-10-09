@@ -137,7 +137,7 @@ fn processing_loop(
     let mut snapshot = ConfigSnapshot::from(&initial_cfg);
     snapshot.rtp_output = Some(rtp_output.clone());
     let mut cached_rev = config_rev.load(Ordering::Relaxed);
-    let mut sustain_pressed_state = [None; 16];
+    let mut sustain_pressed_state = super::pipeline::OscOutputState::default();
     let mut unused_midi_out = None;
     let mut unused_notes = crate::midi::ActiveNotes::default();
     let mut generation = midi_reset_generation();
@@ -346,7 +346,7 @@ fn spawn_midi_thru_worker(
         let mut midi_out_name = initial.midi.output_device;
         let mut next_output_reconnect = std::time::Instant::now();
         let mut output_reconnect_backoff = Duration::from_millis(500);
-        let mut sustain = [None; 16];
+        let mut sustain = super::pipeline::OscOutputState::default();
         let mut active_notes = crate::midi::ActiveNotes::default();
         let mut cached_generation = midi_reset_generation();
         let mut route_generation = rx.recovery().generation();
@@ -365,7 +365,7 @@ fn spawn_midi_thru_worker(
                 if let Some(out) = midi_out.as_mut() {
                     flush_midi_output(out, &mut active_notes, &logger);
                 }
-                sustain.fill(None);
+                sustain.clear();
                 cached_panic_revision = current_panic_revision;
             }
             let observed_rev = config_rev.load(Ordering::Acquire);
@@ -377,7 +377,7 @@ fn spawn_midi_thru_worker(
                     if let Some(out) = midi_out.as_mut() {
                         flush_midi_output(out, &mut active_notes, &logger);
                     }
-                    sustain.fill(None);
+                    sustain.clear();
                 }
                 previous_config = config.clone();
                 if config.midi.output_device != midi_out_name {
@@ -479,7 +479,7 @@ fn spawn_osc_worker(
         let mut cached_rev = 0;
         let mut osc_client = Some(osc);
         let mut current_target = (initial.osc.target_ip, initial.osc.target_port);
-        let mut sustain = [None; 16];
+        let mut sustain = super::pipeline::OscOutputState::default();
         let mut active_notes = crate::midi::ActiveNotes::default();
         let mut cached_generation = midi_reset_generation();
         let mut route_generation = rx.recovery().generation();
@@ -492,7 +492,7 @@ fn spawn_osc_worker(
                 route_generation = rx.recovery().generation();
                 cached_generation = generation;
                 reset_pending = true;
-                sustain.fill(None);
+                sustain.clear();
             }
             if reset_pending {
                 reset_pending = osc_client
@@ -510,7 +510,7 @@ fn spawn_osc_worker(
                     if let Some(client) = osc_client.as_ref() {
                         let _ = client.send_reset_all();
                     }
-                    sustain.fill(None);
+                    sustain.clear();
                 }
                 previous_config = config.clone();
                 snapshot = ConfigSnapshot::from(&config);

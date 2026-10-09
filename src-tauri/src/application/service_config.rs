@@ -57,6 +57,8 @@ fn apply_and_save_config(
 ) -> Result<(), CommandError> {
     let _change = state.config_change.lock();
     let previous = state.config_store.load();
+    let audio_was_running = state.audio.is_running();
+    let bridge_running = state.bridge.status(&previous).running;
     let logger = frontend_logger(window, state);
     commit_config_change(
         &previous,
@@ -77,7 +79,26 @@ fn apply_and_save_config(
             state
                 .bridge
                 .sync_rtp(cfg, &logger, force)
-                .map_err(|err| runtime_error("runtime.sync-rtp-failed", err))
+                .map_err(|err| runtime_error("runtime.sync-rtp-failed", err))?;
+            let should_run = desired_audio_running(
+                previous.audio.enabled,
+                cfg.audio.enabled,
+                audio_was_running,
+                bridge_running,
+            );
+            if should_run && !state.audio.is_running() {
+                state
+                    .audio
+                    .start(
+                        audio_settings_from_config(cfg),
+                        fallback_vst_path(window.app_handle()),
+                        logger.clone(),
+                    )
+                    .map_err(|err| runtime_error("audio.start-failed", err.to_string()))?;
+            } else if !should_run && state.audio.is_running() {
+                state.audio.stop(Some(window.app_handle().clone()));
+            }
+            Ok(())
         },
         |cfg| {
             state
@@ -91,6 +112,21 @@ fn apply_and_save_config(
     set_logs_enabled(config.logging.enabled);
     sync_rtp_discovery(config, state, window.app_handle());
     Ok(())
+}
+
+// Preserve the actual runtime for unrelated edits and restore it on rollback.
+// Enabling audio while the bridge is stopped only changes the next startup.
+fn desired_audio_running(
+    previous_enabled: bool,
+    next_enabled: bool,
+    initially_running: bool,
+    bridge_running: bool,
+) -> bool {
+    if previous_enabled == next_enabled {
+        initially_running
+    } else {
+        next_enabled && (bridge_running || initially_running)
+    }
 }
 
 pub fn save_config(window: &Window, config: Config, state: &AppState) -> Result<(), CommandError> {
@@ -150,6 +186,43 @@ pub fn import_config(
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    fn audio_enable_changes_follow_bridge_lifecycle_and_preserve_unrelated_edits() {
+        assert!(desired_audio_running(false, true, false, true));
+        assert!(!desired_audio_running(true, false, true, true));
+        assert!(!desired_audio_running(false, true, false, false));
+        assert!(!desired_audio_running(true, true, false, true));
+        assert!(desired_audio_running(true, true, true, false));
+    }
+
+    #[test]
+    fn rejected_audio_enable_change_restores_initial_runtime() {
+        for initially_running in [false, true] {
+            let mut previous = Config::default();
+            previous.audio.enabled = initially_running;
+            let mut next = previous.clone();
+            next.audio.enabled = !initially_running;
+            let running = Cell::new(initially_running);
+            let result = commit_config_change(
+                &previous,
+                &next,
+                false,
+                |cfg, _| {
+                    running.set(desired_audio_running(
+                        previous.audio.enabled,
+                        cfg.audio.enabled,
+                        initially_running,
+                        true,
+                    ));
+                    Ok(())
+                },
+                |_| Err(config_error("write", "simulated disk failure")),
+            );
+            assert!(result.is_err());
+            assert_eq!(running.get(), initially_running);
+        }
+    }
 
     #[test]
     fn failed_bind_or_save_preserves_disk_and_restores_runtime_config() {

@@ -61,6 +61,31 @@ describe("audio configuration transactions", () => {
     };
   });
 
+  it("saves the new audio enabled value rather than the previous render", async () => {
+    let finishSave!: () => void;
+    mocks.saveConfig.mockImplementationOnce(() => new Promise<void>((resolve) => { finishSave = resolve; }));
+    const { result } = renderHook(() => useAudioPageController());
+    let pending!: Promise<void>;
+    await act(async () => { pending = result.current.handleAudioToggle(false); });
+    expect(mocks.saveConfig.mock.calls[0][0].audio.enabled).toBe(false);
+    expect(mocks.updateConfig).toHaveBeenCalledWith({ audio: { enabled: false } });
+    await act(async () => { finishSave(); await pending; });
+    expect(mocks.updateConfig).toHaveBeenCalledWith({ audio: { enabled: false } });
+    expect(mocks.refreshStatus).toHaveBeenCalledOnce();
+    expect(mocks.bridge.saveConfig).not.toHaveBeenCalled();
+  });
+
+  it("keeps the audio switch unchanged and reports a rejected native transition", async () => {
+    mocks.saveConfig.mockRejectedValueOnce(new Error("audio start failed"));
+    const { result } = renderHook(() => useAudioPageController());
+    await act(async () => { await result.current.handleAudioToggle(false); });
+    expect(mocks.updateConfig.mock.calls).toEqual([
+      [{ audio: { enabled: false } }], [{ audio: { enabled: true } }],
+    ]);
+    expect(mocks.toastError).toHaveBeenCalledWith("audio start failed");
+    expect(result.current.audioReloading).toBe(false);
+  });
+
   it("restores a failed game-mode change without reloading the VST", async () => {
     mocks.saveConfig.mockRejectedValueOnce(new Error("disk failed"));
     const { result } = renderHook(() => useAudioPageController());

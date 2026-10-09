@@ -49,6 +49,7 @@ pub fn start_bridge(
     config: Config,
     state: &AppState,
 ) -> Result<BridgeStatus, CommandError> {
+    let _change = state.config_change.lock();
     sync_runtime_logging(&config, &state.dev_logging);
     set_log_all_to_file(config.logging.log_all_to_file);
     set_logs_enabled(config.logging.enabled);
@@ -170,8 +171,11 @@ pub fn refresh_rtp_sessions(
         .map_err(|err| runtime_error("rtp.refresh-sessions-failed", err))
 }
 
-pub fn preflight_check(state: &AppState) -> Result<PreflightReport, CommandError> {
-    let cfg = state.config_store.load();
+pub fn preflight_check(
+    config: Option<Config>,
+    state: &AppState,
+) -> Result<PreflightReport, CommandError> {
+    let cfg = config.unwrap_or_else(|| state.config_store.load());
     let mut messages = Vec::new();
 
     let midi_inputs = list_midi_inputs()?;
@@ -495,6 +499,33 @@ fn wait_for_stress_queues(audio: &crate::audio::AudioEngine, include_bridge: boo
 #[cfg(test)]
 mod tests {
     use super::{stress_midi_message, stress_trailing_note_off};
+
+    #[test]
+    fn preflight_checks_supplied_draft_without_changing_saved_configuration() {
+        use super::*;
+        let directory = tempfile::tempdir().unwrap();
+        let state = AppState {
+            config_store: crate::config::ConfigStore::with_path(
+                directory.path().join("config.yaml"),
+            ),
+            ..AppState::new()
+        };
+        let mut saved = Config::default();
+        saved.audio.enabled = false;
+        saved.rtp.enabled = false;
+        state.config_store.save(&saved).unwrap();
+        let mut draft = saved.clone();
+        draft.midi.input_device = Some(RTP_VIRTUAL_INPUT.into());
+        draft.midi.output_device = Some(VST_INTERNAL_OUTPUT.into());
+        // An invalid pair avoids binding any real network ports during this test.
+        draft.rtp.port = u16::MAX;
+        let report = preflight_check(Some(draft), &state).unwrap();
+        assert!(report.midi_in_ok && report.midi_out_ok && report.audio_backend_ok);
+        assert!(!report.rtp_port_ok);
+        assert_eq!(state.config_store.load(), saved);
+        let stored_report = preflight_check(None, &state).unwrap();
+        assert!(!stored_report.midi_in_ok && !stored_report.midi_out_ok);
+    }
 
     #[test]
     fn stress_messages_are_balanced_note_pairs() {

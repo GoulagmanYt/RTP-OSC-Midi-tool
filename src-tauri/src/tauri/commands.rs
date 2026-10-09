@@ -1,6 +1,6 @@
 //! Commandes Tauri: fine couche d'adaptation vers la couche application.
 
-use tauri::{AppHandle, Emitter, State, Window};
+use tauri::{AppHandle, Emitter, Manager, State, Window};
 
 use crate::{
     application::services,
@@ -23,12 +23,17 @@ pub fn get_config(app: AppHandle, state: State<AppState>) -> Config {
 }
 
 #[::tauri::command]
-pub fn save_config(
+pub async fn save_config(
+    app: AppHandle,
     window: Window,
     config: Config,
-    state: State<'_, AppState>,
 ) -> Result<(), CommandError> {
-    services::save_config(&window, config, state.inner())
+    ::tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        services::save_config(&window, config, state.inner())
+    })
+    .await
+    .map_err(|error| CommandError::new("config.save-task-failed", "config", error.to_string()))?
 }
 
 #[::tauri::command]
@@ -213,8 +218,11 @@ pub async fn reload_vst(
 }
 
 #[::tauri::command]
-pub fn preflight_check(state: State<AppState>) -> Result<PreflightReport, CommandError> {
-    services::preflight_check(state.inner())
+pub fn preflight_check(
+    config: Option<Config>,
+    state: State<AppState>,
+) -> Result<PreflightReport, CommandError> {
+    services::preflight_check(config, state.inner())
 }
 
 #[::tauri::command]

@@ -32,13 +32,13 @@ export function useBridgeActions({
       if (!config) {
         return;
       }
-      const next = mergeConfig(config, patch);
-      if (JSON.stringify(next) === JSON.stringify(config)) {
-        return;
-      }
-      setConfig(next);
+      setConfig((current) => {
+        if (!current) return current;
+        const next = mergeConfig(current, patch);
+        return JSON.stringify(next) === JSON.stringify(current) ? current : next;
+      });
       if (patch.audio?.backend !== undefined) {
-        await refreshAudioDevices(next.audio.backend);
+        await refreshAudioDevices(patch.audio.backend);
       }
     },
     [config, refreshAudioDevices, setConfig]
@@ -62,7 +62,7 @@ export function useBridgeActions({
       return null;
     }
     try {
-      const report = await api.preflightCheck();
+      const report = await api.preflightCheck(config);
       setPreflight(report);
       return report;
     } catch (error) {

@@ -1,4 +1,5 @@
 import { invokeCommand } from "./api-client";
+import { persistConfigSave, persistConfigSerially } from "./config-persistence";
 import type {
   AppConfig,
   AudioDeviceEntry,
@@ -20,8 +21,8 @@ export async function getConfig(): Promise<AppConfig> {
   return invokeCommand("get_config");
 }
 
-export async function saveConfig(config: AppConfig): Promise<void> {
-  return invokeCommand("save_config", { config });
+export async function saveConfig(config: AppConfig, shouldSave?: () => boolean): Promise<boolean> {
+  return persistConfigSave(config, (next) => invokeCommand<void>("save_config", { config: next }), shouldSave);
 }
 
 export async function listMidiInputs(): Promise<string[]> {
@@ -33,7 +34,7 @@ export async function listMidiOutputs(): Promise<string[]> {
 }
 
 export async function startBridge(config: AppConfig): Promise<RuntimeStatus> {
-  return invokeCommand("start_bridge", { config });
+  return persistConfigSerially(config, (next) => invokeCommand<RuntimeStatus>("start_bridge", { config: next }));
 }
 
 export async function stopBridge(): Promise<void> {
@@ -120,8 +121,8 @@ export async function reloadVst(): Promise<RuntimeStatus> {
   return invokeCommand("reload_vst");
 }
 
-export async function preflightCheck(): Promise<PreflightReport> {
-  return invokeCommand("preflight_check");
+export async function preflightCheck(config?: AppConfig): Promise<PreflightReport> {
+  return invokeCommand("preflight_check", { config });
 }
 
 export async function exportConfig(path: string): Promise<void> {
