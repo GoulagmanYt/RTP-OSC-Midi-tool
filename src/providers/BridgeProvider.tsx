@@ -92,9 +92,15 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
     toast.error(getErrorMessage(error) || t("toasts.settings.configSaveFailed"));
   }, [t]);
 
+  const saveAndRefreshStatus = useCallback(async (next: api.AppConfig, shouldSave?: () => boolean) => {
+    const saved = await api.saveConfig(next, shouldSave);
+    if (saved !== false) await refreshStatus();
+    return saved;
+  }, [refreshStatus]);
+
   useAutosaveSettings({
     config,
-    save: api.saveConfig,
+    save: saveAndRefreshStatus,
     setConfig,
     onError: handleAutosaveError,
     loadAccepted: api.getConfig,

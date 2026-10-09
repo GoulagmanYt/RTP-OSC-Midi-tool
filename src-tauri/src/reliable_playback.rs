@@ -350,7 +350,7 @@ fn handle_connection(
             }
             Ok(ClientFrame::Stop { session_id }) if session_id == prepared.session_id => {
                 cancel.store(true, Ordering::Relaxed);
-                inject_all_notes_off(&tx, &format!("ReliablePLV:{}:stop", prepared.song));
+                inject_all_notes_off(&tx, &format!("ReliablePLV:{}", prepared.song));
                 *ACTIVE_SESSION.lock() = None;
                 let _ = send_server_frame(
                     &writer,
@@ -380,7 +380,7 @@ fn handle_connection(
     if started && !done.load(Ordering::Relaxed) {
         cancel.store(true, Ordering::Relaxed);
         if !server_stop.load(Ordering::Relaxed) {
-            inject_all_notes_off(&tx, &format!("ReliablePLV:{}:stop", prepared.song));
+            inject_all_notes_off(&tx, &format!("ReliablePLV:{}", prepared.song));
         }
         *ACTIVE_SESSION.lock() = None;
         done.store(true, Ordering::Relaxed);
@@ -524,7 +524,8 @@ fn wait_until(target: Instant, cancel: &AtomicBool, server_stop: &AtomicBool) {
         }
         let remaining = target - now;
         if remaining > Duration::from_millis(2) {
-            thread::sleep(remaining - Duration::from_millis(1));
+            // Recheck cancellation even during a long silence or start delay.
+            thread::sleep((remaining - Duration::from_millis(1)).min(Duration::from_millis(5)));
         } else {
             thread::yield_now();
         }

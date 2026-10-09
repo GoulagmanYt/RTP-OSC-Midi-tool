@@ -671,6 +671,88 @@ mod tests {
     }
 
     #[test]
+    fn reliable_playback_stop_and_disconnect_release_osc_notes_and_sustain() {
+        let _guard = TEST_PIPELINE_LOCK.lock().unwrap();
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::time::Duration;
+        for disconnect in [false, true] {
+            let (tx, rx) = bounded(256);
+            let server =
+                crate::reliable_playback::ReliablePlaybackServer::start("127.0.0.1:0", tx).unwrap();
+            let mut stream = TcpStream::connect(server.local_addr()).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let send = |stream: &mut TcpStream, payload: serde_json::Value| {
+                let data = serde_json::to_vec(&payload).unwrap();
+                stream
+                    .write_all(&(data.len() as u32).to_be_bytes())
+                    .unwrap();
+                stream.write_all(&data).unwrap();
+            };
+            send(
+                &mut stream,
+                serde_json::json!({
+                    "type": "prepare", "version": 1, "sessionId": "osc-release",
+                    "song": "release.mid", "total": 3, "events": [
+                        {"seq": 0, "dueUs": 0, "data": [0x90, 60, 100]},
+                        {"seq": 1, "dueUs": 0, "data": [0xB0, 64, 127]},
+                        {"seq": 2, "dueUs": 60_000_000, "data": [0x80, 60, 0]}
+                    ]
+                }),
+            );
+            let mut header = [0; 4];
+            stream.read_exact(&mut header).unwrap();
+            let mut response = vec![0; u32::from_be_bytes(header) as usize];
+            stream.read_exact(&mut response).unwrap();
+            send(
+                &mut stream,
+                serde_json::json!({"type": "start", "sessionId": "osc-release", "startDelayMs": 0}),
+            );
+            let mut state = OscOutputState::default();
+            for _ in 0..2 {
+                state.observe(&rx.recv_timeout(Duration::from_secs(2)).unwrap());
+            }
+            let mut sent = Vec::new();
+            state
+                .flush(|index, pressed| {
+                    sent.push((index, pressed));
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(sent, vec![(Some(40), true), (None, true)]);
+            if !disconnect {
+                send(
+                    &mut stream,
+                    serde_json::json!({"type": "stop", "sessionId": "osc-release"}),
+                );
+            }
+            drop(stream);
+            for _ in 0..32 {
+                state.observe(&rx.recv_timeout(Duration::from_secs(2)).unwrap());
+            }
+            state
+                .flush(|index, pressed| {
+                    sent.push((index, pressed));
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(
+                sent,
+                vec![
+                    (Some(40), true),
+                    (None, true),
+                    (Some(40), false),
+                    (None, false)
+                ]
+            );
+            assert!(state.sources.is_empty());
+            server.stop();
+        }
+    }
+
+    #[test]
     fn osc_channel_mode_releases_preserve_other_held_notes() {
         for controller in [120, 123] {
             let mut state = OscOutputState::default();

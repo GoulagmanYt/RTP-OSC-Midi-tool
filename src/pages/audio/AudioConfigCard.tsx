@@ -97,6 +97,8 @@ export function AudioConfigCard({
   onToggleAudio,
   onUpdateAudioConfig,
 }: Props) {
+  const savedScanPaths = (config?.audio.vstScanPaths || []).join(";");
+  const [scanPathsDraft, setScanPathsDraft] = useState<string | null>(null);
   const [vstSearch, setVstSearch] = useState("");
   const [vstFormat, setVstFormat] = useState("all");
   const [vstArchitecture, setVstArchitecture] = useState("all");
@@ -540,12 +542,16 @@ export function AudioConfigCard({
             <Label htmlFor="vst-scan-paths">{t("audio.vstCustomPaths")}</Label>
             <Input
               id="vst-scan-paths"
-              value={(config?.audio.vstScanPaths || []).join(";")}
-              onChange={(event) =>
-                onUpdateAudioConfig({
-                  vstScanPaths: event.target.value.split(";").map((path) => path.trim()).filter(Boolean),
-                })
-              }
+              value={scanPathsDraft ?? savedScanPaths}
+              onChange={(event) => setScanPathsDraft(event.target.value)}
+              onBlur={async (event) => {
+                const vstScanPaths = event.target.value.split(";").map((path) => path.trim()).filter(Boolean);
+                if (vstScanPaths.join(";") !== savedScanPaths) {
+                  const accepted = await onUpdateAudioConfig({ vstScanPaths });
+                  if (accepted === false) return;
+                }
+                setScanPathsDraft(null);
+              }}
               placeholder={t("audio.vstCustomPathsPlaceholder")}
             />
             <p className="text-xs text-muted-foreground">{t("audio.vstCustomPathsHint")}</p>

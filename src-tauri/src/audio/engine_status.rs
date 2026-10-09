@@ -8,6 +8,17 @@ use super::{
 use crate::config::VstEqSettings;
 use crate::logger::FrontendLogger;
 
+#[cfg(target_os = "windows")]
+fn require_control_admission(admitted: bool) -> Result<(), AudioError> {
+    if admitted {
+        Ok(())
+    } else {
+        Err(AudioError::Message(
+            "Audio worker unavailable or its command queue is full".into(),
+        ))
+    }
+}
+
 impl AudioEngine {
     pub fn lifecycle_state(&self) -> &'static str {
         #[cfg(target_os = "windows")]
@@ -28,37 +39,36 @@ impl AudioEngine {
         .as_str()
     }
 
-    pub fn set_gain(&self, gain_db: f32) {
+    pub fn set_gain(&self, gain_db: f32) -> Result<(), AudioError> {
         #[cfg(target_os = "windows")]
         if self.is_worker_enabled() {
-            let _ = self.worker.try_set_gain(gain_db);
-            return;
+            return require_control_admission(self.worker.try_set_gain(gain_db));
         }
         if let Some(rt) = self.runtime.lock().as_mut() {
             rt.controls
                 .gain_bits
                 .store(db_to_linear(gain_db).to_bits(), Ordering::Relaxed);
         }
+        Ok(())
     }
 
-    pub fn set_limiter_enabled(&self, enabled: bool) {
+    pub fn set_limiter_enabled(&self, enabled: bool) -> Result<(), AudioError> {
         #[cfg(target_os = "windows")]
         if self.is_worker_enabled() {
-            let _ = self.worker.try_set_limiter_enabled(enabled);
-            return;
+            return require_control_admission(self.worker.try_set_limiter_enabled(enabled));
         }
         if let Some(rt) = self.runtime.lock().as_mut() {
             rt.controls
                 .limiter_enabled
                 .store(enabled, Ordering::Relaxed);
         }
+        Ok(())
     }
 
-    pub fn set_vst_eq(&self, settings: VstEqSettings) {
+    pub fn set_vst_eq(&self, settings: VstEqSettings) -> Result<(), AudioError> {
         #[cfg(target_os = "windows")]
         if self.is_worker_enabled() {
-            let _ = self.worker.try_set_eq(settings);
-            return;
+            return require_control_admission(self.worker.try_set_eq(settings));
         }
         if let Some(runtime) = self.runtime.lock().as_ref() {
             runtime
@@ -66,6 +76,7 @@ impl AudioEngine {
                 .equalizer
                 .publish(&settings, runtime.sample_rate);
         }
+        Ok(())
     }
 
     pub fn current_backend(&self) -> Option<String> {
@@ -684,5 +695,19 @@ impl AudioEngine {
         logger: FrontendLogger,
     ) -> Result<(), AudioError> {
         self.start(settings, vst_fallback, logger)
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod control_tests {
+    use super::*;
+
+    #[test]
+    fn public_controls_report_unavailable_worker_instead_of_success() {
+        let audio = AudioEngine::new();
+        audio.worker_enabled.store(true, Ordering::Release);
+        assert!(audio.set_gain(-12.0).is_err());
+        assert!(audio.set_limiter_enabled(true).is_err());
+        assert!(audio.set_vst_eq(VstEqSettings::default()).is_err());
     }
 }

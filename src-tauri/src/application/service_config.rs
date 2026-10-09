@@ -60,6 +60,7 @@ fn apply_and_save_config(
     let audio_was_running = state.audio.is_running();
     let bridge_running = state.bridge.status(&previous).running;
     let logger = frontend_logger(window, state);
+    let mut audio_restart_attempted = false;
     commit_config_change(
         &previous,
         config,
@@ -86,7 +87,10 @@ fn apply_and_save_config(
                 audio_was_running,
                 bridge_running,
             );
-            if should_run && !state.audio.is_running() {
+            if should_run && (force || audio_restart_attempted || !state.audio.is_running()) {
+                // Also restart the previous settings if application or persistence
+                // fails after replacing (or attempting to replace) the worker.
+                audio_restart_attempted = true;
                 state
                     .audio
                     .start(
@@ -95,7 +99,7 @@ fn apply_and_save_config(
                         logger.clone(),
                     )
                     .map_err(|err| runtime_error("audio.start-failed", err.to_string()))?;
-            } else if !should_run && state.audio.is_running() {
+            } else if !should_run && (audio_restart_attempted || state.audio.is_running()) {
                 state.audio.stop(Some(window.app_handle().clone()));
             }
             Ok(())
@@ -151,7 +155,7 @@ pub fn export_config(path: String, state: &AppState) -> Result<(), CommandError>
 }
 
 pub fn import_config(
-    app: &AppHandle,
+    _app: &AppHandle,
     window: &Window,
     path: String,
     state: &AppState,
@@ -162,23 +166,7 @@ pub fn import_config(
         .map_err(|err| config_error("config.import-parse-failed", err.to_string()))?;
 
     apply_and_save_config(window, &cfg, state, true)?;
-    let logger = frontend_logger(window, state);
-
-    if cfg.audio.enabled {
-        let fallback_vst = fallback_vst_path(app);
-        if let Err(err) = state.audio.start(
-            audio_settings_from_config(&cfg),
-            fallback_vst,
-            logger.clone(),
-        ) {
-            logger.error(format!("Audio not restarted after import: {err}"));
-        } else {
-            persist_resolved_audio_device(&cfg, state);
-        }
-    } else {
-        state.audio.stop(Some(app.clone()));
-    }
-
+    persist_resolved_audio_device(&cfg, state);
     Ok(cfg)
 }
 
@@ -186,6 +174,48 @@ pub fn import_config(
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    fn rejected_import_restart_or_persistence_restores_the_previous_audio_settings() {
+        for fail_restart in [false, true] {
+            let previous = Config::default();
+            let mut next = previous.clone();
+            next.audio.vst_path = Some("replacement.dll".into());
+            let active = std::cell::RefCell::new(previous.audio.clone());
+            let persisted = Cell::new(false);
+            let error = commit_config_change(
+                &previous,
+                &next,
+                true,
+                |cfg, force| {
+                    *active.borrow_mut() = cfg.audio.clone();
+                    if force && fail_restart {
+                        Err(runtime_error(
+                            "audio.start-failed",
+                            "replacement worker rejected",
+                        ))
+                    } else {
+                        Ok(())
+                    }
+                },
+                |_| {
+                    persisted.set(true);
+                    Err(config_error("config.save-failed", "disk failure"))
+                },
+            )
+            .unwrap_err();
+            assert_eq!(*active.borrow(), previous.audio);
+            assert_eq!(persisted.get(), !fail_restart);
+            assert_eq!(
+                error.code,
+                if fail_restart {
+                    "audio.start-failed"
+                } else {
+                    "config.save-failed"
+                }
+            );
+        }
+    }
 
     #[test]
     fn audio_enable_changes_follow_bridge_lifecycle_and_preserve_unrelated_edits() {

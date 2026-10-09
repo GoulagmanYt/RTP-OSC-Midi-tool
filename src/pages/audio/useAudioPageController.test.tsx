@@ -11,6 +11,8 @@ const mocks = vi.hoisted(() => ({
   updateConfig: vi.fn(),
   refreshStatus: vi.fn(),
   toastError: vi.fn(),
+  setMasterGain: vi.fn(),
+  setAudioLimiter: vi.fn(),
 }));
 
 vi.mock("../../api", () => ({
@@ -19,7 +21,7 @@ vi.mock("../../api", () => ({
   listVstPlugins: mocks.listVstPlugins,
   closeVstUi: vi.fn(), listVstParameters: vi.fn(), openVstUi: vi.fn(),
   openVstFolder: vi.fn(), pingAudio: vi.fn(), refreshVstPlugins: vi.fn(),
-  retestVstPlugin: vi.fn(), setAudioLimiter: vi.fn(), setMasterGain: vi.fn(),
+  retestVstPlugin: vi.fn(), setAudioLimiter: mocks.setAudioLimiter, setMasterGain: mocks.setMasterGain,
   setVstEq: vi.fn(), setVstParameter: vi.fn(),
 }));
 vi.mock("../../providers/BridgeProvider", () => ({ useBridge: () => mocks.bridge }));
@@ -59,6 +61,29 @@ describe("audio configuration transactions", () => {
       metrics: null, updateConfig: mocks.updateConfig, refreshStatus: mocks.refreshStatus,
       saveConfig: vi.fn(), refreshAudioDevices: vi.fn(), audioBackends: [], audioDevices: [],
     };
+  });
+
+  it("does not load devices from a backend rejected by the native transaction", async () => {
+    mocks.bridge.config = { ...currentConfig(), audio: { ...currentConfig().audio, backend: "WASAPI" } };
+    mocks.saveConfig.mockRejectedValueOnce(new Error("ASIO failed"));
+    const { result } = renderHook(() => useAudioPageController());
+    await act(async () => { await result.current.handleBackendChange("ASIO"); });
+    expect(mocks.updateConfig).toHaveBeenLastCalledWith({ audio: (mocks.bridge.config as AppConfig).audio });
+    expect(mocks.bridge.refreshAudioDevices).not.toHaveBeenCalledWith("ASIO");
+    expect(mocks.toastError).toHaveBeenCalledWith("ASIO failed");
+  });
+
+  it("reports rejected live controls without persisting their unaccepted values", async () => {
+    mocks.setMasterGain.mockRejectedValueOnce(new Error("gain queue full"));
+    mocks.setAudioLimiter.mockRejectedValueOnce(new Error("limiter queue full"));
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const { result } = renderHook(() => useAudioPageController());
+    await act(async () => {
+      await result.current.handleGainChange(-12);
+      await result.current.handleLimiterToggle(false);
+    });
+    expect(mocks.updateConfig).not.toHaveBeenCalled();
+    expect(mocks.toastError.mock.calls).toEqual([["gain queue full"], ["limiter queue full"]]);
   });
 
   it("saves the new audio enabled value rather than the previous render", async () => {

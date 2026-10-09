@@ -237,8 +237,9 @@ export function useAudioPageController() {
   }, [loadCachedVstPlugins]);
 
   const handleBackendChange = async (value: string) => {
-    await updateAudioConfig({ backend: value, device: null, deviceId: null });
-    await refreshAudioDevices(value);
+    if (await updateAudioConfig({ backend: value, device: null, deviceId: null })) {
+      await refreshAudioDevices(value);
+    }
   };
 
   const handleAudioToggle = async (checked: boolean) => {
@@ -260,20 +261,22 @@ export function useAudioPageController() {
   };
 
   const handleGainChange = async (value: number) => {
-    await updateConfig({ audio: { gainDb: value } });
     try {
       await setMasterGain(value);
+      await updateConfig({ audio: { gainDb: value } });
     } catch (e) {
       console.error("Failed to set master gain", e);
+      toast.error(getErrorMessage(e) || t("toasts.settings.configSaveFailed"));
     }
   };
 
   const handleLimiterToggle = async (checked: boolean) => {
-    await updateConfig({ audio: { limiterEnabled: checked } });
     try {
       await setAudioLimiter(checked);
+      await updateConfig({ audio: { limiterEnabled: checked } });
     } catch (e) {
       console.error("Failed to set limiter", e);
+      toast.error(getErrorMessage(e) || t("toasts.settings.configSaveFailed"));
     }
   };
 

@@ -79,6 +79,9 @@ pub fn refresh_vst_plugins(state: &AppState) -> Vec<VstPluginEntry> {
                 })
             });
             if let Some(entry) = legacy_match.or_else(|| {
+                if cfg.audio.vst_plugin_id.is_some() {
+                    return None;
+                }
                 plugins
                     .iter()
                     .find(|entry| entry.path.eq_ignore_ascii_case(path) && entry.supported)
@@ -185,21 +188,27 @@ pub fn close_vst_ui(app: &AppHandle, state: &AppState) -> Result<(), CommandErro
 }
 
 pub fn set_master_gain(gain_db: f32, state: &AppState) -> Result<(), CommandError> {
-    state.audio.set_gain(gain_db);
-    Ok(())
+    state
+        .audio
+        .set_gain(gain_db)
+        .map_err(|err| audio_error("audio.set-gain-failed", err.to_string()))
 }
 
 pub fn set_audio_limiter(enabled: bool, state: &AppState) -> Result<(), CommandError> {
-    state.audio.set_limiter_enabled(enabled);
-    Ok(())
+    state
+        .audio
+        .set_limiter_enabled(enabled)
+        .map_err(|err| audio_error("audio.set-limiter-failed", err.to_string()))
 }
 
 pub fn set_vst_eq(
     settings: crate::config::VstEqSettings,
     state: &AppState,
 ) -> Result<(), CommandError> {
-    state.audio.set_vst_eq(settings);
-    Ok(())
+    state
+        .audio
+        .set_vst_eq(settings)
+        .map_err(|err| audio_error("audio.set-eq-failed", err.to_string()))
 }
 
 pub fn ping_audio(app: &AppHandle, window: &Window, state: &AppState) -> Result<(), CommandError> {

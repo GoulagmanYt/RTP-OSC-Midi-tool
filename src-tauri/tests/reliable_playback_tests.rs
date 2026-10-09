@@ -175,8 +175,8 @@ fn reliable_server_stop_cancels_session_and_injects_all_notes_off() {
         let all_notes_off = &frames[(channel as usize) * 2 + 1];
         assert_eq!(sustain_off.data.as_slice(), &[0xB0 | channel, 64, 0]);
         assert_eq!(all_notes_off.data.as_slice(), &[0xB0 | channel, 123, 0]);
-        assert_eq!(&*sustain_off.source, "ReliablePLV:long.mid:stop");
-        assert_eq!(&*all_notes_off.source, "ReliablePLV:long.mid:stop");
+        assert_eq!(&*sustain_off.source, "ReliablePLV:long.mid");
+        assert_eq!(&*all_notes_off.source, "ReliablePLV:long.mid");
     }
 
     let metrics = reliable_playback_metrics_snapshot();
@@ -265,9 +265,10 @@ fn reliable_server_shutdown_cancels_scheduled_playback() {
             "version": 1,
             "sessionId": "shutdown-session",
             "song": "shutdown.mid",
-            "total": 1,
+            "total": 2,
             "events": [
-                {"seq": 0, "dueUs": 60_000_000, "data": [0x90, 60, 100]}
+                {"seq": 0, "dueUs": 0, "data": [0x90, 60, 100]},
+                {"seq": 1, "dueUs": 60_000_000, "data": [0x80, 60, 0]}
             ]
         }),
     );
@@ -277,12 +278,21 @@ fn reliable_server_shutdown_cancels_scheduled_playback() {
         json!({"type": "start", "sessionId": "shutdown-session", "startDelayMs": 0}),
     );
 
+    // Ensure the scheduler is already inside its long musical silence.
+    let note = rx.recv_timeout(Duration::from_secs(2)).expect("first note");
+    assert_eq!(note.data.as_slice(), &[0x90, 60, 100]);
+    std::thread::sleep(Duration::from_millis(30));
+    let stopping = std::time::Instant::now();
     server.stop();
+    assert!(
+        stopping.elapsed() < Duration::from_secs(1),
+        "shutdown waited for the next note"
+    );
 
     let frames: Vec<_> = rx.try_iter().collect();
     assert_eq!(frames.len(), 32);
     assert!(frames.iter().all(|frame| (frame.data[0] & 0xF0) == 0xB0));
-    assert_eq!(reliable_playback_metrics_snapshot().messages_out, 0);
+    assert_eq!(reliable_playback_metrics_snapshot().messages_out, 1);
     assert!(reliable_playback_metrics_snapshot()
         .active_session
         .is_none());

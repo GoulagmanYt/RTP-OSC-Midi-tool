@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { AppConfig, RuntimeStatus, VstPluginEntry } from "../../api-types";
 import { AudioConfigCard } from "./AudioConfigCard";
@@ -100,6 +100,17 @@ function renderCard(developerMode: boolean, vstEqEnabled = false) {
 }
 
 describe("AudioConfigCard VST diagnostics", () => {
+  it("preserves separators while typing multiple scan paths and commits on blur", async () => {
+    const update = renderCard(false);
+    const input = screen.getByLabelText("audio.vstCustomPaths") as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "C:\\VST1;" } });
+    expect(input.value).toBe("C:\\VST1;");
+    expect(update).not.toHaveBeenCalled();
+    fireEvent.change(input, { target: { value: "C:\\VST1; C:\\VST2" } });
+    expect(input.value).toBe("C:\\VST1; C:\\VST2");
+    await act(async () => { fireEvent.blur(input); });
+    expect(update).toHaveBeenCalledWith({ vstScanPaths: ["C:\\VST1", "C:\\VST2"] });
+  });
   it("enables game mode for legacy configs and submits an additive toggle", () => {
     const update = renderCard(false);
     const toggle = screen.getByRole("switch", { name: /audio.gameMode/ });

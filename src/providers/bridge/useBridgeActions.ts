@@ -77,7 +77,8 @@ export function useBridgeActions({
       return;
     }
     await api.saveConfig(config);
-  }, [config]);
+    await refreshStatus();
+  }, [config, refreshStatus]);
 
   const toggleBridge = useCallback(async () => {
     if (!config || !status) {

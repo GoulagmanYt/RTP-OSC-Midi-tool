@@ -466,16 +466,22 @@ mod windows_worker {
                             }
                         }
                         ControlMessage::SetGain { request_id, gain_db } => {
-                            audio.set_gain(gain_db);
-                            ControlMessage::Ack { request_id }
+                            match audio.set_gain(gain_db) {
+                                Ok(()) => ControlMessage::Ack { request_id },
+                                Err(error) => ControlMessage::Error { request_id: Some(request_id), code: "worker.gain-failed".into(), message: error.to_string() },
+                            }
                         }
                         ControlMessage::SetLimiter { request_id, enabled } => {
-                            audio.set_limiter_enabled(enabled);
-                            ControlMessage::Ack { request_id }
+                            match audio.set_limiter_enabled(enabled) {
+                                Ok(()) => ControlMessage::Ack { request_id },
+                                Err(error) => ControlMessage::Error { request_id: Some(request_id), code: "worker.limiter-failed".into(), message: error.to_string() },
+                            }
                         }
                         ControlMessage::SetEq { request_id, settings } => {
-                            audio.set_vst_eq(settings);
-                            ControlMessage::Ack { request_id }
+                            match audio.set_vst_eq(settings) {
+                                Ok(()) => ControlMessage::Ack { request_id },
+                                Err(error) => ControlMessage::Error { request_id: Some(request_id), code: "worker.eq-failed".into(), message: error.to_string() },
+                            }
                         }
                         ControlMessage::Panic { request_id } => {
                             match audio.panic_all_notes() {
