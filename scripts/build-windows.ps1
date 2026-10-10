@@ -137,9 +137,8 @@ function Test-NodeVersionSupported {
         return $false
     }
     return (
-        ($Version.Major -eq 22 -and $Version -ge [Version]'22.22.2') -or
-        ($Version.Major -eq 24 -and $Version -ge [Version]'24.15.0') -or
-        $Version.Major -ge 26
+        ($Version.Major -eq 20 -and $Version -ge [Version]'20.19.0') -or
+        $Version -ge [Version]'22.12.0'
     )
 }
 
@@ -483,10 +482,10 @@ try {
         }
     }
     if (-not $node -or -not $npm) {
-        throw 'Node.js/npm was not found. Install Node 22.22.2+, 24.15+, or 26+.'
+        throw 'Node.js/npm was not found. Install Node 20.19+ or 22.12+.'
     }
     if (-not $nodeSupported) {
-        throw "Node.js v$nodeVersion is incompatible with jsdom 30 and no compatible NVM installation was found. Install Node 22.22.2+, 24.15+, or 26+."
+        throw "Node.js v$nodeVersion is incompatible with the frontend toolchain and no compatible NVM installation was found. Install Node 20.19+ or 22.12+."
     }
     if (-not $cargo) { throw 'Rust/Cargo was not found.' }
     if (-not $cmake) { throw 'CMake was not found.' }

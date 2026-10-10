@@ -25,6 +25,7 @@ jobs:
   build-windows:
     name: Build Windows executable
     runs-on: windows-latest
+    timeout-minutes: 90
 
     env:
       CARGO_TERM_COLOR: always
@@ -68,12 +69,32 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci --no-fund --no-audit
 
+      - name: Validate frontend before packaging
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          npm run lint
+          npm test
+
+      - name: Validate Rust before packaging
+        shell: pwsh
+        env:
+          TAURI_CONFIG: '{"bundle":{"externalBin":[]}}'
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          cargo fmt --manifest-path src-tauri/Cargo.toml --package osc-midi-bridge -- --check
+          cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
+          cargo test --manifest-path src-tauri/Cargo.toml --all-targets --all-features
+          cargo fmt --manifest-path tools/diagnostics/Cargo.toml --package oscmidi-diagnostics -- --check
+          cargo clippy --manifest-path tools/diagnostics/Cargo.toml --target-dir tools/diagnostics/target --all-targets -- -D warnings
+
       - name: Validate application version
         id: release
         shell: pwsh
         env:
           REQUEST_PUBLISH: ${{ inputs.publish_release }}
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
           $packageVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
           $packageLock = Get-Content package-lock.json -Raw | ConvertFrom-Json -AsHashtable
           $packageLockVersion = $packageLock['version']
