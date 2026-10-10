@@ -253,6 +253,9 @@ pub(super) fn stop_runtime(
     let config_for_reset = runtime.config.lock().clone();
     rtp_sink.store(None);
     runtime.stop.store(true, Ordering::Relaxed);
+    if let Some(server) = runtime.reliable_playback {
+        server.stop();
+    }
     if let Some(server) = runtime.osc_input {
         server.stop();
     }
@@ -267,9 +270,6 @@ pub(super) fn stop_runtime(
     }
     if let Some(handle) = runtime.midi_event_emitter {
         let _ = handle.join();
-    }
-    if let Some(server) = runtime.reliable_playback {
-        server.stop();
     }
     if config_for_reset.osc.enabled {
         if let Ok(osc) = OscClient::new(

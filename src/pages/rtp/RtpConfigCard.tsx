@@ -100,7 +100,14 @@ export function RtpConfigCard({
                 type="number"
                 placeholder="5004"
                 value={config?.rtp.port ?? ""}
-                onChange={(e) => onUpdateConfig({ rtp: { port: Number(e.target.value || 0) } })}
+                onChange={(e) => {
+                  const val = e.target.value.trim();
+                  if (val === "") return;
+                  const port = parseInt(val, 10);
+                  if (!Number.isNaN(port) && port >= 1024 && port <= 65534) {
+                    onUpdateConfig({ rtp: { port } });
+                  }
+                }}
               />
               <p className="text-xs text-muted-foreground">{t("rtp.portHint")}</p>
             </div>
@@ -165,9 +172,14 @@ export function RtpConfigCard({
                             type="number"
                             placeholder="5004"
                             value={remote.port}
-                            onChange={(e) =>
-                              onUpdateRemote(remote.id, { port: Number(e.target.value || 0) })
-                            }
+                            onChange={(e) => {
+                              const val = e.target.value.trim();
+                              if (val === "") return;
+                              const port = parseInt(val, 10);
+                              if (!Number.isNaN(port) && port >= 1024 && port <= 65534) {
+                                onUpdateRemote(remote.id, { port });
+                              }
+                            }}
                           />
                         </div>
                       </div>

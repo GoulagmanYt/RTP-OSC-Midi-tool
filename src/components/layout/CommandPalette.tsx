@@ -37,10 +37,12 @@ export default function CommandPalette({ open, onOpenChange }: CommandPalettePro
 
   const runCommand = (command: () => void | Promise<void>) => {
     onOpenChange(false);
-    Promise.resolve(command()).catch((e) => {
-      const message = getErrorMessage(e);
-      toast.error(message || t("toasts.bridge.bridgeActionFailed"));
-    });
+    Promise.resolve()
+      .then(() => command())
+      .catch((e) => {
+        const message = getErrorMessage(e);
+        toast.error(message || t("toasts.bridge.bridgeActionFailed"));
+      });
   };
 
   return (

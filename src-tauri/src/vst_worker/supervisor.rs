@@ -1014,9 +1014,17 @@ async fn midi_writer<W: tokio::io::AsyncWrite + Unpin>(
                     count += 1;
                 }
                 if inner.emergency_reset_pending.load(Ordering::Acquire) || generation != inner.midi_generation.load(Ordering::Acquire) { continue; }
-                if let Err(error) = tokio::io::AsyncWriteExt::write_all(&mut pipe, &batch[..count * width]).await {
-                    background_log("error", format!("VST worker MIDI pipe failed: {error}"));
-                    break;
+                let write_fut = tokio::io::AsyncWriteExt::write_all(&mut pipe, &batch[..count * width]);
+                match tokio::time::timeout(Duration::from_millis(500), write_fut).await {
+                    Ok(Ok(())) => {},
+                    Ok(Err(error)) => {
+                        background_log("error", format!("VST worker MIDI pipe failed: {error}"));
+                        break;
+                    }
+                    Err(_) => {
+                        background_log("error", "VST worker MIDI pipe write timed out (worker blocked)");
+                        break;
+                    }
                 }
                 tokio::task::yield_now().await;
             }

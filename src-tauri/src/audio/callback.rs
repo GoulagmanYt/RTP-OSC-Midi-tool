@@ -72,13 +72,13 @@ pub(super) fn build_output_stream_for_sample<T: Sample + SizedSample + FromSampl
                 ErrorKind::Xrun => {
                     error_telemetry.xruns.fetch_add(1, Ordering::Relaxed);
                 }
-                ErrorKind::DeviceChanged => {
-                    error_telemetry
-                        .stream_route_changes
-                        .fetch_add(1, Ordering::Relaxed);
-                }
                 ErrorKind::RealtimeDenied => {}
                 kind => {
+                    if kind == ErrorKind::DeviceChanged {
+                        error_telemetry
+                            .stream_route_changes
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
                     error_reset.store(true, Ordering::Release);
                     error_telemetry
                         .stream_recovery_requests
@@ -117,7 +117,8 @@ fn stream_error_code(kind: ErrorKind) -> u32 {
         ErrorKind::UnsupportedOperation => 9,
         ErrorKind::InvalidInput => 10,
         ErrorKind::Other => 11,
-        ErrorKind::Xrun | ErrorKind::DeviceChanged | ErrorKind::RealtimeDenied => 0,
+        ErrorKind::DeviceChanged => 12,
+        ErrorKind::Xrun | ErrorKind::RealtimeDenied => 0,
         _ => 11,
     }
 }
@@ -226,9 +227,11 @@ fn audio_callback<T: Sample + FromSample<f32>>(
         PluginBackend::Vst2 { instance, time } => {
             state.drain_parameter_commands();
             let parameters = instance.get_parameter_object();
-            for command in &state.parameter_commands {
-                parameters.set_parameter(command.index as i32, command.value);
-            }
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                for command in &state.parameter_commands {
+                    parameters.set_parameter(command.index as i32, command.value);
+                }
+            }));
             if state.last_frames != frames {
                 // instance.set_block_size(frames as i64); // Removed to prevent VST reset during playback
                 state
@@ -393,7 +396,7 @@ fn audio_callback<T: Sample + FromSample<f32>>(
 
     let mut peak_l = 0.0f32;
     let mut peak_r = 0.0f32;
-    debug_assert!(state.last_output.len() >= data.len());
+    debug_assert!(state.last_output.len() >= frames.saturating_mul(device_channels));
     for (frame_idx, frame) in data.chunks_exact_mut(device_channels).enumerate() {
         let recovery_gain = if state.recovering_from_silence {
             (frame_idx + 1) as f32 / frames as f32

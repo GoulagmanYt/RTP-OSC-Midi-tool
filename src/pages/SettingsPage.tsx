@@ -42,12 +42,20 @@ export default function SettingsPage() {
   const { t } = useI18n();
 
   useEffect(() => {
+    let cancelled = false;
     getAppPaths()
-      .then(setPaths)
+      .then((p) => {
+        if (!cancelled) setPaths(p);
+      })
       .catch((error) => {
-        console.error("Failed to load app paths", error);
-        toast.error(t("toasts.settings.pathsLoadFailed"));
+        if (!cancelled) {
+          console.error("Failed to load app paths", error);
+          toast.error(t("toasts.settings.pathsLoadFailed"));
+        }
       });
+    return () => {
+      cancelled = true;
+    };
   }, [t]);
 
   const currentPalette = (config?.ui.themePalette as PaletteChoice["id"]) || "light";

@@ -171,8 +171,10 @@ pub fn export_config(path: String, state: &AppState) -> Result<(), CommandError>
     let yaml = serde_yaml::to_string(&cfg)
         .map_err(|err| config_error("config.serialize-failed", err.to_string()))?;
     if let Some(parent) = PathBuf::from(&path).parent() {
-        fs::create_dir_all(parent)
-            .map_err(|err| io_to_error("config.export-failed", "config", err))?;
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)
+                .map_err(|err| io_to_error("config.export-failed", "config", err))?;
+        }
     }
     fs::write(&path, yaml).map_err(|err| io_to_error("config.export-failed", "config", err))
 }

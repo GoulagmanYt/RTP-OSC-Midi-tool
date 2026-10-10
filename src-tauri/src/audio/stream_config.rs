@@ -47,7 +47,7 @@ pub(super) fn choose_buffer_size(supported: &SupportedBufferSize, requested: u32
 pub(super) fn max_plugin_block_size(supported: &SupportedBufferSize, requested: u32) -> u32 {
     match supported {
         SupportedBufferSize::Range { min, max } => requested.max(*min).max(*max),
-        SupportedBufferSize::Unknown => requested.max(2048),
+        SupportedBufferSize::Unknown => requested.max(8192),
     }
 }
 

@@ -1,7 +1,8 @@
-import { useCallback } from "react";
+import { useCallback, useRef } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import { toast } from "sonner";
 import * as api from "../../api";
+import { getErrorMessage } from "../../api-errors";
 import { mergeConfig } from "./utils";
 
 type BridgeActionsOptions = {
@@ -27,6 +28,8 @@ export function useBridgeActions({
   refreshAudioDevices,
   t,
 }: BridgeActionsOptions) {
+  const toggleInProgress = useRef(false);
+
   const updateConfig = useCallback(
     async (patch: api.DeepPartial<api.AppConfig>) => {
       if (!config) {
@@ -82,9 +85,10 @@ export function useBridgeActions({
   }, [config, refreshStatus]);
 
   const toggleBridge = useCallback(async () => {
-    if (!config || !status) {
+    if (!config || !status || toggleInProgress.current) {
       return;
     }
+    toggleInProgress.current = true;
     try {
       if (status.running) {
         await api.stopBridge();
@@ -106,8 +110,11 @@ export function useBridgeActions({
       setStatus(nextStatus);
     } catch (error) {
       console.error("Failed to toggle bridge", error);
-      toast.error(t("toasts.bridge.bridgeActionFailed"));
+      const message = getErrorMessage(error);
+      toast.error(message || t("toasts.bridge.bridgeActionFailed"));
       await refreshStatus();
+    } finally {
+      toggleInProgress.current = false;
     }
   }, [config, refreshStatus, runPreflight, setStatus, status, t]);
 

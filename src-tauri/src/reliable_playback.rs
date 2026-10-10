@@ -436,6 +436,15 @@ fn validate_prepare(
                 "events must be sorted by dueUs".to_string(),
             ));
         }
+        if event.due_us > 86_400_000_000 {
+            return Err((
+                Some(session_id),
+                format!(
+                    "dueUs {} exceeds maximum allowed duration (24h)",
+                    event.due_us
+                ),
+            ));
+        }
         if event.data.is_empty() {
             return Err((
                 Some(session_id),
@@ -471,7 +480,9 @@ fn run_schedule(
     server_stop: Arc<AtomicBool>,
 ) -> Option<PlaybackCompletion> {
     let source: Arc<str> = Arc::from(format!("ReliablePLV:{}", session.song));
-    let start = Instant::now() + Duration::from_millis(start_delay_ms);
+    let start = Instant::now()
+        .checked_add(Duration::from_millis(start_delay_ms.min(60_000)))
+        .unwrap_or_else(Instant::now);
     let mut processed = 0u64;
     let mut dropped = 0u64;
     let mut max_late_us = 0u64;
@@ -482,7 +493,9 @@ fn run_schedule(
             return None;
         }
         let due_us = session.events[index].due_us;
-        let target = start + Duration::from_micros(due_us);
+        let target = start
+            .checked_add(Duration::from_micros(due_us))
+            .unwrap_or(start);
         wait_until(target, &cancel, &server_stop);
         if cancel.load(Ordering::Relaxed) || server_stop.load(Ordering::Relaxed) {
             return None;
@@ -509,6 +522,9 @@ fn run_schedule(
                 ) => {
                     processed += 1;
                     MESSAGES_OUT.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(crate::bridge::pipeline::EnqueueError::Disconnected) => {
+                    return None;
                 }
                 Ok(crate::bridge::pipeline::EnqueueOutcome::DroppedNonCritical) | Err(_) => {
                     dropped += 1;

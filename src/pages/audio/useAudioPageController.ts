@@ -60,15 +60,21 @@ export function useAudioPageController() {
   const pendingVstEq = useRef<VstEqSettings | null>(null);
   const vstEqFrame = useRef<number | null>(null);
   const vstEqSendInFlight = useRef(false);
+  const pendingVstParams = useRef<Map<number, number>>(new Map());
+  const vstParamFrame = useRef<number | null>(null);
   const vstEqControllerMounted = useRef(true);
   const flushVstEqRef = useRef<() => void>(() => undefined);
 
   useEffect(() => {
+    let disposed = false;
     const unlisten = listen("audio:vst-editor-hidden", () => {
-      setVstUiOpen(false);
+      if (!disposed) {
+        setVstUiOpen(false);
+      }
     });
     return () => {
-      unlisten.then((fn) => fn());
+      disposed = true;
+      unlisten.then((fn) => fn()).catch(() => undefined);
     };
   }, []);
 
@@ -133,6 +139,7 @@ export function useAudioPageController() {
     return () => {
       vstEqControllerMounted.current = false;
       if (vstEqFrame.current !== null) window.cancelAnimationFrame(vstEqFrame.current);
+      if (vstParamFrame.current !== null) window.cancelAnimationFrame(vstParamFrame.current);
     };
   }, []);
 
@@ -213,7 +220,9 @@ export function useAudioPageController() {
   const loadCachedVstPlugins = useCallback(async () => {
     try {
       const plugins = await listVstPlugins();
-      setVstPlugins(plugins);
+      if (vstEqControllerMounted.current) {
+        setVstPlugins(plugins);
+      }
     } catch (e) {
       console.error("Failed to load cached VST plugins", e);
     }
@@ -223,12 +232,16 @@ export function useAudioPageController() {
     setVstPluginsLoading(true);
     try {
       const plugins = await refreshVstPlugins();
-      setVstPlugins(plugins);
+      if (vstEqControllerMounted.current) {
+        setVstPlugins(plugins);
+      }
     } catch (e) {
       console.error("Failed to list VST plugins", e);
       toast.error(t("toasts.audio.vstListFailed"));
     } finally {
-      setVstPluginsLoading(false);
+      if (vstEqControllerMounted.current) {
+        setVstPluginsLoading(false);
+      }
     }
   }, [t]);
 
@@ -312,7 +325,7 @@ export function useAudioPageController() {
     setVstPluginsLoading(true);
     try {
       const tested = await retestVstPlugin(pluginId);
-      setVstPlugins((entries) => [...entries.filter((entry) => entry.id !== pluginId), tested]);
+      setVstPlugins((entries) => entries.map((entry) => (entry.id === pluginId ? tested : entry)));
     } catch (e) {
       toast.error(getErrorMessage(e) || t("toasts.audio.vstListFailed"));
     } finally {
@@ -371,7 +384,7 @@ export function useAudioPageController() {
     try {
       await pingAudio();
       toast.success(t("toasts.audio.pingSent"));
-      refreshStatus();
+      await refreshStatus();
     } catch (e) {
       const message = getErrorMessage(e);
       toast.error(message || t("toasts.audio.pingFailed"));
@@ -385,7 +398,7 @@ export function useAudioPageController() {
     try {
       await reloadVst();
       toast.success(t("toasts.audio.vstReloaded"));
-      refreshStatus();
+      await refreshStatus();
     } catch (e) {
       const message = getErrorMessage(e);
       toast.error(message || t("toasts.audio.vstReloadFailed"));
@@ -395,15 +408,26 @@ export function useAudioPageController() {
     }
   };
 
-  const handleVstParamChange = async (index: number, value: number) => {
-    setVstParams((prev) => prev.map((param) => (param.index === index ? { ...param, value } : param)));
-    try {
-      await setVstParameter(index, value);
-    } catch (e) {
-      const message = getErrorMessage(e);
-      toast.error(message || t("toasts.audio.vstParamFailed"));
+  const flushVstParams = useCallback(() => {
+    vstParamFrame.current = null;
+    if (pendingVstParams.current.size === 0) return;
+    const entries = Array.from(pendingVstParams.current.entries());
+    pendingVstParams.current.clear();
+    for (const [idx, val] of entries) {
+      setVstParameter(idx, val).catch((e) => {
+        const message = getErrorMessage(e);
+        toast.error(message || t("toasts.audio.vstParamFailed"));
+      });
     }
-  };
+  }, [t]);
+
+  const handleVstParamChange = useCallback(async (index: number, value: number) => {
+    setVstParams((prev) => prev.map((param) => (param.index === index ? { ...param, value } : param)));
+    pendingVstParams.current.set(index, value);
+    if (vstParamFrame.current === null) {
+      vstParamFrame.current = window.requestAnimationFrame(flushVstParams);
+    }
+  }, [flushVstParams]);
 
   const handleVstEqChange = (settings: VstEqSettings) => {
     if (!config) return;

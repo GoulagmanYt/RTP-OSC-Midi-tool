@@ -56,7 +56,15 @@ fn resolve_remote_socket_addr(
     logger: &FrontendLogger,
 ) -> Option<SocketAddr> {
     if let Ok(ip) = host.parse::<IpAddr>() {
-        return Some(SocketAddr::new(ip, port));
+        return match ip {
+            IpAddr::V4(v4) => Some(SocketAddr::new(IpAddr::V4(v4), port)),
+            IpAddr::V6(_) => {
+                logger.warn(format!(
+                    "RTP-MIDI remote host is IPv6, but RTP-MIDI requires IPv4: {host}"
+                ));
+                None
+            }
+        };
     }
 
     let addr = format!("{host}:{port}");

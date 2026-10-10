@@ -21,6 +21,7 @@ type Props = {
   onReset: () => void;
   onPanic: () => void;
   onUpdateConfig: (patch: Partial<AppConfig>) => void | Promise<void>;
+  onGainChange?: (gain: number) => void;
   displayPortName: (name: string) => string;
 };
 
@@ -36,6 +37,7 @@ export function BasicRoutingCard({
   onReset,
   onPanic,
   onUpdateConfig,
+  onGainChange,
   displayPortName,
 }: Props) {
   return (
@@ -145,9 +147,14 @@ export function BasicRoutingCard({
                 max="12"
                 step="1"
                 value={config?.audio.gainDb ?? 0}
-                onChange={(event) =>
-                  onUpdateConfig({ audio: { gainDb: Number(event.target.value || 0) } as AppConfig["audio"] })
-                }
+                onChange={(event) => {
+                  const val = Number(event.target.value || 0);
+                  if (onGainChange) {
+                    onGainChange(val);
+                  } else {
+                    onUpdateConfig({ audio: { ...config?.audio, gainDb: val } as AppConfig["audio"] });
+                  }
+                }}
               />
             </div>
 

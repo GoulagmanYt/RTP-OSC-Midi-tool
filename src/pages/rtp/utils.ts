@@ -23,7 +23,7 @@ export function mergeSessionIntoRemotes(
 ) {
   const host = session.addresses[0] ?? session.host;
   const existing =
-    remotes.find((remote) => remote.name === session.name) ??
+    remotes.find((remote) => remote.name && remote.name.toLowerCase() === session.name.toLowerCase()) ??
     remotes.find((remote) => remote.host === host && remote.port === session.port);
 
   if (existing) {
@@ -49,7 +49,7 @@ export function mergeSessionIntoRemotes(
 export function isSelectedSession(remotes: RtpRemoteEntry[], session: RtpSessionInfo) {
   return remotes.some((remote) => {
     if (remote.port !== session.port) return false;
-    if (remote.name && remote.name === session.name) return true;
+    if (remote.name && remote.name.toLowerCase() === session.name.toLowerCase()) return true;
     if (remote.host === session.host) return true;
     return session.addresses.includes(remote.host);
   });

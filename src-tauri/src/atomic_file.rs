@@ -14,7 +14,9 @@ pub(crate) fn write_atomically(path: &Path, data: &[u8]) -> std::io::Result<()> 
             "target path has no parent",
         )
     })?;
-    fs::create_dir_all(parent)?;
+    if !parent.as_os_str().is_empty() {
+        fs::create_dir_all(parent)?;
+    }
     let sequence = TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let temp_path = parent.join(format!(
         ".{}.{}.{}.tmp",

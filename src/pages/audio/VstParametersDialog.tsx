@@ -9,7 +9,7 @@ type Props = {
   loading: boolean;
   t: TranslateFn;
   onOpenChange: (open: boolean) => void;
-  onParamChange: (index: number, value: number) => Promise<void>;
+  onParamChange: (index: number, value: number) => void | Promise<void>;
 };
 
 export function VstParametersDialog({ open, params, loading, t, onOpenChange, onParamChange }: Props) {

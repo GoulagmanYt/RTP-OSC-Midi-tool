@@ -170,10 +170,11 @@ fn packet(
             _ => return Err("invalid OSC MIDI status"),
         };
         let mut data = [status, arguments[2], arguments[3]];
-        if data[1..usize::from(len)].iter().any(|b| *b >= 128)
-            || data[usize::from(len)..].iter().any(|b| *b != 0)
-        {
+        if data[1..usize::from(len)].iter().any(|b| *b >= 128) {
             return Err("invalid OSC MIDI data");
+        }
+        for byte in data[usize::from(len)..].iter_mut() {
+            *byte = 0;
         }
         if status & 0xF0 == 0x90 && data[2] == 0 {
             data[0] = 0x80 | (status & 15);
@@ -196,11 +197,13 @@ fn packet(
                     1 => true,
                     _ => return Err("OSC switch must be zero or one"),
                 },
-                ",f" => match f32::from_be_bytes(arguments.try_into().unwrap()) {
-                    0.0 => false,
-                    1.0 => true,
-                    _ => return Err("OSC switch must be zero or one"),
-                },
+                ",f" => {
+                    let value = f32::from_be_bytes(arguments.try_into().unwrap());
+                    if !value.is_finite() {
+                        return Err("OSC switch must be finite");
+                    }
+                    value >= 0.5
+                }
                 ",T" => true,
                 ",F" => false,
                 _ => return Err("invalid OSC switch type"),

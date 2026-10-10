@@ -443,6 +443,7 @@ impl RemotePlugin {
                 SERVER_FAILED => {
                     let reason = mapping_error(mapping.get());
                     let _ = child.kill();
+                    let _ = child.wait();
                     let _ = unsafe { CloseHandle(request_event) };
                     return Err(reason);
                 }
@@ -456,6 +457,7 @@ impl RemotePlugin {
             }
             if Instant::now() >= deadline {
                 let _ = child.kill();
+                let _ = child.wait();
                 let _ = unsafe { CloseHandle(request_event) };
                 return Err("VST x86 DSP worker timed out during startup".to_string());
             }
@@ -487,6 +489,7 @@ impl RemotePlugin {
             .collect();
         if output_channels == 0 || output_channels > BRIDGE_MAX_CHANNELS {
             let _ = child.kill();
+            let _ = child.wait();
             let _ = unsafe { CloseHandle(request_event) };
             return Err(format!(
                 "Unsupported x86 plugin output count: {output_channels}"

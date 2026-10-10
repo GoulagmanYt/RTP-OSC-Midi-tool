@@ -40,14 +40,18 @@ impl AudioEngine {
     }
 
     pub fn set_gain(&self, gain_db: f32) -> Result<(), AudioError> {
+        if !gain_db.is_finite() {
+            return Err(AudioError::Message("Gain dB must be finite".into()));
+        }
+        let clamped = gain_db.clamp(-60.0, 12.0);
         #[cfg(target_os = "windows")]
         if self.is_worker_enabled() {
-            return require_control_admission(self.worker.try_set_gain(gain_db));
+            return require_control_admission(self.worker.try_set_gain(clamped));
         }
         if let Some(rt) = self.runtime.lock().as_mut() {
             rt.controls
                 .gain_bits
-                .store(db_to_linear(gain_db).to_bits(), Ordering::Relaxed);
+                .store(db_to_linear(clamped).to_bits(), Ordering::Relaxed);
         }
         Ok(())
     }

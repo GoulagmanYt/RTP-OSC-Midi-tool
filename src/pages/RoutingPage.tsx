@@ -1,7 +1,7 @@
 import { useMemo, useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useBridge } from "../providers/BridgeProvider";
-import { panicMidi, sendTestMidi } from "../api";
+import { panicMidi, sendTestMidi, setMasterGain } from "../api";
 import type { MidiActivityInfo } from "../api";
 import { useI18n } from "../providers/LanguageProvider";
 import { AdvancedRoutingCard } from "./routing/AdvancedRoutingCard";
@@ -33,13 +33,32 @@ export default function RoutingPage() {
   }, [config?.rtp.sessionName, inputsList]);
 
   useEffect(() => {
+    let disposed = false;
     const unlisten = listen<MidiActivityInfo[]>("midi:activity", (event) => {
-      setActivity(event.payload);
+      if (!disposed) {
+        setActivity(event.payload);
+      }
     });
     return () => {
-      unlisten.then((fn) => fn());
+      disposed = true;
+      unlisten.then((fn) => fn()).catch(() => undefined);
     };
   }, []);
+
+  const handleGainChange = useCallback(
+    async (gain: number) => {
+      try {
+        if (status?.audioRunning) {
+          await setMasterGain(gain);
+        }
+        await updateConfig({ audio: { gainDb: gain } });
+      } catch (e) {
+        console.error("Failed to set master gain", e);
+        toast.error(getErrorMessage(e));
+      }
+    },
+    [status, updateConfig]
+  );
 
   const handleMidiInChange = useCallback(
     (value: string) => {
@@ -218,6 +237,7 @@ export default function RoutingPage() {
         onReset={handleReset}
         onPanic={handlePanic}
         onUpdateConfig={updateConfig}
+        onGainChange={handleGainChange}
         displayPortName={displayPortName}
       />
       <AdvancedRoutingCard

@@ -552,26 +552,29 @@ impl AudioEngine {
     }
 
     pub fn set_vst_parameter(&self, index: usize, value: f32) -> Result<(), AudioError> {
-        #[cfg(target_os = "windows")]
-        if self.is_worker_enabled() {
-            return crate::tauri::utils::safe_block_on(self.worker.set_parameter(index, value))
-                .map_err(AudioError::Message);
-        }
-        let guard = self.runtime.lock();
-        let Some(runtime) = guard.as_ref() else {
-            return Err(AudioError::Message("Audio not started".into()));
-        };
         if !value.is_finite() {
             return Err(AudioError::Message(
                 "VST parameter value must be finite".into(),
             ));
         }
+        let normalized = value.clamp(0.0, 1.0);
+
+        #[cfg(target_os = "windows")]
+        if self.is_worker_enabled() {
+            return crate::tauri::utils::safe_block_on(
+                self.worker.set_parameter(index, normalized),
+            )
+            .map_err(AudioError::Message);
+        }
+        let guard = self.runtime.lock();
+        let Some(runtime) = guard.as_ref() else {
+            return Err(AudioError::Message("Audio not started".into()));
+        };
         if self.maintenance.load(Ordering::Acquire) {
             return Err(AudioError::Message(
                 "Audio maintenance is active; retry the parameter change after maintenance".into(),
             ));
         }
-        let normalized = value.clamp(0.0, 1.0);
         let sequence = runtime
             .telemetry
             .parameter_accepted_sequence

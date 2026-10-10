@@ -187,9 +187,16 @@ pub fn close_vst_ui(app: &AppHandle, state: &AppState) -> Result<(), CommandErro
 }
 
 pub fn set_master_gain(gain_db: f32, state: &AppState) -> Result<(), CommandError> {
+    if !gain_db.is_finite() {
+        return Err(audio_error(
+            "audio.invalid-gain",
+            "Gain must be a finite number",
+        ));
+    }
+    let clamped_gain = gain_db.clamp(-60.0, 12.0);
     state
         .audio
-        .set_gain(gain_db)
+        .set_gain(clamped_gain)
         .map_err(|err| audio_error("audio.set-gain-failed", err.to_string()))
 }
 

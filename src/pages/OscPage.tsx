@@ -75,9 +75,14 @@ export default function OscPage() {
                   type="number"
                   placeholder="9000"
                   value={config?.osc.targetPort ?? ""}
-                  onChange={(e) =>
-                    updateConfig({ osc: { targetPort: Number(e.target.value || 0) } })
-                  }
+                  onChange={(e) => {
+                    const val = e.target.value.trim();
+                    if (val === "") return;
+                    const port = parseInt(val, 10);
+                    if (!Number.isNaN(port) && port >= 1 && port <= 65535) {
+                      updateConfig({ osc: { targetPort: port } });
+                    }
+                  }}
                 />
               </div>
             </div>
@@ -101,7 +106,14 @@ export default function OscPage() {
                 <Label htmlFor="osc-listen-port">{t("osc.listenPort")}</Label>
                 <Input id="osc-listen-port" type="number" min={1} max={65535}
                   value={config?.osc.listenPort ?? 9001}
-                  onChange={(e) => updateConfig({ osc: { listenPort: Number(e.target.value || 0) } })} />
+                  onChange={(e) => {
+                    const val = e.target.value.trim();
+                    if (val === "") return;
+                    const port = parseInt(val, 10);
+                    if (!Number.isNaN(port) && port >= 1 && port <= 65535) {
+                      updateConfig({ osc: { listenPort: port } });
+                    }
+                  }} />
               </div>
             </div>
           </div>

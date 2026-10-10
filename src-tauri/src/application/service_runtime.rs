@@ -87,7 +87,9 @@ pub async fn stop_bridge(app: &AppHandle, state: &AppState) -> Result<(), Comman
     let app = app.clone();
     let audio = state.audio.clone();
     let bridge = state.bridge.clone();
+    let config_change = state.config_change.clone();
     ::tauri::async_runtime::spawn_blocking(move || {
+        let _change = config_change.lock();
         // Stop every MIDI producer before removing the audio consumer. This
         // also keeps all blocking thread joins away from Tokio's async worker.
         let bridge_result = bridge.stop();

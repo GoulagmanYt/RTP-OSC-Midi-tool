@@ -200,33 +200,43 @@ pub(super) fn reset_all_notes(plugin: Arc<Mutex<PluginBackend>>) {
 pub(super) fn send_reset_messages(plugin: &mut PluginBackend) {
     match plugin {
         PluginBackend::Vst2 { instance, .. } => {
+            let mut midi_events: [api::MidiEvent; 64] = core::array::from_fn(|_| api::MidiEvent {
+                event_type: api::EventType::Midi,
+                byte_size: std::mem::size_of::<api::MidiEvent>() as i32,
+                delta_frames: 0,
+                flags: MidiEventFlags::REALTIME_EVENT.bits(),
+                note_length: 0,
+                note_offset: 0,
+                midi_data: [0; 3],
+                _midi_reserved: 0,
+                detune: 0,
+                note_off_velocity: 0,
+                _reserved1: 0,
+                _reserved2: 0,
+            });
+            let mut event_ptrs: [*mut api::Event; 64] = [std::ptr::null_mut(); 64];
+            let mut idx = 0;
             for ch in 0..16u8 {
                 for message in reset_messages_for_channel(ch) {
-                    let mut midi_event = api::MidiEvent {
-                        event_type: api::EventType::Midi,
-                        byte_size: std::mem::size_of::<api::MidiEvent>() as i32,
-                        delta_frames: 0,
-                        flags: MidiEventFlags::REALTIME_EVENT.bits(),
-                        note_length: 0,
-                        note_offset: 0,
-                        midi_data: message,
-                        _midi_reserved: 0,
-                        detune: 0,
-                        note_off_velocity: 0,
-                        _reserved1: 0,
-                        _reserved2: 0,
-                    };
-                    let evt = api::Events {
-                        num_events: 1,
-                        _reserved: 0,
-                        events: [
-                            &mut midi_event as *mut api::MidiEvent as *mut api::Event,
-                            std::ptr::null_mut(),
-                        ],
-                    };
-                    instance.process_events(&evt);
+                    midi_events[idx].midi_data = message;
+                    event_ptrs[idx] =
+                        &mut midi_events[idx] as *mut api::MidiEvent as *mut api::Event;
+                    idx += 1;
                 }
             }
+            #[repr(C)]
+            struct ResetBatch {
+                num_events: i32,
+                _reserved: isize,
+                events: [*mut api::Event; 64],
+            }
+            let batch = ResetBatch {
+                num_events: 64,
+                _reserved: 0,
+                events: event_ptrs,
+            };
+            let evt = unsafe { &*(&batch as *const ResetBatch as *const api::Events) };
+            instance.process_events(evt);
         }
         PluginBackend::Vst3 { instance, .. } => {
             for ch in 0..16u8 {

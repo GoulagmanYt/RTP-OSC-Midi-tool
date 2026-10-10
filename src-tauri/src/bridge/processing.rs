@@ -386,6 +386,9 @@ fn spawn_midi_thru_worker(
                     midi_out = connection;
                     *actual_midi_out.lock() = connected;
                     midi_out_name = config.midi.output_device;
+                    if let Some(out) = midi_out.as_mut() {
+                        flush_midi_output(out, &mut active_notes, &logger);
+                    }
                     output_reconnect_backoff = Duration::from_millis(500);
                     next_output_reconnect = std::time::Instant::now() + Duration::from_millis(500);
                 }

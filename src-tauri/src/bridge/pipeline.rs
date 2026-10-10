@@ -237,7 +237,20 @@ impl OscOutputState {
         let Some(&status) = frame.data.first() else {
             return;
         };
+        if frame.data.as_slice() == [0xFF] {
+            self.sources.clear();
+            return;
+        }
         if !(0x80..0xF0).contains(&status) {
+            return;
+        }
+        if frame.source.as_ref() == "ReliablePLV:server-stop"
+            && status & 0xF0 == 0xB0
+            && frame.data.len() == 3
+            && matches!(frame.data[1], 120 | 123)
+        {
+            self.sources
+                .retain(|key, _| !key.starts_with("ReliablePLV:"));
             return;
         }
         let channel = usize::from(status & 15);
@@ -255,7 +268,11 @@ impl OscOutputState {
             source.sustain[channel] = sustain.pressed;
         } else if status & 0xF0 == 0xB0 && frame.data.len() == 3 {
             match frame.data[1] {
-                120 | 123 => source.notes[channel] = 0,
+                120 => {
+                    source.notes[channel] = 0;
+                    source.sustain[channel] = false;
+                }
+                123 => source.notes[channel] = 0,
                 121 => source.sustain[channel] = false,
                 _ => {}
             }

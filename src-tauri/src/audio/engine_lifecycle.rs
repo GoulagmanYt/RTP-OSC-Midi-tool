@@ -743,15 +743,25 @@ impl AudioEngine {
 
             let dev_name = device.to_string();
             let dev_id = device.id().ok().map(|id| id.to_string());
+            let mut supported_configs = match device.supported_output_configs() {
+                Ok(configs) => configs,
+                Err(e) => {
+                    logger.warn(format!(
+                        "Failed to query supported configs for candidate '{}': {e}",
+                        dev_name
+                    ));
+                    last_err = Some(AudioError::Message(format!(
+                        "Failed to query configs for '{dev_name}': {e}"
+                    )));
+                    continue;
+                }
+            };
 
-            let has_stereo = device
-                .supported_output_configs()
-                .map_err(|e| AudioError::Message(e.to_string()))?
-                .any(|cfg| cfg.channels() >= 2);
+            let has_stereo = supported_configs.any(|cfg| cfg.channels() >= 2);
 
             if !has_stereo {
                 logger.info(format!(
-                    "Device '{}' skipped â€” VST requires stereo output.",
+                    "Device '{}' skipped — VST requires stereo output.",
                     dev_name
                 ));
                 continue;
