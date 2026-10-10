@@ -317,6 +317,19 @@ pub(super) fn build_stream(
                     parameter_cache,
                 ));
             }
+            if super::engine::requires_vst3_destructor_quarantine(
+                &vst_path,
+                vst_probe.class_uid.as_deref(),
+            ) {
+                crate::logger::background_log(
+                    "warn",
+                    format!(
+                        "Quarantining VST3 instance {:?} after audio stream build failure",
+                        vst_path
+                    ),
+                );
+                std::mem::forget(plugin);
+            }
             Err(primary_err)
         }
     }

@@ -237,6 +237,9 @@ impl VstWorkerSupervisor {
             return Err("Worker start superseded by another lifecycle request".into());
         }
         self.stop_session().await.ok();
+        // Allow virtual ASIO drivers (e.g. Voicemeeter AUX Virtual ASIO) time to release
+        // their single-client IPC handle and buffer locks after the previous worker exits.
+        tokio::time::sleep(Duration::from_millis(150)).await;
         // Old-session controls cannot overwrite the new recovery snapshot.
         *self.inner.last_load.lock() = Some((settings.clone(), class_uid.clone()));
         self.inner
@@ -966,6 +969,7 @@ async fn midi_writer<W: tokio::io::AsyncWrite + Unpin>(
     mut pipe: W,
     mut midi: crate::midi_queue::AsyncReceiver<MidiWireFrame>,
     inner: Arc<SupervisorInner>,
+    lifecycle_generation: u64,
 ) {
     let mut generation = 0;
     let mut saved = None;
@@ -1018,7 +1022,9 @@ async fn midi_writer<W: tokio::io::AsyncWrite + Unpin>(
             }
         }
     }
-    inner.midi_transport_failed.store(true, Ordering::Release);
+    if lifecycle_generation == inner.lifecycle_generation.load(Ordering::Acquire) {
+        inner.midi_transport_failed.store(true, Ordering::Release);
+    }
 }
 
 fn message_request_id(message: &ControlMessage) -> Option<u64> {
@@ -1122,7 +1128,7 @@ async fn run_session(runtime: SessionRuntime) {
         }
     }
 
-    let midi_task = midi_runtime.spawn(midi_writer(midi_pipe, midi, inner.clone()));
+    let midi_task = midi_runtime.spawn(midi_writer(midi_pipe, midi, inner.clone(), generation));
     let (reader, writer): (ReadHalf<_>, WriteHalf<_>) = tokio::io::split(control);
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let control_task = tauri::async_runtime::spawn(control_reader(reader, event_tx));
@@ -1418,7 +1424,7 @@ mod tests {
             let mut fresh = MidiWireFrame::new(2, 2, &[0x90, 62, 100]).unwrap();
             fresh.generation = supervisor.inner.midi_generation.load(Ordering::Acquire);
             tx.send(fresh).await.unwrap();
-            let task = tokio::spawn(midi_writer(writer, rx, supervisor.inner.clone()));
+            let task = tokio::spawn(midi_writer(writer, rx, supervisor.inner.clone(), 0));
             let reset = super::super::protocol::read_midi_frame(&mut reader)
                 .await
                 .unwrap();
