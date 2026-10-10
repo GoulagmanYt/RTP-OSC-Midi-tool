@@ -15,7 +15,7 @@ use super::runtime_state::{monotonic_us, AudioCallbackState, PluginBackend, RESE
 
 // One origin per block prevents conversion work itself from shifting later events
 // backwards. Clamp regressing ingress timestamps without reordering Note-Off/On.
-struct MidiBlockTiming {
+pub(super) struct MidiBlockTiming {
     start_us: u64,
     sample_rate: u32,
     last_frame: u32,
@@ -23,7 +23,7 @@ struct MidiBlockTiming {
 }
 
 impl MidiBlockTiming {
-    fn new(frames: usize, sample_rate: u32, now_us: u64) -> Self {
+    pub(super) fn new(frames: usize, sample_rate: u32, now_us: u64) -> Self {
         let frames = frames.max(1);
         let period_us = (frames as u64)
             .saturating_mul(1_000_000)
@@ -37,7 +37,7 @@ impl MidiBlockTiming {
         }
     }
 
-    fn offset(&mut self, timestamp_us: u64) -> u32 {
+    pub(super) fn offset(&mut self, timestamp_us: u64) -> u32 {
         let offset = timestamp_us
             .saturating_sub(self.start_us)
             .saturating_mul(u64::from(self.sample_rate))

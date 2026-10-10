@@ -61,6 +61,7 @@ fn apply_and_save_config(
     let bridge_running = state.bridge.status(&previous).running;
     let logger = frontend_logger(window, state);
     let mut audio_restart_attempted = false;
+    let mut applied_gain_db = previous.audio.gain_db;
     commit_config_change(
         &previous,
         config,
@@ -99,8 +100,16 @@ fn apply_and_save_config(
                         logger.clone(),
                     )
                     .map_err(|err| runtime_error("audio.start-failed", err.to_string()))?;
+                applied_gain_db = cfg.audio.gain_db;
             } else if !should_run && (audio_restart_attempted || state.audio.is_running()) {
                 state.audio.stop(Some(window.app_handle().clone()));
+            } else if should_run {
+                apply_gain_change(&mut applied_gain_db, cfg.audio.gain_db, |gain_db| {
+                    state
+                        .audio
+                        .set_gain(gain_db)
+                        .map_err(|err| runtime_error("audio.set-gain-failed", err.to_string()))
+                })?;
             }
             Ok(())
         },
@@ -115,6 +124,20 @@ fn apply_and_save_config(
     set_log_all_to_file(config.logging.log_all_to_file);
     set_logs_enabled(config.logging.enabled);
     sync_rtp_discovery(config, state, window.app_handle());
+    Ok(())
+}
+
+// Track admitted changes so a failed disk write restores the active gain as
+// well as the saved configuration. Unrelated edits do not send audio controls.
+fn apply_gain_change(
+    applied: &mut f32,
+    requested: f32,
+    set_gain: impl FnOnce(f32) -> Result<(), CommandError>,
+) -> Result<(), CommandError> {
+    if *applied != requested {
+        set_gain(requested)?;
+        *applied = requested;
+    }
     Ok(())
 }
 
@@ -174,6 +197,70 @@ pub fn import_config(
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    fn saved_gain_changes_reach_the_active_engine_and_roll_back_on_disk_failure() {
+        for fail_save in [false, true] {
+            let previous = Config::default();
+            let mut next = previous.clone();
+            next.audio.gain_db = -12.0;
+            let active_gain = Cell::new(previous.audio.gain_db);
+            let mut applied = previous.audio.gain_db;
+            let result = commit_config_change(
+                &previous,
+                &next,
+                false,
+                |cfg, _| {
+                    apply_gain_change(&mut applied, cfg.audio.gain_db, |gain| {
+                        active_gain.set(gain);
+                        Ok(())
+                    })
+                },
+                |_| {
+                    if fail_save {
+                        Err(config_error("config.save-failed", "disk failure"))
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
+            assert_eq!(result.is_err(), fail_save);
+            assert_eq!(active_gain.get(), if fail_save { 0.0 } else { -12.0 });
+        }
+    }
+
+    #[test]
+    fn rejected_gain_is_not_persisted_and_unrelated_edits_send_no_gain_control() {
+        let previous = Config::default();
+        let mut next = previous.clone();
+        next.audio.gain_db = -12.0;
+        let mut applied = previous.audio.gain_db;
+        let persisted = Cell::new(false);
+        let calls = Cell::new(0);
+        let result = commit_config_change(
+            &previous,
+            &next,
+            false,
+            |cfg, _| {
+                apply_gain_change(&mut applied, cfg.audio.gain_db, |_| {
+                    calls.set(calls.get() + 1);
+                    Err(runtime_error("audio.set-gain-failed", "worker unavailable"))
+                })
+            },
+            |_| {
+                persisted.set(true);
+                Ok(())
+            },
+        );
+        assert_eq!(result.unwrap_err().code, "audio.set-gain-failed");
+        assert!(!persisted.get());
+        assert_eq!(applied, previous.audio.gain_db);
+        assert_eq!(calls.get(), 1);
+        apply_gain_change(&mut applied, previous.audio.gain_db, |_| {
+            panic!("unchanged gain must not send a command")
+        })
+        .unwrap();
+    }
 
     #[test]
     fn rejected_import_restart_or_persistence_restores_the_previous_audio_settings() {

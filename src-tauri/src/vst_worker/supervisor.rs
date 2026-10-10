@@ -1189,6 +1189,11 @@ async fn run_session(runtime: SessionRuntime) {
                         guard.maintenance_started.get_or_insert(now);
                     } else if guard.maintenance_started.take().is_some() { guard.callback_progress = Some(now); }
                     guard.snapshot.editor_open = metrics.editor_open;
+                    if let (Some(status), Some(enabled)) =
+                        (guard.snapshot.status.as_mut(), metrics.limiter_enabled)
+                    {
+                        status.limiter_enabled = enabled;
+                    }
                     guard.snapshot.metrics = metrics;
                 }
                 Some(Ok(ControlMessage::EditorHidden)) => {

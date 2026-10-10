@@ -92,6 +92,25 @@ async fn isolated_worker_survives_midi_and_contains_process_crashes() {
         .expect("fixture worker should become ready");
     assert_eq!(status.stream_buffer_size, 512);
     assert_eq!(supervisor.snapshot().state, VstWorkerState::Ready);
+    for enabled in [true, false] {
+        assert!(supervisor.try_set_limiter_enabled(enabled));
+        // Commands are consumed FIFO: Parameters follows the limiter's Ack.
+        supervisor.list_parameters().await.unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let snapshot = supervisor.snapshot();
+            if snapshot.metrics.limiter_enabled == Some(enabled)
+                && snapshot.status.as_ref().unwrap().limiter_enabled == enabled
+            {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "applied limiter state was not published: {snapshot:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
     assert!(supervisor.try_set_eq(VstEqSettings {
         enabled: true,
         ..VstEqSettings::default()
@@ -116,6 +135,20 @@ async fn isolated_worker_survives_midi_and_contains_process_crashes() {
     }
     supervisor.stop().await.expect("fixture worker stop");
     assert_eq!(supervisor.snapshot().state, VstWorkerState::Disabled);
+
+    std::env::set_var("OSCMIDI_VST_FIXTURE_MODE", "reject-limiter");
+    let rejected_limiter = VstWorkerSupervisor::new();
+    rejected_limiter
+        .start(fixture_settings(), None)
+        .await
+        .unwrap();
+    assert!(rejected_limiter.try_set_limiter_enabled(true));
+    rejected_limiter.list_parameters().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let snapshot = rejected_limiter.snapshot();
+    assert_eq!(snapshot.metrics.limiter_enabled, Some(false));
+    assert!(!snapshot.status.unwrap().limiter_enabled);
+    rejected_limiter.stop().await.unwrap();
 
     std::env::set_var("OSCMIDI_VST_FIXTURE_MODE", "recover-controls");
     let recovered = VstWorkerSupervisor::new();

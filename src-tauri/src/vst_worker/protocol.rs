@@ -34,6 +34,9 @@ pub struct WorkerAudioStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkerMetrics {
+    /// Applied worker state. Older workers omit it, preserving the Ready value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limiter_enabled: Option<bool>,
     #[serde(default)]
     pub midi_transport_failed: bool,
     #[serde(default)]
@@ -364,6 +367,26 @@ fn fallback_monotonic_ticks() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn limiter_heartbeat_state_is_optional_for_older_workers() {
+        let legacy = serde_json::to_value(WorkerMetrics::default()).unwrap();
+        assert!(legacy.get("limiterEnabled").is_none());
+        assert_eq!(
+            serde_json::from_value::<WorkerMetrics>(legacy.clone())
+                .unwrap()
+                .limiter_enabled,
+            None
+        );
+        let mut current = legacy;
+        current["limiterEnabled"] = serde_json::Value::Bool(true);
+        assert_eq!(
+            serde_json::from_value::<WorkerMetrics>(current)
+                .unwrap()
+                .limiter_enabled,
+            Some(true)
+        );
+    }
 
     #[test]
     fn midi_wire_frame_round_trip_is_fixed_and_bounded() {

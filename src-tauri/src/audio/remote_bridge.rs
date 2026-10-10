@@ -55,7 +55,7 @@ use crate::{
 };
 
 use super::{
-    callback_midi::midi_to_rack_event,
+    callback_midi::{midi_to_rack_event, MidiBlockTiming},
     plugin_host::{load_plugin_backend, set_active_vst2_editor_window, VST2_RESIZE_MESSAGE},
     runtime_state::{MidiPacket, PluginBackend, Vst2EventBatch, MIDI_EVENT_BATCH_CAPACITY},
     state_codec::{load_vst_state, save_vst_state_checked},
@@ -639,22 +639,16 @@ impl RemotePlugin {
                 event_count = write_panic_events(&mut slot.events);
                 self.panic_pending = false;
             }
-            {
-                while event_count < BRIDGE_MAX_MIDI {
-                    let Some(packet) = midi.pop_front() else {
-                        break;
-                    };
-                    slot.events[event_count] = BridgeMidiEvent {
-                        ingress_qpc: packet.ingress_qpc,
-                        worker_qpc: packet.worker_qpc,
-                        consumed_qpc: 0,
-                        data: packet.data,
-                        len: packet.len,
-                        sample_offset: bridge_sample_offset(packet, frames, self.sample_rate),
-                    };
-                    event_count += 1;
-                }
-            }
+            event_count = write_bridge_midi_events(
+                &mut slot.events,
+                midi,
+                event_count,
+                MidiBlockTiming::new(
+                    frames,
+                    self.sample_rate,
+                    super::runtime_state::monotonic_us(),
+                ),
+            );
             let parameter_count = self.pending_parameter_changes.len();
             for (target, source) in slot
                 .parameter_changes
@@ -798,19 +792,27 @@ impl RemotePlugin {
 }
 
 #[cfg(target_pointer_width = "64")]
-fn bridge_sample_offset(packet: MidiPacket, frames: usize, sample_rate: u32) -> u32 {
-    let period_us = (frames as u64)
-        .saturating_mul(1_000_000)
-        .checked_div(u64::from(sample_rate.max(1)))
-        .unwrap_or(0);
-    let block_start = super::runtime_state::monotonic_us().saturating_sub(period_us);
-    packet
-        .timestamp_us
-        .saturating_sub(block_start)
-        .saturating_mul(u64::from(sample_rate))
-        .checked_div(1_000_000)
-        .unwrap_or(0)
-        .min(frames.saturating_sub(1) as u64) as u32
+fn write_bridge_midi_events(
+    events: &mut [BridgeMidiEvent; BRIDGE_MAX_MIDI],
+    midi: &mut VecDeque<MidiPacket>,
+    mut event_count: usize,
+    mut timing: MidiBlockTiming,
+) -> usize {
+    while event_count < BRIDGE_MAX_MIDI {
+        let Some(packet) = midi.pop_front() else {
+            break;
+        };
+        events[event_count] = BridgeMidiEvent {
+            ingress_qpc: packet.ingress_qpc,
+            worker_qpc: packet.worker_qpc,
+            consumed_qpc: 0,
+            data: packet.data,
+            len: packet.len,
+            sample_offset: timing.offset(packet.timestamp_us),
+        };
+        event_count += 1;
+    }
+    event_count
 }
 
 #[cfg(target_pointer_width = "64")]
@@ -1684,6 +1686,43 @@ fn stable_token(value: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn bridged_midi_preserves_release_retrigger_order_in_one_sample_timeline() {
+        let mut midi = VecDeque::new();
+        let messages = [
+            ([0x80, 60, 0], 1_005_000),
+            ([0x90, 60, 100], 1_005_000),
+            ([0x80, 60, 0], 1_004_990),
+            ([0x90, 60, 100], 1_006_000),
+        ];
+        for (data, timestamp_us) in messages {
+            let mut packet = MidiPacket::from_bytes(&data).unwrap();
+            packet.timestamp_us = timestamp_us;
+            midi.push_back(packet);
+        }
+        let mut events = [BridgeMidiEvent::default(); BRIDGE_MAX_MIDI];
+        let count = write_bridge_midi_events(
+            &mut events,
+            &mut midi,
+            0,
+            MidiBlockTiming::new(480, 48_000, 1_010_000),
+        );
+        assert_eq!(count, 4);
+        assert!(midi.is_empty());
+        assert_eq!(
+            events[..count]
+                .iter()
+                .map(|e| e.sample_offset)
+                .collect::<Vec<_>>(),
+            [240, 240, 240, 288]
+        );
+        assert_eq!(
+            events[..count].iter().map(|e| e.data).collect::<Vec<_>>(),
+            messages.map(|(data, _)| data)
+        );
+    }
 
     #[cfg(target_pointer_width = "64")]
     fn test_mapping() -> Mapping {

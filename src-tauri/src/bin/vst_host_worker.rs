@@ -16,7 +16,10 @@ fn main() {
 mod windows_worker {
     use std::{
         collections::HashMap,
-        sync::atomic::{AtomicU32, Ordering},
+        sync::{
+            atomic::{AtomicBool, AtomicU32, Ordering},
+            Arc,
+        },
         time::Duration,
     };
 
@@ -347,6 +350,10 @@ mod windows_worker {
                 }
             }
         });
+        // Publish only applied control state. Heartbeats must remain independent
+        // of runtime/plugin locks, including while Load or maintenance runs.
+        let applied_limiter = Arc::new(AtomicBool::new(false));
+        let health_limiter = applied_limiter.clone();
         let health_audio = audio.clone();
         control_runtime.spawn(async move {
             let mut tick = tokio::time::interval(HEARTBEAT_PERIOD);
@@ -355,10 +362,12 @@ mod windows_worker {
             loop {
                 tick.tick().await;
                 sequence = sequence.wrapping_add(1);
+                let mut metrics = health_audio.realtime_metrics();
+                metrics.limiter_enabled = Some(health_limiter.load(Ordering::Acquire));
                 let message = ControlMessage::Heartbeat {
                     sequence,
                     monotonic_qpc: monotonic_qpc(),
-                    metrics: health_audio.realtime_metrics(),
+                    metrics,
                 };
                 match heartbeat_tx.try_send(message) {
                     Ok(()) | Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {}
@@ -430,7 +439,10 @@ mod windows_worker {
                                 Ok(()) => {
                                     tokio::time::sleep(Duration::from_millis(u64::from(warmup_ms.clamp(500, 2_000)))).await;
                                     match ready_status(&audio, class_uid) {
-                                        Ok(status) => ControlMessage::Ready { request_id, status },
+                                        Ok(status) => {
+                                            applied_limiter.store(status.limiter_enabled, Ordering::Release);
+                                            ControlMessage::Ready { request_id, status }
+                                        },
                                         Err(message) => ControlMessage::Error { request_id: Some(request_id), code: "worker.ready-failed".into(), message },
                                     }
                                 }
@@ -473,7 +485,10 @@ mod windows_worker {
                         }
                         ControlMessage::SetLimiter { request_id, enabled } => {
                             match audio.set_limiter_enabled(enabled) {
-                                Ok(()) => ControlMessage::Ack { request_id },
+                                Ok(()) => {
+                                    applied_limiter.store(enabled, Ordering::Release);
+                                    ControlMessage::Ack { request_id }
+                                },
                                 Err(error) => ControlMessage::Error { request_id: Some(request_id), code: "worker.limiter-failed".into(), message: error.to_string() },
                             }
                         }

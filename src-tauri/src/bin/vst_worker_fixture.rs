@@ -132,6 +132,7 @@ mod fixture {
         let mut slow_ack = None;
         let mut loaded = false;
         let mut game_mode = false;
+        let mut limiter_enabled = false;
         let mut editor_open = false;
         let mut deferred_editor = None;
         loop {
@@ -151,7 +152,7 @@ mod fixture {
                     write_control_frame(&mut control_writer, &ControlMessage::Heartbeat {
                         sequence,
                         monotonic_qpc: monotonic_qpc(),
-                        metrics: WorkerMetrics { callback_count: if loaded && mode != "callback-blocked" { sequence } else { 0 }, game_mode, editor_open, deferred_editor, ..WorkerMetrics::default() },
+                        metrics: WorkerMetrics { callback_count: if loaded && mode != "callback-blocked" { sequence } else { 0 }, game_mode, limiter_enabled: Some(limiter_enabled), editor_open, deferred_editor, ..WorkerMetrics::default() },
                     }).await.map_err(|error| error.to_string())?;
                 }
                 message = control_rx.recv() => {
@@ -169,6 +170,7 @@ mod fixture {
                             }
                             loaded = true;
                             game_mode = settings.game_mode;
+                            limiter_enabled = settings.limiter_enabled;
                             if mode == "silence-two-seconds" { silence_until = Some(tokio::time::Instant::now() + Duration::from_secs(2)); }
                             match mode.as_str() {
                                 "crash" => std::process::abort(),
@@ -209,10 +211,21 @@ mod fixture {
                         }
                         ControlMessage::SetParameter { request_id, .. }
                         | ControlMessage::SetGain { request_id, .. }
-                        | ControlMessage::SetLimiter { request_id, .. }
                         | ControlMessage::SetEq { request_id, .. }
                         | ControlMessage::SaveState { request_id }
                         | ControlMessage::Panic { request_id } => ControlMessage::Ack { request_id },
+                        ControlMessage::SetLimiter { request_id, enabled } => {
+                            if mode == "reject-limiter" {
+                                ControlMessage::Error {
+                                    request_id: Some(request_id),
+                                    code: "fixture.limiter-rejected".into(),
+                                    message: "fixture rejected limiter change".into(),
+                                }
+                            } else {
+                                limiter_enabled = enabled;
+                                ControlMessage::Ack { request_id }
+                            }
+                        }
                         _ => ControlMessage::Error { request_id: None, code: "fixture.invalid-command".into(), message: "invalid fixture command".into() },
                     };
                     write_control_frame(&mut control_writer, &response).await.map_err(|error| error.to_string())?;
