@@ -868,6 +868,7 @@ fn create_kill_on_close_job(child: &Child) -> Result<windows::Win32::Foundation:
 
 fn spawn_worker(credentials: &SessionCredentials) -> Result<WorkerProcess, String> {
     use std::os::windows::process::CommandExt;
+    use windows::Win32::System::Threading::HIGH_PRIORITY_CLASS;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
     let executable = worker_executable_path()?;
@@ -883,7 +884,7 @@ fn spawn_worker(credentials: &SessionCredentials) -> Result<WorkerProcess, Strin
         .arg("--token")
         .arg(&credentials.token)
         .stdin(Stdio::null())
-        .creation_flags(CREATE_NO_WINDOW);
+        .creation_flags(CREATE_NO_WINDOW | HIGH_PRIORITY_CLASS.0);
     if inherit_stdio {
         command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
     } else {

@@ -335,11 +335,18 @@ fn handle_connection(mut stream: TcpStream, tx: Sender<MidiFrame>, server_stop: 
                 let done = Arc::clone(&done);
                 let session = Arc::clone(&prepared);
                 let server_stop = Arc::clone(&server_stop);
-                scheduler = Some(thread::spawn(move || {
-                    let completion = run_schedule(session, start_delay_ms, tx, cancel, server_stop);
-                    done.store(true, Ordering::Release);
-                    completion
-                }));
+                scheduler = Some(
+                    thread::Builder::new()
+                        .name("midi-playback".into())
+                        .spawn(move || {
+                            let _priority = crate::audio::windows_tuning::prioritize_midi_thread();
+                            let completion =
+                                run_schedule(session, start_delay_ms, tx, cancel, server_stop);
+                            done.store(true, Ordering::Release);
+                            completion
+                        })
+                        .expect("failed to spawn midi-playback thread"),
+                );
             }
             Ok(ClientFrame::Stop { session_id }) if session_id == prepared.session_id => {
                 stop_requested = true;

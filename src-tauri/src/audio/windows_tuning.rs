@@ -105,7 +105,7 @@ use windows::Win32::System::Threading::{
     GetCurrentProcess, GetCurrentThread, GetCurrentThreadId, ProcessPowerThrottling,
     SetPriorityClass, SetProcessInformation, SetThreadInformation, SetThreadPriority,
     SetThreadPriorityBoost, ThreadPowerThrottling, ABOVE_NORMAL_PRIORITY_CLASS,
-    AVRT_PRIORITY_CRITICAL, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+    AVRT_PRIORITY_CRITICAL, HIGH_PRIORITY_CLASS, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
     PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION,
     PROCESS_POWER_THROTTLING_STATE, THREAD_POWER_THROTTLING_CURRENT_VERSION,
     THREAD_POWER_THROTTLING_EXECUTION_SPEED, THREAD_POWER_THROTTLING_STATE,
@@ -202,6 +202,74 @@ pub(crate) fn prioritize_midi_thread() -> Option<()> {
     None
 }
 
+/// Keep audio DSP execution eligible for critical multimedia scheduling while a game is busy.
+/// Call only on dedicated DSP workers, and keep the guard on that thread until exit.
+#[cfg(target_os = "windows")]
+pub(crate) fn prioritize_dsp_thread() -> Option<MmcssRegistration> {
+    unsafe {
+        let mut task_index = 0;
+        let mut profile = "Pro Audio";
+        let mut critical = false;
+        let mut fallback = false;
+        let registration = match AvSetMmThreadCharacteristicsW(w!("Pro Audio"), &mut task_index)
+            .or_else(|pro_audio_error| {
+                profile = "Audio";
+                AvSetMmThreadCharacteristicsW(w!("Audio"), &mut task_index)
+                    .map_err(|audio_error| (pro_audio_error, audio_error))
+            }) {
+            Ok(handle) => {
+                critical = AvSetMmThreadPriority(handle, AVRT_PRIORITY_CRITICAL).is_ok();
+                if !critical {
+                    background_log("warn", "Failed to raise DSP MMCSS priority to CRITICAL");
+                }
+                Some(MmcssRegistration {
+                    handle,
+                    owner_thread_id: GetCurrentThreadId(),
+                })
+            }
+            Err((pro_audio_error, audio_error)) => {
+                if !is_thread_already_in_task_error(&pro_audio_error)
+                    && !is_thread_already_in_task_error(&audio_error)
+                {
+                    background_log(
+                        "warn",
+                        "DSP MMCSS unavailable; using thread priority fallback",
+                    );
+                    profile = "unavailable";
+                    fallback =
+                        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST).is_ok();
+                    if !fallback {
+                        background_log("warn", "Failed to raise DSP worker priority");
+                    }
+                }
+                None
+            }
+        };
+        let throttle = THREAD_POWER_THROTTLING_STATE {
+            Version: THREAD_POWER_THROTTLING_CURRENT_VERSION,
+            ControlMask: THREAD_POWER_THROTTLING_EXECUTION_SPEED,
+            StateMask: 0,
+        };
+        if SetThreadInformation(
+            GetCurrentThread(),
+            ThreadPowerThrottling,
+            &throttle as *const _ as *const std::ffi::c_void,
+            std::mem::size_of::<THREAD_POWER_THROTTLING_STATE>() as u32,
+        )
+        .is_err()
+        {
+            background_log("warn", "Failed to disable DSP thread power throttling");
+        }
+        crate::realtime::record_thread(profile, critical, fallback);
+        registration
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn prioritize_dsp_thread() -> Option<()> {
+    None
+}
+
 #[cfg(target_os = "windows")]
 impl Drop for MmcssRegistration {
     fn drop(&mut self) {
@@ -285,6 +353,42 @@ pub(super) fn apply_audio_thread_priority(state: &mut AudioCallbackState) {
 pub(super) fn apply_audio_thread_priority(_state: &mut AudioCallbackState) {}
 
 #[cfg(target_os = "windows")]
+pub struct HighResolutionTimerGuard {
+    period_ms: u32,
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for HighResolutionTimerGuard {
+    fn drop(&mut self) {
+        unsafe {
+            if self.period_ms != 0 && timeEndPeriod(self.period_ms) != 0 {
+                background_log("warn", "Windows rejected timer resolution release");
+            }
+        }
+    }
+}
+
+/// Request system-wide 1ms timer resolution for high-precision sleeps and audio/MIDI scheduling.
+#[cfg(target_os = "windows")]
+pub fn enable_high_resolution_timer() -> HighResolutionTimerGuard {
+    let period_ms = if unsafe { timeBeginPeriod(1) } == 0 {
+        1
+    } else {
+        background_log("warn", "Windows rejected 1ms timer resolution");
+        0
+    };
+    HighResolutionTimerGuard { period_ms }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub struct HighResolutionTimerGuard;
+
+#[cfg(not(target_os = "windows"))]
+pub fn enable_high_resolution_timer() -> HighResolutionTimerGuard {
+    HighResolutionTimerGuard
+}
+
+#[cfg(target_os = "windows")]
 pub(super) struct AudioProcessTuning {
     timer_period_ms: u32,
 }
@@ -349,7 +453,7 @@ pub fn apply_process_priority(logger: &FrontendLogger) {
 }
 
 /// Lightweight re-application of process priority on focus loss.
-/// Does not require a FrontendLogger â€” logs via background_log.
+/// Does not require a FrontendLogger — logs via background_log.
 #[cfg(target_os = "windows")]
 pub fn reapply_process_priority_on_focus_loss() {
     unsafe {
@@ -377,6 +481,48 @@ pub fn reapply_process_priority_on_focus_loss() {
         }
     }
 }
+
+/// Apply high priority class and disable power throttling for dedicated background audio workers.
+/// Workers run headless without UI rendering, allowing HIGH_PRIORITY_CLASS (same as FL Studio/DAWs).
+#[cfg(target_os = "windows")]
+pub fn apply_worker_process_priority() {
+    unsafe {
+        if SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS).is_err() {
+            background_log(
+                "warn",
+                "Failed to raise worker process priority class to HIGH",
+            );
+        } else {
+            background_log("debug", "Raised worker process priority to HIGH");
+        }
+
+        let throttle = PROCESS_POWER_THROTTLING_STATE {
+            Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+            ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED
+                | PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION,
+            StateMask: 0,
+        };
+        let process_power_ok = SetProcessInformation(
+            GetCurrentProcess(),
+            ProcessPowerThrottling,
+            &throttle as *const _ as *const std::ffi::c_void,
+            std::mem::size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
+        )
+        .is_ok();
+        store_bool(&AUDIO_POWER_THROTTLING_DISABLED, process_power_ok);
+        if !process_power_ok {
+            background_log("warn", "Failed to disable worker process power throttling");
+        } else {
+            background_log(
+                "debug",
+                "Disabled Windows power throttling for audio worker process",
+            );
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn apply_worker_process_priority() {}
 
 #[cfg(not(target_os = "windows"))]
 pub(super) struct AudioProcessTuning;
@@ -452,5 +598,12 @@ mod tests {
         let source = include_str!("windows_tuning.rs");
         assert!(source.contains("ERROR_THREAD_ALREADY_IN_TASK_RAW: u32 = 1552"));
         assert!(source.contains("is_thread_already_in_task_error"));
+    }
+
+    #[test]
+    fn windows_worker_tuning_uses_high_priority_class() {
+        let source = include_str!("windows_tuning.rs");
+        let high_class = ["HIGH_PRIORITY", "_CLASS"].concat();
+        assert!(source.contains(&high_class));
     }
 }

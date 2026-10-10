@@ -630,7 +630,8 @@ mod windows_worker {
 
 #[cfg(target_os = "windows")]
 fn main() {
-    osc_midi_bridge::audio::windows_tuning::reapply_process_priority_on_focus_loss();
+    let _timer_guard = osc_midi_bridge::audio::windows_tuning::enable_high_resolution_timer();
+    osc_midi_bridge::audio::windows_tuning::apply_worker_process_priority();
     windows_worker::install_descendant_console_guard();
     if let Some(exit_code) = osc_midi_bridge::plugin_probe::probe_cli_exit_code() {
         if exit_code == 0 {

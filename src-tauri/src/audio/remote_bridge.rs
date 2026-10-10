@@ -1221,7 +1221,7 @@ fn run_dsp_server(args: DspArgs, logger: FrontendLogger) -> Result<(), String> {
     let mut rack_events = Vec::with_capacity(BRIDGE_MAX_MIDI);
     let mut editor = None;
 
-    let _dsp_priority = super::windows_tuning::prioritize_midi_thread();
+    let _dsp_priority = super::windows_tuning::prioritize_dsp_thread();
     while mapping.get().shutdown.load(Ordering::Acquire) == 0 {
         let _ = unsafe { WaitForSingleObject(request_event, 50) };
         if mapping.get().shutdown.load(Ordering::Acquire) != 0 {
