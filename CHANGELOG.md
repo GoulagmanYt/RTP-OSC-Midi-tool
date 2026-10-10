@@ -6,6 +6,13 @@ All notable changes to OSCMidi are documented here.
 
 ### Fixed
 
+- Wait for Reliable Playback scheduling to stop before releasing notes and acknowledging cancellation, including simultaneous MIDI bursts and client disconnections.
+- Serialize configuration imports and resets with saves, discard obsolete autosaves, and publish the accepted replacement directly to the interface.
+- Preserve the bridge and audio runtime when switching the interface language with automatic startup enabled.
+- Apply gain changes saved from Routing to the running audio engine and restore the previous gain if persistence fails.
+- Preserve Note-Off/Note-On timing order in the x86 VST bridge with a shared clock origin for each audio block.
+- Refresh the reported limiter state from the worker's applied controls without restarting audio.
+- Load connected RTP participants when opening the RTP page and preserve newer connection events while the initial snapshot is in flight.
 - Give dedicated MIDI processing, MIDI Thru and OSC workers Windows multimedia scheduling priority and disable their power throttling to reduce delivery delays during CPU contention.
 - Match output queue capacity to the 8,192-message input queue so a scheduling interruption can be absorbed without overflowing a smaller downstream queue.
 - Stop feeding disabled MIDI Thru outputs and prevent UI-only OSC queue overflow from resetting VST notes and sustain. Active outputs retain emergency recovery when a critical release is lost.

@@ -21,7 +21,7 @@ export interface BridgeContextType {
   refreshAudioDevices: (backend?: string | null) => Promise<void>;
   refreshLists: () => Promise<void>;
   runPreflight: () => Promise<api.PreflightReport | null>;
-  reloadConfig: () => Promise<void>;
+  reloadConfig: (accepted?: api.AppConfig) => Promise<void>;
 }
 
 export const BridgeContext = createContext<BridgeContextType | undefined>(undefined);

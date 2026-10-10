@@ -88,6 +88,7 @@ fn run_app() -> Result<(), Box<dyn std::error::Error>> {
             restart_rtp,
             preflight_check,
             refresh_rtp_sessions,
+            get_rtp_participants,
             ping_audio,
             reload_vst,
             reset_config_defaults,

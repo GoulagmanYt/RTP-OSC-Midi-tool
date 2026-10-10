@@ -44,18 +44,19 @@ export function useBridgeActions({
     [config, refreshAudioDevices, setConfig]
   );
 
-  const reloadConfig = useCallback(async () => {
+  const reloadConfig = useCallback(async (accepted?: api.AppConfig) => {
     try {
-      const fresh = await api.getConfig();
+      const fresh = accepted ?? await api.getConfig();
       setConfig(fresh);
-      await refreshLists();
-      if (fresh.audio.backend) {
-        await refreshAudioDevices(fresh.audio.backend);
-      }
+      await Promise.all([
+        refreshStatus(),
+        refreshLists(),
+        refreshAudioDevices(fresh.audio.backend),
+      ]);
     } catch (error) {
       console.error("Failed to reload config", error);
     }
-  }, [refreshAudioDevices, refreshLists, setConfig]);
+  }, [refreshAudioDevices, refreshLists, refreshStatus, setConfig]);
 
   const runPreflight = useCallback(async () => {
     if (!config) {

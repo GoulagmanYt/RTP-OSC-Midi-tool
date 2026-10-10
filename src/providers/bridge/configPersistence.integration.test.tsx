@@ -107,3 +107,40 @@ it("keeps native audio enabled after a slow disable is rejected and the UI rolls
   expect(result.current.config?.audio.enabled).toBe(true);
   expect(nativeConfig.audio.enabled).toBe(true);
 });
+
+it.each(["reset", "import"])("keeps an accepted %s after a slow save and an older queued autosave", async (operation) => {
+  let finishSave!: () => void;
+  let nativeConfig = initial;
+  const accepted = { ...initial, audio: { ...initial.audio, enabled: false }, osc: { listenPort: 9100 } } as api.AppConfig;
+  const applied: api.AppConfig[] = [];
+  mocks.invoke.mockImplementation(async (command: string, args?: { config: api.AppConfig }) => {
+    if (command === "save_config") {
+      if (applied.length === 0) await new Promise<void>((resolve) => { finishSave = resolve; });
+      nativeConfig = args!.config;
+      applied.push(nativeConfig);
+    } else if (command === "reset_config_defaults" || command === "import_config") {
+      nativeConfig = accepted;
+      applied.push(accepted);
+      return accepted;
+    } else if (command === "get_config") {
+      throw new Error("The accepted replacement must be published directly");
+    }
+    return [];
+  });
+  const { result } = mount();
+  const blocking = api.saveConfig(initial);
+  await act(async () => { await result.current.updateConfig({ osc: { listenPort: 9002 } }); });
+  await act(async () => { await vi.advanceTimersByTimeAsync(350); });
+  const replacement = operation === "reset" ? api.resetConfigDefaults() : api.importConfig("replacement.yaml");
+  expect(mocks.invoke.mock.calls.filter(([command]) => command === "reset_config_defaults" || command === "import_config")).toHaveLength(0);
+  await act(async () => {
+    finishSave();
+    await blocking;
+    await result.current.reloadConfig(await replacement);
+  });
+  await act(async () => { await vi.advanceTimersByTimeAsync(700); });
+  expect(applied.map((config) => config.osc.listenPort)).toEqual([9001, 9002, 9100]);
+  expect(nativeConfig).toBe(accepted);
+  expect(result.current.config).toBe(accepted);
+  expect(onError).not.toHaveBeenCalled();
+});

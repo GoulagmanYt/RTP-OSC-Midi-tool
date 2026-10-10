@@ -1,11 +1,12 @@
 import { invokeCommand } from "./api-client";
-import { persistConfigSave, persistConfigSerially } from "./config-persistence";
+import { persistConfigReplacement, persistConfigSave, persistConfigSerially } from "./config-persistence";
 import type {
   AppConfig,
   AudioDeviceEntry,
   AppPaths,
   PreflightReport,
   RtpSessionInfo,
+  RtpParticipantInfo,
   RuntimeStatus,
   StressTestMode,
   StressTestResult,
@@ -53,8 +54,12 @@ export async function refreshRtpSessions(): Promise<RtpSessionInfo[]> {
   return invokeCommand("refresh_rtp_sessions");
 }
 
+export async function getRtpParticipants(): Promise<RtpParticipantInfo[]> {
+  return invokeCommand("get_rtp_participants");
+}
+
 export async function resetConfigDefaults(): Promise<AppConfig> {
-  return invokeCommand("reset_config_defaults");
+  return persistConfigReplacement(() => invokeCommand<AppConfig>("reset_config_defaults"));
 }
 
 export async function restartRtp(): Promise<RuntimeStatus> {
@@ -134,7 +139,7 @@ export async function exportDiagnostics(path: string): Promise<void> {
 }
 
 export async function importConfig(path: string): Promise<AppConfig> {
-  return invokeCommand("import_config", { path });
+  return persistConfigReplacement(() => invokeCommand<AppConfig>("import_config", { path }));
 }
 
 export async function getAppPaths(): Promise<AppPaths> {

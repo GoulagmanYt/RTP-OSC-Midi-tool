@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import type { AppConfig } from "../../api";
+import { getConfigSaveGeneration, isAcceptedConfigReplacement } from "../../config-persistence";
 
 type AutosaveOptions = {
   config: AppConfig | null;
@@ -20,7 +21,7 @@ export function useAutosaveSettings({ config, save, setConfig, onError, loadAcce
     if (!config) {
       return;
     }
-    if (!accepted.current) {
+    if (!accepted.current || isAcceptedConfigReplacement(config)) {
       accepted.current = config;
       return;
     }
@@ -28,12 +29,14 @@ export function useAutosaveSettings({ config, save, setConfig, onError, loadAcce
       return;
     }
 
+    const generation = getConfigSaveGeneration();
+    const shouldSave = () => latest.current === config && getConfigSaveGeneration() === generation;
     const timer = window.setTimeout(() => {
       pendingSave.current = pendingSave.current.then(async () => {
         // A delayed save must never overwrite a newer edit or a rollback.
-        if (latest.current !== config) return;
+        if (!shouldSave()) return;
         try {
-          const saved = await save(config, () => latest.current === config);
+          const saved = await save(config, shouldSave);
           if (saved !== false) accepted.current = config;
         } catch (error) {
           console.error("Auto-save failed", error);

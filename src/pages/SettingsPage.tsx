@@ -84,8 +84,8 @@ export default function SettingsPage() {
     }
     setBusy(true);
     try {
-      await resetConfigDefaults();
-      await reloadConfig();
+      const accepted = await resetConfigDefaults();
+      await reloadConfig(accepted);
       toast.success(t("toasts.settings.configReset"));
     } catch (e) {
       const message = getErrorMessage(e);
@@ -164,8 +164,8 @@ export default function SettingsPage() {
         filters: [{ name: "YAML", extensions: ["yaml", "yml"] }],
       });
       if (!selected || Array.isArray(selected)) return;
-      await importConfig(selected.toString());
-      await reloadConfig();
+      const accepted = await importConfig(selected.toString());
+      await reloadConfig(accepted);
       toast.success(t("toasts.settings.importSuccess"));
     } catch (e) {
       const message = getErrorMessage(e);

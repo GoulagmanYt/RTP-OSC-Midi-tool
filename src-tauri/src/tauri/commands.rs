@@ -8,8 +8,8 @@ use crate::{
     error::CommandError,
     tauri::state::AppState,
     types::{
-        AppPaths, AudioDeviceEntry, BridgeStatus, PreflightReport, RtpSessionInfo, VstParameter,
-        VstPluginEntry,
+        AppPaths, AudioDeviceEntry, BridgeStatus, PreflightReport, RtpParticipantInfo,
+        RtpSessionInfo, VstParameter, VstPluginEntry,
     },
 };
 
@@ -95,6 +95,11 @@ pub fn refresh_rtp_sessions(
     state: State<AppState>,
 ) -> Result<Vec<RtpSessionInfo>, CommandError> {
     services::refresh_rtp_sessions(&app, state.inner())
+}
+
+#[::tauri::command]
+pub fn get_rtp_participants(state: State<AppState>) -> Vec<RtpParticipantInfo> {
+    services::get_rtp_participants(state.inner())
 }
 
 #[::tauri::command]

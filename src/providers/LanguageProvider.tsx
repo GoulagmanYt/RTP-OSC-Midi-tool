@@ -101,7 +101,6 @@ export function LanguageProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     let cancelled = false;
-    setReady(false);
 
     const load = async () => {
       await ensureCatalog(language);
@@ -125,6 +124,7 @@ export function LanguageProvider({ children }: { children: React.ReactNode }) {
       const value =
         resolveValue(catalogs[language], key) ??
         resolveValue(catalogs.en, key) ??
+        resolveValue(catalogs.fr, key) ??
         key;
       return interpolate(value, vars);
     },

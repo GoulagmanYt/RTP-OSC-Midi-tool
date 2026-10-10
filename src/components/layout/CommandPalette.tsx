@@ -107,8 +107,8 @@ export default function CommandPalette({ open, onOpenChange }: CommandPalettePro
           <CommandItem
             onSelect={() =>
               runCommand(async () => {
-                await resetConfigDefaults();
-                await reloadConfig();
+                const accepted = await resetConfigDefaults();
+                await reloadConfig(accepted);
               })
             }
           >

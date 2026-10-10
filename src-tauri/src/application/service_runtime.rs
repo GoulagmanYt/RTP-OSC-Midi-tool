@@ -12,7 +12,7 @@ use crate::{
             audio_settings_from_config, fallback_vst_path, sync_rtp_discovery, sync_runtime_logging,
         },
     },
-    types::{BridgeStatus, PreflightReport, RtpSessionInfo},
+    types::{BridgeStatus, PreflightReport, RtpParticipantInfo, RtpSessionInfo},
 };
 
 use super::service_common::{
@@ -169,6 +169,10 @@ pub fn refresh_rtp_sessions(
         .rtp_discovery
         .refresh_now(app, true)
         .map_err(|err| runtime_error("rtp.refresh-sessions-failed", err))
+}
+
+pub fn get_rtp_participants(state: &AppState) -> Vec<RtpParticipantInfo> {
+    state.bridge.rtp_participants()
 }
 
 pub fn preflight_check(

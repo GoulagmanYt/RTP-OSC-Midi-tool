@@ -3,6 +3,7 @@ import { useState } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { AppConfig } from "../../api";
 import { useAutosaveSettings } from "./useAutosaveSettings";
+import { persistConfigReplacement } from "../../config-persistence";
 
 const initial = { osc: { listenPort: 9001 } } as AppConfig;
 
@@ -83,4 +84,21 @@ it("does not treat a skipped native save as an accepted configuration", async ()
   await act(async () => { result.current.setConfig({ osc: { listenPort: 9999 } } as AppConfig); });
   await act(async () => { await vi.advanceTimersByTimeAsync(350); });
   expect(result.current.config).toBe(initial);
+});
+
+it("invalidates an old debounce timer when replacement commits before React receives its snapshot", async () => {
+  const save = vi.fn().mockResolvedValue(true);
+  const { result } = mount(save);
+  await act(async () => { result.current.setConfig({ osc: { listenPort: 9002 } } as AppConfig); });
+  const replacement = { osc: { listenPort: 9003 } } as AppConfig;
+  await persistConfigReplacement(async () => replacement);
+  await act(async () => { await vi.advanceTimersByTimeAsync(350); });
+  expect(save).not.toHaveBeenCalled();
+  await act(async () => { result.current.setConfig(replacement); });
+  await act(async () => { await vi.advanceTimersByTimeAsync(350); });
+  expect(save).not.toHaveBeenCalled();
+  const newer = { osc: { listenPort: 9004 } } as AppConfig;
+  await act(async () => { result.current.setConfig(newer); });
+  await act(async () => { await vi.advanceTimersByTimeAsync(350); });
+  expect(save).toHaveBeenCalledWith(newer, expect.any(Function));
 });

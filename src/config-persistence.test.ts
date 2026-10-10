@@ -1,6 +1,6 @@
 import { expect, it, vi } from "vitest";
 import type { AppConfig } from "./api-types";
-import { persistConfigSave, persistConfigSerially } from "./config-persistence";
+import { getConfigSaveGeneration, persistConfigReplacement, persistConfigSave, persistConfigSerially } from "./config-persistence";
 
 it("keeps automatic and explicit writes in order and continues after a rejection", async () => {
   let rejectFirst!: (error: Error) => void;
@@ -17,6 +17,42 @@ it("keeps automatic and explicit writes in order and continues after a rejection
   await rejected;
   await newer;
   expect(operation.mock.calls.map(([config]) => config)).toEqual([first, second]);
+});
+
+it("orders replacements after in-flight writes and skips older automatic saves queued behind them", async () => {
+  let finishFirst!: () => void;
+  const old = { version: 21 } as AppConfig;
+  const replacement = { version: 22 } as AppConfig;
+  const applied: AppConfig[] = [];
+  const first = persistConfigSave(old, async (config) => {
+    await new Promise<void>((resolve) => { finishFirst = resolve; });
+    applied.push(config);
+  });
+  const replaced = persistConfigReplacement(async () => {
+    applied.push(replacement);
+    return replacement;
+  });
+  const stale = persistConfigSave(old, async (config) => { applied.push(config); }, () => true);
+  await Promise.resolve();
+  expect(applied).toEqual([]);
+  finishFirst();
+  await first;
+  expect(await replaced).toBe(replacement);
+  expect(await stale).toBe(false);
+  expect(applied).toEqual([old, replacement]);
+});
+
+it("keeps pending drafts and subsequent saves valid when a replacement fails", async () => {
+  const generation = getConfigSaveGeneration();
+  const replaced = persistConfigReplacement(async () => { throw new Error("invalid import"); });
+  const save = vi.fn().mockResolvedValue(undefined);
+  const draft = { version: 23 } as AppConfig;
+  const automatic = persistConfigSave(draft, save, () => true);
+  await expect(replaced).rejects.toThrow("invalid import");
+  expect(getConfigSaveGeneration()).toBe(generation);
+  expect(await automatic).toBe(true);
+  expect(await persistConfigSave(draft, save)).toBe(true);
+  expect(save).toHaveBeenCalledTimes(2);
 });
 
 it("cancels already queued automatic retries of consecutive rejected snapshots but permits later retries", async () => {
