@@ -192,21 +192,22 @@ impl BridgeHandle {
             }
             let old_config = runtime.config.lock().clone();
             let old_midi = &old_config.midi;
-            let profiles_changed = !super::pipeline::ConfigSnapshot::from(&old_config)
-                .same_profiles(&super::pipeline::ConfigSnapshot::from(&config));
+            let routing_changed = old_midi.channel_filter != config.midi.channel_filter
+                || !super::pipeline::ConfigSnapshot::from(&old_config)
+                    .same_profiles(&super::pipeline::ConfigSnapshot::from(&config));
             let sender = self.rtp_sink.load();
-            if profiles_changed {
+            if routing_changed {
                 if let Some(sender) = sender.as_ref() {
                     sender.invalidate_preparation();
                 }
             }
-            if profiles_changed
+            if routing_changed
                 || old_midi.input_device != config.midi.input_device
                 || old_midi.hotplug != config.midi.hotplug
             {
                 super::pipeline::request_critical_midi_reset();
             }
-            if profiles_changed {
+            if routing_changed {
                 if let Some(sender) = sender.as_ref() {
                     super::pipeline::prepare_input_routing(sender, &config);
                 }

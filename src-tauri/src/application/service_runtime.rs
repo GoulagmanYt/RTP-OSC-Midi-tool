@@ -187,7 +187,7 @@ pub fn preflight_check(
             if name == RTP_VIRTUAL_INPUT {
                 true
             } else {
-                midi_inputs.iter().any(|p| p.contains(name))
+                !name.trim().is_empty() && midi_inputs.iter().any(|p| p.contains(name))
             }
         })
         .unwrap_or(false);
@@ -204,7 +204,7 @@ pub fn preflight_check(
             if name == VST_INTERNAL_OUTPUT || name == VST_INTERNAL_OUTPUT_LEGACY {
                 true
             } else {
-                midi_outputs.iter().any(|p| p.contains(name))
+                !name.trim().is_empty() && midi_outputs.iter().any(|p| p.contains(name))
             }
         })
         .unwrap_or(false);
@@ -232,6 +232,7 @@ pub fn preflight_check(
     }
 
     let rtp_needed = cfg.rtp.enabled
+        || cfg.rtp.thru_enabled
         || cfg.rtp.remote_enabled
         || cfg
             .midi
@@ -539,6 +540,26 @@ mod tests {
         }
         assert!(stress_trailing_note_off(100).is_none());
         assert_eq!(stress_trailing_note_off(101).unwrap()[0], 0x80);
+    }
+
+    #[test]
+    fn preflight_rejects_blank_midi_names_and_checks_thru_only_rtp() {
+        use super::*;
+        let state = AppState::new();
+        let mut config = Config::default();
+        config.audio.enabled = false;
+        config.rtp.enabled = false;
+        config.rtp.remote_enabled = false;
+        config.rtp.thru_enabled = true;
+        config.rtp.port = u16::MAX;
+        for name in ["", " ", "\t"] {
+            config.midi.input_device = Some(name.into());
+            config.midi.output_device = Some(name.into());
+            let report = preflight_check(Some(config.clone()), &state).unwrap();
+            assert!(!report.midi_in_ok && !report.midi_out_ok && !report.rtp_port_ok);
+        }
+        config.rtp.thru_enabled = false;
+        assert!(preflight_check(Some(config), &state).unwrap().rtp_port_ok);
     }
 
     #[test]

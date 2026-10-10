@@ -56,11 +56,26 @@ export function isSelectedSession(remotes: RtpRemoteEntry[], session: RtpSession
 }
 
 export function buildRemoteConnectionChecker(participants: RtpParticipantInfo[]) {
-  const connectedAddrs = new Set(participants.map((participant) => participant.addr));
+  const connectedAddrs = participants.flatMap((participant) => {
+    const match = /^(\[[^\]]+\]|[^:]+):(\d+)$/.exec(participant.addr);
+    return match ? [{ host: normalizeHost(match[1]), port: Number(match[2]) }] : [];
+  });
   return (remote: RtpRemoteEntry) => {
-    const addr = `${remote.host}:${remote.port}`;
-    if (connectedAddrs.has(addr)) return true;
+    const host = normalizeHost(remote.host);
+    if (connectedAddrs.some((addr) => addr.host === host && Math.abs(addr.port - remote.port) <= 1)) return true;
     if (!remote.name) return false;
     return participants.some((participant) => participant.name === remote.name);
   };
+}
+
+function normalizeHost(host: string) {
+  const bare = host.replace(/^\[|\]$/g, "");
+  if (!bare.includes(":")) return bare.toLowerCase();
+  const [ip, scope] = bare.split("%");
+  try {
+    const canonical = new URL(`http://[${ip}]/`).hostname;
+    return `${canonical}${scope ? `%${scope}` : ""}`;
+  } catch {
+    return bare.toLowerCase();
+  }
 }

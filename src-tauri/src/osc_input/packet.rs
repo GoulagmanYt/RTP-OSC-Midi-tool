@@ -219,7 +219,7 @@ fn packet(
         }
     }
     if let Some((data, len)) = midi {
-        if out.len() >= MAX_PACKET_MESSAGES || out.len() == out.capacity() {
+        if out.len() >= MAX_PACKET_MESSAGES {
             return Err("too many OSC messages");
         }
         out.push(ScheduledMidi {
@@ -244,6 +244,20 @@ mod tests {
             args: vec![OscType::Int(1)],
         })
     }
+    #[test]
+    fn decoding_grows_empty_and_small_vectors_but_keeps_the_packet_limit() {
+        let packet = OscPacket::Bundle(OscBundle {
+            timetag: (0, 1).into(),
+            content: vec![message(); MAX_PACKET_MESSAGES],
+        });
+        let bytes = rosc::encoder::encode(&packet).unwrap();
+        for capacity in [0, 1] {
+            let mut out = Vec::with_capacity(capacity);
+            decode(&bytes, SystemTime::now(), Instant::now(), 0, &mut out).unwrap();
+            assert_eq!(out.len(), MAX_PACKET_MESSAGES);
+        }
+    }
+
     #[test]
     fn validates_all_atomic_types_and_rejects_bad_padding_and_truncation() {
         let packet = OscPacket::Message(OscMessage {

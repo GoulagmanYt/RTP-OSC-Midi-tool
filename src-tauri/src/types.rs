@@ -40,7 +40,7 @@ impl AppPaths {
         let dirs = directories::ProjectDirs::from("com", "OSCMIDI", "OSCMIDI")
             .ok_or("Impossible de determiner le dossier de configuration")?;
         let config_dir = dirs.config_dir().to_path_buf();
-        let log_dir = config_dir.join("logs");
+        let log_dir = config_dir.clone();
         let log_file = log_dir.join("app.log");
 
         Ok(Self {

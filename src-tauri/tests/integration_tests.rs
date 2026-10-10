@@ -325,3 +325,13 @@ fn test_audio_legacy_is_not_in_production_module_graph() {
     assert!(!main_rs.contains("audio_legacy"));
     assert!(!engine_rs.contains("audio_legacy"));
 }
+#[test]
+fn app_paths_expose_the_log_file_used_by_the_runtime() {
+    let paths = osc_midi_bridge::AppPaths::new().unwrap();
+    let actual = osc_midi_bridge::tauri::utils::log_file_path().unwrap();
+    assert_eq!(std::path::Path::new(&paths.log_file), actual);
+    assert_eq!(
+        std::path::Path::new(&paths.log_dir),
+        actual.parent().unwrap()
+    );
+}

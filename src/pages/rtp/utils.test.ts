@@ -51,6 +51,26 @@ describe("mergeSessionIntoRemotes", () => {
 });
 
 describe("buildRemoteConnectionChecker", () => {
+  it.each([
+    ["192.168.0.9", "192.168.0.9:5004"],
+    ["192.168.0.9", "192.168.0.9:5005"],
+    ["192.168.0.9", "192.168.0.9:5003"],
+    ["::1", "[::1]:5005"],
+    ["[::1]", "[::1]:5004"],
+    ["0:0:0:0:0:0:0:1", "[::1]:5004"],
+    ["fe80::1%3", "[fe80::1%3]:5005"],
+  ])("recognizes %s via %s without a matching name", (host, addr) => {
+    const check = buildRemoteConnectionChecker([{ name: "Device", addr }]);
+    expect(check({ id: "1", name: "Alias", host, port: 5004, autoConnect: true })).toBe(true);
+    expect(check({ id: "1", name: "Alias", host, port: 5010, autoConnect: true })).toBe(false);
+  });
+
+  it("does not confuse different IPv6 scopes or hosts", () => {
+    const check = buildRemoteConnectionChecker([{ name: "Device", addr: "[fe80::1%3]:5005" }]);
+    for (const host of ["fe80::1%4", "fe80::2%3"]) {
+      expect(check({ id: "1", name: "", host, port: 5004, autoConnect: true })).toBe(false);
+    }
+  });
   it("marks remotes as connected by address or participant name", () => {
     const participants: RtpParticipantInfo[] = [
       { name: "Keys", addr: "192.168.0.9:5008" },

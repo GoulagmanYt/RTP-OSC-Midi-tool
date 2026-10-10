@@ -17,35 +17,68 @@ const DISCOVERY_TTL: Duration = Duration::from_secs(30);
 const DISCOVERY_INTERVAL: Duration = Duration::from_secs(10);
 const DISCOVERY_INTERVAL_IDLE: Duration = Duration::from_secs(30);
 
+#[cfg(test)]
+mod port_tests {
+    use super::*;
+
+    #[test]
+    fn ephemeral_port_checks_use_an_adjacent_ephemeral_pair() {
+        assert_eq!(ports_available(0), Ok(true));
+        assert_eq!(ports_available(u16::MAX), Ok(false));
+        let occupied = UdpSocket::bind("0.0.0.0:0").unwrap();
+        assert_eq!(
+            ports_available(occupied.local_addr().unwrap().port()),
+            Ok(false)
+        );
+    }
+}
+
 pub fn ports_available(port: u16) -> Result<bool, String> {
     if port == u16::MAX {
         return Ok(false);
     }
-    let ctrl_addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port);
-    let data_addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port.saturating_add(1));
-    let ctrl = match UdpSocket::bind(ctrl_addr) {
-        Ok(sock) => sock,
-        Err(err) => {
-            if err.kind() == std::io::ErrorKind::AddrInUse {
-                return Ok(false);
-            } else {
-                return Err(err.to_string());
+    for attempt in 0..32 {
+        let ctrl_addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port);
+        let ctrl = match UdpSocket::bind(ctrl_addr) {
+            Ok(sock) => sock,
+            Err(err) => {
+                if err.kind() == std::io::ErrorKind::AddrInUse {
+                    return Ok(false);
+                } else {
+                    return Err(err.to_string());
+                }
             }
-        }
-    };
-    let data = match UdpSocket::bind(data_addr) {
-        Ok(sock) => sock,
-        Err(err) => {
-            if err.kind() == std::io::ErrorKind::AddrInUse {
-                return Ok(false);
-            } else {
-                return Err(err.to_string());
+        };
+        let Some(data_port) = ctrl
+            .local_addr()
+            .map_err(|err| err.to_string())?
+            .port()
+            .checked_add(1)
+        else {
+            if port == 0 {
+                continue;
             }
-        }
-    };
-    drop(ctrl);
-    drop(data);
-    Ok(true)
+            return Ok(false);
+        };
+        let data_addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, data_port);
+        let data = match UdpSocket::bind(data_addr) {
+            Ok(sock) => sock,
+            Err(err) => {
+                if port == 0 && attempt < 31 && err.kind() == std::io::ErrorKind::AddrInUse {
+                    continue;
+                }
+                if err.kind() == std::io::ErrorKind::AddrInUse {
+                    return Ok(false);
+                } else {
+                    return Err(err.to_string());
+                }
+            }
+        };
+        drop(ctrl);
+        drop(data);
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 pub fn discover_sessions(timeout: Duration) -> Result<Vec<RtpSessionInfo>, String> {

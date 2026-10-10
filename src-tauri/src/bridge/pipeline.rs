@@ -157,13 +157,20 @@ pub(crate) fn classify_input_frame(tx: &Sender<MidiFrame>, frame: &MidiFrame) ->
 pub(super) fn prepare_input_routing(tx: &Sender<MidiFrame>, cfg: &Config) {
     let snapshot = ConfigSnapshot::from(cfg);
     tx.set_preparation(move |frame| {
-        snapshot
-            .routing_assignments
-            .get(&*frame.source)
-            .and_then(|index| snapshot.routing_profiles.get(*index))
-            .filter(|profile| profile.enabled)
-            .is_none_or(|profile| apply_routing_profile(profile, frame))
+        accepts_channel(snapshot.channel_filter, &frame.data)
+            && snapshot
+                .routing_assignments
+                .get(&*frame.source)
+                .and_then(|index| snapshot.routing_profiles.get(*index))
+                .filter(|profile| profile.enabled)
+                .is_none_or(|profile| apply_routing_profile(profile, frame))
     });
+}
+
+fn accepts_channel(filter: Option<u8>, data: &[u8]) -> bool {
+    !data.first().is_some_and(|status| {
+        (0x80..0xF0).contains(status) && filter.is_some_and(|channel| (status & 15) + 1 != channel)
+    })
 }
 
 impl From<&Config> for ConfigSnapshot {
@@ -216,10 +223,14 @@ struct OscSourceState {
 }
 
 impl OscOutputState {
-    pub(super) fn clear(&mut self) {
-        self.sources.clear();
+    pub(super) fn reset_sent(&mut self) {
         self.sent_notes = 0;
         self.sent_sustain = false;
+    }
+
+    pub(super) fn clear(&mut self) {
+        self.sources.clear();
+        self.reset_sent();
     }
 
     fn observe(&mut self, frame: &MidiFrame) {
@@ -257,7 +268,7 @@ impl OscOutputState {
     }
 
     /// Commit each switch only after a successful send so failures remain retryable.
-    fn flush(
+    pub(super) fn flush(
         &mut self,
         mut send: impl FnMut(Option<u8>, bool) -> Result<(), String>,
     ) -> Result<(), String> {
@@ -310,6 +321,13 @@ pub(super) fn handle_midi_frame(
     // Compteur entrée pipeline (stress test metrics)
     if deliver_audio {
         PIPELINE_IN_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+
+    if !accepts_channel(config.channel_filter, &frame.data) {
+        if deliver_audio {
+            PIPELINE_FILTERED_COUNT.fetch_add(1, Ordering::Relaxed);
+        }
+        return;
     }
 
     if deliver_audio && frame.data.as_slice() == [0xFF] {
@@ -408,29 +426,11 @@ pub(super) fn handle_midi_frame(
         return;
     }
 
-    if let Some(note) = parse_note(frame.data.as_slice()) {
-        if note.index.is_some() {
-            let event = MidiNoteEvent {
-                source: frame.source.to_string(),
-                note: note.note,
-                channel: note.channel,
-                pressed: matches!(note.kind, MidiKind::NoteOn),
-                timestamp_ms: now_ms(),
-            };
-            let _ = midi_event_tx.try_send(event);
-        }
+    if let Some(event) = midi_note_event(&frame) {
+        let _ = midi_event_tx.try_send(event);
     }
     if !config.osc_enabled || frame.source.starts_with("OSC:") {
         return;
-    }
-    if let Some(filter) = config.channel_filter {
-        if frame
-            .data
-            .first()
-            .is_some_and(|status| (status & 15) + 1 != filter)
-        {
-            return;
-        }
     }
     osc_state.observe(&frame);
     if let Some(client) = osc {
@@ -461,6 +461,17 @@ pub(super) fn handle_midi_frame(
             }
         }
     }
+}
+
+fn midi_note_event(frame: &MidiFrame) -> Option<MidiNoteEvent> {
+    let note = parse_note(&frame.data)?;
+    Some(MidiNoteEvent {
+        source: frame.source.to_string(),
+        note: note.note,
+        channel: note.channel,
+        pressed: matches!(note.kind, MidiKind::NoteOn),
+        timestamp_ms: now_ms(),
+    })
 }
 
 fn apply_routing_profile(profile: &RoutingProfileRuntime, frame: &mut MidiFrame) -> bool {
@@ -636,6 +647,77 @@ mod tests {
             data: smallvec::SmallVec::from_slice(data),
             source: Arc::from("test"),
         }
+    }
+
+    #[test]
+    fn global_channel_filter_applies_at_admission_and_preserves_system_messages() {
+        let mut config = Config::default();
+        config.midi.channel_filter = Some(1);
+        let (tx, rx) = bounded(32);
+        prepare_input_routing(&tx, &config);
+        for data in [
+            &[0x91, 60, 100][..],
+            &[0x81, 60, 0],
+            &[0xB1, 64, 127],
+            &[0xC1, 10],
+        ] {
+            assert_eq!(
+                try_enqueue_midi_frame(&tx, frame(data)).unwrap(),
+                EnqueueOutcome::Filtered
+            );
+        }
+        for data in [
+            &[0x90, 60, 100][..],
+            &[0x80, 60, 0],
+            &[0xF8],
+            &[0xF0, 1, 0xF7],
+            &[0xFF],
+        ] {
+            assert_eq!(
+                try_enqueue_midi_frame(&tx, frame(data)).unwrap(),
+                EnqueueOutcome::Enqueued
+            );
+            assert_eq!(rx.recv().unwrap().data.as_slice(), data);
+        }
+    }
+
+    #[test]
+    fn successful_reset_resends_notes_observed_during_network_failure() {
+        let mut state = OscOutputState::default();
+        let mut sent = Vec::new();
+        observe_osc(&mut state, "test", &[0x90, 60, 100], &mut sent);
+        state.observe(&frame(&[0x90, 61, 100]));
+        state.reset_sent();
+        state
+            .flush(|index, pressed| {
+                sent.push((index, pressed));
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            sent,
+            vec![(Some(40), true), (Some(40), true), (Some(41), true)]
+        );
+    }
+
+    #[test]
+    fn ui_events_cover_the_entire_midi_note_range_without_extending_osc_parameters() {
+        for pitch in 0..=127 {
+            for (status, velocity, pressed) in
+                [(0x9F, 100, true), (0x8F, 0, false), (0x9F, 0, false)]
+            {
+                let event = midi_note_event(&frame(&[status, pitch, velocity])).unwrap();
+                assert_eq!(
+                    (event.note, event.channel, event.pressed),
+                    (pitch, 16, pressed)
+                );
+            }
+        }
+        let mut state = OscOutputState::default();
+        let mut sent = Vec::new();
+        observe_osc(&mut state, "test", &[0x90, 0, 100], &mut sent);
+        observe_osc(&mut state, "test", &[0x90, 127, 100], &mut sent);
+        assert!(sent.is_empty());
     }
 
     fn observe_osc(

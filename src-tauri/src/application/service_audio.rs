@@ -132,8 +132,7 @@ pub fn open_vst_folder(id: &str, state: &AppState) -> Result<(), CommandError> {
         .ok_or_else(|| audio_error("audio.vst-not-found", "VST catalogue entry not found"))?;
     #[cfg(target_os = "windows")]
     std::process::Command::new("explorer.exe")
-        .arg("/select,")
-        .arg(&entry.path)
+        .arg(format!("/select,{}", entry.path))
         .spawn()
         .map_err(|error| audio_error("audio.open-vst-folder-failed", error.to_string()))?;
     Ok(())

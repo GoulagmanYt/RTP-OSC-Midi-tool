@@ -41,10 +41,18 @@ impl OscClient {
     pub fn new(ip: &str, port: u16) -> Result<Self, String> {
         LazyLock::force(&NOTE_PACKETS);
         LazyLock::force(&SUSTAIN_PACKETS);
-        let target = format!("{ip}:{port}")
-            .parse::<SocketAddr>()
-            .map_err(|e| e.to_string())?;
-        let socket = UdpSocket::bind("0.0.0.0:0").map_err(|e| e.to_string())?;
+        let address = if ip.contains(':') && !ip.starts_with('[') {
+            format!("[{ip}]:{port}")
+        } else {
+            format!("{ip}:{port}")
+        };
+        let target = address.parse::<SocketAddr>().map_err(|e| e.to_string())?;
+        let socket = UdpSocket::bind(if target.is_ipv6() {
+            "[::]:0"
+        } else {
+            "0.0.0.0:0"
+        })
+        .map_err(|e| e.to_string())?;
         socket
             .set_nonblocking(true)
             .map_err(|e| format!("socket write timeout: {e}"))?;
@@ -114,6 +122,22 @@ fn encode_param(name: &str, pressed: bool) -> Vec<u8> {
 mod tests {
     use super::*;
     use std::{io::ErrorKind, time::Instant};
+
+    #[test]
+    fn sends_to_both_ipv6_literal_formats() {
+        let listener = UdpSocket::bind("[::1]:0").unwrap();
+        listener
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        for host in ["::1", "[::1]"] {
+            let client = OscClient::new(host, listener.local_addr().unwrap().port()).unwrap();
+            client.send_note(1, true).unwrap();
+            let mut buffer = [0; 128];
+            let (size, from) = listener.recv_from(&mut buffer).unwrap();
+            assert!(from.is_ipv6());
+            assert_eq!(&buffer[..size], &*NOTE_PACKETS[0][1]);
+        }
+    }
 
     #[test]
     fn cached_packets_round_trip_and_have_aligned_strings_and_payloads() {

@@ -283,6 +283,7 @@ fn processing_loop(
 
 fn midi_output_route_changed(previous: &Config, next: &Config) -> bool {
     previous.midi.output_device != next.midi.output_device
+        || previous.midi.channel_filter != next.midi.channel_filter
         || previous.midi.thru_enabled != next.midi.thru_enabled
         || !ConfigSnapshot::from(previous).same_profiles(&ConfigSnapshot::from(next))
 }
@@ -486,22 +487,16 @@ fn spawn_osc_worker(
         let mut pending = None;
         let mut no_midi_out = None;
         let mut reset_pending = false;
+        let mut reset_retry = RetrySchedule::new();
+        let mut client_retry = RetrySchedule::new();
         while !stop.load(Ordering::Relaxed) {
             let generation = midi_reset_generation();
             if cached_generation != generation || route_generation != rx.recovery().generation() {
                 route_generation = rx.recovery().generation();
                 cached_generation = generation;
                 reset_pending = true;
+                reset_retry.reset();
                 sustain.clear();
-            }
-            if reset_pending {
-                reset_pending = osc_client
-                    .as_ref()
-                    .is_some_and(|client| client.send_reset_all().is_err());
-                if reset_pending {
-                    thread::sleep(Duration::from_millis(10));
-                    continue;
-                }
             }
             let observed_rev = config_rev.load(Ordering::Acquire);
             if observed_rev != cached_rev {
@@ -511,12 +506,59 @@ fn spawn_osc_worker(
                         let _ = client.send_reset_all();
                     }
                     sustain.clear();
+                    reset_pending = true;
+                    reset_retry.reset();
                 }
                 previous_config = config.clone();
                 snapshot = ConfigSnapshot::from(&config);
                 cached_rev = observed_rev;
             }
-            update_osc_client(&snapshot, &logger, &mut osc_client, &mut current_target);
+            match update_osc_client(
+                &snapshot,
+                &mut osc_client,
+                &mut current_target,
+                &mut client_retry,
+            ) {
+                Some(OscClientUpdate::Connected) => logger.info(format!(
+                    "Cible OSC mise a jour -> {}:{}",
+                    current_target.0, current_target.1
+                )),
+                Some(OscClientUpdate::Failed(error)) => {
+                    logger.error(format!("Impossible de creer le client OSC: {error}"))
+                }
+                Some(OscClientUpdate::Suspended) => logger.debug("OSC desactive (client suspendu)"),
+                None => {}
+            }
+            if reset_pending && reset_retry.ready() {
+                if !snapshot.osc_enabled {
+                    reset_pending = false;
+                } else if let Some(client) = osc_client.as_ref() {
+                    match client.send_reset_all() {
+                        Ok(()) => {
+                            reset_pending = false;
+                            reset_retry.reset();
+                            // Notes observed while the destination was unavailable still need sending.
+                            sustain.reset_sent();
+                            if let Err(error) = sustain.flush(|index, pressed| {
+                                match index {
+                                    Some(index) => client.send_note(index, pressed),
+                                    None => client.send_sustain(pressed),
+                                }?;
+                                osc_counter.fetch_add(1, Ordering::Relaxed);
+                                Ok(())
+                            }) {
+                                logger.warn(format!("Reprise OSC en attente: {error}"));
+                                reset_pending = true;
+                                reset_retry.failed();
+                            }
+                        }
+                        Err(error) => {
+                            logger.warn(format!("Reset OSC en attente: {error}"));
+                            reset_retry.failed();
+                        }
+                    }
+                }
+            }
             match pending
                 .take()
                 .map_or_else(|| rx.recv_timeout(Duration::from_millis(5)), Ok)
@@ -538,7 +580,7 @@ fn spawn_osc_worker(
                     let deliver_external = !frame.source.starts_with("StressTest");
                     handle_midi_frame(
                         &snapshot,
-                        osc_client.as_ref(),
+                        osc_client.as_ref().filter(|_| !reset_pending),
                         &mut no_midi_out,
                         &logger,
                         frame,
@@ -563,42 +605,76 @@ fn spawn_osc_worker(
     })
 }
 
+enum OscClientUpdate {
+    Connected,
+    Failed(String),
+    Suspended,
+}
+
 fn update_osc_client(
     snapshot: &ConfigSnapshot,
-    logger: &FrontendLogger,
     osc_client: &mut Option<OscClient>,
     current_target: &mut (String, u16),
-) {
+    retry: &mut RetrySchedule,
+) -> Option<OscClientUpdate> {
     let target_changed = current_target.1 != snapshot.osc_target_port
         || current_target.0.as_str() != snapshot.osc_target_ip;
 
+    if target_changed {
+        current_target.0.clone_from(&snapshot.osc_target_ip);
+        current_target.1 = snapshot.osc_target_port;
+        retry.reset();
+    }
+
     if snapshot.osc_enabled {
-        if target_changed || osc_client.is_none() {
+        if target_changed || (osc_client.is_none() && retry.ready()) {
             match OscClient::new(&snapshot.osc_target_ip, snapshot.osc_target_port) {
                 Ok(new_osc) => {
-                    current_target.0.clone_from(&snapshot.osc_target_ip);
-                    current_target.1 = snapshot.osc_target_port;
                     *osc_client = Some(new_osc);
-                    logger.info(format!(
-                        "Cible OSC mise a jour -> {}:{}",
-                        current_target.0, current_target.1
-                    ));
+                    retry.reset();
+                    return Some(OscClientUpdate::Connected);
                 }
                 Err(err) => {
-                    logger.error(format!("Impossible de creer le client OSC: {err}"));
                     *osc_client = None;
+                    retry.failed();
+                    return Some(OscClientUpdate::Failed(err));
                 }
             }
         }
     } else {
-        if osc_client.is_some() {
-            logger.debug("OSC desactive (client suspendu)");
+        let suspended = osc_client.take().is_some();
+        retry.reset();
+        if suspended {
+            return Some(OscClientUpdate::Suspended);
         }
-        *osc_client = None;
-        if target_changed {
-            current_target.0.clone_from(&snapshot.osc_target_ip);
-            current_target.1 = snapshot.osc_target_port;
+    }
+    None
+}
+
+struct RetrySchedule {
+    next: std::time::Instant,
+    delay: Duration,
+}
+
+impl RetrySchedule {
+    fn new() -> Self {
+        Self {
+            next: std::time::Instant::now(),
+            delay: Duration::from_millis(500),
         }
+    }
+
+    fn ready(&self) -> bool {
+        std::time::Instant::now() >= self.next
+    }
+
+    fn reset(&mut self) {
+        *self = Self::new();
+    }
+
+    fn failed(&mut self) {
+        self.next = std::time::Instant::now() + self.delay;
+        self.delay = (self.delay * 2).min(Duration::from_secs(10));
     }
 }
 
@@ -630,6 +706,42 @@ impl crate::midi_queue::Priority for FanoutFrame {
 mod recovery_tests {
     use super::*;
     use crate::bridge::pipeline::{try_enqueue_midi_frame, EnqueueOutcome};
+
+    #[test]
+    fn invalid_osc_target_backs_off_and_a_new_target_recovers_immediately() {
+        let mut config = Config::default();
+        config.osc.enabled = true;
+        config.osc.target_ip = "invalid address".into();
+        let mut snapshot = ConfigSnapshot::from(&config);
+        let mut client = None;
+        let mut target = (String::new(), 0);
+        let mut retry = RetrySchedule::new();
+        assert!(matches!(
+            update_osc_client(&snapshot, &mut client, &mut target, &mut retry),
+            Some(OscClientUpdate::Failed(_))
+        ));
+        for _ in 0..10_000 {
+            assert!(update_osc_client(&snapshot, &mut client, &mut target, &mut retry).is_none());
+        }
+        assert!(client.is_none());
+        snapshot.osc_target_ip = "127.0.0.1".into();
+        assert!(matches!(
+            update_osc_client(&snapshot, &mut client, &mut target, &mut retry),
+            Some(OscClientUpdate::Connected)
+        ));
+        assert!(client.is_some());
+        snapshot.osc_enabled = false;
+        assert!(matches!(
+            update_osc_client(&snapshot, &mut client, &mut target, &mut retry),
+            Some(OscClientUpdate::Suspended)
+        ));
+        assert!(client.is_none());
+        snapshot.osc_enabled = true;
+        assert!(matches!(
+            update_osc_client(&snapshot, &mut client, &mut target, &mut retry),
+            Some(OscClientUpdate::Connected)
+        ));
+    }
 
     fn note(status: u8, channel: u8, pitch: u8) -> MidiFrame {
         MidiFrame {
@@ -672,7 +784,7 @@ mod recovery_tests {
         next = previous.clone();
         next.midi.channel_filter = Some(2);
         assert!(osc_output_route_changed(&previous, &next));
-        assert!(!midi_output_route_changed(&previous, &next));
+        assert!(midi_output_route_changed(&previous, &next));
     }
 
     #[test]

@@ -10,6 +10,17 @@ use std::time::Duration;
 
 static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
+#[test]
+fn reliable_server_stops_and_releases_an_ipv6_listener() {
+    let _guard = test_guard();
+    let (tx, _rx) = bounded(256);
+    let server = ReliablePlaybackServer::start("[::1]:0", tx).unwrap();
+    let address = server.local_addr();
+    assert!(address.is_ipv6());
+    server.stop();
+    assert!(std::net::TcpListener::bind(address).is_ok());
+}
+
 fn test_guard() -> MutexGuard<'static, ()> {
     TEST_LOCK
         .get_or_init(|| Mutex::new(()))

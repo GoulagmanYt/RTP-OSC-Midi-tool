@@ -184,7 +184,7 @@ fn select_named_port<P: Clone>(
     preferred: Option<&String>,
     mut port_name: impl FnMut(&P) -> Result<String, midir::PortInfoError>,
 ) -> Option<P> {
-    let name = preferred?;
+    let name = preferred.filter(|name| !name.trim().is_empty())?;
     let named: Vec<_> = ports
         .iter()
         .filter_map(|port| port_name(port).ok().map(|label| (port, label)))
@@ -249,6 +249,18 @@ pub(super) fn reset_midi_output(out: &mut MidiOutputConnection, logger: &Fronten
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blank_names_never_select_a_port() {
+        for name in ["", " ", "\t"] {
+            assert!(
+                select_named_port(&["Keyboard"], Some(&name.to_string()), |port| Ok(
+                    (*port).into()
+                ))
+                .is_none()
+            );
+        }
+    }
 
     #[test]
     fn selects_exact_port_before_earlier_partial_match() {

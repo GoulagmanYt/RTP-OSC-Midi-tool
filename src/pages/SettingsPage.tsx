@@ -22,6 +22,7 @@ import {
 } from "../api";
 import { useI18n } from "../providers/LanguageProvider";
 import { getErrorMessage } from "../api-errors";
+import { join } from "@tauri-apps/api/path";
 
 type PaletteChoice = {
   id: "light" | "dark" | "contrast";
@@ -121,7 +122,7 @@ export default function SettingsPage() {
     try {
       const target = await save({
         title: t("settings.dialog.exportTitle"),
-        defaultPath: paths?.configDir ? `${paths.configDir}\\config.yaml` : "config.yaml",
+        defaultPath: paths?.configDir ? await join(paths.configDir, "config.yaml") : "config.yaml",
         filters: [{ name: "YAML", extensions: ["yaml", "yml"] }],
       });
       if (!target) return;
@@ -140,7 +141,7 @@ export default function SettingsPage() {
     try {
       const target = await save({
         title: t("settings.dialog.exportDiagnosticsTitle"),
-        defaultPath: paths?.configDir ? `${paths.configDir}\\diagnostic.json` : "diagnostic.json",
+        defaultPath: paths?.configDir ? await join(paths.configDir, "diagnostic.json") : "diagnostic.json",
         filters: [{ name: "JSON", extensions: ["json"] }],
       });
       if (!target) return;
@@ -242,7 +243,7 @@ export default function SettingsPage() {
                 if (!checked) {
                   await handleConfigUpdate({
                     ui: { developerMode: false },
-                    logging: { enabled: false, verbose: false, logAllToFile: false },
+                    logging: { verbose: false, logAllToFile: false },
                     osc: { logMessages: false },
                     rtp: { logMessages: false },
                   });

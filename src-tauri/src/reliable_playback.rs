@@ -150,10 +150,14 @@ impl ReliablePlaybackServer {
 
     pub fn stop(self) {
         self.stop.store(true, Ordering::Relaxed);
-        let wake_addr = SocketAddr::new(
-            "127.0.0.1".parse().expect("loopback"),
-            self.local_addr.port(),
-        );
+        let mut wake_addr = self.local_addr;
+        if wake_addr.ip().is_unspecified() {
+            wake_addr.set_ip(if wake_addr.is_ipv6() {
+                std::net::Ipv6Addr::LOCALHOST.into()
+            } else {
+                std::net::Ipv4Addr::LOCALHOST.into()
+            });
+        }
         let _ = TcpStream::connect_timeout(&wake_addr, Duration::from_millis(100));
         if let Some(handle) = self.handle.lock().take() {
             let _ = handle.join();
