@@ -308,3 +308,94 @@ fn reliable_server_shutdown_cancels_scheduled_playback() {
         .active_session
         .is_none());
 }
+
+fn cancel_equal_deadline_burst(disconnect: bool) {
+    let _guard = test_guard();
+    reset_reliable_playback_metrics();
+    let (tx, rx) = bounded(65536);
+    let server = ReliablePlaybackServer::start("127.0.0.1:0", tx).unwrap();
+    let mut stream = connect(&server, Duration::from_secs(5));
+    let batch_size = 50_000;
+    let mut events: Vec<_> = (0..batch_size)
+        .map(|seq| json!({"seq": seq, "dueUs": 0, "data": [0x90, 60, 100]}))
+        .collect();
+    // Keep the session running even if the simultaneous group finishes before
+    // the client gets CPU time to cancel it.
+    events.push(json!({"seq": batch_size, "dueUs": 60_000_000, "data": [0x80, 60, 0]}));
+    send_frame(
+        &mut stream,
+        json!({
+            "type": "prepare", "version": 1, "sessionId": "cancel-burst",
+            "song": "burst.mid", "total": events.len(), "events": events
+        }),
+    );
+    assert_eq!(recv_frame(&mut stream)["type"], "prepared");
+    send_frame(
+        &mut stream,
+        json!({"type": "start", "sessionId": "cancel-burst", "startDelayMs": 0}),
+    );
+    assert_eq!(
+        rx.recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .data
+            .as_slice(),
+        &[0x90, 60, 100]
+    );
+    if disconnect {
+        drop(stream);
+    } else {
+        send_frame(
+            &mut stream,
+            json!({"type": "stop", "sessionId": "cancel-burst"}),
+        );
+        assert_eq!(recv_frame(&mut stream)["type"], "stopped");
+        // A completed reply must not follow the stopped terminal reply.
+        assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+    }
+    let mut frames = Vec::new();
+    loop {
+        let frame = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let last_reset = frame.data.as_slice() == [0xBF, 123, 0];
+        frames.push(frame);
+        if last_reset {
+            break;
+        }
+    }
+    let first_reset = frames
+        .iter()
+        .position(|frame| frame.data[0] & 0xF0 == 0xB0)
+        .unwrap();
+    assert_eq!(frames.len() - first_reset, 32);
+    for channel in 0u8..16 {
+        assert_eq!(
+            frames[first_reset + usize::from(channel) * 2]
+                .data
+                .as_slice(),
+            &[0xB0 | channel, 64, 0]
+        );
+        assert_eq!(
+            frames[first_reset + usize::from(channel) * 2 + 1]
+                .data
+                .as_slice(),
+            &[0xB0 | channel, 123, 0]
+        );
+    }
+    assert!(
+        rx.recv_timeout(Duration::from_millis(100)).is_err(),
+        "MIDI admitted after cancellation reset"
+    );
+    assert!(reliable_playback_metrics_snapshot()
+        .active_session
+        .is_none());
+    server.stop();
+}
+
+#[test]
+fn reliable_server_stop_orders_reset_after_equal_deadline_burst() {
+    cancel_equal_deadline_burst(false);
+}
+
+#[test]
+fn reliable_server_disconnect_orders_reset_after_equal_deadline_burst() {
+    cancel_equal_deadline_burst(true);
+}

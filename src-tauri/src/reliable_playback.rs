@@ -216,11 +216,10 @@ fn accept_loop(
                 }
                 let tx = tx.clone();
                 let stop = Arc::clone(&stop);
-                let scheduler_workers = Arc::clone(&workers);
                 let permit = ConnectionPermit(Arc::clone(&active_connections));
                 let handle = thread::spawn(move || {
                     let _permit = permit;
-                    handle_connection(stream, tx, stop, scheduler_workers);
+                    handle_connection(stream, tx, stop);
                 });
                 workers.lock().push(handle);
             }
@@ -253,12 +252,7 @@ fn reap_finished_workers(workers: &Mutex<Vec<thread::JoinHandle<()>>>) {
     }
 }
 
-fn handle_connection(
-    mut stream: TcpStream,
-    tx: Sender<MidiFrame>,
-    server_stop: Arc<AtomicBool>,
-    workers: Arc<Mutex<Vec<thread::JoinHandle<()>>>>,
-) {
+fn handle_connection(mut stream: TcpStream, tx: Sender<MidiFrame>, server_stop: Arc<AtomicBool>) {
     let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
     let writer = match stream.try_clone() {
         Ok(writer) => Arc::new(Mutex::new(writer)),
@@ -324,8 +318,11 @@ fn handle_connection(
     let cancel = Arc::new(AtomicBool::new(false));
     let done = Arc::new(AtomicBool::new(false));
     let mut started = false;
+    let mut scheduler = None;
+    let mut stop_requested = false;
+    let mut connection_failed = false;
 
-    while !server_stop.load(Ordering::Relaxed) && !done.load(Ordering::Relaxed) {
+    while !server_stop.load(Ordering::Relaxed) && !done.load(Ordering::Acquire) {
         match read_client_frame(&mut stream, &server_stop, true) {
             Ok(ClientFrame::Start {
                 session_id,
@@ -334,35 +331,18 @@ fn handle_connection(
                 started = true;
                 *ACTIVE_SESSION.lock() = Some(session_id.clone());
                 let tx = tx.clone();
-                let writer = Arc::clone(&writer);
                 let cancel = Arc::clone(&cancel);
                 let done = Arc::clone(&done);
                 let session = Arc::clone(&prepared);
                 let server_stop = Arc::clone(&server_stop);
-                let handle = thread::spawn(move || {
-                    run_schedule(
-                        session,
-                        start_delay_ms,
-                        tx,
-                        writer,
-                        cancel,
-                        done,
-                        server_stop,
-                    );
-                });
-                workers.lock().push(handle);
+                scheduler = Some(thread::spawn(move || {
+                    let completion = run_schedule(session, start_delay_ms, tx, cancel, server_stop);
+                    done.store(true, Ordering::Release);
+                    completion
+                }));
             }
             Ok(ClientFrame::Stop { session_id }) if session_id == prepared.session_id => {
-                cancel.store(true, Ordering::Relaxed);
-                inject_all_notes_off(&tx, &format!("ReliablePLV:{}", prepared.song));
-                *ACTIVE_SESSION.lock() = None;
-                let _ = send_server_frame(
-                    &writer,
-                    &ServerFrame::Stopped {
-                        session_id: &prepared.session_id,
-                    },
-                );
-                done.store(true, Ordering::Relaxed);
+                stop_requested = true;
                 break;
             }
             Ok(_) => {
@@ -373,21 +353,53 @@ fn handle_connection(
                         message: "unexpected reliable playback frame".to_string(),
                     },
                 );
+                connection_failed = true;
                 break;
             }
             Err(err)
                 if err.kind() == ErrorKind::WouldBlock || err.kind() == ErrorKind::TimedOut => {}
-            Err(_) => break,
+            Err(_) => {
+                connection_failed = true;
+                break;
+            }
         }
     }
 
-    if started && !done.load(Ordering::Relaxed) {
+    if stop_requested || connection_failed || server_stop.load(Ordering::Relaxed) {
         cancel.store(true, Ordering::Relaxed);
-        if !server_stop.load(Ordering::Relaxed) {
+    }
+    // The connection owns the scheduler and every terminal reply. Wait until
+    // admission has stopped before releasing notes or acknowledging Stop/EOF.
+    // Even an admission racing with the cancel check therefore precedes reset.
+    let completion = scheduler.and_then(|handle| handle.join().ok()).flatten();
+    if started || stop_requested {
+        *ACTIVE_SESSION.lock() = None;
+    }
+    if server_stop.load(Ordering::Relaxed) {
+        return; // The server injects its reset after joining all connections.
+    }
+    if stop_requested || connection_failed {
+        if started || stop_requested {
             inject_all_notes_off(&tx, &format!("ReliablePLV:{}", prepared.song));
         }
-        *ACTIVE_SESSION.lock() = None;
-        done.store(true, Ordering::Relaxed);
+        if stop_requested {
+            let _ = send_server_frame(
+                &writer,
+                &ServerFrame::Stopped {
+                    session_id: &prepared.session_id,
+                },
+            );
+        }
+    } else if let Some(completion) = completion {
+        let _ = send_server_frame(
+            &writer,
+            &ServerFrame::Completed {
+                session_id: &prepared.session_id,
+                processed: completion.processed,
+                max_late_us: completion.max_late_us,
+                dropped: completion.dropped,
+            },
+        );
     }
 }
 
@@ -445,15 +457,19 @@ fn validate_prepare(
     })
 }
 
+struct PlaybackCompletion {
+    processed: u64,
+    dropped: u64,
+    max_late_us: u64,
+}
+
 fn run_schedule(
     session: Arc<PreparedSession>,
     start_delay_ms: u64,
     tx: Sender<MidiFrame>,
-    writer: Arc<Mutex<TcpStream>>,
     cancel: Arc<AtomicBool>,
-    done: Arc<AtomicBool>,
     server_stop: Arc<AtomicBool>,
-) {
+) -> Option<PlaybackCompletion> {
     let source: Arc<str> = Arc::from(format!("ReliablePLV:{}", session.song));
     let start = Instant::now() + Duration::from_millis(start_delay_ms);
     let mut processed = 0u64;
@@ -463,23 +479,22 @@ fn run_schedule(
 
     while index < session.events.len() {
         if cancel.load(Ordering::Relaxed) || server_stop.load(Ordering::Relaxed) {
-            *ACTIVE_SESSION.lock() = None;
-            done.store(true, Ordering::Relaxed);
-            return;
+            return None;
         }
         let due_us = session.events[index].due_us;
         let target = start + Duration::from_micros(due_us);
         wait_until(target, &cancel, &server_stop);
         if cancel.load(Ordering::Relaxed) || server_stop.load(Ordering::Relaxed) {
-            *ACTIVE_SESSION.lock() = None;
-            done.store(true, Ordering::Relaxed);
-            return;
+            return None;
         }
         let late_us = Instant::now().saturating_duration_since(target).as_micros() as u64;
         max_late_us = max_late_us.max(late_us);
         record_max_late(max_late_us);
 
         while index < session.events.len() && session.events[index].due_us == due_us {
+            if cancel.load(Ordering::Relaxed) || server_stop.load(Ordering::Relaxed) {
+                return None;
+            }
             let event = &session.events[index];
             let frame = MidiFrame {
                 generation: MidiFrame::current_generation(),
@@ -504,17 +519,11 @@ fn run_schedule(
         }
     }
 
-    *ACTIVE_SESSION.lock() = None;
-    let _ = send_server_frame(
-        &writer,
-        &ServerFrame::Completed {
-            session_id: &session.session_id,
-            processed,
-            max_late_us,
-            dropped,
-        },
-    );
-    done.store(true, Ordering::Relaxed);
+    Some(PlaybackCompletion {
+        processed,
+        max_late_us,
+        dropped,
+    })
 }
 
 fn wait_until(target: Instant, cancel: &AtomicBool, server_stop: &AtomicBool) {
@@ -641,6 +650,62 @@ fn send_server_frame(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn cancellation_during_equal_deadline_batch_stops_before_reset() {
+        let _guard = crate::bridge::pipeline::TEST_PIPELINE_LOCK.lock().unwrap();
+        // Pause a real admission after its cancellation check. Joining the
+        // scheduler must allow that one admission to finish before reset, and
+        // cancellation must prevent the remaining event in the same batch.
+        for server_shutdown in [false, true] {
+            let (tx, rx) = crate::midi_queue::bounded(64);
+            let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+            let (resume_tx, resume_rx) = std::sync::mpsc::sync_channel(1);
+            let resume_rx = Mutex::new(resume_rx);
+            tx.set_preparation(move |frame: &mut MidiFrame| {
+                if frame.data.as_slice() == [0x90, 61, 100] {
+                    entered_tx.send(()).unwrap();
+                    resume_rx.lock().recv().unwrap();
+                }
+                true
+            });
+            let session = Arc::new(PreparedSession {
+                session_id: "cancel-batch".into(),
+                song: "batch.mid".into(),
+                events: (60..63)
+                    .enumerate()
+                    .map(|(seq, note)| ReliablePlaybackEvent {
+                        seq: seq as u64,
+                        due_us: 0,
+                        data: smallvec::smallvec![0x90, note, 100],
+                    })
+                    .collect(),
+            });
+            let cancel = Arc::new(AtomicBool::new(false));
+            let server_stop = Arc::new(AtomicBool::new(false));
+            let scheduler = thread::spawn({
+                let tx = tx.clone();
+                let cancel = cancel.clone();
+                let server_stop = server_stop.clone();
+                move || run_schedule(session, 0, tx, cancel, server_stop)
+            });
+            entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            if server_shutdown {
+                server_stop.store(true, Ordering::Relaxed);
+            } else {
+                cancel.store(true, Ordering::Relaxed);
+            }
+            resume_tx.send(()).unwrap();
+            assert!(scheduler.join().unwrap().is_none());
+            inject_all_notes_off(&tx, "ReliablePLV:batch.mid");
+            let frames: Vec<_> = rx.try_iter().collect();
+            assert_eq!(frames.len(), 34);
+            assert_eq!(frames[0].data.as_slice(), &[0x90, 60, 100]);
+            assert_eq!(frames[1].data.as_slice(), &[0x90, 61, 100]);
+            assert!(frames[2..].iter().all(|frame| frame.data[0] & 0xF0 == 0xB0));
+            assert_eq!(frames.last().unwrap().data.as_slice(), &[0xBF, 123, 0]);
+        }
+    }
 
     #[test]
     fn client_frame_deserializes_prepare_protocol_shape() {
