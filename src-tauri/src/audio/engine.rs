@@ -175,11 +175,17 @@ impl AudioEngine {
             };
         }
 
-        let Some(packet) = MidiPacket::from_bytes(bytes) else {
+        let age_us = crate::vst_worker::protocol::qpc_elapsed_us(
+            ingress_qpc,
+            crate::vst_worker::protocol::monotonic_qpc(),
+        );
+        let Some(mut packet) = MidiPacket::from_bytes(bytes) else {
             return MidiSendOutcome::DroppedNonCritical;
         };
 
-        let mut packet = packet;
+        // Keep the same ingress timeline as the isolated worker, including
+        // time already spent waiting in the routing queues.
+        packet.timestamp_us = packet.timestamp_us.saturating_sub(age_us);
         packet.ingress_qpc = ingress_qpc;
         self.send_midi_packet_with_outcome(packet)
     }
@@ -590,6 +596,42 @@ mod tests {
     }
 
     #[test]
+    fn local_audio_preserves_ingress_time_after_routing_delay() {
+        let engine = AudioEngine::new();
+        let (tx, mut rx) = RingBuffer::new(8);
+        engine.midi_tx.store(Some(Arc::new(MidiIngress::new(
+            tx,
+            Arc::new(AudioTelemetry::new()),
+        ))));
+        let ingress_qpc = crate::vst_worker::protocol::monotonic_qpc();
+        let ingress_us = super::super::runtime_state::monotonic_us();
+        thread::sleep(std::time::Duration::from_millis(25));
+        assert_eq!(
+            engine.send_midi_at(&[0x90, 60, 100], ingress_qpc),
+            MidiSendOutcome::Sent
+        );
+        let packet = rx.pop().unwrap();
+        assert_eq!(packet.ingress_qpc, ingress_qpc);
+        assert!(packet.timestamp_us.abs_diff(ingress_us) < 5_000);
+    }
+
+    #[test]
+    fn audio_pending_queue_reserves_capacity_for_pedal_and_mode_releases() {
+        for controller in [66, 69, 124, 125, 126, 127] {
+            let (_, rx) = RingBuffer::new(8);
+            let mut state = callback_test_state(rx, Arc::new(AtomicBool::new(false)));
+            for _ in 0..MAX_PENDING_MIDI - crate::realtime::reserve(MAX_PENDING_MIDI) {
+                state.enqueue_midi(MidiPacket::from_bytes(&[0x90, 60, 100]).unwrap());
+            }
+            state.enqueue_midi(MidiPacket::from_bytes(&[0xB0, controller, 0]).unwrap());
+            assert_eq!(
+                state.pending_midi.back().unwrap().data,
+                [0xB0, controller, 0]
+            );
+        }
+    }
+
+    #[test]
     fn duplicate_parameters_count_toward_callback_budget() {
         let (_tx, rx) = RingBuffer::new(8);
         let mut callback = callback_test_state(rx, Arc::new(AtomicBool::new(false)));
@@ -918,7 +960,7 @@ mod tests {
 
         replay_last_output_or_silence(&mut out, 2, 0.0f32, &mut state);
 
-        assert_eq!(out, vec![0.25, -0.375, 0.05, -0.05]);
+        assert_eq!(out, vec![0.25, -0.5, 0.0, 0.0]);
         assert!(state.last_output.iter().all(|sample| *sample == 0.0));
         assert!(state.recovering_from_silence);
         assert_eq!(
@@ -927,8 +969,20 @@ mod tests {
         );
         assert_eq!(
             f32::from_bits(state.telemetry.meter_right.load(Ordering::Relaxed)),
-            0.375
+            0.5
         );
+    }
+
+    #[test]
+    fn fallback_does_not_resurrect_history_when_callback_size_grows() {
+        let (_, rx) = RingBuffer::new(8);
+        let mut state = callback_test_state(rx, Arc::new(AtomicBool::new(false)));
+        state.last_output.fill(0.5);
+        let mut short = [0.0f32; 4];
+        replay_last_output_or_silence(&mut short, 2, 0.0, &mut state);
+        let mut long = [1.0f32; 8];
+        replay_last_output_or_silence(&mut long, 2, 0.0, &mut state);
+        assert_eq!(long, [0.0; 8]);
     }
 
     #[test]

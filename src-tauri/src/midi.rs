@@ -172,7 +172,8 @@ pub fn is_critical_release_message(data: &[u8]) -> bool {
     matches!(status, 0x80)
         || (status == 0x90 && data[2] == 0)
         || (status == 0xB0
-            && ((data[1] == 64 && data[2] < 64) || matches!(data[1], 120 | 121 | 123)))
+            && ((matches!(data[1], 64 | 66 | 69) && data[2] < 64)
+                || matches!(data[1], 120 | 121 | 123..=127)))
 }
 
 /// Validate complete driver/bridge messages before indexing or dispatching them.

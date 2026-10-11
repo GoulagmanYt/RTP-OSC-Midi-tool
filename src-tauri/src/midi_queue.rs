@@ -512,6 +512,33 @@ mod tests {
     }
 
     #[test]
+    fn pedal_and_channel_mode_releases_use_reserved_capacity() {
+        for controller in [64, 66, 69, 120, 121, 123, 124, 125, 126, 127] {
+            let (tx, rx) = bounded(8);
+            for key in 0..7 {
+                tx.try_send(note(0x90, key)).unwrap();
+            }
+            let release =
+                crate::midi::MidiFrame::copy_realtime(&[0xB0, controller, 0], Arc::from("test"))
+                    .unwrap();
+            assert!(tx.try_send(release).is_ok(), "CC {controller} release lost");
+            assert_eq!(
+                rx.try_iter().last().unwrap().data.as_slice(),
+                &[0xB0, controller, 0]
+            );
+        }
+        for controller in [64, 66, 69] {
+            assert!(!crate::midi::is_critical_release_message(&[
+                0xB0, controller, 64
+            ]));
+            assert!(crate::midi::is_critical_release_message(&[
+                0xB0, controller, 63
+            ]));
+        }
+        assert!(!crate::midi::is_critical_release_message(&[0xB0, 122, 0]));
+    }
+
+    #[test]
     fn reserve_preserves_fifo_and_returns_admission_on_dequeue() {
         let (tx, rx) = bounded(8);
         for key in 0..7 {

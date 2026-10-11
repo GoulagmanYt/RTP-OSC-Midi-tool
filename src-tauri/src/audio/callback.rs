@@ -18,7 +18,7 @@ use vst::{buffer::AudioBuffer, plugin::Plugin};
 use super::callback_render::replay_last_output_or_silence as replay_output_or_silence;
 use super::{
     callback_midi::{process_pending_vst2_midi, process_pending_vst3_midi, send_reset_messages},
-    callback_render::{limit_sample, process_vst3_plugin},
+    callback_render::{output_sample, process_vst3_plugin},
     runtime_state::{
         atomic_max, AudioCallbackState, AudioControls, AudioError, AudioTelemetry, MidiPacket,
         ParameterCommand, PluginBackend, DSP_HISTOGRAM_BUCKETS, DSP_HISTOGRAM_BUCKET_US,
@@ -411,12 +411,8 @@ fn audio_callback<T: Sample + FromSample<f32>>(
             let mono = state.equalizer.process_mono(left[frame_idx]);
             (mono, mono)
         };
-        let mut l = equalized_left * gain_linear * recovery_gain;
-        let mut r = equalized_right * gain_linear * recovery_gain;
-        if limiter_on {
-            l = limit_sample(l);
-            r = limit_sample(r);
-        }
+        let l = output_sample(equalized_left, gain_linear * recovery_gain, limiter_on);
+        let r = output_sample(equalized_right, gain_linear * recovery_gain, limiter_on);
 
         peak_l = peak_l.max(l.abs());
         peak_r = peak_r.max(r.abs());
@@ -443,6 +439,9 @@ fn audio_callback<T: Sample + FromSample<f32>>(
             *sample = 0.0;
         }
     }
+
+    // A later, larger callback must not replay the tail of an older block.
+    state.last_output[frames * device_channels..].fill(0.0);
 
     state
         .telemetry
