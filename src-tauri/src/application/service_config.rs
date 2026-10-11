@@ -62,6 +62,18 @@ fn apply_and_save_config(
     let logger = frontend_logger(window, state);
     let mut audio_restart_attempted = false;
     let mut applied_gain_db = previous.audio.gain_db;
+    let mut applied_limiter = previous.audio.limiter_enabled;
+    let prev_eq_key = previous
+        .audio
+        .vst_plugin_id
+        .as_deref()
+        .unwrap_or(crate::config::BUNDLED_VST_EQ_KEY);
+    let mut applied_vst_eq = previous
+        .audio
+        .vst_eq_by_plugin
+        .get(prev_eq_key)
+        .cloned()
+        .unwrap_or_default();
     commit_config_change(
         &previous,
         config,
@@ -101,6 +113,18 @@ fn apply_and_save_config(
                     )
                     .map_err(|err| runtime_error("audio.start-failed", err.to_string()))?;
                 applied_gain_db = cfg.audio.gain_db;
+                applied_limiter = cfg.audio.limiter_enabled;
+                let eq_key = cfg
+                    .audio
+                    .vst_plugin_id
+                    .as_deref()
+                    .unwrap_or(crate::config::BUNDLED_VST_EQ_KEY);
+                applied_vst_eq = cfg
+                    .audio
+                    .vst_eq_by_plugin
+                    .get(eq_key)
+                    .cloned()
+                    .unwrap_or_default();
             } else if !should_run && (audio_restart_attempted || state.audio.is_running()) {
                 state.audio.stop(Some(window.app_handle().clone()));
             } else if should_run {
@@ -109,6 +133,29 @@ fn apply_and_save_config(
                         .audio
                         .set_gain(gain_db)
                         .map_err(|err| runtime_error("audio.set-gain-failed", err.to_string()))
+                })?;
+                apply_limiter_change(&mut applied_limiter, cfg.audio.limiter_enabled, |limiter| {
+                    state
+                        .audio
+                        .set_limiter_enabled(limiter)
+                        .map_err(|err| runtime_error("audio.set-limiter-failed", err.to_string()))
+                })?;
+                let eq_key = cfg
+                    .audio
+                    .vst_plugin_id
+                    .as_deref()
+                    .unwrap_or(crate::config::BUNDLED_VST_EQ_KEY);
+                let current_eq = cfg
+                    .audio
+                    .vst_eq_by_plugin
+                    .get(eq_key)
+                    .cloned()
+                    .unwrap_or_default();
+                apply_vst_eq_change(&mut applied_vst_eq, current_eq, |eq| {
+                    state
+                        .audio
+                        .set_vst_eq(eq)
+                        .map_err(|err| runtime_error("audio.set-vst-eq-failed", err.to_string()))
                 })?;
             }
             Ok(())
@@ -136,6 +183,30 @@ fn apply_gain_change(
 ) -> Result<(), CommandError> {
     if *applied != requested {
         set_gain(requested)?;
+        *applied = requested;
+    }
+    Ok(())
+}
+
+fn apply_limiter_change(
+    applied: &mut bool,
+    requested: bool,
+    set_limiter: impl FnOnce(bool) -> Result<(), CommandError>,
+) -> Result<(), CommandError> {
+    if *applied != requested {
+        set_limiter(requested)?;
+        *applied = requested;
+    }
+    Ok(())
+}
+
+fn apply_vst_eq_change(
+    applied: &mut crate::config::VstEqSettings,
+    requested: crate::config::VstEqSettings,
+    set_vst_eq: impl FnOnce(crate::config::VstEqSettings) -> Result<(), CommandError>,
+) -> Result<(), CommandError> {
+    if *applied != requested {
+        set_vst_eq(requested.clone())?;
         *applied = requested;
     }
     Ok(())
@@ -416,5 +487,97 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.code, "apply");
         assert!(error.details["rollbackError"].contains("rollback"));
+    }
+
+    #[test]
+    fn saved_limiter_changes_reach_the_active_engine_and_roll_back_on_disk_failure() {
+        for fail_save in [false, true] {
+            let previous = Config::default();
+            let mut next = previous.clone();
+            next.audio.limiter_enabled = !previous.audio.limiter_enabled;
+            let active_limiter = Cell::new(previous.audio.limiter_enabled);
+            let mut applied = previous.audio.limiter_enabled;
+            let result = commit_config_change(
+                &previous,
+                &next,
+                false,
+                |cfg, _| {
+                    apply_limiter_change(&mut applied, cfg.audio.limiter_enabled, |limiter| {
+                        active_limiter.set(limiter);
+                        Ok(())
+                    })
+                },
+                |_| {
+                    if fail_save {
+                        Err(config_error("config.save-failed", "disk failure"))
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
+            assert_eq!(result.is_err(), fail_save);
+            assert_eq!(
+                active_limiter.get(),
+                if fail_save {
+                    previous.audio.limiter_enabled
+                } else {
+                    next.audio.limiter_enabled
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn saved_vst_eq_changes_reach_the_active_engine_and_roll_back_on_disk_failure() {
+        for fail_save in [false, true] {
+            let previous = Config::default();
+            let modified_eq = crate::config::VstEqSettings {
+                enabled: true,
+                low_shelf: crate::config::EqShelfSettings {
+                    frequency_hz: 120.0,
+                    gain_db: 4.5,
+                },
+                ..Default::default()
+            };
+            let mut next = previous.clone();
+            next.audio
+                .vst_eq_by_plugin
+                .insert(crate::config::BUNDLED_VST_EQ_KEY.to_string(), modified_eq.clone());
+            let active_eq = std::cell::RefCell::new(crate::config::VstEqSettings::default());
+            let mut applied = crate::config::VstEqSettings::default();
+            let result = commit_config_change(
+                &previous,
+                &next,
+                false,
+                |cfg, _| {
+                    let eq = cfg
+                        .audio
+                        .vst_eq_by_plugin
+                        .get(crate::config::BUNDLED_VST_EQ_KEY)
+                        .cloned()
+                        .unwrap_or_default();
+                    apply_vst_eq_change(&mut applied, eq, |settings| {
+                        *active_eq.borrow_mut() = settings;
+                        Ok(())
+                    })
+                },
+                |_| {
+                    if fail_save {
+                        Err(config_error("config.save-failed", "disk failure"))
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
+            assert_eq!(result.is_err(), fail_save);
+            assert_eq!(
+                *active_eq.borrow(),
+                if fail_save {
+                    crate::config::VstEqSettings::default()
+                } else {
+                    modified_eq
+                }
+            );
+        }
     }
 }

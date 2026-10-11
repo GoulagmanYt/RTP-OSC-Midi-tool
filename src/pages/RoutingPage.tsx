@@ -8,7 +8,7 @@ import { AdvancedRoutingCard } from "./routing/AdvancedRoutingCard";
 import { BasicRoutingCard } from "./routing/BasicRoutingCard";
 import { RoutingStatusCard } from "./routing/RoutingStatusCard";
 import { TestMidiCard } from "./routing/TestMidiCard";
-import { displayPortName as displayPortNameLabel, formatNote } from "./routing/shared";
+import { clampNullableMidiNumber, displayPortName as displayPortNameLabel, formatNote } from "./routing/shared";
 import { toast } from "sonner";
 import { getErrorMessage } from "../api-errors";
 
@@ -76,10 +76,9 @@ export default function RoutingPage() {
 
   const handleChannelFilterChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
-      const val = e.target.value;
       updateConfig({
         midi: {
-          channelFilter: val ? Number(val) : null,
+          channelFilter: clampNullableMidiNumber(e.target.value, 1, 16),
         },
       });
     },

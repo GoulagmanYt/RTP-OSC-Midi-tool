@@ -111,3 +111,35 @@ fn audit_rtp_port_65534_is_accepted_as_candidate() {
     let candidates = osc_midi_bridge::rtp::candidate_ports(65534);
     assert_eq!(candidates.as_slice(), &[65534]);
 }
+
+#[test]
+fn audit_bridge_is_running_matches_lifecycle() {
+    let bridge = BridgeHandle::new();
+    assert!(!bridge.is_running(), "fresh BridgeHandle must not be running");
+}
+
+#[test]
+fn audit_stress_test_mode_checks_bridge_and_audio_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState {
+        config_store: ConfigStore::with_path(dir.path().join("config.yaml")),
+        config_change: Arc::new(Mutex::new(())),
+        bridge: BridgeHandle::new(),
+        dev_logging: Arc::new(AtomicBool::new(false)),
+        audio: AudioEngine::new(),
+        vst_cache: Mutex::new(None),
+        rtp_discovery: RtpDiscoveryManager::new(),
+    };
+    let res = osc_midi_bridge::application::services::run_stress_test(
+        "bridge",
+        100,
+        1,
+        &state,
+    );
+    assert_eq!(
+        res.unwrap_err().code,
+        "stress.audio-not-running",
+        "must require running audio"
+    );
+}
+

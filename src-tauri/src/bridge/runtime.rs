@@ -249,6 +249,10 @@ impl BridgeHandle {
         status
     }
 
+    pub fn is_running(&self) -> bool {
+        self.inner.lock().is_some()
+    }
+
     pub fn rtp_participants(&self) -> Vec<RtpParticipantInfo> {
         self.rtp_server
             .lock()

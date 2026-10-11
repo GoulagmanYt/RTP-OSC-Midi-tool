@@ -15,3 +15,25 @@ export function displayPortName(name: string, t: Translate) {
   if (name === VST_OUTPUT) return t("devices.vstInternalOutput");
   return name;
 }
+
+export function clampMidiNumber(value: unknown, min: number, max: number, fallback = min): number {
+  if (value === null || value === undefined || value === "") return fallback;
+  const num = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(num)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(num)));
+}
+
+export function clampNullableMidiNumber(value: unknown, min: number, max: number): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  const num = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(num)) return null;
+  return Math.max(min, Math.min(max, Math.floor(num)));
+}
+
+export function clampAudioGain(value: unknown, min = -60, max = 12, fallback = 0): number {
+  if (value === null || value === undefined || value === "") return fallback;
+  const num = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(num)) return fallback;
+  return Math.max(min, Math.min(max, num));
+}
+

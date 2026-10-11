@@ -101,7 +101,7 @@ pub fn save_vst_cache_to_disk(entries: &[VstPluginEntry]) {
     let Ok(raw) = serde_json::to_string(entries) else {
         return;
     };
-    let _ = fs::write(path, raw);
+    let _ = crate::atomic_file::write_atomically(&path, raw.as_bytes());
 }
 
 pub fn open_folder_in_explorer(path: &Path) -> Result<(), String> {

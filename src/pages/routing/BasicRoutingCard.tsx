@@ -7,7 +7,7 @@ import { Label } from "../../components/ui/Label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../components/ui/Select";
 import { Switch } from "../../components/ui/Switch";
 
-import type { Translate } from "./shared";
+import { clampAudioGain, type Translate } from "./shared";
 
 type Props = {
   config: AppConfig | null;
@@ -148,7 +148,7 @@ export function BasicRoutingCard({
                 step="1"
                 value={config?.audio.gainDb ?? 0}
                 onChange={(event) => {
-                  const val = Number(event.target.value || 0);
+                  const val = clampAudioGain(event.target.value, -60, 12, 0);
                   if (onGainChange) {
                     onGainChange(val);
                   } else {

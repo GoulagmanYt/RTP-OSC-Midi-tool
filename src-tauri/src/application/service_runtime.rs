@@ -387,6 +387,12 @@ fn run_stress_bridge_pipeline(
             "Le moteur audio doit être démarré pour le stress test.",
         ));
     }
+    if !state.bridge.is_running() {
+        return Err(runtime_error(
+            "stress.bridge-not-running",
+            "Le pont MIDI doit être démarré pour le stress test du pipeline bridge.",
+        ));
+    }
 
     // Reset pipeline counters
     reset_pipeline_stats();

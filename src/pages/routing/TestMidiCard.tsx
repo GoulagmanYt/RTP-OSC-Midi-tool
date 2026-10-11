@@ -5,7 +5,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../..
 import { Input } from "../../components/ui/Input";
 import { Label } from "../../components/ui/Label";
 
-import type { Translate } from "./shared";
+import { clampMidiNumber, type Translate } from "./shared";
 
 type Props = {
   t: Translate;
@@ -74,8 +74,7 @@ export function TestMidiCard(props: Props) {
                 max={max}
                 value={value}
                 onChange={(event) => {
-                  const val = Number(event.target.value || 0);
-                  setter(Math.max(min, Math.min(max, Math.floor(val))));
+                  setter(clampMidiNumber(event.target.value, min, max, min));
                 }}
               />
             </div>
