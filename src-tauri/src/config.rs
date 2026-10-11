@@ -317,6 +317,34 @@ pub struct AppConfig {
 
 impl AppConfig {
     pub const CURRENT_VERSION: u32 = 4;
+
+    pub fn parse_yaml(raw: &str) -> Result<Self, String> {
+        let mut value = serde_yaml::from_str::<serde_yaml::Value>(raw)
+            .map_err(|e| e.to_string())?;
+        let version = value
+            .get("version")
+            .and_then(serde_yaml::Value::as_u64)
+            .unwrap_or_default() as u32;
+        if matches!(version, 2 | 3) {
+            if let Some(mapping) = value.as_mapping_mut() {
+                mapping.insert(
+                    serde_yaml::Value::String("version".into()),
+                    serde_yaml::Value::Number(AppConfig::CURRENT_VERSION.into()),
+                );
+            }
+        } else if version != AppConfig::CURRENT_VERSION {
+            return Err(format!(
+                "Unsupported configuration version {version}; expected {}",
+                AppConfig::CURRENT_VERSION
+            ));
+        }
+        let mut cfg = serde_yaml::from_value::<AppConfig>(value)
+            .map_err(|e| e.to_string())?;
+        for settings in cfg.audio.vst_eq_by_plugin.values_mut() {
+            *settings = settings.normalized(cfg.audio.sample_rate);
+        }
+        Ok(cfg)
+    }
 }
 
 impl Default for AppConfig {
@@ -381,47 +409,27 @@ impl ConfigStore {
                 return AppConfig::default();
             }
         };
-        let Ok(mut value) = serde_yaml::from_str::<serde_yaml::Value>(&raw) else {
-            log::error!(
-                "Invalid YAML configuration preserved at {:?}; using defaults for this session",
-                self.path
-            );
-            return AppConfig::default();
-        };
-        let version = value
-            .get("version")
-            .and_then(serde_yaml::Value::as_u64)
+        let raw_version = serde_yaml::from_str::<serde_yaml::Value>(&raw)
+            .ok()
+            .and_then(|v| v.get("version").and_then(serde_yaml::Value::as_u64))
             .unwrap_or_default() as u32;
-        if matches!(version, 2 | 3) {
-            if let Some(mapping) = value.as_mapping_mut() {
-                mapping.insert(
-                    serde_yaml::Value::String("version".into()),
-                    serde_yaml::Value::Number(AppConfig::CURRENT_VERSION.into()),
+        match AppConfig::parse_yaml(&raw) {
+            Ok(cfg) => {
+                if matches!(raw_version, 2 | 3) {
+                    if let Err(error) = self.save(&cfg) {
+                        log::warn!("Unable to persist migrated configuration: {error}");
+                    }
+                }
+                cfg
+            }
+            Err(error) => {
+                log::error!(
+                    "Invalid configuration preserved at {:?}: {error}; using defaults for this session",
+                    self.path
                 );
-            }
-        } else if version != AppConfig::CURRENT_VERSION {
-            log::error!(
-                "Unsupported configuration version {version} preserved at {:?}; using defaults for this session",
-                self.path
-            );
-            return AppConfig::default();
-        }
-        let Ok(mut cfg) = serde_yaml::from_value::<AppConfig>(value) else {
-            log::error!(
-                "Invalid configuration schema preserved at {:?}; using defaults for this session",
-                self.path
-            );
-            return AppConfig::default();
-        };
-        for settings in cfg.audio.vst_eq_by_plugin.values_mut() {
-            *settings = settings.normalized(cfg.audio.sample_rate);
-        }
-        if matches!(version, 2 | 3) {
-            if let Err(error) = self.save(&cfg) {
-                log::warn!("Unable to persist migrated configuration: {error}");
+                AppConfig::default()
             }
         }
-        cfg
     }
 
     pub fn save(&self, cfg: &AppConfig) -> Result<(), String> {

@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use tauri::{AppHandle, Window};
 
 use crate::{
@@ -6,8 +7,8 @@ use crate::{
     tauri::{
         state::AppState,
         utils::{
-            audio_settings_from_config, fallback_vst_path, retain_instrument_entries,
-            save_vst_cache_to_disk,
+            audio_settings_from_config, fallback_vst_path, open_folder_in_explorer,
+            retain_instrument_entries, save_vst_cache_to_disk,
         },
     },
     types::{legacy_path_plugin_id, AudioDeviceEntry, BridgeStatus, VstParameter, VstPluginEntry},
@@ -130,11 +131,14 @@ pub fn open_vst_folder(id: &str, state: &AppState) -> Result<(), CommandError> {
         .as_ref()
         .and_then(|entries| entries.iter().find(|entry| entry.id == id).cloned())
         .ok_or_else(|| audio_error("audio.vst-not-found", "VST catalogue entry not found"))?;
-    #[cfg(target_os = "windows")]
-    std::process::Command::new("explorer.exe")
-        .arg(format!("/select,{}", entry.path))
-        .spawn()
-        .map_err(|error| audio_error("audio.open-vst-folder-failed", error.to_string()))?;
+    let path = PathBuf::from(&entry.path);
+    let target_dir = if path.is_dir() {
+        path
+    } else {
+        path.parent().map(|p| p.to_path_buf()).unwrap_or(path)
+    };
+    open_folder_in_explorer(&target_dir)
+        .map_err(|error| audio_error("audio.open-vst-folder-failed", error))?;
     Ok(())
 }
 

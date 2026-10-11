@@ -42,6 +42,17 @@ describe("VST EQ helpers", () => {
     expect(sliderToFrequency(slider, 100, 10_000)).toBe(1_000);
   });
 
+  it("handles non-finite, negative, and out-of-range frequency values safely", () => {
+    expect(frequencyToSlider(-10, 100, 10_000)).toBe(0);
+    expect(frequencyToSlider(NaN, 100, 10_000)).toBe(0);
+    expect(frequencyToSlider(50, 100, 10_000)).toBe(0);
+    expect(frequencyToSlider(20_000, 100, 10_000)).toBe(1_000);
+
+    expect(sliderToFrequency(-50, 100, 10_000)).toBe(100);
+    expect(sliderToFrequency(NaN, 100, 10_000)).toBe(100);
+    expect(sliderToFrequency(1_500, 100, 10_000)).toBe(10_000);
+  });
+
   it("is flat while bypassed and attenuates bass when enabled", () => {
     const settings = createDefaultVstEqSettings();
     settings.lowShelf.gainDb = -6;

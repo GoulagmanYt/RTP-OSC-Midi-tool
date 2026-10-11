@@ -73,7 +73,10 @@ export function TestMidiCard(props: Props) {
                 min={min}
                 max={max}
                 value={value}
-                onChange={(event) => setter(Number(event.target.value || 0))}
+                onChange={(event) => {
+                  const val = Number(event.target.value || 0);
+                  setter(Math.max(min, Math.min(max, Math.floor(val))));
+                }}
               />
             </div>
           ))}

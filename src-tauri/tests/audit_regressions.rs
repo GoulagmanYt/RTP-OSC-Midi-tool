@@ -27,13 +27,52 @@ fn audit_osc_only_preflight_does_not_require_unused_midi_ports() {
 fn audit_unsupported_config_version_must_not_be_saved_successfully() {
     let dir = tempfile::tempdir().unwrap();
     let store = ConfigStore::with_path(dir.path().join("config.yaml"));
-    let mut cfg = Config::default();
-    cfg.version = Config::CURRENT_VERSION + 1;
-    cfg.osc.target_port = 9876;
+    let cfg = Config {
+        version: Config::CURRENT_VERSION + 1,
+        osc: osc_midi_bridge::config::OscConfig {
+            target_port: 9876,
+            ..Default::default()
+        },
+        ..Config::default()
+    };
     let raw = serde_yaml::to_string(&cfg).unwrap();
-    let imported: Config = serde_yaml::from_str(&raw).unwrap();
-    let saved = store.save(&imported);
-    assert!(saved.is_err() || store.load() == imported, "save accepts the imported version but immediately loads defaults");
+    let imported: Result<Config, _> = Config::parse_yaml(&raw);
+    assert!(imported.is_err(), "parse_yaml must reject future versions");
+    let saved = store.save(&cfg);
+    assert!(saved.is_err(), "save must reject future versions");
+}
+
+#[test]
+fn audit_config_migration_on_parse_yaml() {
+    let mut raw_v2 = serde_yaml::to_value(Config::default()).unwrap();
+    raw_v2["version"] = serde_yaml::Value::Number(2.into());
+    let yaml_v2 = serde_yaml::to_string(&raw_v2).unwrap();
+    let parsed_v2 = Config::parse_yaml(&yaml_v2).expect("v2 config should be migrated");
+    assert_eq!(parsed_v2.version, Config::CURRENT_VERSION);
+
+    let mut raw_v3 = serde_yaml::to_value(Config::default()).unwrap();
+    raw_v3["version"] = serde_yaml::Value::Number(3.into());
+    let yaml_v3 = serde_yaml::to_string(&raw_v3).unwrap();
+    let parsed_v3 = Config::parse_yaml(&yaml_v3).expect("v3 config should be migrated");
+    assert_eq!(parsed_v3.version, Config::CURRENT_VERSION);
+}
+
+#[test]
+fn audit_export_config_atomic_and_nested_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("nested").join("sub").join("exported.yaml");
+    let state = AppState {
+        config_store: ConfigStore::with_path(dir.path().join("config.yaml")),
+        config_change: Arc::new(Mutex::new(())), bridge: BridgeHandle::new(),
+        dev_logging: Arc::new(AtomicBool::new(false)), audio: AudioEngine::new(),
+        vst_cache: Mutex::new(None), rtp_discovery: RtpDiscoveryManager::new(),
+    };
+    let res = osc_midi_bridge::application::services::export_config(target.to_string_lossy().to_string(), &state);
+    assert!(res.is_ok(), "export_config should create directories and write: {res:?}");
+    assert!(target.exists(), "exported file must exist");
+    let content = std::fs::read_to_string(&target).unwrap();
+    let reloaded = Config::parse_yaml(&content);
+    assert!(reloaded.is_ok(), "reloaded config from export must be valid");
 }
 
 fn send(stream: &mut TcpStream, frame: serde_json::Value) {

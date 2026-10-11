@@ -107,7 +107,9 @@ export function AdvancedRoutingCard(props: Props) {
                         value={profile.channelFilter ?? ""}
                         onChange={(event) =>
                           updateProfile(profile.id, {
-                            channelFilter: event.target.value ? Number(event.target.value) : null,
+                            channelFilter: event.target.value
+                              ? Math.max(1, Math.min(16, Math.floor(Number(event.target.value))))
+                              : null,
                           })
                         }
                       />
@@ -122,7 +124,9 @@ export function AdvancedRoutingCard(props: Props) {
                         value={profile.noteMin ?? ""}
                         onChange={(event) =>
                           updateProfile(profile.id, {
-                            noteMin: event.target.value ? Number(event.target.value) : null,
+                            noteMin: event.target.value
+                              ? Math.max(0, Math.min(127, Math.floor(Number(event.target.value))))
+                              : null,
                           })
                         }
                       />
@@ -137,7 +141,9 @@ export function AdvancedRoutingCard(props: Props) {
                         value={profile.noteMax ?? ""}
                         onChange={(event) =>
                           updateProfile(profile.id, {
-                            noteMax: event.target.value ? Number(event.target.value) : null,
+                            noteMax: event.target.value
+                              ? Math.max(0, Math.min(127, Math.floor(Number(event.target.value))))
+                              : null,
                           })
                         }
                       />
@@ -168,7 +174,7 @@ export function AdvancedRoutingCard(props: Props) {
                                   value={entry.from}
                                   onChange={(event) =>
                                     updateProfileMap(profile.id, mapKey, idx, {
-                                      from: Number(event.target.value || 0),
+                                      from: Math.max(0, Math.min(127, Math.floor(Number(event.target.value || 0)))),
                                     })
                                   }
                                 />
@@ -179,7 +185,7 @@ export function AdvancedRoutingCard(props: Props) {
                                   value={entry.to}
                                   onChange={(event) =>
                                     updateProfileMap(profile.id, mapKey, idx, {
-                                      to: Number(event.target.value || 0),
+                                      to: Math.max(0, Math.min(127, Math.floor(Number(event.target.value || 0)))),
                                     })
                                   }
                                 />

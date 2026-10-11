@@ -85,7 +85,7 @@ pub fn candidate_ports(port: u16) -> smallvec::SmallVec<[u16; 3]> {
         [0u16, 2, 4]
             .into_iter()
             .filter_map(|offset| port.checked_add(offset))
-            .filter(|candidate| *candidate <= u16::MAX - 1)
+            .filter(|candidate| *candidate < u16::MAX)
             .collect()
     }
 }

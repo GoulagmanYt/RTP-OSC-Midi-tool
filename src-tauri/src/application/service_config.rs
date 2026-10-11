@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf};
+use std::{fs, path::Path};
 
 use tauri::{AppHandle, Manager, Window};
 
@@ -170,13 +170,8 @@ pub fn export_config(path: String, state: &AppState) -> Result<(), CommandError>
     let cfg = state.config_store.load();
     let yaml = serde_yaml::to_string(&cfg)
         .map_err(|err| config_error("config.serialize-failed", err.to_string()))?;
-    if let Some(parent) = PathBuf::from(&path).parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)
-                .map_err(|err| io_to_error("config.export-failed", "config", err))?;
-        }
-    }
-    fs::write(&path, yaml).map_err(|err| io_to_error("config.export-failed", "config", err))
+    crate::atomic_file::write_atomically(Path::new(&path), yaml.as_bytes())
+        .map_err(|err| io_to_error("config.export-failed", "config", err))
 }
 
 pub fn import_config(
@@ -187,8 +182,8 @@ pub fn import_config(
 ) -> Result<Config, CommandError> {
     let raw = fs::read_to_string(&path)
         .map_err(|err| io_to_error("config.import-read-failed", "config", err))?;
-    let cfg: Config = serde_yaml::from_str(&raw)
-        .map_err(|err| config_error("config.import-parse-failed", err.to_string()))?;
+    let cfg = Config::parse_yaml(&raw)
+        .map_err(|err| config_error("config.import-parse-failed", err))?;
 
     apply_and_save_config(window, &cfg, state, true)?;
     persist_resolved_audio_device(&cfg, state);

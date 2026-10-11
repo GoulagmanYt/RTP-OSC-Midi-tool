@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { RtpParticipantInfo, RtpRemoteEntry, RtpSessionInfo } from "../../api-types";
 import {
   buildRemoteConnectionChecker,
+  isSelectedSession,
   mergeSessionIntoRemotes,
   syncAutoConnectRemotes,
 } from "./utils";
@@ -89,3 +90,45 @@ describe("buildRemoteConnectionChecker", () => {
     ).toBe(false);
   });
 });
+
+describe("isSelectedSession", () => {
+  it("matches bracketed and unbracketed IPv6 addresses", () => {
+    const remotes: RtpRemoteEntry[] = [
+      { id: "1", name: "", host: "[fe80::1]", port: 5004, autoConnect: true },
+    ];
+    const session: RtpSessionInfo = {
+      name: "Remote",
+      host: "fe80::1",
+      port: 5004,
+      addresses: ["fe80::1"],
+    };
+    expect(isSelectedSession(remotes, session)).toBe(true);
+  });
+
+  it("matches hostnames case-insensitively", () => {
+    const remotes: RtpRemoteEntry[] = [
+      { id: "1", name: "", host: "MacBook.local", port: 5004, autoConnect: true },
+    ];
+    const session: RtpSessionInfo = {
+      name: "Remote",
+      host: "macbook.local",
+      port: 5004,
+      addresses: ["192.168.1.100"],
+    };
+    expect(isSelectedSession(remotes, session)).toBe(true);
+  });
+
+  it("rejects non-matching ports or hosts", () => {
+    const remotes: RtpRemoteEntry[] = [
+      { id: "1", name: "Other", host: "192.168.1.10", port: 5004, autoConnect: true },
+    ];
+    const session: RtpSessionInfo = {
+      name: "Remote",
+      host: "192.168.1.20",
+      port: 5004,
+      addresses: ["192.168.1.20"],
+    };
+    expect(isSelectedSession(remotes, session)).toBe(false);
+  });
+});
+

@@ -47,11 +47,14 @@ export function mergeSessionIntoRemotes(
 }
 
 export function isSelectedSession(remotes: RtpRemoteEntry[], session: RtpSessionInfo) {
+  const sessionHost = normalizeHost(session.host);
+  const sessionAddrs = session.addresses.map(normalizeHost);
   return remotes.some((remote) => {
     if (remote.port !== session.port) return false;
     if (remote.name && remote.name.toLowerCase() === session.name.toLowerCase()) return true;
-    if (remote.host === session.host) return true;
-    return session.addresses.includes(remote.host);
+    const remoteHost = normalizeHost(remote.host);
+    if (remoteHost === sessionHost) return true;
+    return sessionAddrs.includes(remoteHost);
   });
 }
 
