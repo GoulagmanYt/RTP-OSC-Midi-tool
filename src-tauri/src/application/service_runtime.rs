@@ -185,35 +185,21 @@ pub fn preflight_check(
     let mut messages = Vec::new();
 
     let midi_inputs = list_midi_inputs()?;
-    let midi_in_ok = cfg
-        .midi
-        .input_device
-        .as_ref()
-        .map(|name| {
-            if name == RTP_VIRTUAL_INPUT {
-                true
-            } else {
-                !name.trim().is_empty() && midi_inputs.iter().any(|p| p.contains(name))
-            }
-        })
-        .unwrap_or(false);
+    let midi_in_ok = match cfg.midi.input_device.as_deref() {
+        Some(name) if name == RTP_VIRTUAL_INPUT => true,
+        Some(name) if !name.trim().is_empty() => midi_inputs.iter().any(|p| p.contains(name)),
+        _ => !cfg.midi.thru_enabled,
+    };
     if !midi_in_ok {
         messages.push("MIDI IN manquant ou non configure".to_string());
     }
 
     let midi_outputs = list_midi_outputs()?;
-    let midi_out_ok = cfg
-        .midi
-        .output_device
-        .as_ref()
-        .map(|name| {
-            if name == VST_INTERNAL_OUTPUT || name == VST_INTERNAL_OUTPUT_LEGACY {
-                true
-            } else {
-                !name.trim().is_empty() && midi_outputs.iter().any(|p| p.contains(name))
-            }
-        })
-        .unwrap_or(false);
+    let midi_out_ok = match cfg.midi.output_device.as_deref() {
+        Some(name) if name == VST_INTERNAL_OUTPUT || name == VST_INTERNAL_OUTPUT_LEGACY => true,
+        Some(name) if !name.trim().is_empty() => midi_outputs.iter().any(|p| p.contains(name)),
+        _ => !cfg.midi.thru_enabled,
+    };
     if !midi_out_ok {
         messages.push("MIDI OUT manquant ou non configure".to_string());
     }

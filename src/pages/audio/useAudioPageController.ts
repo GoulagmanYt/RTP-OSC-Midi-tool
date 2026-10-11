@@ -64,6 +64,7 @@ export function useAudioPageController() {
   const vstParamFrame = useRef<number | null>(null);
   const vstEqControllerMounted = useRef(true);
   const flushVstEqRef = useRef<() => void>(() => undefined);
+  const flushVstParamsRef = useRef<() => void>(() => undefined);
 
   useEffect(() => {
     let disposed = false;
@@ -138,8 +139,15 @@ export function useAudioPageController() {
     vstEqControllerMounted.current = true;
     return () => {
       vstEqControllerMounted.current = false;
-      if (vstEqFrame.current !== null) window.cancelAnimationFrame(vstEqFrame.current);
-      if (vstParamFrame.current !== null) window.cancelAnimationFrame(vstParamFrame.current);
+      if (vstEqFrame.current !== null) {
+        window.cancelAnimationFrame(vstEqFrame.current);
+        vstEqFrame.current = null;
+      }
+      if (vstParamFrame.current !== null) {
+        window.cancelAnimationFrame(vstParamFrame.current);
+        vstParamFrame.current = null;
+      }
+      flushVstParamsRef.current();
     };
   }, []);
 
@@ -304,6 +312,11 @@ export function useAudioPageController() {
         window.cancelAnimationFrame(vstEqFrame.current);
         vstEqFrame.current = null;
       }
+      pendingVstParams.current.clear();
+      if (vstParamFrame.current !== null) {
+        window.cancelAnimationFrame(vstParamFrame.current);
+        vstParamFrame.current = null;
+      }
       setVstParams([]);
       await updateAudioConfig({ vstPluginId: plugin.id, vstPath: plugin.path });
     },
@@ -420,6 +433,10 @@ export function useAudioPageController() {
       });
     }
   }, [t]);
+
+  useEffect(() => {
+    flushVstParamsRef.current = flushVstParams;
+  }, [flushVstParams]);
 
   const handleVstParamChange = useCallback(async (index: number, value: number) => {
     setVstParams((prev) => prev.map((param) => (param.index === index ? { ...param, value } : param)));

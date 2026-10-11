@@ -425,6 +425,13 @@ impl ConfigStore {
     }
 
     pub fn save(&self, cfg: &AppConfig) -> Result<(), String> {
+        if cfg.version != AppConfig::CURRENT_VERSION {
+            return Err(format!(
+                "Unsupported configuration version {}; expected {}",
+                cfg.version,
+                AppConfig::CURRENT_VERSION
+            ));
+        }
         let raw = serde_yaml::to_string(cfg).map_err(|e| e.to_string())?;
         crate::atomic_file::write_atomically(&self.path, raw.as_bytes()).map_err(|e| e.to_string())
     }

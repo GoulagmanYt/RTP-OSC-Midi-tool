@@ -262,7 +262,7 @@ fn handle_connection(mut stream: TcpStream, tx: Sender<MidiFrame>, server_stop: 
         }
     };
 
-    let prepared = Arc::new(match read_client_frame(&mut stream, &server_stop, false) {
+    let prepared = Arc::new(match read_client_frame(&mut stream, &server_stop, None, false) {
         Ok(ClientFrame::Prepare {
             version,
             session_id,
@@ -323,7 +323,7 @@ fn handle_connection(mut stream: TcpStream, tx: Sender<MidiFrame>, server_stop: 
     let mut connection_failed = false;
 
     while !server_stop.load(Ordering::Relaxed) && !done.load(Ordering::Acquire) {
-        match read_client_frame(&mut stream, &server_stop, true) {
+        match read_client_frame(&mut stream, &server_stop, Some(&done), true) {
             Ok(ClientFrame::Start {
                 session_id,
                 start_delay_ms,
@@ -598,18 +598,20 @@ fn record_max_late(late_us: u64) {
 fn read_client_frame(
     stream: &mut TcpStream,
     stop: &AtomicBool,
+    done: Option<&AtomicBool>,
     return_on_idle_timeout: bool,
 ) -> std::io::Result<ClientFrame> {
-    read_frame(stream, stop, return_on_idle_timeout)
+    read_frame(stream, stop, done, return_on_idle_timeout)
 }
 
 fn read_frame(
     stream: &mut TcpStream,
     stop: &AtomicBool,
+    done: Option<&AtomicBool>,
     return_on_idle_timeout: bool,
 ) -> std::io::Result<ClientFrame> {
     let mut header = [0u8; 4];
-    read_exact_preserving_progress(stream, &mut header, stop, return_on_idle_timeout)?;
+    read_exact_preserving_progress(stream, &mut header, stop, done, return_on_idle_timeout)?;
     let size = u32::from_be_bytes(header) as usize;
     if size > MAX_FRAME_BYTES {
         return Err(std::io::Error::new(
@@ -618,7 +620,7 @@ fn read_frame(
         ));
     }
     let mut data = vec![0u8; size];
-    read_exact_preserving_progress(stream, &mut data, stop, false)?;
+    read_exact_preserving_progress(stream, &mut data, stop, done, false)?;
     serde_json::from_slice(&data).map_err(|err| std::io::Error::new(ErrorKind::InvalidData, err))
 }
 
@@ -626,6 +628,7 @@ fn read_exact_preserving_progress(
     stream: &mut TcpStream,
     buffer: &mut [u8],
     stop: &AtomicBool,
+    done: Option<&AtomicBool>,
     return_on_idle_timeout: bool,
 ) -> std::io::Result<()> {
     let mut offset = 0usize;
@@ -634,6 +637,12 @@ fn read_exact_preserving_progress(
             return Err(std::io::Error::new(
                 ErrorKind::Interrupted,
                 "server stopping",
+            ));
+        }
+        if done.map(|d| d.load(Ordering::Acquire)).unwrap_or(false) {
+            return Err(std::io::Error::new(
+                ErrorKind::TimedOut,
+                "playback completed",
             ));
         }
         match stream.read(&mut buffer[offset..]) {
@@ -647,7 +656,9 @@ fn read_exact_preserving_progress(
             Err(err)
                 if err.kind() == ErrorKind::WouldBlock || err.kind() == ErrorKind::TimedOut =>
             {
-                if offset == 0 && return_on_idle_timeout {
+                if (offset == 0 && return_on_idle_timeout)
+                    || done.map(|d| d.load(Ordering::Acquire)).unwrap_or(false)
+                {
                     return Err(err);
                 }
             }

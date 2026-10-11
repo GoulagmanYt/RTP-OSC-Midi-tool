@@ -615,12 +615,46 @@ pub(crate) fn plugin_file_metadata(path: &Path) -> (Option<u64>, Option<u64>) {
     let Ok(metadata) = std::fs::metadata(path) else {
         return (None, None);
     };
-    let modified = metadata
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64);
-    (modified, Some(metadata.len()))
+    if metadata.is_dir() {
+        let mut max_modified = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64);
+        let mut total_size = 0u64;
+        let mut stack = vec![path.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let Ok(read_dir) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in read_dir.flatten() {
+                let entry_path = entry.path();
+                if let Ok(entry_meta) = entry.metadata() {
+                    if entry_meta.is_dir() {
+                        stack.push(entry_path);
+                    } else {
+                        total_size = total_size.saturating_add(entry_meta.len());
+                        if let Some(entry_mod) = entry_meta
+                            .modified()
+                            .ok()
+                            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_millis().min(u64::MAX as u128) as u64)
+                        {
+                            max_modified = Some(max_modified.map_or(entry_mod, |m| m.max(entry_mod)));
+                        }
+                    }
+                }
+            }
+        }
+        (max_modified, Some(total_size))
+    } else {
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64);
+        (modified, Some(metadata.len()))
+    }
 }
 
 #[cfg(test)]
@@ -642,6 +676,28 @@ mod tests {
         entry.supported = true;
         entry.unsupported_reason = None;
         entry
+    }
+
+    #[test]
+    fn audit_bundle_binary_update_invalidates_catalogue_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = dir.path().join("Audit.vst3");
+        let binary_dir = bundle.join("Contents/x86_64-win");
+        std::fs::create_dir_all(&binary_dir).unwrap();
+        let binary = binary_dir.join("Audit.vst3");
+        std::fs::write(&binary, b"old binary").unwrap();
+        let roots = [dir.path().to_path_buf()];
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let probe = |path: &Path, _: Duration, architecture: &str| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            vec![instrument_entry(path, architecture, "class-a")]
+        };
+        let cached = scan_vst_plugins_with_probe(&roots, &[], false, &probe);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+        std::fs::write(&binary, b"new binary with changed size").unwrap();
+        let _ = scan_vst_plugins_with_probe(&roots, &cached, false, &probe);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 2,
+            "modified bundle binary was not re-probed");
     }
 
     #[test]

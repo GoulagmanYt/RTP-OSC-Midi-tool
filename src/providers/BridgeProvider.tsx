@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import * as api from "../api";
 import { getErrorMessage } from "../api-errors";
 import { toast } from "sonner";
@@ -26,34 +26,47 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
   const { logs, appendLog, clearLogs } = useLogs();
   const { t } = useI18n();
 
+  const statusRequestId = useRef(0);
+  const listsRequestId = useRef(0);
+  const audioDevicesRequestId = useRef(0);
+
   const refreshStatus = useCallback(async () => {
+    const id = ++statusRequestId.current;
     try {
       const nextStatus = await api.getStatus();
-      setStatus(nextStatus);
+      if (id === statusRequestId.current) {
+        setStatus(nextStatus);
+      }
     } catch (error) {
       console.error("Failed to get status", error);
     }
   }, []);
 
   const refreshLists = useCallback(async () => {
+    const id = ++listsRequestId.current;
     try {
       const [inputs, outputs, backends] = await Promise.all([
         api.listMidiInputs(),
         api.listMidiOutputs(),
         api.listAudioBackends(),
       ]);
-      setMidiInputs(inputs);
-      setMidiOutputs(outputs);
-      setAudioBackends(backends);
+      if (id === listsRequestId.current) {
+        setMidiInputs(inputs);
+        setMidiOutputs(outputs);
+        setAudioBackends(backends);
+      }
     } catch (error) {
       console.error("Failed to refresh lists", error);
     }
   }, []);
 
   const refreshAudioDevices = useCallback(async (backend?: string | null) => {
+    const id = ++audioDevicesRequestId.current;
     try {
       const devices = await api.listAudioDevices(backend);
-      setAudioDevices(devices);
+      if (id === audioDevicesRequestId.current) {
+        setAudioDevices(devices);
+      }
     } catch (error) {
       console.error("Failed to list audio devices", error);
     }

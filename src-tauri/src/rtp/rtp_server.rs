@@ -78,6 +78,18 @@ pub struct RtpServer {
     advertisement: Option<RtpMdnsAdvertisement>,
 }
 
+pub fn candidate_ports(port: u16) -> smallvec::SmallVec<[u16; 3]> {
+    if port == 0 {
+        smallvec::smallvec![0u16]
+    } else {
+        [0u16, 2, 4]
+            .into_iter()
+            .filter_map(|offset| port.checked_add(offset))
+            .filter(|candidate| *candidate <= u16::MAX - 1)
+            .collect()
+    }
+}
+
 impl RtpServer {
     pub fn start(
         name: String,
@@ -101,15 +113,7 @@ impl RtpServer {
             let name = session_name;
             let logger = setup_logger;
             let ssrc = (Uuid::new_v4().as_u128() & 0xFFFF_FFFF) as u32;
-            let try_ports = if port == 0 {
-                smallvec::smallvec![0u16]
-            } else {
-                [0u16, 2, 4]
-                    .into_iter()
-                    .filter_map(|offset| port.checked_add(offset))
-                    .filter(|candidate| *candidate < u16::MAX - 1)
-                    .collect::<smallvec::SmallVec<[u16; 3]>>()
-            };
+            let try_ports = candidate_ports(port);
             if try_ports.is_empty() {
                 return Err("Impossible de demarrer RTP-MIDI (port invalide)".to_string());
             }
