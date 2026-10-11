@@ -1,6 +1,11 @@
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, fs, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::PathBuf,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use crate::types::RuntimeStatus;
 
@@ -431,6 +436,28 @@ impl ConfigStore {
         }
     }
 
+    fn backup_if_unreadable(&self) {
+        let Ok(raw) = fs::read_to_string(&self.path) else {
+            return;
+        };
+        if AppConfig::parse_yaml(&raw).is_ok() {
+            return;
+        }
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let backup_path = self.path.with_extension(format!("yaml.invalid-{stamp}"));
+        if let Err(e) = fs::copy(&self.path, &backup_path) {
+            log::warn!("Failed to back up unreadable config file: {e}");
+        } else {
+            log::warn!(
+                "Unreadable or invalid configuration backed up to {:?}",
+                backup_path
+            );
+        }
+    }
+
     pub fn save(&self, cfg: &AppConfig) -> Result<(), String> {
         if cfg.version != AppConfig::CURRENT_VERSION {
             return Err(format!(
@@ -439,6 +466,7 @@ impl ConfigStore {
                 AppConfig::CURRENT_VERSION
             ));
         }
+        self.backup_if_unreadable();
         let raw = serde_yaml::to_string(cfg).map_err(|e| e.to_string())?;
         crate::atomic_file::write_atomically(&self.path, raw.as_bytes()).map_err(|e| e.to_string())
     }
@@ -603,6 +631,35 @@ mod tests {
 
         assert_eq!(config.version, AppConfig::CURRENT_VERSION);
         assert_eq!(std::fs::read_to_string(path).expect("preserved"), original);
+    }
+
+    #[test]
+    fn store_backs_up_invalid_config_on_save() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("config.yaml");
+        let broken = "invalid_yaml: [missing bracket";
+        std::fs::write(&path, broken).expect("write broken");
+
+        let store = ConfigStore::with_path(path.clone());
+        let _ = store.load();
+
+        let default_cfg = AppConfig::default();
+        store.save(&default_cfg).expect("save valid");
+
+        // The active config file now has the valid config
+        let new_raw = std::fs::read_to_string(&path).expect("read new");
+        assert!(AppConfig::parse_yaml(&new_raw).is_ok());
+
+        // An invalid backup file was created containing the broken content
+        let entries = std::fs::read_dir(dir.path()).expect("read_dir");
+        let backup = entries.filter_map(|e| e.ok()).find(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with("config.yaml.invalid-")
+        });
+        assert!(backup.is_some(), "Backup file should exist");
+        let backup_content = std::fs::read_to_string(backup.unwrap().path()).expect("read backup");
+        assert_eq!(backup_content, broken);
     }
 
     #[test]

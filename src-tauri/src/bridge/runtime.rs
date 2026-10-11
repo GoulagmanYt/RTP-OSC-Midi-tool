@@ -184,11 +184,30 @@ impl BridgeHandle {
                     .load_full()
                     .map(|sender| (*sender).clone())
                     .ok_or("Bridge MIDI input unavailable")?;
-                let replacement = crate::osc_input::OscInputServer::start(&config.osc, sink)?;
-                if let Some(previous) = runtime.osc_input.take() {
-                    previous.stop();
+                if old.input_enabled && old.listen_port == config.osc.listen_port {
+                    if let Some(previous) = runtime.osc_input.take() {
+                        previous.stop();
+                    }
+                    match crate::osc_input::OscInputServer::start(&config.osc, sink.clone()) {
+                        Ok(replacement) => {
+                            runtime.osc_input = replacement;
+                        }
+                        Err(err) => {
+                            if let Ok(recovered) =
+                                crate::osc_input::OscInputServer::start(&old, sink)
+                            {
+                                runtime.osc_input = recovered;
+                            }
+                            return Err(err);
+                        }
+                    }
+                } else {
+                    let replacement = crate::osc_input::OscInputServer::start(&config.osc, sink)?;
+                    if let Some(previous) = runtime.osc_input.take() {
+                        previous.stop();
+                    }
+                    runtime.osc_input = replacement;
                 }
-                runtime.osc_input = replacement;
             }
             let old_config = runtime.config.lock().clone();
             let old_midi = &old_config.midi;

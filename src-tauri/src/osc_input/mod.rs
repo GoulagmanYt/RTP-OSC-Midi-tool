@@ -91,6 +91,7 @@ async fn receive(
         BinaryHeap::with_capacity(PENDING_CAPACITY);
     let mut order = 0u64;
     let mut generation = midi_reset_generation();
+    let mut errors = 0u64;
     loop {
         let current = midi_reset_generation();
         if generation != current {
@@ -114,7 +115,17 @@ async fn receive(
                 }
             },
             received = socket.recv_from(&mut buffer) => {
-                let Ok((size, _)) = received else { crate::realtime::OSC_SOCKET_ERRORS.fetch_add(1, std::sync::atomic::Ordering::Relaxed); request_critical_midi_reset(); break; };
+                let Ok((size, _)) = received else {
+                    crate::realtime::OSC_SOCKET_ERRORS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    errors += 1;
+                    if errors >= 20 {
+                        request_critical_midi_reset();
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50 * errors.min(20))).await;
+                    continue;
+                };
+                errors = 0;
                 let now = Instant::now();
                 let ingress_qpc = crate::vst_worker::protocol::monotonic_qpc();
                 let received_generation = midi_reset_generation();

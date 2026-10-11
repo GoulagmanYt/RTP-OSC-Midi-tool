@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{fence, AtomicU32, Ordering};
 
 use parking_lot::Mutex;
 
@@ -125,7 +125,8 @@ impl PublishedEq {
         let encoded = EqTarget::from_settings(settings, sample_rate).encode();
         let _guard = self.writer.lock();
         let odd = self.sequence.load(Ordering::Relaxed).wrapping_add(1) | 1;
-        self.sequence.store(odd, Ordering::Release);
+        self.sequence.store(odd, Ordering::Relaxed);
+        fence(Ordering::Release);
         for (slot, value) in self.values.iter().zip(encoded) {
             slot.store(value, Ordering::Relaxed);
         }
@@ -138,7 +139,8 @@ impl PublishedEq {
             return None;
         }
         let values = std::array::from_fn(|index| self.values[index].load(Ordering::Relaxed));
-        let after = self.sequence.load(Ordering::Acquire);
+        fence(Ordering::Acquire);
+        let after = self.sequence.load(Ordering::Relaxed);
         (before == after).then(|| (after, EqTarget::decode(values)))
     }
 }

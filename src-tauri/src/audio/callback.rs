@@ -188,6 +188,8 @@ fn audio_callback<T: Sample + FromSample<f32>>(
     if !state.prepare(frames) {
         state.telemetry.xruns.fetch_add(1, Ordering::Relaxed);
         data.fill(silence);
+        state.last_output.fill(0.0);
+        state.recovering_from_silence = true;
         state
             .telemetry
             .meter_left

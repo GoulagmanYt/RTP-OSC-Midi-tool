@@ -17,6 +17,7 @@ describe("useLogs", () => {
         message: "second",
         timestamp: "10:00:01.000",
       });
+      result.current.flushLogs();
     });
 
     expect(result.current.logs).toHaveLength(2);

@@ -1,6 +1,6 @@
 use crate::midi_queue::Sender;
-use parking_lot::Mutex;
-use std::collections::BinaryHeap;
+use parking_lot::{Mutex, RwLock};
+use std::collections::{BinaryHeap, HashMap};
 use std::net::SocketAddr;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
@@ -185,8 +185,16 @@ impl RtpServer {
             }
         }
 
-        // La source est construite une seule fois et partagée via Arc.
+        // La source par défaut et le registre des sources qualifiées par pair distant.
         let rtp_source: Arc<str> = Arc::from(format!("RTP:{name}"));
+        let peer_sources = Arc::new(RwLock::new(HashMap::<u32, Arc<str>>::new()));
+        let peer_sources_for_join = Arc::clone(&peer_sources);
+        let peer_sources_for_left = Arc::clone(&peer_sources);
+        let peer_sources_for_midi = Arc::clone(&peer_sources);
+        let peer_sources_for_sysex = Arc::clone(&peer_sources);
+        let session_name_for_join = name.clone();
+        let session_name_for_midi = name.clone();
+        let session_name_for_sysex = name.clone();
         let midi_sink = sink.clone();
         let participants = Arc::new(Mutex::new(Vec::<RtpParticipantInfo>::new()));
         let participants_for_join = participants.clone();
@@ -227,9 +235,21 @@ impl RtpServer {
             let sysex_source = rtp_source.clone();
             session
                 .add_listener(TimestampedSysExEvent, move |event| {
-                    let Some(mut frame) =
-                        MidiFrame::sysex_realtime(event.payload, sysex_source.clone())
-                    else {
+                    let source = if event.ssrc != 0 {
+                        peer_sources_for_sysex
+                            .read()
+                            .get(&event.ssrc)
+                            .cloned()
+                            .unwrap_or_else(|| {
+                                Arc::from(format!(
+                                    "RTP:{}#ssrc_{:08x}",
+                                    session_name_for_sysex, event.ssrc
+                                ))
+                            })
+                    } else {
+                        sysex_source.clone()
+                    };
+                    let Some(mut frame) = MidiFrame::sysex_realtime(event.payload, source) else {
                         record_rtp_drop();
                         request_critical_midi_reset();
                         return;
@@ -273,13 +293,27 @@ impl RtpServer {
                         });
                     }
 
+                    let source = if event.ssrc != 0 {
+                        peer_sources_for_midi
+                            .read()
+                            .get(&event.ssrc)
+                            .cloned()
+                            .unwrap_or_else(|| {
+                                Arc::from(format!(
+                                    "RTP:{}#ssrc_{:08x}",
+                                    session_name_for_midi, event.ssrc
+                                ))
+                            })
+                    } else {
+                        std::sync::Arc::clone(&rtp_source)
+                    };
                     let generation = MidiFrame::current_generation();
                     let timed = TimedRtpFrame {
                         frame: MidiFrame {
                             generation,
                             ingress_qpc: crate::vst_worker::protocol::qpc_at(event.received_at),
                             data: bytes,
-                            source: std::sync::Arc::clone(&rtp_source),
+                            source,
                         },
                         deadline: event.deadline,
                         generation,
@@ -304,10 +338,16 @@ impl RtpServer {
             let join_logger = logger.clone();
             session
                 .add_listener(ParticipantJoinedEvent, move |participant| {
+                    let peer_ssrc = participant.ssrc().get();
+                    let peer_addr = participant.addr();
+                    let peer_source: Arc<str> =
+                        Arc::from(format!("RTP:{}@{}", session_name_for_join, peer_addr));
+                    peer_sources_for_join.write().insert(peer_ssrc, peer_source);
+
                     let name = participant.name().to_str().unwrap_or("Unknown");
                     let info = RtpParticipantInfo {
                         name: name.to_string(),
-                        addr: participant.addr().to_string(),
+                        addr: peer_addr.to_string(),
                     };
                     {
                         let mut guard = participants_for_join.lock();
@@ -319,7 +359,7 @@ impl RtpServer {
                     notify_for_join.notify_one();
                     join_logger.info(format!(
                         "RTP-MIDI participant joined: {name} ({})",
-                        participant.addr()
+                        peer_addr
                     ));
                 })
                 .await;
@@ -328,6 +368,8 @@ impl RtpServer {
             let left_logger = logger.clone();
             session
                 .add_listener(ParticipantLeftEvent, move |participant| {
+                    let peer_ssrc = participant.ssrc().get();
+                    peer_sources_for_left.write().remove(&peer_ssrc);
                     request_critical_midi_reset();
                     let name = participant.name().to_str().unwrap_or("Unknown");
                     {

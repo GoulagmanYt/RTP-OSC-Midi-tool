@@ -16,16 +16,18 @@ use std::{
 use crate::{bridge::pipeline::try_enqueue_midi_frame, midi::MidiFrame};
 
 const PROTOCOL_VERSION: u8 = 1;
-pub const DEFAULT_RELIABLE_PLAYBACK_ADDR: &str = "0.0.0.0:5056";
+pub const DEFAULT_RELIABLE_PLAYBACK_ADDR: &str = "127.0.0.1:5056";
 const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 const MAX_EVENT_BYTES: usize = 1024;
 const MAX_CONNECTIONS: usize = 8;
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
+static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
 static MESSAGES_IN: AtomicU64 = AtomicU64::new(0);
 static MESSAGES_OUT: AtomicU64 = AtomicU64::new(0);
 static DROPPED: AtomicU64 = AtomicU64::new(0);
 static MAX_LATE_US: AtomicU64 = AtomicU64::new(0);
-static ACTIVE_SESSION: LazyLock<Mutex<Option<String>>> = LazyLock::new(|| Mutex::new(None));
+static ACTIVE_SESSION: LazyLock<Mutex<Option<(u64, String)>>> = LazyLock::new(|| Mutex::new(None));
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReliablePlaybackMetricsSnapshot {
@@ -182,7 +184,7 @@ pub fn reliable_playback_metrics_snapshot() -> ReliablePlaybackMetricsSnapshot {
         messages_out: MESSAGES_OUT.load(Ordering::Relaxed),
         dropped: DROPPED.load(Ordering::Relaxed),
         max_late_us: MAX_LATE_US.load(Ordering::Relaxed),
-        active_session: ACTIVE_SESSION.lock().clone(),
+        active_session: ACTIVE_SESSION.lock().as_ref().map(|(_, name)| name.clone()),
     }
 }
 
@@ -253,7 +255,9 @@ fn reap_finished_workers(workers: &Mutex<Vec<thread::JoinHandle<()>>>) {
 }
 
 fn handle_connection(mut stream: TcpStream, tx: Sender<MidiFrame>, server_stop: Arc<AtomicBool>) {
+    let _ = stream.set_nonblocking(false);
     let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
+    let connection_id = NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed);
     let writer = match stream.try_clone() {
         Ok(writer) => Arc::new(Mutex::new(writer)),
         Err(err) => {
@@ -262,8 +266,9 @@ fn handle_connection(mut stream: TcpStream, tx: Sender<MidiFrame>, server_stop: 
         }
     };
 
+    let handshake_deadline = Some(Instant::now() + HANDSHAKE_TIMEOUT);
     let prepared = Arc::new(
-        match read_client_frame(&mut stream, &server_stop, None, false) {
+        match read_client_frame(&mut stream, &server_stop, None, false, handshake_deadline) {
             Ok(ClientFrame::Prepare {
                 version,
                 session_id,
@@ -325,13 +330,13 @@ fn handle_connection(mut stream: TcpStream, tx: Sender<MidiFrame>, server_stop: 
     let mut connection_failed = false;
 
     while !server_stop.load(Ordering::Relaxed) && !done.load(Ordering::Acquire) {
-        match read_client_frame(&mut stream, &server_stop, Some(&done), true) {
+        match read_client_frame(&mut stream, &server_stop, Some(&done), true, None) {
             Ok(ClientFrame::Start {
                 session_id,
                 start_delay_ms,
             }) if session_id == prepared.session_id && !started => {
                 started = true;
-                *ACTIVE_SESSION.lock() = Some(session_id.clone());
+                *ACTIVE_SESSION.lock() = Some((connection_id, session_id.clone()));
                 let tx = tx.clone();
                 let cancel = Arc::clone(&cancel);
                 let done = Arc::clone(&done);
@@ -382,7 +387,10 @@ fn handle_connection(mut stream: TcpStream, tx: Sender<MidiFrame>, server_stop: 
     // Even an admission racing with the cancel check therefore precedes reset.
     let completion = scheduler.and_then(|handle| handle.join().ok()).flatten();
     if started || stop_requested {
-        *ACTIVE_SESSION.lock() = None;
+        let mut guard = ACTIVE_SESSION.lock();
+        if guard.as_ref().map(|(id, _)| *id) == Some(connection_id) {
+            *guard = None;
+        }
     }
     if server_stop.load(Ordering::Relaxed) {
         return; // The server injects its reset after joining all connections.
@@ -602,8 +610,9 @@ fn read_client_frame(
     stop: &AtomicBool,
     done: Option<&AtomicBool>,
     return_on_idle_timeout: bool,
+    deadline: Option<Instant>,
 ) -> std::io::Result<ClientFrame> {
-    read_frame(stream, stop, done, return_on_idle_timeout)
+    read_frame(stream, stop, done, return_on_idle_timeout, deadline)
 }
 
 fn read_frame(
@@ -611,9 +620,17 @@ fn read_frame(
     stop: &AtomicBool,
     done: Option<&AtomicBool>,
     return_on_idle_timeout: bool,
+    deadline: Option<Instant>,
 ) -> std::io::Result<ClientFrame> {
     let mut header = [0u8; 4];
-    read_exact_preserving_progress(stream, &mut header, stop, done, return_on_idle_timeout)?;
+    read_exact_preserving_progress(
+        stream,
+        &mut header,
+        stop,
+        done,
+        return_on_idle_timeout,
+        deadline,
+    )?;
     let size = u32::from_be_bytes(header) as usize;
     if size > MAX_FRAME_BYTES {
         return Err(std::io::Error::new(
@@ -622,7 +639,7 @@ fn read_frame(
         ));
     }
     let mut data = vec![0u8; size];
-    read_exact_preserving_progress(stream, &mut data, stop, done, false)?;
+    read_exact_preserving_progress(stream, &mut data, stop, done, false, deadline)?;
     serde_json::from_slice(&data).map_err(|err| std::io::Error::new(ErrorKind::InvalidData, err))
 }
 
@@ -632,6 +649,7 @@ fn read_exact_preserving_progress(
     stop: &AtomicBool,
     done: Option<&AtomicBool>,
     return_on_idle_timeout: bool,
+    deadline: Option<Instant>,
 ) -> std::io::Result<()> {
     let mut offset = 0usize;
     while offset < buffer.len() {
@@ -647,6 +665,12 @@ fn read_exact_preserving_progress(
                 "playback completed",
             ));
         }
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            return Err(std::io::Error::new(
+                ErrorKind::TimedOut,
+                "read deadline exceeded",
+            ));
+        }
         match stream.read(&mut buffer[offset..]) {
             Ok(0) => {
                 return Err(std::io::Error::new(
@@ -658,6 +682,12 @@ fn read_exact_preserving_progress(
             Err(err)
                 if err.kind() == ErrorKind::WouldBlock || err.kind() == ErrorKind::TimedOut =>
             {
+                if deadline.is_some_and(|d| Instant::now() >= d) {
+                    return Err(std::io::Error::new(
+                        ErrorKind::TimedOut,
+                        "read deadline exceeded",
+                    ));
+                }
                 if (offset == 0 && return_on_idle_timeout)
                     || done.map(|d| d.load(Ordering::Acquire)).unwrap_or(false)
                 {
