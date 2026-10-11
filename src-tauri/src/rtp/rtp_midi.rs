@@ -57,14 +57,59 @@ pub fn midi_to_bytes(message: RtMidiMessage) -> SmallVec<[u8; 32]> {
     }
 }
 
+fn normalize_ip(ip: std::net::IpAddr) -> std::net::IpAddr {
+    match ip {
+        std::net::IpAddr::V4(v4) => std::net::IpAddr::V4(v4),
+        std::net::IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                std::net::IpAddr::V4(v4)
+            } else {
+                std::net::IpAddr::V6(v6)
+            }
+        }
+    }
+}
+
 pub fn participant_matches_target(participant_addr: &str, target: &SocketAddr) -> bool {
     let Ok(participant) = participant_addr.parse::<SocketAddr>() else {
         return false;
     };
-    if participant.ip() != target.ip() {
+    if normalize_ip(participant.ip()) != normalize_ip(target.ip()) {
         return false;
     }
     let tp = target.port();
     let pp = participant.port();
     pp == tp || (tp.checked_add(1) == Some(pp)) || (tp.checked_sub(1) == Some(pp))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn matches_ipv4_and_mapped_ipv6_targets() {
+        let target_v4: SocketAddr = "192.168.1.50:5004".parse().unwrap();
+        assert!(participant_matches_target("192.168.1.50:5004", &target_v4));
+        assert!(participant_matches_target("192.168.1.50:5005", &target_v4));
+        assert!(participant_matches_target("192.168.1.50:5003", &target_v4));
+        assert!(!participant_matches_target("192.168.1.50:5006", &target_v4));
+        assert!(!participant_matches_target("192.168.1.51:5004", &target_v4));
+
+        // Dual-stack IPv4-mapped IPv6 participant matching IPv4 target
+        assert!(participant_matches_target(
+            "[::ffff:192.168.1.50]:5004",
+            &target_v4
+        ));
+        assert!(participant_matches_target(
+            "[::ffff:192.168.1.50]:5005",
+            &target_v4
+        ));
+        assert!(!participant_matches_target(
+            "[::ffff:192.168.1.51]:5004",
+            &target_v4
+        ));
+
+        // Invalid address parsing returns false
+        assert!(!participant_matches_target("not-an-ip", &target_v4));
+    }
 }

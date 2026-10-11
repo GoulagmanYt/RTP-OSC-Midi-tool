@@ -262,58 +262,60 @@ fn handle_connection(mut stream: TcpStream, tx: Sender<MidiFrame>, server_stop: 
         }
     };
 
-    let prepared = Arc::new(match read_client_frame(&mut stream, &server_stop, None, false) {
-        Ok(ClientFrame::Prepare {
-            version,
-            session_id,
-            song,
-            total,
-            events,
-        }) => match validate_prepare(version, session_id, song, total, events) {
-            Ok(prepared) => {
-                MESSAGES_IN.fetch_add(prepared.events.len() as u64, Ordering::Relaxed);
-                let _ = send_server_frame(
-                    &writer,
-                    &ServerFrame::Prepared {
-                        session_id: &prepared.session_id,
-                        received: prepared.events.len(),
-                    },
-                );
-                prepared
-            }
-            Err((session_id, message)) => {
+    let prepared = Arc::new(
+        match read_client_frame(&mut stream, &server_stop, None, false) {
+            Ok(ClientFrame::Prepare {
+                version,
+                session_id,
+                song,
+                total,
+                events,
+            }) => match validate_prepare(version, session_id, song, total, events) {
+                Ok(prepared) => {
+                    MESSAGES_IN.fetch_add(prepared.events.len() as u64, Ordering::Relaxed);
+                    let _ = send_server_frame(
+                        &writer,
+                        &ServerFrame::Prepared {
+                            session_id: &prepared.session_id,
+                            received: prepared.events.len(),
+                        },
+                    );
+                    prepared
+                }
+                Err((session_id, message)) => {
+                    let _ = send_server_frame(
+                        &writer,
+                        &ServerFrame::Error {
+                            session_id: session_id.as_deref(),
+                            message,
+                        },
+                    );
+                    return;
+                }
+            },
+            Ok(_) => {
                 let _ = send_server_frame(
                     &writer,
                     &ServerFrame::Error {
-                        session_id: session_id.as_deref(),
-                        message,
+                        session_id: None,
+                        message: "first frame must be prepare".to_string(),
                     },
                 );
                 return;
             }
+            Err(err) => {
+                let _ = send_server_frame(
+                    &writer,
+                    &ServerFrame::Error {
+                        session_id: None,
+                        message: format!("read prepare failed: {err}"),
+                    },
+                );
+                log::debug!("Reliable playback read prepare failed: {err}");
+                return;
+            }
         },
-        Ok(_) => {
-            let _ = send_server_frame(
-                &writer,
-                &ServerFrame::Error {
-                    session_id: None,
-                    message: "first frame must be prepare".to_string(),
-                },
-            );
-            return;
-        }
-        Err(err) => {
-            let _ = send_server_frame(
-                &writer,
-                &ServerFrame::Error {
-                    session_id: None,
-                    message: format!("read prepare failed: {err}"),
-                },
-            );
-            log::debug!("Reliable playback read prepare failed: {err}");
-            return;
-        }
-    });
+    );
 
     let cancel = Arc::new(AtomicBool::new(false));
     let done = Arc::new(AtomicBool::new(false));

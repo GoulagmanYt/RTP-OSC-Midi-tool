@@ -652,7 +652,10 @@ impl RemotePlugin {
                     super::runtime_state::monotonic_us(),
                 ),
             );
-            let parameter_count = self.pending_parameter_changes.len();
+            let parameter_count = self
+                .pending_parameter_changes
+                .len()
+                .min(BRIDGE_MAX_PARAMETER_CHANGES);
             for (target, source) in slot
                 .parameter_changes
                 .iter_mut()
@@ -1082,7 +1085,14 @@ fn open_remote_editor(
             editor.idle();
             let settled_size = editor.size();
             if settled_size != (width, height) {
-                resize_remote_editor_to_client(hwnd, settled_size.0, settled_size.1)?;
+                if let Err(error) =
+                    resize_remote_editor_to_client(hwnd, settled_size.0, settled_size.1)
+                {
+                    editor.close();
+                    set_active_vst2_editor_window(None);
+                    let _ = unsafe { DestroyWindow(hwnd) };
+                    return Err(error);
+                }
             }
             *current = Some(RemoteEditor::Vst2 { editor, hwnd });
             Ok(())
@@ -1090,9 +1100,16 @@ fn open_remote_editor(
         PluginBackend::Vst3 { instance, .. } => {
             let mut gui = Box::new(instance.create_gui().map_err(|error| error.to_string())?);
             let hwnd = create_remote_editor_window("VST3 x86 Editor")?;
-            gui.attach(hwnd.0).map_err(|error| error.to_string())?;
-            let (width, height) = gui.size().map_err(|error| error.to_string())?;
-            resize_remote_editor_to_client(hwnd, width.round() as i32, height.round() as i32)?;
+            let setup = (|| {
+                gui.attach(hwnd.0).map_err(|error| error.to_string())?;
+                let (width, height) = gui.size().map_err(|error| error.to_string())?;
+                resize_remote_editor_to_client(hwnd, width.round() as i32, height.round() as i32)?;
+                Ok(())
+            })();
+            if let Err(error) = setup {
+                let _ = unsafe { DestroyWindow(hwnd) };
+                return Err(error);
+            }
             unsafe {
                 let _ = ShowWindow(hwnd, SW_SHOW);
                 let _ = SetForegroundWindow(hwnd);

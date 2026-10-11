@@ -70,19 +70,11 @@ export default function OscPage() {
                 <Label htmlFor="osc-port" className="text-sm">
                   {t("osc.port")}
                 </Label>
-                <Input
+                <OscPortInput
                   id="osc-port"
-                  type="number"
                   placeholder="9000"
-                  value={config?.osc.targetPort ?? ""}
-                  onChange={(e) => {
-                    const val = e.target.value.trim();
-                    if (val === "") return;
-                    const port = parseInt(val, 10);
-                    if (!Number.isNaN(port) && port >= 1 && port <= 65535) {
-                      updateConfig({ osc: { targetPort: port } });
-                    }
-                  }}
+                  value={config?.osc.targetPort}
+                  onCommit={(targetPort) => updateConfig({ osc: { targetPort } })}
                 />
               </div>
             </div>
@@ -104,16 +96,12 @@ export default function OscPage() {
               </div>
               <div className="space-y-2">
                 <Label htmlFor="osc-listen-port">{t("osc.listenPort")}</Label>
-                <Input id="osc-listen-port" type="number" min={1} max={65535}
-                  value={config?.osc.listenPort ?? 9001}
-                  onChange={(e) => {
-                    const val = e.target.value.trim();
-                    if (val === "") return;
-                    const port = parseInt(val, 10);
-                    if (!Number.isNaN(port) && port >= 1 && port <= 65535) {
-                      updateConfig({ osc: { listenPort: port } });
-                    }
-                  }} />
+                <OscPortInput
+                  id="osc-listen-port"
+                  placeholder="9001"
+                  value={config?.osc.listenPort}
+                  onCommit={(listenPort) => updateConfig({ osc: { listenPort } })}
+                />
               </div>
             </div>
           </div>
@@ -131,7 +119,7 @@ export default function OscPage() {
               <div className="flex items-center justify-between">
                 <Label className="text-sm">{t("osc.verbose")}</Label>
                 <Switch
-                  checked={config?.logging.verbose ?? false}
+                  checked={config?.logging?.verbose ?? false}
                   onCheckedChange={(c) => updateConfig({ logging: { verbose: c } })}
                 />
               </div>
@@ -210,5 +198,51 @@ export default function OscPage() {
         </CardContent>
       </Card>
     </div>
+  );
+}
+
+type OscPortInputProps = {
+  id: string;
+  value?: number;
+  placeholder?: string;
+  onCommit: (port: number) => void;
+};
+
+export function OscPortInput(props: OscPortInputProps) {
+  return <OscPortDraft key={props.value ?? "empty"} {...props} />;
+}
+
+function OscPortDraft({ id, value, placeholder = "9000", onCommit }: OscPortInputProps) {
+  const [draft, setDraft] = useState(value?.toString() ?? "");
+
+  const commit = () => {
+    const port = Number(draft);
+    if (draft.trim() !== "" && Number.isInteger(port) && port >= 1 && port <= 65535) {
+      setDraft(String(port));
+      if (port !== value) onCommit(port);
+    } else {
+      setDraft(value?.toString() ?? "");
+    }
+  };
+
+  return (
+    <Input
+      id={id}
+      type="number"
+      min={1}
+      max={65535}
+      step={1}
+      placeholder={placeholder}
+      value={draft}
+      onChange={(event) => setDraft(event.target.value)}
+      onBlur={commit}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          commit();
+          event.currentTarget.blur();
+        }
+      }}
+    />
   );
 }

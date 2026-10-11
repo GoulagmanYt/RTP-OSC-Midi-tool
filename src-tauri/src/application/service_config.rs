@@ -253,8 +253,8 @@ pub fn import_config(
 ) -> Result<Config, CommandError> {
     let raw = fs::read_to_string(&path)
         .map_err(|err| io_to_error("config.import-read-failed", "config", err))?;
-    let cfg = Config::parse_yaml(&raw)
-        .map_err(|err| config_error("config.import-parse-failed", err))?;
+    let cfg =
+        Config::parse_yaml(&raw).map_err(|err| config_error("config.import-parse-failed", err))?;
 
     apply_and_save_config(window, &cfg, state, true)?;
     persist_resolved_audio_device(&cfg, state);
@@ -540,9 +540,10 @@ mod tests {
                 ..Default::default()
             };
             let mut next = previous.clone();
-            next.audio
-                .vst_eq_by_plugin
-                .insert(crate::config::BUNDLED_VST_EQ_KEY.to_string(), modified_eq.clone());
+            next.audio.vst_eq_by_plugin.insert(
+                crate::config::BUNDLED_VST_EQ_KEY.to_string(),
+                modified_eq.clone(),
+            );
             let active_eq = std::cell::RefCell::new(crate::config::VstEqSettings::default());
             let mut applied = crate::config::VstEqSettings::default();
             let result = commit_config_change(

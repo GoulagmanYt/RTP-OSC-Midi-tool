@@ -640,7 +640,8 @@ pub(crate) fn plugin_file_metadata(path: &Path) -> (Option<u64>, Option<u64>) {
                             .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
                             .map(|d| d.as_millis().min(u64::MAX as u128) as u64)
                         {
-                            max_modified = Some(max_modified.map_or(entry_mod, |m| m.max(entry_mod)));
+                            max_modified =
+                                Some(max_modified.map_or(entry_mod, |m| m.max(entry_mod)));
                         }
                     }
                 }
@@ -696,8 +697,11 @@ mod tests {
         assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
         std::fs::write(&binary, b"new binary with changed size").unwrap();
         let _ = scan_vst_plugins_with_probe(&roots, &cached, false, &probe);
-        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 2,
-            "modified bundle binary was not re-probed");
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::Relaxed),
+            2,
+            "modified bundle binary was not re-probed"
+        );
     }
 
     #[test]

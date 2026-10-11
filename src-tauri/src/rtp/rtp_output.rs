@@ -33,24 +33,28 @@ impl RtpOutputRoute {
         if frame.source.starts_with("RTP:") {
             return;
         }
-        let accepted = self.0.load().as_ref().is_some_and(|sender| {
-            let Some(copy) = frame.clone_realtime() else {
-                return false;
-            };
-            sender
-                .try_send(OutgoingFrame {
-                    generation: copy.generation,
-                    frame: copy,
-                    route_generation: sender.recovery().generation(),
-                })
-                .is_ok()
-        });
+        let guard = self.0.load();
+        let Some(sender) = guard.as_ref() else {
+            return;
+        };
+        let Some(copy) = frame.clone_realtime() else {
+            super::rtp_server::record_rtp_drop();
+            if is_critical_release_message(frame.data.as_slice()) {
+                sender.recovery().request_reset();
+            }
+            return;
+        };
+        let accepted = sender
+            .try_send(OutgoingFrame {
+                generation: copy.generation,
+                frame: copy,
+                route_generation: sender.recovery().generation(),
+            })
+            .is_ok();
         if !accepted {
             super::rtp_server::record_rtp_drop();
             if is_critical_release_message(frame.data.as_slice()) {
-                if let Some(sender) = self.0.load().as_ref() {
-                    sender.recovery().request_reset();
-                }
+                sender.recovery().request_reset();
             }
         }
     }
@@ -195,10 +199,12 @@ mod tests {
         route.send(&frame);
         assert_eq!(midi_reset_generation(), generation);
         assert!(rx.try_recv().unwrap().route_generation < rx.recovery().generation());
+        let drops_before = crate::rtp::rtp_server::rtp_dropped_count();
         let old_route = route.0.load();
         route.set(None); // Publication must not wait for readers of the old route.
         route.send(&frame);
         drop(old_route);
+        assert_eq!(crate::rtp::rtp_server::rtp_dropped_count(), drops_before);
     }
     #[test]
     fn forwards_wire_midi_segments_large_sysex_and_resets_remote_notes() {

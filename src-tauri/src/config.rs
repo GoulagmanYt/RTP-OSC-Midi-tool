@@ -319,8 +319,8 @@ impl AppConfig {
     pub const CURRENT_VERSION: u32 = 4;
 
     pub fn parse_yaml(raw: &str) -> Result<Self, String> {
-        let mut value = serde_yaml::from_str::<serde_yaml::Value>(raw)
-            .map_err(|e| e.to_string())?;
+        let mut value =
+            serde_yaml::from_str::<serde_yaml::Value>(raw).map_err(|e| e.to_string())?;
         let version = value
             .get("version")
             .and_then(serde_yaml::Value::as_u64)
@@ -338,8 +338,7 @@ impl AppConfig {
                 AppConfig::CURRENT_VERSION
             ));
         }
-        let mut cfg = serde_yaml::from_value::<AppConfig>(value)
-            .map_err(|e| e.to_string())?;
+        let mut cfg = serde_yaml::from_value::<AppConfig>(value).map_err(|e| e.to_string())?;
         for settings in cfg.audio.vst_eq_by_plugin.values_mut() {
             *settings = settings.normalized(cfg.audio.sample_rate);
         }

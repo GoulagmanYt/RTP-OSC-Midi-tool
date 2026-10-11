@@ -103,7 +103,7 @@ fn packet(
         let inherited_tag = if tag == 1 { parent_tag } else { Some(tag) };
         while !remaining.is_empty() {
             let size = i32::from_be_bytes(take(&mut remaining, 4)?.try_into().unwrap());
-            if size <= 0 {
+            if size <= 0 || !(size as usize).is_multiple_of(4) {
                 return Err("invalid OSC bundle element size");
             }
             let element = take(&mut remaining, size as usize)?;
@@ -352,5 +352,20 @@ mod tests {
             deadline(1u64 << 32, era_wall, now, now).unwrap(),
             now + Duration::from_secs(1)
         );
+    }
+
+    #[test]
+    fn rejects_unaligned_bundle_elements() {
+        let wall = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let now = Instant::now();
+        let mut raw = Vec::new();
+        raw.extend_from_slice(b"#bundle\0");
+        raw.extend_from_slice(&1u64.to_be_bytes());
+        // Element size 5 (not a multiple of 4)
+        raw.extend_from_slice(&5i32.to_be_bytes());
+        raw.extend_from_slice(&[0u8; 8]);
+        let mut out = Vec::with_capacity(MAX_PACKET_MESSAGES);
+        let err = decode(&raw, wall, now, 0, &mut out).unwrap_err();
+        assert_eq!(err, "invalid OSC bundle element size");
     }
 }
