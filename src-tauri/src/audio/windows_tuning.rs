@@ -5,7 +5,11 @@ use crate::logger::{background_log, FrontendLogger};
 use super::runtime_state::AudioCallbackState;
 
 #[cfg(target_os = "windows")]
-use std::sync::atomic::{AtomicU32, AtomicU8};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8};
+
+// Process-wide role: audio startup and focus changes must preserve worker policy.
+#[cfg(target_os = "windows")]
+static WORKER_PROCESS: AtomicBool = AtomicBool::new(false);
 
 #[cfg(target_os = "windows")]
 static AUDIO_MMCSS_ENABLED: AtomicU8 = AtomicU8::new(0);
@@ -424,6 +428,9 @@ pub(super) fn apply_audio_process_tuning(logger: &FrontendLogger) -> AudioProces
 /// to keep the explicitly requested scheduling policy consistent.
 #[cfg(target_os = "windows")]
 pub fn apply_process_priority(logger: &FrontendLogger) {
+    if reapply_worker_policy() {
+        return;
+    }
     unsafe {
         if SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS).is_err() {
             logger.warn("Failed to raise process priority class to ABOVE_NORMAL");
@@ -456,6 +463,9 @@ pub fn apply_process_priority(logger: &FrontendLogger) {
 /// Does not require a FrontendLogger — logs via background_log.
 #[cfg(target_os = "windows")]
 pub fn reapply_process_priority_on_focus_loss() {
+    if reapply_worker_policy() {
+        return;
+    }
     unsafe {
         if SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS).is_err() {
             background_log("warn", "Failed to set process priority policy");
@@ -482,10 +492,20 @@ pub fn reapply_process_priority_on_focus_loss() {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn reapply_worker_policy() -> bool {
+    if !WORKER_PROCESS.load(Ordering::Acquire) {
+        return false;
+    }
+    apply_worker_process_priority();
+    true
+}
+
 /// Apply high priority class and disable power throttling for dedicated background audio workers.
 /// Workers run headless without UI rendering, allowing HIGH_PRIORITY_CLASS (same as FL Studio/DAWs).
 #[cfg(target_os = "windows")]
 pub fn apply_worker_process_priority() {
+    WORKER_PROCESS.store(true, Ordering::Release);
     unsafe {
         if SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS).is_err() {
             background_log(
@@ -560,6 +580,52 @@ pub(super) fn audio_power_throttling_disabled() -> Option<bool> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn worker_priority_survives_reapplication() {
+        use super::*;
+        use windows::Win32::System::Threading::GetPriorityClass;
+
+        // Priority and worker role are process-wide: keep the test runner untouched.
+        const CHILD_ENV: &str = "OSCMIDI_TEST_WORKER_PRIORITY";
+        if std::env::var_os(CHILD_ENV).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "audio::windows_tuning::tests::worker_priority_survives_reapplication",
+                    "--nocapture",
+                ])
+                .env(CHILD_ENV, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        assert!(!reapply_worker_policy());
+        reapply_process_priority_on_focus_loss();
+        assert_eq!(
+            unsafe { GetPriorityClass(GetCurrentProcess()) },
+            ABOVE_NORMAL_PRIORITY_CLASS.0
+        );
+        apply_worker_process_priority();
+        assert_eq!(
+            unsafe { GetPriorityClass(GetCurrentProcess()) },
+            HIGH_PRIORITY_CLASS.0
+        );
+        // This is the same policy gate used when audio startup reapplies tuning.
+        assert!(reapply_worker_policy());
+        reapply_process_priority_on_focus_loss();
+        assert_eq!(
+            unsafe { GetPriorityClass(GetCurrentProcess()) },
+            HIGH_PRIORITY_CLASS.0
+        );
+    }
+
     #[test]
     fn windows_audio_tuning_uses_mmcss_critical_priority() {
         let source = include_str!("windows_tuning.rs");

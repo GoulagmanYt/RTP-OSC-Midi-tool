@@ -7,6 +7,7 @@ import { Switch } from "../../components/ui/Switch";
 import type { AppConfig, DeepPartial, RtpRemoteEntry, RtpSessionInfo } from "../../api-types";
 import type { TranslateFn } from "./shared";
 import { Plus, RefreshCcw, Trash2, Wifi } from "lucide-react";
+import { RtpPortInput } from "./RtpPortInput";
 
 type Props = {
   busy: boolean;
@@ -95,19 +96,10 @@ export function RtpConfigCard({
               <Label htmlFor="rtp-port" className="text-sm">
                 {t("rtp.portLabel")}
               </Label>
-              <Input
+              <RtpPortInput
                 id="rtp-port"
-                type="number"
-                placeholder="5004"
-                value={config?.rtp.port ?? ""}
-                onChange={(e) => {
-                  const val = e.target.value.trim();
-                  if (val === "") return;
-                  const port = parseInt(val, 10);
-                  if (!Number.isNaN(port) && port >= 1024 && port <= 65534) {
-                    onUpdateConfig({ rtp: { port } });
-                  }
-                }}
+                value={config?.rtp.port}
+                onCommit={(port) => onUpdateConfig({ rtp: { port } })}
               />
               <p className="text-xs text-muted-foreground">{t("rtp.portHint")}</p>
             </div>
@@ -167,19 +159,11 @@ export function RtpConfigCard({
                           />
                         </div>
                         <div className="space-y-1">
-                          <Label className="text-xs">{t("rtp.favoritePort")}</Label>
-                          <Input
-                            type="number"
-                            placeholder="5004"
+                          <Label htmlFor={`rtp-port-${remote.id}`} className="text-xs">{t("rtp.favoritePort")}</Label>
+                          <RtpPortInput
+                            id={`rtp-port-${remote.id}`}
                             value={remote.port}
-                            onChange={(e) => {
-                              const val = e.target.value.trim();
-                              if (val === "") return;
-                              const port = parseInt(val, 10);
-                              if (!Number.isNaN(port) && port >= 1024 && port <= 65534) {
-                                onUpdateRemote(remote.id, { port });
-                              }
-                            }}
+                            onCommit={(port) => onUpdateRemote(remote.id, { port })}
                           />
                         </div>
                       </div>
