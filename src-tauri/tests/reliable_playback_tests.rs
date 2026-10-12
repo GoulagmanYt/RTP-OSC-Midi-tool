@@ -399,3 +399,15 @@ fn reliable_server_stop_orders_reset_after_equal_deadline_burst() {
 fn reliable_server_disconnect_orders_reset_after_equal_deadline_burst() {
     cancel_equal_deadline_burst(true);
 }
+
+#[test]
+fn default_playback_listener_accepts_remote_interfaces() {
+    let address: std::net::SocketAddr =
+        osc_midi_bridge::reliable_playback::DEFAULT_RELIABLE_PLAYBACK_ADDR
+            .parse()
+            .unwrap();
+    assert!(
+        address.ip().is_unspecified(),
+        "default listener must remain reachable over LAN"
+    );
+}

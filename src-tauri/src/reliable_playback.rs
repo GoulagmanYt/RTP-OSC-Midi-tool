@@ -16,7 +16,7 @@ use std::{
 use crate::{bridge::pipeline::try_enqueue_midi_frame, midi::MidiFrame};
 
 const PROTOCOL_VERSION: u8 = 1;
-pub const DEFAULT_RELIABLE_PLAYBACK_ADDR: &str = "127.0.0.1:5056";
+pub const DEFAULT_RELIABLE_PLAYBACK_ADDR: &str = "0.0.0.0:5056";
 const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 const MAX_EVENT_BYTES: usize = 1024;
 const MAX_CONNECTIONS: usize = 8;
