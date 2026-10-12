@@ -436,26 +436,34 @@ impl ConfigStore {
         }
     }
 
-    fn backup_if_unreadable(&self) {
-        let Ok(raw) = fs::read_to_string(&self.path) else {
-            return;
+    fn backup_if_unreadable(&self) -> Result<(), String> {
+        let raw = match fs::read_to_string(&self.path) {
+            Ok(content) => content,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => {
+                let msg = format!("Failed to read existing config file for backup: {e}");
+                log::warn!("{msg}");
+                return Err(msg);
+            }
         };
         if AppConfig::parse_yaml(&raw).is_ok() {
-            return;
+            return Ok(());
         }
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let backup_path = self.path.with_extension(format!("yaml.invalid-{stamp}"));
-        if let Err(e) = fs::copy(&self.path, &backup_path) {
-            log::warn!("Failed to back up unreadable config file: {e}");
-        } else {
-            log::warn!(
-                "Unreadable or invalid configuration backed up to {:?}",
-                backup_path
-            );
-        }
+        fs::copy(&self.path, &backup_path).map_err(|e| {
+            let msg = format!("Failed to back up unreadable config file: {e}");
+            log::warn!("{msg}");
+            msg
+        })?;
+        log::warn!(
+            "Unreadable or invalid configuration backed up to {:?}",
+            backup_path
+        );
+        Ok(())
     }
 
     pub fn save(&self, cfg: &AppConfig) -> Result<(), String> {
@@ -466,7 +474,7 @@ impl ConfigStore {
                 AppConfig::CURRENT_VERSION
             ));
         }
-        self.backup_if_unreadable();
+        self.backup_if_unreadable()?;
         let raw = serde_yaml::to_string(cfg).map_err(|e| e.to_string())?;
         crate::atomic_file::write_atomically(&self.path, raw.as_bytes()).map_err(|e| e.to_string())
     }
@@ -660,6 +668,31 @@ mod tests {
         assert!(backup.is_some(), "Backup file should exist");
         let backup_content = std::fs::read_to_string(backup.unwrap().path()).expect("read backup");
         assert_eq!(backup_content, broken);
+    }
+
+    #[test]
+    fn store_save_fails_if_backup_of_invalid_config_fails() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("config.yaml");
+        let broken = "invalid_yaml: [missing bracket";
+        std::fs::write(&path, broken).expect("write broken");
+
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let backup_path = path.with_extension(format!("yaml.invalid-{stamp}"));
+        // Create a directory where the backup file would be written, causing fs::copy to fail
+        std::fs::create_dir(&backup_path).expect("create dir collision");
+
+        let store = ConfigStore::with_path(path.clone());
+        let default_cfg = AppConfig::default();
+        let result = store.save(&default_cfg);
+
+        assert!(result.is_err(), "save should fail when backup fails");
+        // Verify the original broken file is preserved and not overwritten
+        let preserved = std::fs::read_to_string(&path).expect("read preserved");
+        assert_eq!(preserved, broken);
     }
 
     #[test]

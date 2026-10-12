@@ -154,14 +154,23 @@ pub(crate) fn classify_input_frame(tx: &Sender<MidiFrame>, frame: &MidiFrame) ->
     tx.prepare(&mut candidate) && is_critical_release_message(&candidate.data)
 }
 
+fn profile_for_source<'a>(
+    s: &'a ConfigSnapshot,
+    source: &str,
+) -> Option<&'a RoutingProfileRuntime> {
+    let index = s.routing_assignments.get(source).or_else(|| {
+        let rest = source.strip_prefix("RTP:")?;
+        let cut = rest.rfind("#ssrc_").or_else(|| rest.rfind('@'))?;
+        s.routing_assignments.get(&source[..4 + cut])
+    })?;
+    s.routing_profiles.get(*index)
+}
+
 pub(super) fn prepare_input_routing(tx: &Sender<MidiFrame>, cfg: &Config) {
     let snapshot = ConfigSnapshot::from(cfg);
     tx.set_preparation(move |frame| {
         accepts_channel(snapshot.channel_filter, &frame.data)
-            && snapshot
-                .routing_assignments
-                .get(&*frame.source)
-                .and_then(|index| snapshot.routing_profiles.get(*index))
+            && profile_for_source(&snapshot, &frame.source)
                 .filter(|profile| profile.enabled)
                 .is_none_or(|profile| apply_routing_profile(profile, frame))
     });
@@ -1123,5 +1132,183 @@ mod tests {
         assert_eq!(error, EnqueueError::CriticalReleaseDropped);
         assert!(take_critical_midi_reset_request());
         assert!(!take_critical_midi_reset_request());
+    }
+
+    #[test]
+    fn rtp_routing_assignment_falls_back_from_peer_source_to_session_name() {
+        let _guard = TEST_PIPELINE_LOCK.lock().unwrap();
+        let (tx, rx) = bounded(8);
+        let mut config = Config::default();
+        config.midi.routing_profiles.push(RoutingProfile {
+            id: "rtp-filter".into(),
+            name: "RTP Filter".into(),
+            enabled: true,
+            channel_filter: Some(1),
+            note_min: Some(60),
+            note_max: Some(72),
+            cc_map: vec![RoutingMapping { from: 1, to: 2 }],
+            program_map: vec![],
+        });
+        // UI assigns to session base name "RTP:OSCMidi"
+        config.midi.routing_assignments.push(RoutingAssignment {
+            source: "RTP:OSCMidi".into(),
+            profile_id: "rtp-filter".into(),
+        });
+        prepare_input_routing(&tx, &config);
+
+        // Frame from peer with SSRC qualified source
+        let ssrc_frame = MidiFrame {
+            generation: MidiFrame::current_generation(),
+            ingress_qpc: crate::vst_worker::protocol::monotonic_qpc(),
+            data: smallvec::smallvec![0x90, 64, 100],
+            source: Arc::from("RTP:OSCMidi#ssrc_00112233"),
+        };
+        assert_eq!(
+            try_enqueue_midi_frame(&tx, ssrc_frame).unwrap(),
+            EnqueueOutcome::Enqueued
+        );
+        let admitted = rx.recv().unwrap();
+        assert_eq!(admitted.data.as_slice(), &[0x90, 64, 100]);
+
+        // Note filtered out by profile note_max (75 > 72)
+        let filtered_note = MidiFrame {
+            generation: MidiFrame::current_generation(),
+            ingress_qpc: crate::vst_worker::protocol::monotonic_qpc(),
+            data: smallvec::smallvec![0x90, 75, 100],
+            source: Arc::from("RTP:OSCMidi#ssrc_00112233"),
+        };
+        assert_eq!(
+            try_enqueue_midi_frame(&tx, filtered_note).unwrap(),
+            EnqueueOutcome::Filtered
+        );
+
+        // CC remapped by profile (1 -> 2)
+        let cc_frame = MidiFrame {
+            generation: MidiFrame::current_generation(),
+            ingress_qpc: crate::vst_worker::protocol::monotonic_qpc(),
+            data: smallvec::smallvec![0xB0, 1, 64],
+            source: Arc::from("RTP:OSCMidi#ssrc_00112233"),
+        };
+        assert_eq!(
+            try_enqueue_midi_frame(&tx, cc_frame).unwrap(),
+            EnqueueOutcome::Enqueued
+        );
+        let admitted_cc = rx.recv().unwrap();
+        assert_eq!(admitted_cc.data.as_slice(), &[0xB0, 2, 64]);
+
+        // Backward compatibility: frame with address qualified source
+        let addr_frame = MidiFrame {
+            generation: MidiFrame::current_generation(),
+            ingress_qpc: crate::vst_worker::protocol::monotonic_qpc(),
+            data: smallvec::smallvec![0x90, 65, 100],
+            source: Arc::from("RTP:OSCMidi@127.0.0.1:5004"),
+        };
+        assert_eq!(
+            try_enqueue_midi_frame(&tx, addr_frame).unwrap(),
+            EnqueueOutcome::Enqueued
+        );
+
+        // Frame from different session does not match profile
+        let other_session_frame = MidiFrame {
+            generation: MidiFrame::current_generation(),
+            ingress_qpc: crate::vst_worker::protocol::monotonic_qpc(),
+            data: smallvec::smallvec![0x90, 75, 100], // note 75 would be filtered if profile applied
+            source: Arc::from("RTP:OtherSession#ssrc_00112233"),
+        };
+        assert_eq!(
+            try_enqueue_midi_frame(&tx, other_session_frame).unwrap(),
+            EnqueueOutcome::Enqueued
+        );
+    }
+
+    #[test]
+    fn rtp_routing_assignment_prefers_exact_peer_source_over_session_fallback() {
+        let _guard = TEST_PIPELINE_LOCK.lock().unwrap();
+        let (tx, rx) = bounded(8);
+        let mut config = Config::default();
+        config.midi.routing_profiles.push(RoutingProfile {
+            id: "general-profile".into(),
+            name: "General".into(),
+            enabled: true,
+            channel_filter: None,
+            note_min: None,
+            note_max: None,
+            cc_map: vec![RoutingMapping { from: 10, to: 20 }],
+            program_map: vec![],
+        });
+        config.midi.routing_profiles.push(RoutingProfile {
+            id: "specific-peer-profile".into(),
+            name: "Specific Peer".into(),
+            enabled: true,
+            channel_filter: None,
+            note_min: None,
+            note_max: None,
+            cc_map: vec![RoutingMapping { from: 10, to: 99 }],
+            program_map: vec![],
+        });
+        config.midi.routing_assignments.push(RoutingAssignment {
+            source: "RTP:OSCMidi".into(),
+            profile_id: "general-profile".into(),
+        });
+        config.midi.routing_assignments.push(RoutingAssignment {
+            source: "RTP:OSCMidi#ssrc_11111111".into(),
+            profile_id: "specific-peer-profile".into(),
+        });
+        prepare_input_routing(&tx, &config);
+
+        // Specific peer uses specific profile (10 -> 99)
+        let specific_frame = MidiFrame {
+            generation: MidiFrame::current_generation(),
+            ingress_qpc: crate::vst_worker::protocol::monotonic_qpc(),
+            data: smallvec::smallvec![0xB0, 10, 64],
+            source: Arc::from("RTP:OSCMidi#ssrc_11111111"),
+        };
+        assert_eq!(
+            try_enqueue_midi_frame(&tx, specific_frame).unwrap(),
+            EnqueueOutcome::Enqueued
+        );
+        assert_eq!(rx.recv().unwrap().data.as_slice(), &[0xB0, 99, 64]);
+
+        // Other peer in same session falls back to general profile (10 -> 20)
+        let general_frame = MidiFrame {
+            generation: MidiFrame::current_generation(),
+            ingress_qpc: crate::vst_worker::protocol::monotonic_qpc(),
+            data: smallvec::smallvec![0xB0, 10, 64],
+            source: Arc::from("RTP:OSCMidi#ssrc_22222222"),
+        };
+        assert_eq!(
+            try_enqueue_midi_frame(&tx, general_frame).unwrap(),
+            EnqueueOutcome::Enqueued
+        );
+        assert_eq!(rx.recv().unwrap().data.as_slice(), &[0xB0, 20, 64]);
+    }
+
+    #[test]
+    fn osc_peer_source_releases_notes_cleanly() {
+        let mut state = OscOutputState::default();
+        let mut sent = Vec::new();
+        let peer_src: Arc<str> = Arc::from("RTP:Session#ssrc_00112233");
+        let mut note_on = frame(&[0x90, 60, 100]);
+        note_on.source = peer_src.clone();
+        state.observe(&note_on);
+        state
+            .flush(|index, pressed| {
+                sent.push((index, pressed));
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(sent, vec![(Some(40), true)]);
+
+        let mut note_off = frame(&[0x80, 60, 0]);
+        note_off.source = peer_src;
+        state.observe(&note_off);
+        state
+            .flush(|index, pressed| {
+                sent.push((index, pressed));
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(sent, vec![(Some(40), true), (Some(40), false)]);
+        assert!(state.sources.is_empty());
     }
 }

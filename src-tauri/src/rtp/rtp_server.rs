@@ -90,6 +90,10 @@ pub fn candidate_ports(port: u16) -> smallvec::SmallVec<[u16; 3]> {
     }
 }
 
+pub(crate) fn peer_source(name: &str, ssrc: u32) -> Arc<str> {
+    Arc::from(format!("RTP:{name}#ssrc_{ssrc:08x}"))
+}
+
 impl RtpServer {
     pub fn start(
         name: String,
@@ -236,16 +240,17 @@ impl RtpServer {
             session
                 .add_listener(TimestampedSysExEvent, move |event| {
                     let source = if event.ssrc != 0 {
-                        peer_sources_for_sysex
-                            .read()
-                            .get(&event.ssrc)
-                            .cloned()
-                            .unwrap_or_else(|| {
-                                Arc::from(format!(
-                                    "RTP:{}#ssrc_{:08x}",
-                                    session_name_for_sysex, event.ssrc
-                                ))
-                            })
+                        if let Some(source) =
+                            peer_sources_for_sysex.read().get(&event.ssrc).cloned()
+                        {
+                            source
+                        } else {
+                            peer_sources_for_sysex
+                                .write()
+                                .entry(event.ssrc)
+                                .or_insert_with(|| peer_source(&session_name_for_sysex, event.ssrc))
+                                .clone()
+                        }
                     } else {
                         sysex_source.clone()
                     };
@@ -294,16 +299,16 @@ impl RtpServer {
                     }
 
                     let source = if event.ssrc != 0 {
-                        peer_sources_for_midi
-                            .read()
-                            .get(&event.ssrc)
-                            .cloned()
-                            .unwrap_or_else(|| {
-                                Arc::from(format!(
-                                    "RTP:{}#ssrc_{:08x}",
-                                    session_name_for_midi, event.ssrc
-                                ))
-                            })
+                        if let Some(source) = peer_sources_for_midi.read().get(&event.ssrc).cloned()
+                        {
+                            source
+                        } else {
+                            peer_sources_for_midi
+                                .write()
+                                .entry(event.ssrc)
+                                .or_insert_with(|| peer_source(&session_name_for_midi, event.ssrc))
+                                .clone()
+                        }
                     } else {
                         std::sync::Arc::clone(&rtp_source)
                     };
@@ -340,9 +345,10 @@ impl RtpServer {
                 .add_listener(ParticipantJoinedEvent, move |participant| {
                     let peer_ssrc = participant.ssrc().get();
                     let peer_addr = participant.addr();
-                    let peer_source: Arc<str> =
-                        Arc::from(format!("RTP:{}@{}", session_name_for_join, peer_addr));
-                    peer_sources_for_join.write().insert(peer_ssrc, peer_source);
+                    peer_sources_for_join
+                        .write()
+                        .entry(peer_ssrc)
+                        .or_insert_with(|| peer_source(&session_name_for_join, peer_ssrc));
 
                     let name = participant.name().to_str().unwrap_or("Unknown");
                     let info = RtpParticipantInfo {
@@ -710,5 +716,13 @@ mod tests {
         for order in 0..3 {
             assert_eq!(heap.pop().unwrap().order, order);
         }
+    }
+
+    #[test]
+    fn peer_source_format_is_consistent_and_stable() {
+        let src1 = peer_source("TestSession", 0x1234abcd);
+        assert_eq!(&*src1, "RTP:TestSession#ssrc_1234abcd");
+        let src2 = peer_source("OSCMidi", 1);
+        assert_eq!(&*src2, "RTP:OSCMidi#ssrc_00000001");
     }
 }
