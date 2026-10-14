@@ -33,4 +33,32 @@ describe("locale catalogs", () => {
     expect([...english.values()].every((translation) => translation.trim().length > 0)).toBe(true);
     expect([...french.values()].every((translation) => translation.trim().length > 0)).toBe(true);
   });
+
+  it("contains all required audio.eq translation keys in both languages", () => {
+    const requiredEqKeys = [
+      "audio.eq.title",
+      "audio.eq.description",
+      "audio.eq.open",
+      "audio.eq.active",
+      "audio.eq.enabled",
+      "audio.eq.enabledHint",
+      "audio.eq.responseGraph",
+      "audio.eq.lowBand",
+      "audio.eq.midBand",
+      "audio.eq.highBand",
+      "audio.eq.frequency",
+      "audio.eq.gain",
+      "audio.eq.q",
+      "audio.eq.reset",
+    ];
+
+    const english = flattenLocale(en);
+    const french = flattenLocale(fr);
+
+    for (const key of requiredEqKeys) {
+      expect(english.get(key), `Missing English translation for ${key}`).toBeTruthy();
+      expect(french.get(key), `Missing French translation for ${key}`).toBeTruthy();
+    }
+  });
 });
+

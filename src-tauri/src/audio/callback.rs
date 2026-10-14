@@ -18,7 +18,7 @@ use vst::{buffer::AudioBuffer, plugin::Plugin};
 use super::callback_render::replay_last_output_or_silence as replay_output_or_silence;
 use super::{
     callback_midi::{process_pending_vst2_midi, process_pending_vst3_midi, send_reset_messages},
-    callback_render::{limit_sample, process_vst3_plugin},
+    callback_render::{output_sample, process_vst3_plugin},
     runtime_state::{
         atomic_max, AudioCallbackState, AudioControls, AudioError, AudioTelemetry, MidiPacket,
         ParameterCommand, PluginBackend, DSP_HISTOGRAM_BUCKETS, DSP_HISTOGRAM_BUCKET_US,
@@ -72,13 +72,13 @@ pub(super) fn build_output_stream_for_sample<T: Sample + SizedSample + FromSampl
                 ErrorKind::Xrun => {
                     error_telemetry.xruns.fetch_add(1, Ordering::Relaxed);
                 }
-                ErrorKind::DeviceChanged => {
-                    error_telemetry
-                        .stream_route_changes
-                        .fetch_add(1, Ordering::Relaxed);
-                }
                 ErrorKind::RealtimeDenied => {}
                 kind => {
+                    if kind == ErrorKind::DeviceChanged {
+                        error_telemetry
+                            .stream_route_changes
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
                     error_reset.store(true, Ordering::Release);
                     error_telemetry
                         .stream_recovery_requests
@@ -117,7 +117,8 @@ fn stream_error_code(kind: ErrorKind) -> u32 {
         ErrorKind::UnsupportedOperation => 9,
         ErrorKind::InvalidInput => 10,
         ErrorKind::Other => 11,
-        ErrorKind::Xrun | ErrorKind::DeviceChanged | ErrorKind::RealtimeDenied => 0,
+        ErrorKind::DeviceChanged => 12,
+        ErrorKind::Xrun | ErrorKind::RealtimeDenied => 0,
         _ => 11,
     }
 }
@@ -130,6 +131,21 @@ fn audio_callback<T: Sample + FromSample<f32>>(
     info: &OutputCallbackInfo,
 ) {
     let callback_started = Instant::now();
+    let now = crate::vst_worker::protocol::monotonic_qpc();
+    let previous = state
+        .telemetry
+        .callback_last_qpc
+        .swap(now, Ordering::Relaxed);
+    state
+        .telemetry
+        .callback_count
+        .fetch_add(1, Ordering::Relaxed);
+    if previous != 0 {
+        state.telemetry.callback_interval_max_us.fetch_max(
+            crate::vst_worker::protocol::qpc_elapsed_us(previous, now),
+            Ordering::Relaxed,
+        );
+    }
     let timestamp = info.timestamp();
     let backend_latency = timestamp
         .playback
@@ -172,6 +188,8 @@ fn audio_callback<T: Sample + FromSample<f32>>(
     if !state.prepare(frames) {
         state.telemetry.xruns.fetch_add(1, Ordering::Relaxed);
         data.fill(silence);
+        state.last_output.fill(0.0);
+        state.recovering_from_silence = true;
         state
             .telemetry
             .meter_left
@@ -209,6 +227,13 @@ fn audio_callback<T: Sample + FromSample<f32>>(
 
     match &mut *plugin {
         PluginBackend::Vst2 { instance, time } => {
+            state.drain_parameter_commands();
+            let parameters = instance.get_parameter_object();
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                for command in &state.parameter_commands {
+                    parameters.set_parameter(command.index as i32, command.value);
+                }
+            }));
             if state.last_frames != frames {
                 // instance.set_block_size(frames as i64); // Removed to prevent VST reset during playback
                 state
@@ -237,7 +262,11 @@ fn audio_callback<T: Sample + FromSample<f32>>(
                 record_dsp_timing(&state.telemetry, dsp_started);
             }));
 
+            if result.is_ok() {
+                acknowledge_parameters(state);
+            }
             if result.is_err() {
+                fail_parameters(state);
                 state.telemetry.xruns.fetch_add(1, Ordering::Relaxed);
                 state.record_error();
                 replay_output_or_silence(data, device_channels, silence, state);
@@ -257,6 +286,10 @@ fn audio_callback<T: Sample + FromSample<f32>>(
                     .is_err()
                 {
                     state.telemetry.xruns.fetch_add(1, Ordering::Relaxed);
+                    state
+                        .telemetry
+                        .parameter_failed_sequence
+                        .fetch_max(command.sequence, Ordering::Release);
                 }
             }
             if state.last_frames != frames {
@@ -284,8 +317,9 @@ fn audio_callback<T: Sample + FromSample<f32>>(
             ));
 
             match result {
-                Ok(Ok(())) => {}
+                Ok(Ok(())) => acknowledge_parameters(state),
                 Ok(Err(_)) | Err(_) => {
+                    fail_parameters(state);
                     state.telemetry.xruns.fetch_add(1, Ordering::Relaxed);
                     state.record_error();
                     replay_output_or_silence(data, device_channels, silence, state);
@@ -296,7 +330,7 @@ fn audio_callback<T: Sample + FromSample<f32>>(
         }
         #[cfg(all(target_os = "windows", target_pointer_width = "64"))]
         PluginBackend::Remote { instance } => {
-            state.drain_parameter_commands();
+            state.drain_parameter_commands_limit(instance.parameter_capacity());
             if state.last_frames != frames {
                 state
                     .telemetry
@@ -305,11 +339,29 @@ fn audio_callback<T: Sample + FromSample<f32>>(
                 state.last_frames = frames;
             }
             let dsp_started = Instant::now();
+            let healthy = instance.realtime_health();
+            state
+                .telemetry
+                .editor_open
+                .store(instance.editor_open(), Ordering::Release);
+            state
+                .telemetry
+                .x86_underruns
+                .store(healthy.0, Ordering::Relaxed);
+            state
+                .telemetry
+                .x86_overruns
+                .store(healthy.1, Ordering::Relaxed);
+            state
+                .telemetry
+                .x86_alive
+                .store(healthy.2, Ordering::Relaxed);
             if !instance.process(
                 &mut state.pending_midi,
                 &state.parameter_commands,
                 &mut state.outputs,
                 frames,
+                Some(&state.telemetry),
             ) {
                 state.telemetry.xruns.fetch_add(1, Ordering::Relaxed);
                 replay_output_or_silence(data, device_channels, silence, state);
@@ -346,7 +398,7 @@ fn audio_callback<T: Sample + FromSample<f32>>(
 
     let mut peak_l = 0.0f32;
     let mut peak_r = 0.0f32;
-    debug_assert!(state.last_output.len() >= data.len());
+    debug_assert!(state.last_output.len() >= frames.saturating_mul(device_channels));
     for (frame_idx, frame) in data.chunks_exact_mut(device_channels).enumerate() {
         let recovery_gain = if state.recovering_from_silence {
             (frame_idx + 1) as f32 / frames as f32
@@ -361,12 +413,8 @@ fn audio_callback<T: Sample + FromSample<f32>>(
             let mono = state.equalizer.process_mono(left[frame_idx]);
             (mono, mono)
         };
-        let mut l = equalized_left * gain_linear * recovery_gain;
-        let mut r = equalized_right * gain_linear * recovery_gain;
-        if limiter_on {
-            l = limit_sample(l);
-            r = limit_sample(r);
-        }
+        let l = output_sample(equalized_left, gain_linear * recovery_gain, limiter_on);
+        let r = output_sample(equalized_right, gain_linear * recovery_gain, limiter_on);
 
         peak_l = peak_l.max(l.abs());
         peak_r = peak_r.max(r.abs());
@@ -393,6 +441,9 @@ fn audio_callback<T: Sample + FromSample<f32>>(
             *sample = 0.0;
         }
     }
+
+    // A later, larger callback must not replay the tail of an older block.
+    state.last_output[frames * device_channels..].fill(0.0);
 
     state
         .telemetry
@@ -443,5 +494,28 @@ fn finish_callback_timing(state: &AudioCallbackState, frames: usize, started: In
                 .consecutive_deadline_misses
                 .store(0, Ordering::Relaxed);
         }
+    }
+}
+
+pub(super) fn acknowledge_parameters(state: &AudioCallbackState) {
+    if let Some(sequence) = state.parameter_commands.iter().map(|c| c.sequence).max() {
+        state
+            .telemetry
+            .parameter_applied_sequence
+            .fetch_max(sequence, Ordering::Release);
+    }
+}
+
+pub(super) fn fail_parameters(state: &AudioCallbackState) {
+    if let Some(sequence) = state
+        .parameter_commands
+        .iter()
+        .map(|command| command.sequence)
+        .max()
+    {
+        state
+            .telemetry
+            .parameter_failed_sequence
+            .fetch_max(sequence, Ordering::Release);
     }
 }

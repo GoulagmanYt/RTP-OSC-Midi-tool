@@ -1,13 +1,14 @@
 //! Optional OSC input with borrowed decoding and a bounded deadline queue.
 mod packet;
+use crate::midi_queue::Sender;
 use crate::{
     bridge::pipeline::{
-        midi_reset_generation, request_critical_midi_reset, try_enqueue_midi_frame, EnqueueOutcome,
+        classify_input_frame, midi_reset_generation, request_critical_midi_reset,
+        try_enqueue_midi_frame,
     },
     config::OscConfig,
     midi::MidiFrame,
 };
-use crossbeam_channel::Sender;
 use packet::{ScheduledMidi, MAX_PACKET_MESSAGES};
 use std::{
     cmp::Reverse,
@@ -16,11 +17,12 @@ use std::{
     sync::Arc,
     time::{Instant, SystemTime},
 };
-use tauri::async_runtime::{self, JoinHandle};
 use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
 const PENDING_CAPACITY: usize = 4096;
 
 pub(crate) struct OscInputServer {
+    _runtime: crate::realtime::MidiRuntime,
     stop: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<()>>,
 }
@@ -42,11 +44,16 @@ impl OscInputServer {
         let socket =
             UdpSocket::bind(SocketAddr::new(ip, config.listen_port)).map_err(|e| e.to_string())?;
         socket.set_nonblocking(true).map_err(|e| e.to_string())?;
+        let effective_buffer = crate::realtime::configure_udp(&socket)?;
+        crate::realtime::OSC_RECEIVE_BUFFER
+            .store(effective_buffer, std::sync::atomic::Ordering::Relaxed);
         let source: Arc<str> =
             Arc::from(format!("OSC:{}:{}", config.listen_ip, config.listen_port));
         let (stop, cancelled) = oneshot::channel();
-        let task = async_runtime::spawn(receive(socket, sink, source, cancelled));
+        let runtime = crate::realtime::MidiRuntime::new("osc-receive")?;
+        let task = runtime.spawn(receive(socket, sink, source, cancelled));
         Ok(Some(Self {
+            _runtime: runtime,
             stop: Some(stop),
             task: Some(task),
         }))
@@ -84,6 +91,7 @@ async fn receive(
         BinaryHeap::with_capacity(PENDING_CAPACITY);
     let mut order = 0u64;
     let mut generation = midi_reset_generation();
+    let mut errors = 0u64;
     loop {
         let current = midi_reset_generation();
         if generation != current {
@@ -99,22 +107,46 @@ async fn receive(
                     if pending.peek().is_none_or(|event| event.0.deadline > Instant::now()) { break; }
                     let event = pending.pop().unwrap().0;
                     if event.generation != midi_reset_generation() { continue; }
-                    let frame = MidiFrame { data: smallvec::SmallVec::from_slice(&event.data[..usize::from(event.len)]), source: source.clone() };
-                    if !matches!(try_enqueue_midi_frame(&sink, frame), Ok(EnqueueOutcome::Enqueued)) {
-                        request_critical_midi_reset(); pending.clear(); break;
-                    }
+                    let frame = MidiFrame { generation: event.generation, ingress_qpc: event.ingress_qpc, data: smallvec::SmallVec::from_slice(&event.data[..usize::from(event.len)]), source: source.clone() };
+                    let _ = try_enqueue_midi_frame(&sink, frame);
+                    // Admission already recovers a lost effective release. Observe its epoch;
+                    // raw CC64 may have been remapped to a noncritical controller.
+                    if event.generation != midi_reset_generation() { pending.clear(); break; }
                 }
             },
             received = socket.recv_from(&mut buffer) => {
-                let Ok((size, _)) = received else { request_critical_midi_reset(); break; };
+                let Ok((size, _)) = received else {
+                    crate::realtime::OSC_SOCKET_ERRORS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    errors += 1;
+                    if errors >= 20 {
+                        request_critical_midi_reset();
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50 * errors.min(20))).await;
+                    continue;
+                };
+                errors = 0;
                 let now = Instant::now();
-                if packet::decode(&buffer[..size], SystemTime::now(), now, generation, &mut staging).is_err()
-                    || staging.len() > PENDING_CAPACITY - pending.len() {
-                    request_critical_midi_reset(); pending.clear(); continue;
+                let ingress_qpc = crate::vst_worker::protocol::monotonic_qpc();
+                let received_generation = midi_reset_generation();
+                if generation != received_generation { pending.clear(); generation = received_generation; }
+                if packet::decode(&buffer[..size], SystemTime::now(), now, generation, &mut staging).is_err() {
+                    crate::realtime::OSC_INVALID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    continue;
                 }
-                for mut event in staging.drain(..) {
+                for (index, mut event) in staging.drain(..).enumerate() {
+                    event.ingress_qpc = ingress_qpc;
+                    let candidate = MidiFrame { generation: event.generation, ingress_qpc: event.ingress_qpc, data: smallvec::SmallVec::from_slice(&event.data[..usize::from(event.len)]), source: source.clone() };
+                    let critical = classify_input_frame(&sink, &candidate);
+                    let limit = if critical { PENDING_CAPACITY } else { PENDING_CAPACITY - crate::realtime::reserve(PENDING_CAPACITY) };
+                    if pending.len() >= limit {
+                        crate::realtime::OSC_OVERFLOWS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if critical { request_critical_midi_reset(); pending.clear(); break; }
+                        continue;
+                    }
                     event.order = order; order = order.wrapping_add(1);
                     pending.push(Reverse(event));
+                    if (index + 1) % 256 == 0 { tokio::task::yield_now().await; }
                 }
             }
         }
@@ -134,6 +166,41 @@ mod tests {
         })
     }
     #[test]
+    fn malformed_datagram_is_counted_without_resetting_a_healthy_input() {
+        let _guard = crate::bridge::pipeline::TEST_PIPELINE_LOCK.lock().unwrap();
+        let probe = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let addr = probe.local_addr().unwrap();
+        drop(probe);
+        let config = OscConfig {
+            input_enabled: true,
+            listen_port: addr.port(),
+            ..OscConfig::default()
+        };
+        let (tx, rx) = crate::midi_queue::bounded(32);
+        let server = OscInputServer::start(&config, tx).unwrap().unwrap();
+        let generation = midi_reset_generation();
+        let before = crate::realtime::OSC_INVALID.load(std::sync::atomic::Ordering::Relaxed);
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        sender.send_to(&[1, 2, 3], addr).unwrap();
+        sender
+            .send_to(&rosc::encoder::encode(&note(3)).unwrap(), addr)
+            .unwrap();
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .data
+                .as_slice(),
+            &[0x90, 23, 127]
+        );
+        assert_eq!(midi_reset_generation(), generation);
+        assert_eq!(
+            crate::realtime::OSC_INVALID.load(std::sync::atomic::Ordering::Relaxed),
+            before + 1
+        );
+        server.stop();
+    }
+
+    #[test]
     fn udp_input_keeps_receiving_while_bundle_waits_and_releases_socket_on_stop() {
         let _guard = crate::bridge::pipeline::TEST_PIPELINE_LOCK.lock().unwrap();
         let probe = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -144,7 +211,7 @@ mod tests {
             listen_port: addr.port(),
             ..OscConfig::default()
         };
-        let (tx, rx) = crossbeam_channel::bounded(32);
+        let (tx, rx) = crate::midi_queue::bounded(32);
         let server = OscInputServer::start(&config, tx).unwrap().unwrap();
         let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
         let future = (SystemTime::now() + Duration::from_millis(250))

@@ -40,7 +40,7 @@ impl AppPaths {
         let dirs = directories::ProjectDirs::from("com", "OSCMIDI", "OSCMIDI")
             .ok_or("Impossible de determiner le dossier de configuration")?;
         let config_dir = dirs.config_dir().to_path_buf();
-        let log_dir = config_dir.join("logs");
+        let log_dir = config_dir.clone();
         let log_file = log_dir.join("app.log");
 
         Ok(Self {
@@ -102,6 +102,8 @@ pub struct RuntimeStatus {
     pub vst_worker_state: String,
     pub vst_worker_restarts: u32,
     pub vst_worker_last_exit: Option<String>,
+    #[serde(default)]
+    pub realtime: crate::realtime::RealtimeDiagnostics,
     pub audio_mmcss_enabled: Option<bool>,
     pub audio_power_throttling_disabled: Option<bool>,
     pub audio_limiter_enabled: Option<bool>,
@@ -141,6 +143,8 @@ pub struct RuntimeMetrics {
     pub vst_worker_state: String,
     pub vst_worker_restarts: u32,
     pub vst_worker_last_exit: Option<String>,
+    #[serde(default)]
+    pub realtime: crate::realtime::RealtimeDiagnostics,
     pub audio_mmcss_enabled: Option<bool>,
     pub audio_power_throttling_disabled: Option<bool>,
     pub x86_bridge_underruns: Option<u32>,

@@ -1,6 +1,6 @@
 #![allow(deprecated)]
 
-use std::sync::{mpsc, Arc};
+use std::sync::{atomic::Ordering, mpsc, Arc};
 
 use parking_lot::Mutex;
 use vst::plugin::Plugin;
@@ -28,6 +28,8 @@ use super::{
 };
 
 struct WindowData {
+    editor_open: Arc<std::sync::atomic::AtomicBool>,
+    telemetry: Option<Arc<super::runtime_state::AudioTelemetry>>,
     state: std::sync::Weak<Mutex<Option<EditorWindow>>>,
     app_handle: Option<tauri::AppHandle>,
 }
@@ -85,6 +87,10 @@ unsafe extern "system" fn vst_window_proc(
             if !ptr.is_null() {
                 // SAFETY: ptr comes from our Box<WindowData> stored at WM_CREATE and lives until WM_DESTROY.
                 unsafe {
+                    (*ptr).editor_open.store(false, Ordering::Release);
+                    if let Some(telemetry) = &(*ptr).telemetry {
+                        telemetry.editor_open.store(false, Ordering::Release);
+                    }
                     if let Some(handle) = &(*ptr).app_handle {
                         use tauri::Emitter;
                         let _ = handle.emit("audio:vst-editor-hidden", ());
@@ -99,6 +105,12 @@ unsafe extern "system" fn vst_window_proc(
             let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WindowData };
             if !ptr.is_null() {
                 // SAFETY: ptr was allocated with Box::into_raw and is owned by this window.
+                unsafe {
+                    (*ptr).editor_open.store(false, Ordering::Release);
+                    if let Some(telemetry) = &(*ptr).telemetry {
+                        telemetry.editor_open.store(false, Ordering::Release);
+                    }
+                }
                 let _ = unsafe { Box::from_raw(ptr) };
                 unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) };
             }
@@ -262,6 +274,11 @@ impl AudioEngine {
             return crate::tauri::utils::safe_block_on(self.worker.open_editor())
                 .map_err(AudioError::Message);
         }
+        if self.game_mode.load(Ordering::Acquire) {
+            self.deferred_editor.store(1, Ordering::Release);
+            return Ok(());
+        }
+        let maintenance = self.begin_maintenance()?;
         let (plugin_arc, editor_window_arc) = {
             let mut guard = self.runtime.lock();
             let Some(runtime) = guard.as_mut() else {
@@ -273,9 +290,12 @@ impl AudioEngine {
         let weak_editor_window = Arc::downgrade(&editor_window_arc);
         let (tx, rx) = mpsc::channel();
         let app_handle_clone = app_handle.clone();
+        let editor_open = self.editor_open.clone();
+        let telemetry = self.health_telemetry.load_full();
 
         app_handle
             .run_on_main_thread(move || {
+                let _maintenance = maintenance;
                 let result: Result<(), AudioError> = (|| {
                     if let Some(existing) = editor_window_arc.lock().as_ref() {
                         let hwnd = match existing {
@@ -303,6 +323,8 @@ impl AudioEngine {
                             };
 
                             let window_data = WindowData {
+                                editor_open: editor_open.clone(),
+                                telemetry: telemetry.clone(),
                                 state: weak_editor_window,
                                 app_handle: Some(app_handle_clone),
                             };
@@ -378,6 +400,8 @@ impl AudioEngine {
                             let client_height = height.round() as i32;
 
                             let window_data = WindowData {
+                                editor_open: editor_open.clone(),
+                                telemetry: telemetry.clone(),
                                 state: weak_editor_window,
                                 app_handle: Some(app_handle_clone),
                             };
@@ -427,6 +451,10 @@ impl AudioEngine {
                     }
                 })();
 
+                if result.is_ok() {
+                    editor_open.store(true, Ordering::Release);
+                    if let Some(telemetry) = &telemetry { telemetry.editor_open.store(true, Ordering::Release); }
+                }
                 let _ = tx.send(result);
             })
             .map_err(|_| AudioError::Message("Failed to schedule VST UI on main thread".into()))?;
@@ -445,6 +473,11 @@ impl AudioEngine {
             return crate::tauri::utils::safe_block_on(self.worker.close_editor())
                 .map_err(AudioError::Message);
         }
+        if self.game_mode.load(Ordering::Acquire) {
+            self.deferred_editor.store(2, Ordering::Release);
+            return Ok(());
+        }
+        let maintenance = self.begin_maintenance()?;
         let (editor_window_arc, plugin_arc) = {
             let mut guard = self.runtime.lock();
             let Some(runtime) = guard.as_mut() else {
@@ -453,31 +486,54 @@ impl AudioEngine {
             (runtime.editor_window.clone(), runtime.plugin.clone())
         };
 
+        let (tx, rx) = mpsc::sync_channel(1);
+        let editor_open = self.editor_open.clone();
+        let telemetry = self.health_telemetry.load_full();
         app_handle
             .run_on_main_thread(move || {
-                if let Some(editor_win) = editor_window_arc.lock().as_mut() {
-                    let hwnd = match editor_win {
-                        EditorWindow::Vst2 { hwnd, .. } | EditorWindow::Vst3 { hwnd, .. } => hwnd,
+                let _maintenance = maintenance;
+                let editor = editor_window_arc.lock().take();
+                if let Some(mut editor) = editor {
+                    let hwnd = match &mut editor {
+                        EditorWindow::Vst2 { editor, hwnd } => {
+                            editor.close();
+                            *hwnd
+                        }
+                        EditorWindow::Vst3 { gui, hwnd } => {
+                            let _ = gui.detach();
+                            *hwnd
+                        }
                     };
                     unsafe {
-                        let _ = ShowWindow(*hwnd, SW_HIDE);
+                        let _ = KillTimer(Some(hwnd), 1);
+                        let _ = DestroyWindow(hwnd);
                     }
                 }
                 #[cfg(all(target_os = "windows", target_pointer_width = "64"))]
-                {
-                    let mut plugin_guard = plugin_arc.lock();
-                    if let PluginBackend::Remote { instance } = &mut *plugin_guard {
-                        let _ = instance.close_editor();
+                let result = match &mut *plugin_arc.lock() {
+                    PluginBackend::Remote { instance } => {
+                        instance.close_editor().map_err(AudioError::Message)
+                    }
+                    _ => Ok(()),
+                };
+                #[cfg(not(all(target_os = "windows", target_pointer_width = "64")))]
+                let result = {
+                    let _ = plugin_arc;
+                    Ok(())
+                };
+                if result.is_ok() {
+                    editor_open.store(false, Ordering::Release);
+                    if let Some(telemetry) = &telemetry {
+                        telemetry.editor_open.store(false, Ordering::Release);
                     }
                 }
-                #[cfg(not(all(target_os = "windows", target_pointer_width = "64")))]
-                let _ = plugin_arc;
+                let _ = tx.send(result);
             })
             .map_err(|_| {
                 AudioError::Message("Failed to schedule VST close on main thread".into())
             })?;
-
-        Ok(())
+        rx.recv_timeout(std::time::Duration::from_secs(10))
+            .map_err(|_| AudioError::Message("Timed out closing VST editor".into()))?
     }
 
     pub fn list_vst_parameters(&self) -> Result<Vec<VstParameter>, AudioError> {
@@ -496,25 +552,48 @@ impl AudioEngine {
     }
 
     pub fn set_vst_parameter(&self, index: usize, value: f32) -> Result<(), AudioError> {
+        if !value.is_finite() {
+            return Err(AudioError::Message(
+                "VST parameter value must be finite".into(),
+            ));
+        }
+        let normalized = value.clamp(0.0, 1.0);
+
         #[cfg(target_os = "windows")]
         if self.is_worker_enabled() {
-            return crate::tauri::utils::safe_block_on(self.worker.set_parameter(index, value))
-                .map_err(AudioError::Message);
+            return crate::tauri::utils::safe_block_on(
+                self.worker.set_parameter(index, normalized),
+            )
+            .map_err(AudioError::Message);
         }
         let guard = self.runtime.lock();
         let Some(runtime) = guard.as_ref() else {
             return Err(AudioError::Message("Audio not started".into()));
         };
-        let normalized = value.clamp(0.0, 1.0);
+        if self.maintenance.load(Ordering::Acquire) {
+            return Err(AudioError::Message(
+                "Audio maintenance is active; retry the parameter change after maintenance".into(),
+            ));
+        }
+        let sequence = runtime
+            .telemetry
+            .parameter_accepted_sequence
+            .load(Ordering::Acquire)
+            .checked_add(1)
+            .ok_or_else(|| AudioError::Message("Parameter generation exhausted".into()))?;
         let metadata = runtime
             .parameter_cache
             .lock()
             .get(index)
             .cloned()
             .ok_or_else(|| AudioError::Message("VST parameter index out of range".into()))?;
+        if metadata.flags & (1 << 1) != 0 {
+            return Err(AudioError::Message("VST parameter is read-only".into()));
+        }
         runtime
             .parameter_tx
             .try_send(super::runtime_state::ParameterCommand {
+                sequence,
                 index,
                 id: metadata.id,
                 flags: metadata.flags,
@@ -522,6 +601,11 @@ impl AudioEngine {
                 value: normalized,
             })
             .map_err(|_| AudioError::Message("VST parameter queue is full".into()))?;
+        runtime
+            .telemetry
+            .parameter_accepted_sequence
+            .store(sequence, Ordering::Release);
+        self.live_parameters.lock().insert(index, normalized);
         if let Some(parameter) = runtime.parameter_cache.lock().get_mut(index) {
             parameter.value = normalized;
         }

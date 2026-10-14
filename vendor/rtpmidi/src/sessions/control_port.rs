@@ -43,7 +43,18 @@ impl RtpPort for ControlPort {
 
 impl ControlPort {
     pub async fn bind(port: u16, name: CString, ssrc: U32) -> std::io::Result<Self> {
-        let socket = Arc::new(UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, port)).await?);
+        let raw = std::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, port))?;
+        raw.set_nonblocking(true)?;
+        let options = socket2::SockRef::from(&raw);
+        options.set_recv_buffer_size(1024 * 1024)?;
+        let effective = options.recv_buffer_size()?;
+        crate::diagnostics::CONTROL_RECEIVE_BUFFER
+            .store(effective, std::sync::atomic::Ordering::Relaxed);
+        tracing::info!(
+            receive_buffer_bytes = effective,
+            "RTP UDP receive buffer configured"
+        );
+        let socket = Arc::new(UdpSocket::from_std(raw)?);
 
         Ok(ControlPort {
             session_name: name,

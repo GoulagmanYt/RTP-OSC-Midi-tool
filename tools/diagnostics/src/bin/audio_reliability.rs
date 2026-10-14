@@ -9,10 +9,46 @@ use std::{
     time::{Duration, Instant},
 };
 
+// Timer resolution belongs to the generating process; a request in the worker
+// does not make this diagnostic process's Tokio deadlines accurate on Windows.
+#[cfg(windows)]
+struct TimerResolution(bool);
+#[cfg(windows)]
+#[link(name = "winmm")]
+unsafe extern "system" {
+    fn timeBeginPeriod(period: u32) -> u32;
+    fn timeEndPeriod(period: u32) -> u32;
+}
+#[cfg(windows)]
+impl TimerResolution {
+    fn request() -> Self {
+        let active = unsafe { timeBeginPeriod(1) } == 0;
+        if !active {
+            eprintln!("Windows rejected diagnostic timer resolution");
+        }
+        Self(active)
+    }
+}
+#[cfg(windows)]
+impl Drop for TimerResolution {
+    fn drop(&mut self) {
+        if self.0 {
+            unsafe {
+                timeEndPeriod(1);
+            }
+        }
+    }
+}
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(windows)]
+    let _timer_resolution = TimerResolution::request();
     let mut args = std::env::args().skip(1);
     let mut buffer = None;
+    let mut events_per_second = None;
+    let mut exercise_game_mode = false;
+    let mut game_mode = true;
     let mut notes = 10_000usize;
     let mut duration_seconds = 0u64;
     let mut active_seconds: Option<u64> = None;
@@ -26,6 +62,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .next()
             .ok_or_else(|| format!("Missing value for {flag}"))?;
         match flag.as_str() {
+            "--events-per-second" => events_per_second = Some(value.parse::<u32>()?),
+            "--game-mode" => game_mode = value.parse()?,
+            "--exercise-game-mode" => exercise_game_mode = value.parse()?,
             "--buffer" => buffer = Some(value.parse::<u32>()?),
             "--notes" => notes = value.parse()?,
             "--duration-seconds" => duration_seconds = value.parse()?,
@@ -54,8 +93,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }) {
         return Err("--cycle-seconds requires --active-seconds <= cycle <= duration".into());
     }
+    if events_per_second.is_some_and(|rate| rate == 0 || rate > 100_000) {
+        return Err("events per second must be 1..100000".into());
+    }
     let config = ConfigStore::new().load();
     let settings = AudioSettings {
+        game_mode,
         backend: Some("ASIO".into()),
         device_id: Some(format!("asio:{device}")),
         device: Some(device),
@@ -94,6 +137,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         status.stream_buffer_size,
         f64::from(status.stream_buffer_size) * 1000.0 / f64::from(status.sample_rate)
     );
+    let mut game_mode_validation = None;
+    if exercise_game_mode {
+        supervisor.set_game_mode(true).await?;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let before = supervisor.snapshot();
+        let parameters = supervisor.list_parameters().await?;
+        if let Some(parameter) = parameters.first() {
+            supervisor
+                .set_parameter(parameter.index, parameter.value)
+                .await?;
+        }
+        supervisor.save_state().await?;
+        supervisor.open_editor().await?;
+        supervisor.close_editor().await?; // latest deferred intent is closed: no UI is shown by this test.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let deferred = supervisor.snapshot();
+        if !deferred.metrics.deferred_save
+            || deferred.metrics.deferred_editor != Some(false)
+            || deferred.metrics.maintenance
+            || deferred.metrics.callback_count <= before.metrics.callback_count
+            || deferred.metrics.audio_lock_misses != before.metrics.audio_lock_misses
+        {
+            return Err("game-mode protection failed".into());
+        }
+        supervisor.set_game_mode(false).await?;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let flushed = supervisor.snapshot();
+        if flushed.metrics.deferred_save
+            || flushed.metrics.deferred_editor.is_some()
+            || flushed.metrics.maintenance
+        {
+            return Err("deferred operations were not completed".into());
+        }
+        game_mode_validation = Some(
+            serde_json::json!({ "before": before.metrics, "deferred": deferred.metrics, "flushed": flushed.metrics }),
+        );
+        supervisor.set_game_mode(game_mode).await?;
+    }
     let mut rejected = 0;
     let mut sent_on = 0;
     let mut sent_off = 0;
@@ -106,6 +187,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut max_over_budget = 0;
     let mut max_drops = 0;
     let transmitting_at = Instant::now();
+    let batch_size = events_per_second.map_or(16, |rate| if rate <= 1000 { 1 } else { 16 });
+    let half_period = events_per_second.map_or(Duration::from_millis(10), |rate| {
+        Duration::from_secs_f64(batch_size as f64 / f64::from(rate))
+    });
+    let mut pacing = tokio::time::interval(half_period);
+    pacing.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Burst);
+    pacing.tick().await;
     while if duration_seconds == 0 {
         sent_on < notes
     } else {
@@ -126,9 +214,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let count = if active_seconds.is_some_and(|seconds| phase_seconds >= seconds) {
             0
         } else if duration_seconds == 0 {
-            (notes - sent_on).min(16)
+            (notes - sent_on).min(batch_size)
         } else {
-            16
+            batch_size
         };
         for index in 0..count {
             if !supervisor.try_send_midi(&[0x90, 48 + index as u8, 80]) {
@@ -136,14 +224,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             sent_on += 1;
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        pacing.tick().await;
         for index in 0..count {
             if !supervisor.try_send_midi(&[0x80, 48 + index as u8, 0]) {
                 rejected += 1;
             }
             sent_off += 1;
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        pacing.tick().await;
         let snapshot = supervisor.snapshot();
         max_xruns = max_xruns.max(snapshot.metrics.audio_xruns);
         max_over_budget = max_over_budget.max(snapshot.metrics.callback_over_budget_count);
@@ -176,6 +264,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         && (duration_seconds != 0 || sent_on == notes)
         && sent_off == sent_on
         && before_panic.metrics.midi_queue_depth == 0
+        && before_panic.metrics.audio_emergency_resets == 0
+        && before_panic.metrics.audio_lock_misses == 0
         && rejected == 0
         && max_drops == 0
         && final_snapshot.state == VstWorkerState::Ready
@@ -185,7 +275,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stopped_at = Instant::now();
     let stop = supervisor.stop().await;
     let stop_ms = stopped_at.elapsed().as_millis();
+    let period_us =
+        u64::from(status.stream_buffer_size) * 1_000_000 / u64::from(status.sample_rate);
+    let delivery_timing_passed = before_panic.metrics.midi_delivery_p99_us <= period_us * 2
+        && before_panic.metrics.midi_delivery_max_us <= period_us * 5;
     let result = serde_json::json!({
+        "eventsPerSecondRequested": events_per_second,
+        "eventsPerSecondObserved": (sent_on + sent_off) as f64 * 1000.0 / transmission_ms.max(1) as f64, "gameMode": game_mode, "gameModeValidation": game_mode_validation,
+        "deliveryTimingPassed": delivery_timing_passed,
         "status": status, "requestedNotes": notes, "requestedDurationSeconds": duration_seconds,
         "transmissionMs": transmission_ms, "requestedActiveSeconds": active_seconds, "requestedCycleSeconds": cycle_seconds, "metricsBeforeFinalPanic": before_panic.metrics, "noteOnsSubmitted": sent_on,
         "noteOffsSubmitted": sent_off, "rejectedSubmissions": rejected,
@@ -203,7 +300,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     std::fs::write(&report, serde_json::to_vec_pretty(&result)?)?;
     println!("Report: {}", report.display());
-    if !delivery_passed || max_xruns != 0 || max_over_budget != 0 || stop.is_err() {
+    if !delivery_passed
+        || !delivery_timing_passed
+        || max_xruns != 0
+        || max_over_budget != 0
+        || stop.is_err()
+    {
         return Err("Audio reliability run found failures; see report".into());
     }
     Ok(())

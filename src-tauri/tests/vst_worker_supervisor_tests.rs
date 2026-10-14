@@ -42,6 +42,7 @@ fn production_worker_supports_isolated_probe_mode() {
 fn fixture_settings() -> AudioSettings {
     AudioSettings {
         enabled: true,
+        game_mode: true,
         backend: Some("asio".into()),
         device: Some("fixture".into()),
         device_id: None,
@@ -56,7 +57,7 @@ fn fixture_settings() -> AudioSettings {
 }
 
 async fn wait_for_exhausted_restart_budget(supervisor: &VstWorkerSupervisor) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     let mut stable_since = None;
     loop {
         let snapshot = supervisor.snapshot();
@@ -91,16 +92,128 @@ async fn isolated_worker_survives_midi_and_contains_process_crashes() {
         .expect("fixture worker should become ready");
     assert_eq!(status.stream_buffer_size, 512);
     assert_eq!(supervisor.snapshot().state, VstWorkerState::Ready);
+    for enabled in [true, false] {
+        assert!(supervisor.try_set_limiter_enabled(enabled));
+        // Commands are consumed FIFO: Parameters follows the limiter's Ack.
+        supervisor.list_parameters().await.unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let snapshot = supervisor.snapshot();
+            if snapshot.metrics.limiter_enabled == Some(enabled)
+                && snapshot.status.as_ref().unwrap().limiter_enabled == enabled
+            {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "applied limiter state was not published: {snapshot:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
     assert!(supervisor.try_set_eq(VstEqSettings {
         enabled: true,
         ..VstEqSettings::default()
     }));
+    supervisor.open_editor().await.unwrap();
+    assert!(!supervisor.snapshot().editor_open);
+    supervisor.set_game_mode(false).await.unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while !supervisor.snapshot().editor_open {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "deferred editor opening was not published"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    supervisor.close_editor().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(!supervisor.snapshot().editor_open);
     for sequence in 0..10_000u32 {
         let note = 36 + (sequence % 48) as u8;
         assert!(supervisor.try_send_midi(&[0x90, note, 100]));
     }
     supervisor.stop().await.expect("fixture worker stop");
     assert_eq!(supervisor.snapshot().state, VstWorkerState::Disabled);
+
+    std::env::set_var("OSCMIDI_VST_FIXTURE_MODE", "reject-limiter");
+    let rejected_limiter = VstWorkerSupervisor::new();
+    rejected_limiter
+        .start(fixture_settings(), None)
+        .await
+        .unwrap();
+    assert!(rejected_limiter.try_set_limiter_enabled(true));
+    rejected_limiter.list_parameters().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let snapshot = rejected_limiter.snapshot();
+    assert_eq!(snapshot.metrics.limiter_enabled, Some(false));
+    assert!(!snapshot.status.unwrap().limiter_enabled);
+    rejected_limiter.stop().await.unwrap();
+
+    std::env::set_var("OSCMIDI_VST_FIXTURE_MODE", "recover-controls");
+    let recovered = VstWorkerSupervisor::new();
+    recovered.start(fixture_settings(), None).await.unwrap();
+    let mut expected = fixture_settings();
+    expected.gain_db = -60.0;
+    expected.limiter_enabled = true;
+    expected.vst_eq.enabled = true;
+    assert!(recovered.try_set_gain(expected.gain_db));
+    assert!(recovered.try_set_limiter_enabled(expected.limiter_enabled));
+    assert!(recovered.try_set_eq(expected.vst_eq.clone()));
+    std::env::set_var(
+        "OSCMIDI_VST_FIXTURE_EXPECT_SETTINGS",
+        serde_json::to_string(&expected).unwrap(),
+    );
+    assert!(recovered.save_state().await.is_err());
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while recovered.snapshot().restarts == 0 || !recovered.is_ready() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "recovery did not restore live controls: {:?}",
+            recovered.snapshot()
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    recovered.stop().await.unwrap();
+    std::env::remove_var("OSCMIDI_VST_FIXTURE_EXPECT_SETTINGS");
+
+    for mode in ["silence-two-seconds", "slow-command"] {
+        std::env::set_var("OSCMIDI_VST_FIXTURE_MODE", mode);
+        let healthy = VstWorkerSupervisor::new();
+        healthy.start(fixture_settings(), None).await.unwrap();
+        if mode == "slow-command" {
+            healthy.save_state().await.unwrap();
+        } else {
+            tokio::time::sleep(Duration::from_millis(1700)).await;
+            assert!(healthy.snapshot().heartbeat_delayed);
+            assert_eq!(healthy.snapshot().restarts, 0);
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+        }
+        assert_eq!(healthy.snapshot().restarts, 0);
+        assert_eq!(healthy.snapshot().state, VstWorkerState::Ready);
+        healthy.stop().await.unwrap();
+    }
+    std::env::set_var("OSCMIDI_VST_FIXTURE_MODE", "callback-blocked");
+    let blocked = VstWorkerSupervisor::new();
+    blocked.start(fixture_settings(), None).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(5800)).await;
+    assert!(blocked.snapshot().restarts > 0);
+    assert!(blocked
+        .snapshot()
+        .last_exit
+        .as_deref()
+        .unwrap_or_default()
+        .contains("callback stalled"));
+    blocked.stop().await.ok();
+
+    std::env::set_var("OSCMIDI_VST_FIXTURE_MODE", "legacy");
+    let incompatible = VstWorkerSupervisor::new();
+    let error = incompatible
+        .start(fixture_settings(), None)
+        .await
+        .unwrap_err();
+    assert!(error.contains("protocol mismatch"));
+    incompatible.stop().await.ok();
 
     std::env::set_var("OSCMIDI_VST_FIXTURE_MODE", "crash");
     let crashed = VstWorkerSupervisor::new();
@@ -117,12 +230,13 @@ async fn isolated_worker_survives_midi_and_contains_process_crashes() {
         .await
         .expect("hang fixture first becomes ready");
     let detection_started = std::time::Instant::now();
-    while hung.snapshot().restarts == 0 && detection_started.elapsed() < Duration::from_secs(3) {
+    while hung.snapshot().restarts == 0 && detection_started.elapsed() < Duration::from_secs(7) {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     assert!(
-        detection_started.elapsed() < Duration::from_millis(2_000),
-        "hung worker was not detected within the 1.5 second heartbeat budget"
+        detection_started.elapsed() >= Duration::from_secs(5)
+            && detection_started.elapsed() < Duration::from_secs(7),
+        "hung worker was not detected within the 5 second heartbeat budget"
     );
     wait_for_exhausted_restart_budget(&hung).await;
     assert_eq!(hung.snapshot().restarts, 3);

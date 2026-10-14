@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useBridge } from "../providers/BridgeProvider";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "../components/ui/Card";
 import { Label } from "../components/ui/Label";
@@ -14,6 +14,7 @@ import { getErrorMessage } from "../api-errors";
 export default function OscPage() {
   const { config, updateConfig, saveConfig } = useBridge();
   const [busy, setBusy] = useState(false);
+  const [portResetNonce, setPortResetNonce] = useState(0);
   const { t } = useI18n();
 
   const handleSave = async () => {
@@ -70,14 +71,12 @@ export default function OscPage() {
                 <Label htmlFor="osc-port" className="text-sm">
                   {t("osc.port")}
                 </Label>
-                <Input
+                <OscPortInput
                   id="osc-port"
-                  type="number"
                   placeholder="9000"
-                  value={config?.osc.targetPort ?? ""}
-                  onChange={(e) =>
-                    updateConfig({ osc: { targetPort: Number(e.target.value || 0) } })
-                  }
+                  value={config?.osc.targetPort}
+                  resetNonce={portResetNonce}
+                  onCommit={(targetPort) => updateConfig({ osc: { targetPort } })}
                 />
               </div>
             </div>
@@ -99,9 +98,13 @@ export default function OscPage() {
               </div>
               <div className="space-y-2">
                 <Label htmlFor="osc-listen-port">{t("osc.listenPort")}</Label>
-                <Input id="osc-listen-port" type="number" min={1} max={65535}
-                  value={config?.osc.listenPort ?? 9001}
-                  onChange={(e) => updateConfig({ osc: { listenPort: Number(e.target.value || 0) } })} />
+                <OscPortInput
+                  id="osc-listen-port"
+                  placeholder="9001"
+                  value={config?.osc.listenPort}
+                  resetNonce={portResetNonce}
+                  onCommit={(listenPort) => updateConfig({ osc: { listenPort } })}
+                />
               </div>
             </div>
           </div>
@@ -119,7 +122,7 @@ export default function OscPage() {
               <div className="flex items-center justify-between">
                 <Label className="text-sm">{t("osc.verbose")}</Label>
                 <Switch
-                  checked={config?.logging.verbose ?? false}
+                  checked={config?.logging?.verbose ?? false}
                   onCheckedChange={(c) => updateConfig({ logging: { verbose: c } })}
                 />
               </div>
@@ -130,7 +133,17 @@ export default function OscPage() {
             <Button
               variant="outline"
               disabled={busy}
-              onClick={() => updateConfig({ osc: { targetIp: "127.0.0.1", targetPort: 9000 } })}
+              onClick={() => {
+                setPortResetNonce((prev) => prev + 1);
+                updateConfig({
+                  osc: {
+                    targetIp: "127.0.0.1",
+                    targetPort: 9000,
+                    listenIp: "127.0.0.1",
+                    listenPort: 9001,
+                  },
+                });
+              }}
             >
               <RefreshCcw className="h-4 w-4 mr-2" />
               {t("common.default")}
@@ -198,5 +211,56 @@ export default function OscPage() {
         </CardContent>
       </Card>
     </div>
+  );
+}
+
+type OscPortInputProps = {
+  id: string;
+  value?: number;
+  placeholder?: string;
+  resetNonce?: number;
+  onCommit: (port: number) => void;
+};
+
+export function OscPortInput(props: OscPortInputProps) {
+  return <OscPortDraft key={`${props.resetNonce ?? 0}-${props.value ?? "empty"}`} {...props} />;
+}
+
+function OscPortDraft({ id, value, placeholder = "9000", onCommit }: OscPortInputProps) {
+  const [draft, setDraft] = useState(value?.toString() ?? "");
+
+  useEffect(() => {
+    setDraft(value !== undefined ? String(value) : "");
+  }, [value]);
+
+  const commit = () => {
+    const port = Number(draft);
+    if (draft.trim() !== "" && Number.isInteger(port) && port >= 1 && port <= 65535) {
+      setDraft(String(port));
+      if (port !== value) onCommit(port);
+    } else {
+      setDraft(value?.toString() ?? "");
+    }
+  };
+
+  return (
+    <Input
+      id={id}
+      type="number"
+      min={1}
+      max={65535}
+      step={1}
+      placeholder={placeholder}
+      value={draft}
+      onChange={(event) => setDraft(event.target.value)}
+      onBlur={commit}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          commit();
+          event.currentTarget.blur();
+        }
+      }}
+    />
   );
 }

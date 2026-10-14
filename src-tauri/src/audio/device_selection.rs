@@ -46,7 +46,7 @@ pub(super) fn select_device(
         Err(_) => return None,
     };
 
-    if let Some(name) = preferred_name {
+    if let Some(name) = preferred_name.filter(|name| !name.trim().is_empty()) {
         if let Some(dev) = outputs.find(|d| d.to_string() == name) {
             return Some(dev);
         }

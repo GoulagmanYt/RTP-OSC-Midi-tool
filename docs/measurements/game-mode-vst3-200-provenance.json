@@ -1,0 +1,41 @@
+{
+  "codeCommit": "02d0167cf679890352b92d11a61ceb54c6e493eb",
+  "gameMode": true,
+  "pluginVersion": "2.5.6.0",
+  "eventsPerSecond": 200,
+  "activeSeconds": -1,
+  "startedUtc": "2026-10-08T10:24:55.9786371Z",
+  "cycleSeconds": 0,
+  "maxWorkerPrivateMB": 4096,
+  "workerSha256": "CD593A751A93C0B727BEADC2A75E9F76A7CE314919CA536AEC9EFA6813FDCC52",
+  "workerPath": "C:\\Users\\robin\\Documents\\GitHub\\RTP-OSC-Midi-tool\\src-tauri\\binaries\\vst-host-worker-x64-x86_64-pc-windows-msvc.exe",
+  "stateFilesBeforeRun": [
+    {
+      "sha256": "1E84A1BCD2A83E577D8DD62913E66F7C19A72C8926816820750273024F66DA0D",
+      "name": "Church Organ.dll-e32fe916e62f20c4.state"
+    },
+    {
+      "sha256": "DA426F05727127D1D437D0C66111C1479EC71C5CFD0607225D30F7BC2E26A479",
+      "name": "Splice INSTRUMENT.vst3-9b2dba2e7040a21d.state"
+    },
+    {
+      "sha256": "AB62FE29B72B5B94B4300CDEC4F8A0B103C89130E47C3AEAC95812DCFFBC4F44",
+      "name": "Splice INSTRUMENT.vst3-eb604e58c43b3099.state"
+    },
+    {
+      "sha256": "DB6BA777A296D5749CFAEA930D87E31AA9F28F76EE9640C0A1FF5FDFCD75A1A5",
+      "name": "Upright Piano.dll-e8819f30ed2cea63.state"
+    },
+    {
+      "sha256": "8545A328FECD4B238BAA55201B34C2FF687F013AF46F96AA354FDC4239DE36BE",
+      "name": "Upright Piano.vst3-0a7f665eeba008a7.state"
+    }
+  ],
+  "pluginBinaryPath": "C:\\Program Files\\VstPlugins\\Upright Piano Windows VST3 64-bit\\Upright Piano.vst3",
+  "diagnosticSha256": "02ABB159448C6A721E5CA2284EB808711BA61E8BFEDE94F4AFFD04D44B70111F",
+  "durationSeconds": 10,
+  "pluginSha256": "1FA1B8216169591F2E0625AABA068F055B089EFC18E54D8A1D03C91E7C8C44CD",
+  "pluginPath": "C:\\Program Files\\VstPlugins\\Upright Piano Windows VST3 64-bit\\Upright Piano.vst3",
+  "scope": "Audio endurance with periodic process resource samples; other workload may run concurrently. No physical loopback latency measurement.",
+  "stateDirectory": "C:\\Users\\robin\\Documents\\GitHub\\RTP-OSC-Midi-tool\\.cargo-target\\game-mode-validation-state"
+}

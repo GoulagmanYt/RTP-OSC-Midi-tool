@@ -60,11 +60,13 @@ export function TopBar({ onOpenCommand }: { onOpenCommand: () => void }) {
     }
   };
 
-  const runWindowAction = (action: () => Promise<void>) => {
-    void action().catch((error) => {
-      console.error("Window action failed", error);
-      toast.error(t("toasts.window.actionFailed"));
-    });
+  const runWindowAction = (action: () => Promise<void> | void) => {
+    Promise.resolve()
+      .then(() => action())
+      .catch((error) => {
+        console.error("Window action failed", error);
+        toast.error(t("toasts.window.actionFailed"));
+      });
   };
 
   return (

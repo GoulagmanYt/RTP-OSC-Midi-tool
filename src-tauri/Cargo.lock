@@ -3091,7 +3091,7 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "osc-midi-bridge"
-version = "2.6.0"
+version = "2.6.1"
 dependencies = [
  "arc-swap",
  "chrono",
@@ -3115,6 +3115,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "smallvec",
+ "socket2",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
@@ -3905,6 +3906,7 @@ dependencies = [
  "futures",
  "midi-types",
  "rand 0.9.5",
+ "socket2",
  "thiserror 2.0.19",
  "tokio",
  "tokio-util",

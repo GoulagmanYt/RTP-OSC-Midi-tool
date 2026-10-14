@@ -1,0 +1,261 @@
+{
+  "measuredUtc": "2026-10-08T20:29:42.8753013Z",
+  "baseRevision": "dd9b531fa1312da3de09247b12554c0ed34e2d74",
+  "includesUncommittedAuditFixes": true,
+  "profile": "debug",
+  "controlProtocol": 9,
+  "x86MemoryProtocol": 7,
+  "sampleRate": 48000,
+  "bufferFrames": 512,
+  "device": "Voicemeeter AUX Virtual ASIO",
+  "injectionDurationSecondsPerPlugin": 10,
+  "eventsPerSecondRequested": 200,
+  "isolatedStateDirectory": ".cargo-target/audit-fix-validation-state",
+  "scope": "Production worker, installed VST and ASIO; MIDI injected at worker IPC. No VRChat, WPR trace, physical loopback latency or recorded audible continuity validation.",
+  "binaries": [
+    {
+      "name": "vst-host-worker-x64-x86_64-pc-windows-msvc.exe",
+      "sha256": "B21BFECFE039E6D02A5AC91D97F975E869A26F362817FF5439EE77DBE7534AF4"
+    },
+    {
+      "name": "vst-host-worker-x86-x86_64-pc-windows-msvc.exe",
+      "sha256": "31E09A031FC5B898CCC9D549B9BAEDDEF1E714604DDB345256DCCE3537FE4E72"
+    },
+    {
+      "name": "audio_reliability.exe",
+      "sha256": "CF1D2EE8A2177F204A684FCB9CC7A4B3D6751367BE20E300B31ED400D2ACF20F"
+    }
+  ],
+  "plugins": [
+    {
+      "path": "C:\\Program Files\\VstPlugins\\Upright Piano Windows VST 64-bit\\Upright Piano.dll",
+      "version": "2.5.6.0",
+      "sha256": "65095B00AEA68547ADADBF7EBD3CFA5746A8804347AD9E384BC7863F59E57BE4"
+    },
+    {
+      "path": "C:\\Program Files\\VstPlugins\\Upright Piano Windows VST3 64-bit\\Upright Piano.vst3",
+      "version": "2.5.6.0",
+      "sha256": "1FA1B8216169591F2E0625AABA068F055B089EFC18E54D8A1D03C91E7C8C44CD"
+    },
+    {
+      "path": "C:\\Program Files\\VstPlugins\\Steinberg\\VstPlugins\\Church Organ.dll",
+      "version": null,
+      "sha256": "7C2629AEDCAF66A2481BBBD09A70FE4D7E32145A9B4008BC9C08D68B3382F2D4"
+    },
+    {
+      "path": "C:\\Program Files\\Common Files\\VST3\\Splice\\Splice INSTRUMENT.vst3\\Contents\\x86_64-win\\Splice INSTRUMENT.vst3",
+      "version": "2.4.17",
+      "sha256": "D4F9686268DEBCC7B71C2FF277AB056805EAB67F4C6E99B634E961003C9A2E0F"
+    }
+  ],
+  "tests": [
+    {
+      "plugin": "Church Organ VST2 x86",
+      "report": "church-organ-x86.json",
+      "eventsPerSecondObserved": 199.9800019998,
+      "deliveryPassed": true,
+      "deliveryTimingPassed": true,
+      "timingPassed": true,
+      "noteOnsSubmitted": 1000,
+      "noteOffsSubmitted": 1000,
+      "audioSignalObserved": true,
+      "audioMidiDrops": 0,
+      "supervisorMidiDrops": 0,
+      "rejectedSubmissions": 0,
+      "workerRestarts": 0,
+      "audioLockMisses": 0,
+      "resetsBeforeExplicitPanic": 0,
+      "resetsAfterExplicitPanic": 1,
+      "maxXruns": 0,
+      "maxCallbackOverBudgetCount": 0,
+      "deliveryP99Us": 12250,
+      "deliveryMaxUs": 19044,
+      "gameModeValidation": {
+        "flushed": {
+          "gameMode": false,
+          "deferredSave": false,
+          "deferredEditor": null,
+          "editorOpen": false,
+          "maintenance": false,
+          "callbackCount": 292,
+          "audioLockMisses": 0
+        },
+        "deferred": {
+          "gameMode": true,
+          "deferredSave": true,
+          "deferredEditor": false,
+          "editorOpen": false,
+          "maintenance": false,
+          "callbackCount": 201,
+          "audioLockMisses": 0
+        },
+        "before": {
+          "gameMode": true,
+          "deferredSave": false,
+          "deferredEditor": null,
+          "editorOpen": false,
+          "maintenance": false,
+          "callbackCount": 107,
+          "audioLockMisses": 0
+        }
+      },
+      "stopError": null
+    },
+    {
+      "plugin": "Splice INSTRUMENT VST3 x64",
+      "report": "splice-vst3.json",
+      "eventsPerSecondObserved": 199.9800019998,
+      "deliveryPassed": true,
+      "deliveryTimingPassed": true,
+      "timingPassed": true,
+      "noteOnsSubmitted": 1000,
+      "noteOffsSubmitted": 1000,
+      "audioSignalObserved": true,
+      "audioMidiDrops": 0,
+      "supervisorMidiDrops": 0,
+      "rejectedSubmissions": 0,
+      "workerRestarts": 0,
+      "audioLockMisses": 0,
+      "resetsBeforeExplicitPanic": 0,
+      "resetsAfterExplicitPanic": 1,
+      "maxXruns": 0,
+      "maxCallbackOverBudgetCount": 0,
+      "deliveryP99Us": 12750,
+      "deliveryMaxUs": 13527,
+      "gameModeValidation": {
+        "flushed": {
+          "gameMode": false,
+          "deferredSave": false,
+          "deferredEditor": null,
+          "editorOpen": false,
+          "maintenance": false,
+          "callbackCount": 325,
+          "audioLockMisses": 0
+        },
+        "deferred": {
+          "gameMode": true,
+          "deferredSave": true,
+          "deferredEditor": false,
+          "editorOpen": false,
+          "maintenance": false,
+          "callbackCount": 196,
+          "audioLockMisses": 0
+        },
+        "before": {
+          "gameMode": true,
+          "deferredSave": false,
+          "deferredEditor": null,
+          "editorOpen": false,
+          "maintenance": false,
+          "callbackCount": 103,
+          "audioLockMisses": 0
+        }
+      },
+      "stopError": null
+    },
+    {
+      "plugin": "Upright Piano VST2 x64",
+      "report": "upright-vst2.json",
+      "eventsPerSecondObserved": 199.96000799840033,
+      "deliveryPassed": true,
+      "deliveryTimingPassed": true,
+      "timingPassed": true,
+      "noteOnsSubmitted": 1000,
+      "noteOffsSubmitted": 1000,
+      "audioSignalObserved": true,
+      "audioMidiDrops": 0,
+      "supervisorMidiDrops": 0,
+      "rejectedSubmissions": 0,
+      "workerRestarts": 0,
+      "audioLockMisses": 0,
+      "resetsBeforeExplicitPanic": 0,
+      "resetsAfterExplicitPanic": 1,
+      "maxXruns": 0,
+      "maxCallbackOverBudgetCount": 0,
+      "deliveryP99Us": 11250,
+      "deliveryMaxUs": 12101,
+      "gameModeValidation": {
+        "flushed": {
+          "gameMode": false,
+          "deferredSave": false,
+          "deferredEditor": null,
+          "editorOpen": false,
+          "maintenance": false,
+          "callbackCount": 308,
+          "audioLockMisses": 0
+        },
+        "deferred": {
+          "gameMode": true,
+          "deferredSave": true,
+          "deferredEditor": false,
+          "editorOpen": false,
+          "maintenance": false,
+          "callbackCount": 214,
+          "audioLockMisses": 0
+        },
+        "before": {
+          "gameMode": true,
+          "deferredSave": false,
+          "deferredEditor": null,
+          "editorOpen": false,
+          "maintenance": false,
+          "callbackCount": 120,
+          "audioLockMisses": 0
+        }
+      },
+      "stopError": null
+    },
+    {
+      "plugin": "Upright Piano VST3 x64",
+      "report": "upright-vst3.json",
+      "eventsPerSecondObserved": 200.0,
+      "deliveryPassed": true,
+      "deliveryTimingPassed": true,
+      "timingPassed": true,
+      "noteOnsSubmitted": 1000,
+      "noteOffsSubmitted": 1000,
+      "audioSignalObserved": true,
+      "audioMidiDrops": 0,
+      "supervisorMidiDrops": 0,
+      "rejectedSubmissions": 0,
+      "workerRestarts": 0,
+      "audioLockMisses": 0,
+      "resetsBeforeExplicitPanic": 0,
+      "resetsAfterExplicitPanic": 1,
+      "maxXruns": 0,
+      "maxCallbackOverBudgetCount": 0,
+      "deliveryP99Us": 12250,
+      "deliveryMaxUs": 13033,
+      "gameModeValidation": {
+        "flushed": {
+          "gameMode": false,
+          "deferredSave": false,
+          "deferredEditor": null,
+          "editorOpen": false,
+          "maintenance": false,
+          "callbackCount": 311,
+          "audioLockMisses": 0
+        },
+        "deferred": {
+          "gameMode": true,
+          "deferredSave": true,
+          "deferredEditor": false,
+          "editorOpen": false,
+          "maintenance": false,
+          "callbackCount": 217,
+          "audioLockMisses": 0
+        },
+        "before": {
+          "gameMode": true,
+          "deferredSave": false,
+          "deferredEditor": null,
+          "editorOpen": false,
+          "maintenance": false,
+          "callbackCount": 123,
+          "audioLockMisses": 0
+        }
+      },
+      "stopError": null
+    }
+  ]
+}

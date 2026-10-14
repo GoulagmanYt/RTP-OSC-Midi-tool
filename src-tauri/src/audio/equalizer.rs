@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{fence, AtomicU32, Ordering};
 
 use parking_lot::Mutex;
 
@@ -125,7 +125,8 @@ impl PublishedEq {
         let encoded = EqTarget::from_settings(settings, sample_rate).encode();
         let _guard = self.writer.lock();
         let odd = self.sequence.load(Ordering::Relaxed).wrapping_add(1) | 1;
-        self.sequence.store(odd, Ordering::Release);
+        self.sequence.store(odd, Ordering::Relaxed);
+        fence(Ordering::Release);
         for (slot, value) in self.values.iter().zip(encoded) {
             slot.store(value, Ordering::Relaxed);
         }
@@ -138,7 +139,8 @@ impl PublishedEq {
             return None;
         }
         let values = std::array::from_fn(|index| self.values[index].load(Ordering::Relaxed));
-        let after = self.sequence.load(Ordering::Acquire);
+        fence(Ordering::Acquire);
+        let after = self.sequence.load(Ordering::Relaxed);
         (before == after).then(|| (after, EqTarget::decode(values)))
     }
 }
@@ -154,6 +156,10 @@ impl BiquadState {
         let output = coefficients.b0 * input + self.z1;
         self.z1 = coefficients.b1 * input - coefficients.a1 * output + self.z2;
         self.z2 = coefficients.b2 * input - coefficients.a2 * output;
+        if !output.is_finite() || !self.z1.is_finite() || !self.z2.is_finite() {
+            *self = Self::default();
+            return 0.0;
+        }
         if self.z1.abs() < 1.0e-20 {
             self.z1 = 0.0;
         }
@@ -225,11 +231,21 @@ impl StereoEqualizer {
     }
 
     fn process_channel(&mut self, channel: usize, dry: f32) -> f32 {
+        if !dry.is_finite() {
+            self.channels[channel].fill(BiquadState::default());
+            return 0.0;
+        }
         let mut wet = dry;
         for (state, coefficients) in self.channels[channel].iter_mut().zip(self.current.bands) {
             wet = state.process(wet, coefficients);
         }
-        dry + (wet - dry) * self.current.mix
+        // Weighted interpolation avoids overflowing wet - dry for finite inputs.
+        let output = dry * (1.0 - self.current.mix) + wet * self.current.mix;
+        if output.is_finite() {
+            output
+        } else {
+            0.0
+        }
     }
 }
 
@@ -325,6 +341,39 @@ mod tests {
         let target = EqTarget::from_settings(&VstEqSettings::default(), 48_000);
         assert_eq!(target.bands, [BiquadCoefficients::IDENTITY; BAND_COUNT]);
         assert_eq!(target.mix, 0.0);
+    }
+
+    #[test]
+    fn invalid_plugin_samples_do_not_poison_subsequent_audio() {
+        for enabled in [false, true] {
+            for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+                let settings = VstEqSettings {
+                    enabled,
+                    ..VstEqSettings::default()
+                };
+                let target = EqTarget::from_settings(&settings, 48_000);
+                let mut eq = StereoEqualizer::new(0, target, 48_000);
+                assert_eq!(eq.process_stereo(invalid, 0.25), (0.0, 0.25));
+                assert_eq!(eq.process_stereo(0.5, 0.25), (0.5, 0.25));
+            }
+        }
+    }
+
+    #[test]
+    fn finite_plugin_overflow_does_not_poison_filter_state() {
+        let settings = VstEqSettings {
+            enabled: true,
+            high_shelf: crate::config::EqShelfSettings {
+                gain_db: 12.0,
+                ..VstEqSettings::default().high_shelf
+            },
+            ..VstEqSettings::default()
+        };
+        let mut eq = StereoEqualizer::new(0, EqTarget::from_settings(&settings, 48_000), 48_000);
+        assert!(eq.process_mono(f32::MAX).is_finite());
+        for _ in 0..1024 {
+            assert!(eq.process_mono(0.0).is_finite());
+        }
     }
 
     #[test]

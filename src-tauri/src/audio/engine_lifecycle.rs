@@ -91,11 +91,11 @@ fn restore_vst_state_thread_affine(
     parameter_cache: &Arc<parking_lot::Mutex<Vec<crate::types::VstParameter>>>,
     vst_plugin: &crate::types::VstPluginEntry,
     logger: &FrontendLogger,
-) -> Result<(), AudioError> {
+) -> Result<std::collections::BTreeMap<usize, f32>, AudioError> {
     if super::thread_affinity::is_main_ui_thread() {
         load_vst_state(plugin, vst_plugin, logger);
         refresh_vst_parameter_cache(plugin, parameter_cache);
-        return Ok(());
+        return super::game_mode::restore_live_parameters(plugin, parameter_cache, vst_plugin);
     }
 
     let plugin = plugin.clone();
@@ -109,13 +109,17 @@ fn restore_vst_state_thread_affine(
         .run_on_main_thread(move || {
             load_vst_state(&plugin, &vst_plugin, &logger_for_main);
             refresh_vst_parameter_cache(&plugin, &parameter_cache);
-            let _ = tx.send(());
+            let _ = tx.send(super::game_mode::restore_live_parameters(
+                &plugin,
+                &parameter_cache,
+                &vst_plugin,
+            ));
         })
         .map_err(|_| {
             AudioError::Message("Failed to schedule VST state restoration on main thread".into())
         })?;
     rx.recv_timeout(std::time::Duration::from_secs(30))
-        .map_err(|_| AudioError::Message("Timed out restoring VST state on main thread".into()))
+        .map_err(|_| AudioError::Message("Timed out restoring VST state on main thread".into()))?
 }
 
 fn refresh_vst_parameter_cache(
@@ -131,15 +135,15 @@ fn refresh_vst_parameter_cache(
         super::runtime_state::PluginBackend::Vst2 { instance, .. } => {
             let parameters = instance.get_parameter_object();
             for parameter in cache.iter_mut() {
-                parameter.value = parameters
-                    .get_parameter(parameter.index as i32)
-                    .clamp(0.0, 1.0);
+                parameter.value = super::plugin_host::normalized_parameter_value(
+                    parameters.get_parameter(parameter.index as i32),
+                );
             }
         }
         super::runtime_state::PluginBackend::Vst3 { instance, .. } => {
             for parameter in cache.iter_mut() {
                 if let Ok(value) = instance.get_parameter(parameter.index) {
-                    parameter.value = value.clamp(0.0, 1.0);
+                    parameter.value = super::plugin_host::normalized_parameter_value(value);
                 }
             }
         }
@@ -156,6 +160,14 @@ impl AudioEngine {
                 .map_err(AudioError::Message);
         }
 
+        if self.game_mode.load(Ordering::Acquire) {
+            self.deferred_save.store(true, Ordering::Release);
+            return self.persist_live_parameters();
+        }
+        // Preserve accepted values even if callback progress or native capture
+        // subsequently fails. The sidecar is removed only after the barrier.
+        self.persist_live_parameters()?;
+        let maintenance = self.begin_maintenance()?;
         let Some(_lifecycle_guard) = self.lifecycle_gate.try_lock() else {
             return Err(AudioError::Message(
                 "An audio start/reload/stop operation is already in progress".into(),
@@ -166,34 +178,25 @@ impl AudioEngine {
             let runtime = runtime_guard
                 .as_mut()
                 .ok_or_else(|| AudioError::Message("Audio not started".into()))?;
-            runtime._stream.pause().map_err(|error| {
-                AudioError::Message(format!("Failed to pause audio for VST state save: {error}"))
-            })?;
             (runtime.plugin.clone(), runtime.vst_plugin.clone())
         };
 
         let plugin_for_main = plugin.clone();
         let (tx, rx) = mpsc::sync_channel(1);
         let scheduled = app_handle.run_on_main_thread(move || {
-            save_vst_state_blocking(&plugin_for_main, &vst_plugin);
-            let _ = tx.send(());
+            let _maintenance = maintenance;
+            let result = super::state_codec::save_vst_state_checked(&plugin_for_main, &vst_plugin);
+            let _ = tx.send(result);
         });
-        let saved = match scheduled {
+        match scheduled {
             Ok(()) => rx
                 .recv_timeout(std::time::Duration::from_secs(5))
-                .map_err(|_| AudioError::Message("Timed out saving VST state".into())),
+                .map_err(|_| AudioError::Message("Timed out saving VST state".into()))
+                .and_then(|result| result.map_err(AudioError::Message)),
             Err(_) => Err(AudioError::Message(
                 "Failed to schedule VST state save on main thread".into(),
             )),
-        };
-        if let Some(runtime) = self.runtime.lock().as_mut() {
-            if let Err(error) = runtime._stream.play() {
-                return Err(AudioError::Message(format!(
-                    "Failed to resume audio after VST state save: {error}"
-                )));
-            }
         }
-        saved
     }
 
     pub fn stop(&self, app_handle: Option<tauri::AppHandle>) {
@@ -232,6 +235,37 @@ impl AudioEngine {
             .store(false, Ordering::Relaxed);
 
         if let Some(runtime) = runtime {
+            self.editor_open.store(false, Ordering::Release);
+            runtime
+                .telemetry
+                .editor_open
+                .store(false, Ordering::Release);
+            let values = {
+                let changes = self.live_parameters.lock();
+                let cache = runtime.parameter_cache.lock();
+                changes
+                    .keys()
+                    .filter_map(|index| cache.get(*index).cloned())
+                    .collect()
+            };
+            if let Err(error) =
+                super::game_mode::persist_parameter_snapshot(&runtime.vst_plugin, values)
+            {
+                background_log(
+                    "error",
+                    format!("Failed to preserve accepted VST parameters before shutdown: {error}"),
+                );
+            }
+            let parameters_applied = match super::game_mode::wait_for_parameters(
+                &runtime.telemetry,
+                std::time::Duration::from_secs(5),
+            ) {
+                Ok(()) => true,
+                Err(error) => {
+                    background_log("warn", format!("Native shutdown capture deferred; live parameter snapshot retained: {error}"));
+                    false
+                }
+            };
             if retain_audio_device {
                 retained_device = Some(RetainedAudioDevice {
                     device: runtime._device.clone(),
@@ -239,6 +273,12 @@ impl AudioEngine {
                     name: runtime.device.clone(),
                     id: runtime.device_id.clone(),
                 });
+            }
+            if let Err(error) = runtime._stream.pause() {
+                background_log(
+                    "warn",
+                    format!("Failed to pause audio stream during shutdown: {error}"),
+                );
             }
             let plugin = runtime.plugin.clone();
             let vst_path = runtime.vst_path.clone();
@@ -250,7 +290,8 @@ impl AudioEngine {
             if let Some(handle) = app_handle {
                 let (tx, rx) = mpsc::channel();
                 let scheduled = handle.run_on_main_thread(move || {
-                    if let Some(mut editor_win) = editor_window_arc.lock().take() {
+                    let editor_win = editor_window_arc.lock().take();
+                    if let Some(mut editor_win) = editor_win {
                         match &mut editor_win {
                             EditorWindow::Vst2 { editor, hwnd } => {
                                 editor.close();
@@ -294,28 +335,25 @@ impl AudioEngine {
                 std::mem::forget(editor_win);
             }
 
-            if let Err(error) = runtime._stream.pause() {
-                background_log(
-                    "warn",
-                    format!("Failed to pause audio stream during shutdown: {error}"),
-                );
-            }
             reset_all_notes(plugin.clone());
             drop(runtime);
-            if let Some(handle) = app_handle_for_drop.as_ref() {
-                let plugin_for_save = plugin.clone();
-                let vst_plugin_for_save = vst_plugin.clone();
-                let (tx, rx) = mpsc::sync_channel(1);
-                let scheduled = handle.run_on_main_thread(move || {
-                    save_vst_state_blocking(&plugin_for_save, &vst_plugin_for_save);
-                    let _ = tx.send(());
-                });
-                if scheduled.is_err() || rx.recv_timeout(std::time::Duration::from_secs(5)).is_err()
-                {
-                    background_log("warn", "Timed out saving VST state on the main thread");
+            if parameters_applied {
+                if let Some(handle) = app_handle_for_drop.as_ref() {
+                    let plugin_for_save = plugin.clone();
+                    let vst_plugin_for_save = vst_plugin.clone();
+                    let (tx, rx) = mpsc::sync_channel(1);
+                    let scheduled = handle.run_on_main_thread(move || {
+                        save_vst_state_blocking(&plugin_for_save, &vst_plugin_for_save);
+                        let _ = tx.send(());
+                    });
+                    if scheduled.is_err()
+                        || rx.recv_timeout(std::time::Duration::from_secs(5)).is_err()
+                    {
+                        background_log("warn", "Timed out saving VST state on the main thread");
+                    }
+                } else {
+                    save_vst_state_blocking(&plugin, &vst_plugin);
                 }
-            } else {
-                save_vst_state_blocking(&plugin, &vst_plugin);
             }
             if quarantine_destructor {
                 background_log(
@@ -424,6 +462,9 @@ impl AudioEngine {
             ));
         };
         let retained_device = self.stop_locked(Some(logger.app_handle()), true);
+        self.game_mode.store(settings.game_mode, Ordering::Release);
+        self.deferred_editor.store(0, Ordering::Release);
+        self.deferred_save.store(false, Ordering::Release);
         self.lifecycle_state
             .store(AudioLifecycleState::Loading as u8, Ordering::Release);
 
@@ -623,7 +664,7 @@ impl AudioEngine {
             if attempt > 0 {
                 let delay_ms = ASIO_RETRY_DELAYS_MS[attempt as usize];
                 logger.debug(format!(
-                    "Retrying ASIO device acquisition (attempt {}/{}), waiting {}ms…",
+                    "Retrying ASIO device acquisition (attempt {}/{}), waiting {}msâ€¦",
                     attempt + 1,
                     ASIO_RETRY_DELAYS_MS.len(),
                     delay_ms
@@ -702,11 +743,21 @@ impl AudioEngine {
 
             let dev_name = device.to_string();
             let dev_id = device.id().ok().map(|id| id.to_string());
+            let mut supported_configs = match device.supported_output_configs() {
+                Ok(configs) => configs,
+                Err(e) => {
+                    logger.warn(format!(
+                        "Failed to query supported configs for candidate '{}': {e}",
+                        dev_name
+                    ));
+                    last_err = Some(AudioError::Message(format!(
+                        "Failed to query configs for '{dev_name}': {e}"
+                    )));
+                    continue;
+                }
+            };
 
-            let has_stereo = device
-                .supported_output_configs()
-                .map_err(|e| AudioError::Message(e.to_string()))?
-                .any(|cfg| cfg.channels() >= 2);
+            let has_stereo = supported_configs.any(|cfg| cfg.channels() >= 2);
 
             if !has_stereo {
                 logger.info(format!(
@@ -775,7 +826,7 @@ impl AudioEngine {
 
                     if err_str.contains("no longer available") || err_str.contains("unplugged") {
                         logger.warn(format!(
-                            "Device '{}' reported unavailable (attempt {}). Retrying…",
+                            "Device '{}' reported unavailable (attempt {}). Retryingâ€¦",
                             dev_name,
                             attempt + 1
                         ));
@@ -832,7 +883,15 @@ impl AudioEngine {
                 active_device, error
             ))
         })?;
-        restore_vst_state_thread_affine(&plugin, &parameter_cache, &vst_probe, &logger)?;
+        let restored =
+            restore_vst_state_thread_affine(&plugin, &parameter_cache, &vst_probe, &logger)?;
+        super::game_mode::queue_restored_parameters(
+            &parameter_tx,
+            &parameter_cache.lock(),
+            &restored,
+            &telemetry,
+        )?;
+        *self.live_parameters.lock() = restored;
         #[cfg(all(target_os = "windows", target_pointer_width = "64"))]
         let is_x86_bridge = matches!(
             &*plugin.lock(),
@@ -876,6 +935,7 @@ impl AudioEngine {
             vst_plugin: vst_probe.clone(),
         };
 
+        self.health_telemetry.store(Some(runtime.telemetry.clone()));
         *self.last_vst.lock() = Some(vst_path);
         self.midi_tx
             .store(Some(Arc::new(super::engine::MidiIngress::new(

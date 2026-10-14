@@ -62,7 +62,7 @@ pub struct FrontendLogger {
 
 impl FrontendLogger {
     pub fn new(window: Window, dev_enabled: Arc<AtomicBool>) -> Self {
-        ensure_file_logger();
+        let _ = &*LOG_DISPATCH;
         // Sync global state on init
         set_global_dev_mode(dev_enabled.load(Ordering::Relaxed));
         Self {
@@ -95,31 +95,66 @@ impl FrontendLogger {
         if !LOGS_ENABLED.load(Ordering::Relaxed) {
             return;
         }
-        let msg = message.into();
-        let event = LogEvent::new(level, msg.clone());
         let dev = self.dev_enabled.load(Ordering::Relaxed);
-        let log_all = LOG_ALL_TO_FILE.load(Ordering::Relaxed);
-
-        // Update global state just in case
         if dev != GLOBAL_DEV_MODE.load(Ordering::Relaxed) {
             set_global_dev_mode(dev);
         }
+        dispatch_log(LogJob {
+            level: level.into(),
+            message: message.into(),
+            window: Some((
+                self.window.app_handle().clone(),
+                self.window.label().to_owned(),
+            )),
+            dev,
+        });
+    }
+}
 
-        if level != "debug" || dev {
-            let _ = self.window.emit("log:entry", event);
-        }
-
-        // Write to file only if dev mode is enabled OR log_all is enabled OR if it's an error/warn
-        if dev || log_all || level == "error" || level == "warn" {
-            append_file_log(level, &msg);
-        }
-
-        match level {
-            "error" => log::error!("{msg}"),
-            "warn" => log::warn!("{msg}"),
-            "debug" => log::debug!("{msg}"),
-            _ => log::info!("{msg}"),
-        }
+struct LogJob {
+    level: String,
+    message: String,
+    window: Option<(tauri::AppHandle, String)>,
+    dev: bool,
+}
+pub static DROPPED_LOGS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static LOG_DISPATCH: LazyLock<crossbeam_channel::Sender<LogJob>> = LazyLock::new(|| {
+    let (tx, rx) = crossbeam_channel::bounded::<LogJob>(256);
+    std::thread::Builder::new()
+        .name("diagnostic-logs".into())
+        .spawn(move || {
+            ensure_file_logger();
+            for job in rx {
+                if let Some((app, label)) = job.window {
+                    if job.level != "debug" || job.dev {
+                        let _ = app.emit_to(
+                            label,
+                            "log:entry",
+                            LogEvent::new(&job.level, job.message.clone()),
+                        );
+                    }
+                }
+                if job.dev
+                    || LOG_ALL_TO_FILE.load(Ordering::Relaxed)
+                    || job.level == "error"
+                    || job.level == "warn"
+                {
+                    append_file_log(&job.level, &job.message);
+                }
+                match job.level.as_str() {
+                    "error" => log::error!("{}", job.message),
+                    "warn" => log::warn!("{}", job.message),
+                    "debug" => log::debug!("{}", job.message),
+                    _ => log::info!("{}", job.message),
+                }
+            }
+        })
+        .expect("diagnostic logging thread");
+    tx
+});
+fn dispatch_log(job: LogJob) {
+    if LOG_DISPATCH.try_send(job).is_err() {
+        DROPPED_LOGS.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -144,22 +179,12 @@ pub fn background_log(level: &str, message: impl Into<String>) {
     if !LOGS_ENABLED.load(Ordering::Relaxed) {
         return;
     }
-    ensure_file_logger();
-    let msg = message.into();
-
-    // Write to file only if dev mode is enabled OR log_all is enabled OR if it's an error/warn
-    let dev = GLOBAL_DEV_MODE.load(Ordering::Relaxed);
-    let log_all = LOG_ALL_TO_FILE.load(Ordering::Relaxed);
-    if dev || log_all || level == "error" || level == "warn" {
-        append_file_log(level, &msg);
-    }
-
-    match level {
-        "error" => log::error!("{msg}"),
-        "warn" => log::warn!("{msg}"),
-        "debug" => log::debug!("{msg}"),
-        _ => log::info!("{msg}"),
-    }
+    dispatch_log(LogJob {
+        level: level.into(),
+        message: message.into(),
+        window: None,
+        dev: GLOBAL_DEV_MODE.load(Ordering::Relaxed),
+    });
 }
 
 pub fn clear_log_file() -> Result<(), String> {

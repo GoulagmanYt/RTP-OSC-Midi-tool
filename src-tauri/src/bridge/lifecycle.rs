@@ -7,6 +7,7 @@ use super::{
     runtime::{BridgeRuntime, RtpConfigSnapshot},
     status::build_initial_status,
 };
+use crate::midi_queue::Sender;
 use crate::{
     audio::AudioEngine,
     config::{Config, RTP_VIRTUAL_INPUT},
@@ -17,7 +18,6 @@ use crate::{
     rtp::RtpServer,
     types::{MidiNoteEvent, RtpParticipantInfo},
 };
-use crossbeam_channel::Sender;
 use parking_lot::Mutex;
 use std::{
     sync::{
@@ -51,6 +51,7 @@ pub(super) fn sync_rtp(
     force_restart: bool,
     rtp_output: &crate::rtp::rtp_output::RtpOutputRoute,
 ) -> Result<(), String> {
+    rtp_output.set_thru_enabled(config.rtp.thru_enabled);
     let should_run = rtp_requested(config);
     let mut server_guard = rtp_server.lock();
     let mut config_guard = rtp_config.lock();
@@ -84,7 +85,6 @@ pub(super) fn sync_rtp(
                 logger.clone(),
             )?;
             let bound_port = server.bound_port();
-            let advertisement = server.advertisement_status();
             *config_guard = Some(RtpConfigSnapshot {
                 name: config.rtp.session_name.clone(),
                 requested_port: config.rtp.port,
@@ -92,7 +92,6 @@ pub(super) fn sync_rtp(
                 remote_enabled: config.rtp.remote_enabled,
                 remote_targets,
                 log_rtp: config.rtp.log_messages,
-                advertisement,
             });
             rtp_output.set(Some(server.outgoing()));
             *server_guard = Some(server);
@@ -123,13 +122,18 @@ pub(super) fn start_runtime(
     rtp_output: crate::rtp::rtp_output::RtpOutputRoute,
 ) -> Result<BridgeRuntime, String> {
     let logger = FrontendLogger::new(window.clone(), dev_logging);
-    let osc = OscClient::new(&config.osc.target_ip, config.osc.target_port)?;
+    let osc = OscClient::for_config(
+        config.osc.enabled,
+        &config.osc.target_ip,
+        config.osc.target_port,
+    )?;
     let wants_rtp = rtp_requested(&config);
     let mut status = build_initial_status(&config, &audio, wants_rtp);
 
-    use crossbeam_channel::bounded;
+    use crate::midi_queue::bounded;
     let stop = Arc::new(AtomicBool::new(false));
     let (midi_tx, midi_rx) = bounded::<MidiFrame>(BRIDGE_MIDI_QUEUE_CAPACITY);
+    super::pipeline::prepare_input_routing(&midi_tx, &config);
     let (midi_event_tx, midi_event_rx) = bounded::<MidiNoteEvent>(1024);
     let shared_config = Arc::new(Mutex::new(config.clone()));
     let config_rev = Arc::new(AtomicU64::new(1));
@@ -252,6 +256,9 @@ pub(super) fn stop_runtime(
     let config_for_reset = runtime.config.lock().clone();
     rtp_sink.store(None);
     runtime.stop.store(true, Ordering::Relaxed);
+    if let Some(server) = runtime.reliable_playback {
+        server.stop();
+    }
     if let Some(server) = runtime.osc_input {
         server.stop();
     }
@@ -266,9 +273,6 @@ pub(super) fn stop_runtime(
     }
     if let Some(handle) = runtime.midi_event_emitter {
         let _ = handle.join();
-    }
-    if let Some(server) = runtime.reliable_playback {
-        server.stop();
     }
     if config_for_reset.osc.enabled {
         if let Ok(osc) = OscClient::new(

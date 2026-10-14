@@ -55,10 +55,10 @@ use crate::{
 };
 
 use super::{
-    callback_midi::midi_to_rack_event,
+    callback_midi::{midi_to_rack_event, MidiBlockTiming},
     plugin_host::{load_plugin_backend, set_active_vst2_editor_window, VST2_RESIZE_MESSAGE},
     runtime_state::{MidiPacket, PluginBackend, Vst2EventBatch, MIDI_EVENT_BATCH_CAPACITY},
-    state_codec::{load_vst_state, save_vst_state_blocking},
+    state_codec::{load_vst_state, save_vst_state_checked},
 };
 
 #[cfg(target_pointer_width = "64")]
@@ -82,7 +82,7 @@ fn merge_parameter_commands(
 }
 
 const BRIDGE_MAGIC: u32 = 0x4F53_4342;
-const BRIDGE_VERSION: u32 = 5;
+const BRIDGE_VERSION: u32 = 7;
 const BRIDGE_SLOTS: usize = 3;
 const BRIDGE_MAX_FRAMES: usize = 8192;
 const BRIDGE_MAX_CHANNELS: usize = 64;
@@ -98,6 +98,7 @@ const COMMAND_NONE: u32 = 0;
 const COMMAND_OPEN_EDITOR: u32 = 1;
 const COMMAND_CLOSE_EDITOR: u32 = 2;
 const COMMAND_SAVE_STATE: u32 = 3;
+const COMMAND_PREPARE_LIVE_RESTORE: u32 = 4;
 const COMMAND_PENDING: u32 = 1;
 const COMMAND_OK: u32 = 2;
 const COMMAND_FAILED: u32 = 3;
@@ -115,11 +116,14 @@ thread_local! {
 // healthy legacy plug-ins to be restarted after ordinary scheduling spikes.
 // Keep the callback non-blocking, but require a sustained two-second DSP stall
 // before declaring the isolated process unhealthy.
-const BRIDGE_STALL_BUDGET_MS: u64 = 2_000;
+const BRIDGE_STALL_BUDGET_MS: u64 = 5_000;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct BridgeMidiEvent {
+    ingress_qpc: u64,
+    worker_qpc: u64,
+    consumed_qpc: u64,
     data: [u8; 3],
     len: u8,
     sample_offset: u32,
@@ -133,6 +137,9 @@ fn write_panic_events(events: &mut [BridgeMidiEvent; BRIDGE_MAX_MIDI]) -> usize 
                 return event_count;
             };
             *event = BridgeMidiEvent {
+                ingress_qpc: 0,
+                worker_qpc: 0,
+                consumed_qpc: 0,
                 data: [0xB0 | channel, controller, 0],
                 len: 3,
                 sample_offset: 0,
@@ -186,6 +193,7 @@ struct BridgeShared {
     version: u32,
     token: u64,
     server_status: AtomicU32,
+    editor_open: AtomicU32,
     shutdown: AtomicU32,
     input_channels: AtomicU32,
     output_channels: AtomicU32,
@@ -345,6 +353,7 @@ pub(super) struct RemotePlugin {
     sample_rate: u32,
     panic_pending: bool,
     pending_parameter_changes: Vec<super::runtime_state::ParameterCommand>,
+    parameter_sequences: [u64; BRIDGE_SLOTS],
     consecutive_missed_frames: u64,
     parameter_cache: Vec<crate::types::VstParameter>,
     last_output_samples: [f32; BRIDGE_MAX_CHANNELS],
@@ -434,6 +443,7 @@ impl RemotePlugin {
                 SERVER_FAILED => {
                     let reason = mapping_error(mapping.get());
                     let _ = child.kill();
+                    let _ = child.wait();
                     let _ = unsafe { CloseHandle(request_event) };
                     return Err(reason);
                 }
@@ -447,6 +457,7 @@ impl RemotePlugin {
             }
             if Instant::now() >= deadline {
                 let _ = child.kill();
+                let _ = child.wait();
                 let _ = unsafe { CloseHandle(request_event) };
                 return Err("VST x86 DSP worker timed out during startup".to_string());
             }
@@ -478,6 +489,7 @@ impl RemotePlugin {
             .collect();
         if output_channels == 0 || output_channels > BRIDGE_MAX_CHANNELS {
             let _ = child.kill();
+            let _ = child.wait();
             let _ = unsafe { CloseHandle(request_event) };
             return Err(format!(
                 "Unsupported x86 plugin output count: {output_channels}"
@@ -494,6 +506,7 @@ impl RemotePlugin {
             sample_rate,
             panic_pending: false,
             pending_parameter_changes: Vec::with_capacity(BRIDGE_MAX_PARAMETER_CHANGES),
+            parameter_sequences: [0; BRIDGE_SLOTS],
             consecutive_missed_frames: 0,
             parameter_cache,
             last_output_samples: [0.0; BRIDGE_MAX_CHANNELS],
@@ -512,6 +525,10 @@ impl RemotePlugin {
         self.latency_samples
     }
 
+    pub(super) fn parameter_capacity(&self) -> usize {
+        BRIDGE_MAX_PARAMETER_CHANGES.saturating_sub(self.pending_parameter_changes.len())
+    }
+
     pub(super) fn parameters(&self) -> &[crate::types::VstParameter] {
         &self.parameter_cache
     }
@@ -522,6 +539,7 @@ impl RemotePlugin {
         parameters: &[super::runtime_state::ParameterCommand],
         outputs: &mut [Vec<f32>],
         frames: usize,
+        telemetry: Option<&super::runtime_state::AudioTelemetry>,
     ) -> bool {
         if frames == 0 || frames > BRIDGE_MAX_FRAMES {
             return false;
@@ -531,9 +549,16 @@ impl RemotePlugin {
         let shared = self.mapping.get_mut();
         let expected_sequence = self.next_sequence.saturating_sub(1);
         let mut rendered = false;
-        for slot in &shared.slots {
+        for (slot_index, slot) in shared.slots.iter().enumerate() {
             if slot.state.load(Ordering::Acquire) != SLOT_READY {
                 continue;
+            }
+            if let Some(telemetry) = telemetry {
+                // DSP completion is independent of whether its audio block is
+                // still useful (late results and frame-size changes included).
+                telemetry
+                    .parameter_applied_sequence
+                    .fetch_max(self.parameter_sequences[slot_index], Ordering::Release);
             }
             let sequence = slot.sequence.load(Ordering::Acquire);
             if sequence < expected_sequence {
@@ -554,6 +579,21 @@ impl RemotePlugin {
                     [channel * BRIDGE_MAX_FRAMES..channel * BRIDGE_MAX_FRAMES + frames];
                 output[..frames].copy_from_slice(source);
                 self.last_output_samples[channel] = source[frames.saturating_sub(1)];
+            }
+            if let Some(telemetry) = telemetry {
+                for event in slot
+                    .events
+                    .iter()
+                    .take(slot.event_count.load(Ordering::Relaxed) as usize)
+                {
+                    if event.ingress_qpc != 0 && event.consumed_qpc != 0 {
+                        telemetry.record_midi_delivery_at(
+                            event.ingress_qpc,
+                            event.worker_qpc,
+                            event.consumed_qpc,
+                        );
+                    }
+                }
             }
             slot.state.store(SLOT_EMPTY, Ordering::Release);
             rendered = true;
@@ -580,7 +620,7 @@ impl RemotePlugin {
             if bridge_stall_budget_exceeded(self.consecutive_missed_frames, self.sample_rate) {
                 set_mapping_error(
                     shared,
-                    "x86 DSP bridge produced no completed block for 2000 ms",
+                    "x86 DSP bridge produced no completed block for 5000 ms",
                 );
             }
         } else if rendered {
@@ -591,30 +631,31 @@ impl RemotePlugin {
             }
         }
 
-        if let Some(slot) = shared
+        if let Some((slot_index, slot)) = shared
             .slots
             .iter_mut()
-            .find(|slot| slot.state.load(Ordering::Acquire) == SLOT_EMPTY)
+            .enumerate()
+            .find(|(_, slot)| slot.state.load(Ordering::Acquire) == SLOT_EMPTY)
         {
             let mut event_count = 0usize;
             if self.panic_pending {
-                midi.clear();
                 event_count = write_panic_events(&mut slot.events);
                 self.panic_pending = false;
-            } else {
-                while event_count < BRIDGE_MAX_MIDI {
-                    let Some(packet) = midi.pop_front() else {
-                        break;
-                    };
-                    slot.events[event_count] = BridgeMidiEvent {
-                        data: packet.data,
-                        len: packet.len,
-                        sample_offset: bridge_sample_offset(packet, frames, self.sample_rate),
-                    };
-                    event_count += 1;
-                }
             }
-            let parameter_count = self.pending_parameter_changes.len();
+            event_count = write_bridge_midi_events(
+                &mut slot.events,
+                midi,
+                event_count,
+                MidiBlockTiming::new(
+                    frames,
+                    self.sample_rate,
+                    super::runtime_state::monotonic_us(),
+                ),
+            );
+            let parameter_count = self
+                .pending_parameter_changes
+                .len()
+                .min(BRIDGE_MAX_PARAMETER_CHANGES);
             for (target, source) in slot
                 .parameter_changes
                 .iter_mut()
@@ -634,6 +675,12 @@ impl RemotePlugin {
                 .store(event_count as u32, Ordering::Relaxed);
             slot.parameter_change_count
                 .store(parameter_count as u32, Ordering::Relaxed);
+            self.parameter_sequences[slot_index] = self
+                .pending_parameter_changes
+                .iter()
+                .map(|command| command.sequence)
+                .max()
+                .unwrap_or(0);
             self.pending_parameter_changes.clear();
             slot.sequence.store(self.next_sequence, Ordering::Relaxed);
             self.next_sequence = self.next_sequence.wrapping_add(1).max(1);
@@ -649,6 +696,41 @@ impl RemotePlugin {
         self.panic_pending = true;
     }
 
+    pub(super) fn prepare_live_parameter_restore(
+        &mut self,
+        indices: &[usize],
+    ) -> Result<(), String> {
+        for chunk in indices.chunks(BRIDGE_MAX_PARAMETER_CHANGES) {
+            let slot = &mut self.mapping.get_mut().slots[0];
+            for (target, &index) in slot.parameter_changes.iter_mut().zip(chunk) {
+                target.index = u32::try_from(index)
+                    .map_err(|_| "Invalid restored parameter index".to_string())?;
+            }
+            slot.parameter_change_count
+                .store(chunk.len() as u32, Ordering::Release);
+            self.control_command(COMMAND_PREPARE_LIVE_RESTORE, "prepare live restoration")?;
+        }
+        self.mapping.get().slots[0]
+            .parameter_change_count
+            .store(0, Ordering::Release);
+        Ok(())
+    }
+
+    pub(super) fn editor_open(&self) -> bool {
+        self.mapping.get().editor_open.load(Ordering::Acquire) != 0
+    }
+
+    pub(super) fn realtime_health(&self) -> (u32, u32, bool) {
+        let shared = self.mapping.get();
+        (
+            shared.underruns.load(Ordering::Relaxed),
+            shared.overruns.load(Ordering::Relaxed),
+            shared.server_status.load(Ordering::Acquire) == SERVER_READY
+                && shared.shutdown.load(Ordering::Acquire) == 0,
+        )
+    }
+
+    #[cfg(test)]
     pub(super) fn telemetry(&mut self) -> (u32, u32, bool) {
         let shared = self.mapping.get();
         let process_alive = self
@@ -666,26 +748,6 @@ impl RemotePlugin {
         )
     }
 
-    pub(super) fn fault_reason(&mut self) -> Option<String> {
-        let shared = self.mapping.get();
-        if shared.server_status.load(Ordering::Acquire) == SERVER_FAILED {
-            return Some(mapping_error(shared));
-        }
-        if shared.shutdown.load(Ordering::Acquire) != 0 {
-            let reason = mapping_error(shared);
-            return Some(if shared.error_len.load(Ordering::Acquire) == 0 {
-                "x86 DSP worker requested shutdown after a processing failure".to_string()
-            } else {
-                reason
-            });
-        }
-        match self.child.try_wait() {
-            Ok(Some(status)) => Some(format!("x86 DSP worker exited: {status}")),
-            Err(error) => Some(format!("cannot query x86 DSP worker: {error}")),
-            Ok(None) => None,
-        }
-    }
-
     pub(super) fn open_editor(&mut self) -> Result<(), String> {
         self.control_command(COMMAND_OPEN_EDITOR, "editor")
     }
@@ -695,6 +757,8 @@ impl RemotePlugin {
     }
 
     pub(super) fn save_state(&mut self) -> Result<(), String> {
+        // The DSP owner drains accepted slots before capture and retains their
+        // results, including on capture failure. Keep the pipeline sequence.
         self.control_command(COMMAND_SAVE_STATE, "state save")
     }
 
@@ -726,6 +790,9 @@ impl RemotePlugin {
             }
             if Instant::now() >= deadline {
                 shared.command.store(COMMAND_NONE, Ordering::Release);
+                shared
+                    .command_status
+                    .store(COMMAND_FAILED, Ordering::Release);
                 return Err(format!("x86 {operation} command timed out"));
             }
             std::thread::sleep(Duration::from_millis(10));
@@ -734,19 +801,27 @@ impl RemotePlugin {
 }
 
 #[cfg(target_pointer_width = "64")]
-fn bridge_sample_offset(packet: MidiPacket, frames: usize, sample_rate: u32) -> u32 {
-    let period_us = (frames as u64)
-        .saturating_mul(1_000_000)
-        .checked_div(u64::from(sample_rate.max(1)))
-        .unwrap_or(0);
-    let block_start = super::runtime_state::monotonic_us().saturating_sub(period_us);
-    packet
-        .timestamp_us
-        .saturating_sub(block_start)
-        .saturating_mul(u64::from(sample_rate))
-        .checked_div(1_000_000)
-        .unwrap_or(0)
-        .min(frames.saturating_sub(1) as u64) as u32
+fn write_bridge_midi_events(
+    events: &mut [BridgeMidiEvent; BRIDGE_MAX_MIDI],
+    midi: &mut VecDeque<MidiPacket>,
+    mut event_count: usize,
+    mut timing: MidiBlockTiming,
+) -> usize {
+    while event_count < BRIDGE_MAX_MIDI {
+        let Some(packet) = midi.pop_front() else {
+            break;
+        };
+        events[event_count] = BridgeMidiEvent {
+            ingress_qpc: packet.ingress_qpc,
+            worker_qpc: packet.worker_qpc,
+            consumed_qpc: 0,
+            data: packet.data,
+            len: packet.len,
+            sample_offset: timing.offset(packet.timestamp_us),
+        };
+        event_count += 1;
+    }
+    event_count
 }
 
 #[cfg(target_pointer_width = "64")]
@@ -1013,7 +1088,14 @@ fn open_remote_editor(
             editor.idle();
             let settled_size = editor.size();
             if settled_size != (width, height) {
-                resize_remote_editor_to_client(hwnd, settled_size.0, settled_size.1)?;
+                if let Err(error) =
+                    resize_remote_editor_to_client(hwnd, settled_size.0, settled_size.1)
+                {
+                    editor.close();
+                    set_active_vst2_editor_window(None);
+                    let _ = unsafe { DestroyWindow(hwnd) };
+                    return Err(error);
+                }
             }
             *current = Some(RemoteEditor::Vst2 { editor, hwnd });
             Ok(())
@@ -1021,9 +1103,16 @@ fn open_remote_editor(
         PluginBackend::Vst3 { instance, .. } => {
             let mut gui = Box::new(instance.create_gui().map_err(|error| error.to_string())?);
             let hwnd = create_remote_editor_window("VST3 x86 Editor")?;
-            gui.attach(hwnd.0).map_err(|error| error.to_string())?;
-            let (width, height) = gui.size().map_err(|error| error.to_string())?;
-            resize_remote_editor_to_client(hwnd, width.round() as i32, height.round() as i32)?;
+            let setup = (|| {
+                gui.attach(hwnd.0).map_err(|error| error.to_string())?;
+                let (width, height) = gui.size().map_err(|error| error.to_string())?;
+                resize_remote_editor_to_client(hwnd, width.round() as i32, height.round() as i32)?;
+                Ok(())
+            })();
+            if let Err(error) = setup {
+                let _ = unsafe { DestroyWindow(hwnd) };
+                return Err(error);
+            }
             unsafe {
                 let _ = ShowWindow(hwnd, SW_SHOW);
                 let _ = SetForegroundWindow(hwnd);
@@ -1152,13 +1241,16 @@ fn run_dsp_server(args: DspArgs, logger: FrontendLogger) -> Result<(), String> {
     let mut rack_events = Vec::with_capacity(BRIDGE_MAX_MIDI);
     let mut editor = None;
 
+    let _dsp_priority = super::windows_tuning::prioritize_dsp_thread();
     while mapping.get().shutdown.load(Ordering::Acquire) == 0 {
         let _ = unsafe { WaitForSingleObject(request_event, 50) };
         if mapping.get().shutdown.load(Ordering::Acquire) != 0 {
             break;
         }
         pump_remote_editor(&mut editor);
+        let mut internal_state_save = false;
         if REMOTE_EDITOR_CLOSE_REQUESTED.swap(false, Ordering::AcqRel) {
+            mapping.get().editor_open.store(0, Ordering::Release);
             if mapping
                 .get()
                 .command
@@ -1174,18 +1266,15 @@ fn run_dsp_server(args: DspArgs, logger: FrontendLogger) -> Result<(), String> {
                     .get()
                     .command_status
                     .store(COMMAND_PENDING, Ordering::Release);
-                save_vst_state_blocking(&plugin, &selected_probe);
-                mapping
-                    .get()
-                    .command_status
-                    .store(COMMAND_OK, Ordering::Release);
-                mapping.get().command.store(COMMAND_NONE, Ordering::Release);
+                // Capture below, after all accepted DSP requests have run.
+                internal_state_save = true;
             } else {
                 REMOTE_EDITOR_CLOSE_REQUESTED.store(true, Ordering::Release);
             }
         }
         let command = mapping.get().command.load(Ordering::Acquire);
         if command != COMMAND_NONE
+            && command != COMMAND_SAVE_STATE
             && mapping.get().command_status.load(Ordering::Acquire) == COMMAND_PENDING
         {
             let result = match command {
@@ -1194,20 +1283,43 @@ fn run_dsp_server(args: DspArgs, logger: FrontendLogger) -> Result<(), String> {
                     close_remote_editor(&mut editor);
                     Ok(())
                 }
-                COMMAND_SAVE_STATE => {
-                    save_vst_state_blocking(&plugin, &selected_probe);
-                    for slot in &mapping.get().slots {
-                        slot.state.store(SLOT_EMPTY, Ordering::Release);
+                COMMAND_PREPARE_LIVE_RESTORE => {
+                    let slot = &mapping.get().slots[0];
+                    let count = slot.parameter_change_count.load(Ordering::Acquire) as usize;
+                    if count > BRIDGE_MAX_PARAMETER_CHANGES {
+                        Err("Invalid restored parameter count".into())
+                    } else {
+                        let indices = slot
+                            .parameter_changes
+                            .iter()
+                            .take(count)
+                            .map(|change| change.index as usize)
+                            .collect::<Vec<_>>();
+                        match &mut *plugin.lock() {
+                            PluginBackend::Vst3 { instance, .. } => instance
+                                .prepare_live_parameter_restore(&indices)
+                                .map_err(|e| e.to_string()),
+                            PluginBackend::Vst2 { .. } => Ok(()),
+                            #[cfg(target_pointer_width = "64")]
+                            PluginBackend::Remote { .. } => Err("Nested bridge unsupported".into()),
+                        }
                     }
-                    Ok(())
                 }
                 _ => Err("unknown x86 control command".to_string()),
             };
             match result {
-                Ok(()) => mapping
-                    .get()
-                    .command_status
-                    .store(COMMAND_OK, Ordering::Release),
+                Ok(()) => {
+                    if command == COMMAND_OPEN_EDITOR {
+                        mapping.get().editor_open.store(1, Ordering::Release);
+                    }
+                    if command == COMMAND_CLOSE_EDITOR {
+                        mapping.get().editor_open.store(0, Ordering::Release);
+                    }
+                    mapping
+                        .get()
+                        .command_status
+                        .store(COMMAND_OK, Ordering::Release);
+                }
                 Err(error) => {
                     set_command_error(mapping.get_mut(), &error);
                     mapping
@@ -1217,53 +1329,34 @@ fn run_dsp_server(args: DspArgs, logger: FrontendLogger) -> Result<(), String> {
                 }
             }
         }
-        loop {
-            let slot_index = (0..BRIDGE_SLOTS)
-                .filter(|index| {
-                    mapping.get().slots[*index].state.load(Ordering::Acquire) == SLOT_REQUESTED
-                })
-                .min_by_key(|index| mapping.get().slots[*index].sequence.load(Ordering::Acquire));
-            let Some(slot_index) = slot_index else {
-                break;
-            };
-            let shared = mapping.get_mut();
-            let slot = &mut shared.slots[slot_index];
-            if slot.state.load(Ordering::Acquire) != SLOT_REQUESTED {
-                continue;
-            }
-            let frames = slot.frames.load(Ordering::Relaxed) as usize;
-            let event_count = slot.event_count.load(Ordering::Relaxed) as usize;
-            let parameter_change_count =
-                slot.parameter_change_count.load(Ordering::Relaxed) as usize;
-            if frames == 0
-                || frames > args.max_block_size
-                || event_count > BRIDGE_MAX_MIDI
-                || parameter_change_count > BRIDGE_MAX_PARAMETER_CHANGES
-            {
-                slot.state.store(SLOT_EMPTY, Ordering::Release);
-                continue;
-            }
-            input_silence[..frames].fill(0.0);
-            let process_result = process_local_plugin(
-                &mut plugin.lock(),
-                slot,
-                frames,
-                event_count,
-                parameter_change_count,
-                &restored_parameter_cache,
-                &input_silence,
-                loaded.input_channels,
-                loaded.output_channels,
-                &mut vst2_events,
-                &mut vst2_batch,
-                &mut rack_events,
-            );
-            if let Err(error) = process_result {
-                background_log("error", format!("x86 DSP bridge process failed: {error}"));
-                mapping.get().shutdown.store(1, Ordering::Release);
-                break;
-            }
-            slot.state.store(SLOT_READY, Ordering::Release);
+        let serviced = service_dsp_cycle(
+            mapping.get_mut(),
+            args.max_block_size,
+            |slot, frames, event_count, parameter_change_count| {
+                input_silence[..frames].fill(0.0);
+                process_local_plugin(
+                    &mut plugin.lock(),
+                    slot,
+                    frames,
+                    event_count,
+                    parameter_change_count,
+                    &restored_parameter_cache,
+                    &input_silence,
+                    loaded.input_channels,
+                    loaded.output_channels,
+                    &mut vst2_events,
+                    &mut vst2_batch,
+                    &mut rack_events,
+                )
+            },
+            || save_vst_state_checked(&plugin, &selected_probe),
+        );
+        if let Err(error) = serviced {
+            background_log("error", format!("x86 DSP bridge process failed: {error}"));
+            mapping.get().shutdown.store(1, Ordering::Release);
+        }
+        if internal_state_save {
+            mapping.get().command.store(COMMAND_NONE, Ordering::Release);
         }
     }
     close_remote_editor(&mut editor);
@@ -1278,7 +1371,9 @@ fn run_dsp_server(args: DspArgs, logger: FrontendLogger) -> Result<(), String> {
         };
         let _ = unsafe { DestroyWindow(hwnd) };
     }
-    save_vst_state_blocking(&plugin, &selected_probe);
+    // Native capture is an explicit parent command after its application
+    // barrier. Destructor/fault cleanup must not overwrite the last valid state
+    // or delete a newer sidecar after the parent deliberately skipped capture.
     if quarantine_destructor {
         background_log(
             "warn",
@@ -1289,6 +1384,60 @@ fn run_dsp_server(args: DspArgs, logger: FrontendLogger) -> Result<(), String> {
         drop(plugin);
     }
     let _ = unsafe { CloseHandle(request_event) };
+    Ok(())
+}
+
+/// One DSP-owner iteration. Native capture follows every previously accepted
+/// request and never invalidates either requested events or completed audio.
+fn service_dsp_cycle(
+    shared: &mut BridgeShared,
+    max_block_size: usize,
+    mut process: impl FnMut(&mut BridgeSlot, usize, usize, usize) -> Result<(), String>,
+    capture: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    loop {
+        let slot_index = (0..BRIDGE_SLOTS)
+            .filter(|index| shared.slots[*index].state.load(Ordering::Acquire) == SLOT_REQUESTED)
+            .min_by_key(|index| shared.slots[*index].sequence.load(Ordering::Acquire));
+        let Some(slot_index) = slot_index else {
+            break;
+        };
+        let slot = &mut shared.slots[slot_index];
+        let frames = slot.frames.load(Ordering::Relaxed) as usize;
+        let event_count = slot.event_count.load(Ordering::Relaxed) as usize;
+        let parameter_count = slot.parameter_change_count.load(Ordering::Relaxed) as usize;
+        if frames == 0
+            || frames > max_block_size
+            || event_count > BRIDGE_MAX_MIDI
+            || parameter_count > BRIDGE_MAX_PARAMETER_CHANGES
+        {
+            slot.state.store(SLOT_EMPTY, Ordering::Release);
+            continue;
+        }
+        if let Err(error) = process(slot, frames, event_count, parameter_count) {
+            if shared.command.load(Ordering::Acquire) == COMMAND_SAVE_STATE {
+                set_command_error(shared, &error);
+                shared
+                    .command_status
+                    .store(COMMAND_FAILED, Ordering::Release);
+            }
+            return Err(error);
+        }
+        slot.state.store(SLOT_READY, Ordering::Release);
+    }
+    if shared.command.load(Ordering::Acquire) == COMMAND_SAVE_STATE
+        && shared.command_status.load(Ordering::Acquire) == COMMAND_PENDING
+    {
+        match capture() {
+            Ok(()) => shared.command_status.store(COMMAND_OK, Ordering::Release),
+            Err(error) => {
+                set_command_error(shared, &error);
+                shared
+                    .command_status
+                    .store(COMMAND_FAILED, Ordering::Release);
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1383,6 +1532,10 @@ fn process_local_plugin(
     vst2_batch: &mut Vst2EventBatch,
     rack_events: &mut Vec<rack::prelude::MidiEvent>,
 ) -> Result<(), String> {
+    let consumed = crate::vst_worker::protocol::monotonic_qpc();
+    for event in slot.events.iter_mut().take(event_count) {
+        event.consumed_qpc = consumed;
+    }
     match plugin {
         PluginBackend::Vst2 { instance, .. } => {
             use vst::plugin::Plugin as _;
@@ -1558,6 +1711,206 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn bridged_midi_preserves_release_retrigger_order_in_one_sample_timeline() {
+        let mut midi = VecDeque::new();
+        let messages = [
+            ([0x80, 60, 0], 1_005_000),
+            ([0x90, 60, 100], 1_005_000),
+            ([0x80, 60, 0], 1_004_990),
+            ([0x90, 60, 100], 1_006_000),
+        ];
+        for (data, timestamp_us) in messages {
+            let mut packet = MidiPacket::from_bytes(&data).unwrap();
+            packet.timestamp_us = timestamp_us;
+            midi.push_back(packet);
+        }
+        let mut events = [BridgeMidiEvent::default(); BRIDGE_MAX_MIDI];
+        let count = write_bridge_midi_events(
+            &mut events,
+            &mut midi,
+            0,
+            MidiBlockTiming::new(480, 48_000, 1_010_000),
+        );
+        assert_eq!(count, 4);
+        assert!(midi.is_empty());
+        assert_eq!(
+            events[..count]
+                .iter()
+                .map(|e| e.sample_offset)
+                .collect::<Vec<_>>(),
+            [240, 240, 240, 288]
+        );
+        assert_eq!(
+            events[..count].iter().map(|e| e.data).collect::<Vec<_>>(),
+            messages.map(|(data, _)| data)
+        );
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    fn test_mapping() -> Mapping {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let serial = NEXT.fetch_add(1, Ordering::Relaxed);
+        let name = format!("Local\\OSCMIDI-DSP-test-{}-{serial}", std::process::id());
+        Mapping::create(&name, serial, 512, &PrivateKernelSecurity::new().unwrap()).unwrap()
+    }
+
+    // Audit characterization: no native plugin or audio device is loaded.
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn audit_timed_out_x86_control_masks_subsequent_dsp_stall() {
+        use std::os::windows::process::CommandExt;
+        let mapping = test_mapping();
+        mapping
+            .get()
+            .server_status
+            .store(SERVER_READY, Ordering::Release);
+        let request_event = unsafe { CreateEventW(None, false, false, None) }.unwrap();
+        // Already-exited child is only an owned process handle for Drop.
+        // realtime_health, as in production, reads shared state, not try_wait.
+        let mut child = Command::new("cmd.exe")
+            .args(["/d", "/c", "exit", "0"])
+            .creation_flags(0x0800_0000)
+            .spawn()
+            .unwrap();
+        child.wait().unwrap();
+        let mut remote = RemotePlugin {
+            mapping,
+            request_event,
+            child,
+            next_sequence: 1,
+            output_channels: 2,
+            input_channels: 0,
+            latency_samples: 0,
+            sample_rate: 48_000,
+            panic_pending: false,
+            pending_parameter_changes: Vec::with_capacity(BRIDGE_MAX_PARAMETER_CHANGES),
+            parameter_sequences: [0; BRIDGE_SLOTS],
+            consecutive_missed_frames: 0,
+            parameter_cache: Vec::new(),
+            last_output_samples: [0.0; BRIDGE_MAX_CHANNELS],
+        };
+        let error = remote
+            .control_command(COMMAND_OPEN_EDITOR, "audit")
+            .unwrap_err();
+        assert!(error.contains("timed out"));
+        assert_eq!(
+            remote.mapping.get().command.load(Ordering::Acquire),
+            COMMAND_NONE
+        );
+        assert_eq!(
+            remote.mapping.get().command_status.load(Ordering::Acquire),
+            COMMAND_FAILED
+        );
+        let mut midi = VecDeque::new();
+        let mut outputs = vec![vec![0.0; 512]; 2];
+        for _ in 0..500 {
+            remote.process(&mut midi, &[], &mut outputs, 512, None);
+        }
+        assert!(!remote.realtime_health().2);
+        assert!(mapping_error(remote.mapping.get()).contains("5000 ms"));
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn state_capture_drains_requested_notes_in_sequence_and_preserves_results() {
+        for capture_ok in [true, false] {
+            let mut mapping = test_mapping();
+            let shared = mapping.get_mut();
+            shared.command.store(COMMAND_SAVE_STATE, Ordering::Release);
+            shared
+                .command_status
+                .store(COMMAND_PENDING, Ordering::Release);
+            // The lower slot index contains the newer event.
+            for (index, sequence, data) in [(1, 1, [0x80, 60, 0]), (0, 2, [0x90, 60, 100])] {
+                let slot = &mut shared.slots[index];
+                slot.frames.store(512, Ordering::Relaxed);
+                slot.event_count.store(1, Ordering::Relaxed);
+                slot.events[0].data = data;
+                slot.events[0].len = 3;
+                slot.sequence.store(sequence, Ordering::Relaxed);
+                slot.state.store(SLOT_REQUESTED, Ordering::Release);
+            }
+            let held = std::cell::Cell::new(true);
+            let consumed = std::cell::RefCell::new(Vec::new());
+            let captured = std::cell::Cell::new(false);
+            service_dsp_cycle(
+                shared,
+                512,
+                |slot, _, _, _| {
+                    let data = slot.events[0].data;
+                    consumed.borrow_mut().push(data);
+                    held.set(data[0] == 0x90);
+                    Ok(())
+                },
+                || {
+                    assert_eq!(
+                        consumed.borrow().len(),
+                        2,
+                        "capture preceded pending DSP requests"
+                    );
+                    assert!(held.get());
+                    captured.set(true);
+                    if capture_ok {
+                        Ok(())
+                    } else {
+                        Err("capture failed".into())
+                    }
+                },
+            )
+            .unwrap();
+            assert_eq!(*consumed.borrow(), [[0x80, 60, 0], [0x90, 60, 100]]);
+            assert!(held.get());
+            assert!(captured.get());
+            assert_eq!(shared.slots[0].state.load(Ordering::Acquire), SLOT_READY);
+            assert_eq!(shared.slots[1].state.load(Ordering::Acquire), SLOT_READY);
+            assert_eq!(
+                shared.command_status.load(Ordering::Acquire),
+                if capture_ok {
+                    COMMAND_OK
+                } else {
+                    COMMAND_FAILED
+                }
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn state_capture_does_not_run_after_a_failed_dsp_request() {
+        let mut mapping = test_mapping();
+        let shared = mapping.get_mut();
+        shared.command.store(COMMAND_SAVE_STATE, Ordering::Release);
+        shared
+            .command_status
+            .store(COMMAND_PENDING, Ordering::Release);
+        shared.slots[0].frames.store(512, Ordering::Relaxed);
+        shared.slots[0]
+            .state
+            .store(SLOT_REQUESTED, Ordering::Release);
+        let captured = std::cell::Cell::new(false);
+        assert!(service_dsp_cycle(
+            shared,
+            512,
+            |_, _, _, _| Err("DSP failed".into()),
+            || {
+                captured.set(true);
+                Ok(())
+            }
+        )
+        .is_err());
+        assert!(!captured.get());
+        assert_eq!(
+            shared.command_status.load(Ordering::Acquire),
+            COMMAND_FAILED
+        );
+        assert_eq!(
+            shared.slots[0].state.load(Ordering::Acquire),
+            SLOT_REQUESTED
+        );
+    }
+
+    #[test]
     fn shared_bridge_layout_is_versioned_and_bounded() {
         println!(
             "bridge-layout:v{}:shared={}:slot={}:slots_offset={}:slot_outputs_offset={}",
@@ -1575,10 +1928,10 @@ mod tests {
     #[test]
     #[cfg(target_pointer_width = "64")]
     fn bridge_stall_budget_is_based_on_audio_time() {
-        assert!(!bridge_stall_budget_exceeded(95_999, 48_000));
-        assert!(bridge_stall_budget_exceeded(96_000, 48_000));
-        assert!(!bridge_stall_budget_exceeded(88_199, 44_100));
-        assert!(bridge_stall_budget_exceeded(88_200, 44_100));
+        assert!(!bridge_stall_budget_exceeded(239_999, 48_000));
+        assert!(bridge_stall_budget_exceeded(240_000, 48_000));
+        assert!(!bridge_stall_budget_exceeded(220_499, 44_100));
+        assert!(bridge_stall_budget_exceeded(220_500, 44_100));
     }
 
     #[test]
@@ -1588,6 +1941,7 @@ mod tests {
 
         let mut pending = Vec::with_capacity(BRIDGE_MAX_PARAMETER_CHANGES);
         let first = ParameterCommand {
+            sequence: 0,
             index: 7,
             id: 42,
             flags: 0,
@@ -1595,6 +1949,7 @@ mod tests {
             value: 0.25,
         };
         let latest = ParameterCommand {
+            sequence: 0,
             value: 0.75,
             ..first
         };
@@ -1608,6 +1963,7 @@ mod tests {
             merge_parameter_commands(
                 &mut pending,
                 &[ParameterCommand {
+                    sequence: 0,
                     index: index + 100,
                     id: index as u32 + 100,
                     flags: 0,
@@ -1683,7 +2039,7 @@ mod tests {
         let mut outputs = vec![vec![0.0f32; 512]; remote.output_channels()];
         let mut energy = 0.0f32;
         for _ in 0..32 {
-            if remote.process(&mut midi, &[], &mut outputs, 512) {
+            if remote.process(&mut midi, &[], &mut outputs, 512, None) {
                 energy += outputs
                     .iter()
                     .flat_map(|channel| channel.iter())
@@ -1693,7 +2049,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(12));
         }
         midi.push_back(MidiPacket::from_bytes(&[0x80, 60, 0]).expect("note off"));
-        let _ = remote.process(&mut midi, &[], &mut outputs, 512);
+        let _ = remote.process(&mut midi, &[], &mut outputs, 512, None);
         for sequence in 0..10_000u32 {
             let note = 36 + ((sequence / 2) % 48) as u8;
             let bytes: &[u8] = match sequence % 6 {
@@ -1707,7 +2063,7 @@ mod tests {
             midi.push_back(MidiPacket::from_bytes(bytes).expect("stress MIDI event"));
         }
         for _ in 0..24 {
-            let _ = remote.process(&mut midi, &[], &mut outputs, 512);
+            let _ = remote.process(&mut midi, &[], &mut outputs, 512, None);
             std::thread::sleep(Duration::from_millis(12));
         }
         assert!(
@@ -1715,11 +2071,28 @@ mod tests {
             "the x86 bridge did not drain 10,000 MIDI events"
         );
         remote.panic_all_notes();
-        let _ = remote.process(&mut midi, &[], &mut outputs, 512);
+        let _ = remote.process(&mut midi, &[], &mut outputs, 512, None);
         assert!(
             energy.is_finite() && energy > 0.001,
             "bridged VST rendered silence"
         );
         assert!(remote.telemetry().2, "x86 worker should remain alive");
+        let sequence_before_save = remote.next_sequence;
+        let underruns_before_save = remote.telemetry().0;
+        remote.save_state().expect("native save in maintenance");
+        assert_eq!(
+            remote.next_sequence, sequence_before_save,
+            "maintenance must preserve the DSP pipeline sequence"
+        );
+        assert!(
+            remote.process(&mut midi, &[], &mut outputs, 512, None),
+            "the completed DSP block must remain available after maintenance"
+        );
+        assert_eq!(remote.next_sequence, sequence_before_save + 1);
+        assert_eq!(
+            remote.telemetry().0,
+            underruns_before_save,
+            "maintenance must resume the existing pipeline without a new underrun"
+        );
     }
 }

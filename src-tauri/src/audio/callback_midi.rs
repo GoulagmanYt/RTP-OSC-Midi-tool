@@ -15,7 +15,7 @@ use super::runtime_state::{monotonic_us, AudioCallbackState, PluginBackend, RESE
 
 // One origin per block prevents conversion work itself from shifting later events
 // backwards. Clamp regressing ingress timestamps without reordering Note-Off/On.
-struct MidiBlockTiming {
+pub(super) struct MidiBlockTiming {
     start_us: u64,
     sample_rate: u32,
     last_frame: u32,
@@ -23,7 +23,7 @@ struct MidiBlockTiming {
 }
 
 impl MidiBlockTiming {
-    fn new(frames: usize, sample_rate: u32, now_us: u64) -> Self {
+    pub(super) fn new(frames: usize, sample_rate: u32, now_us: u64) -> Self {
         let frames = frames.max(1);
         let period_us = (frames as u64)
             .saturating_mul(1_000_000)
@@ -37,7 +37,7 @@ impl MidiBlockTiming {
         }
     }
 
-    fn offset(&mut self, timestamp_us: u64) -> u32 {
+    pub(super) fn offset(&mut self, timestamp_us: u64) -> u32 {
         let offset = timestamp_us
             .saturating_sub(self.start_us)
             .saturating_mul(u64::from(self.sample_rate))
@@ -114,6 +114,7 @@ pub(super) fn process_pending_vst2_midi(
         let Some(msg) = state.pending_midi.pop_front() else {
             break;
         };
+        state.telemetry.record_midi_delivery(msg);
         let delta_frames = timing.offset(msg.timestamp_us) as i32;
         state.vst2_midi_events.push(api::MidiEvent {
             event_type: api::EventType::Midi,
@@ -150,6 +151,15 @@ pub(super) fn process_pending_vst3_midi(
     state: &mut AudioCallbackState,
     instance: &mut rack::vst3::Vst3Plugin,
 ) -> Result<(), rack::Error> {
+    let available = instance.remaining_midi_capacity();
+    submit_pending_vst3_midi(state, available, |events| instance.send_midi(events))
+}
+
+pub(super) fn submit_pending_vst3_midi(
+    state: &mut AudioCallbackState,
+    available: usize,
+    send: impl FnOnce(&[RackMidiEvent]) -> Result<(), rack::Error>,
+) -> Result<(), rack::Error> {
     if state.pending_midi.is_empty() {
         return Ok(());
     }
@@ -157,19 +167,26 @@ pub(super) fn process_pending_vst3_midi(
     state.midi_events.clear();
     let mut timing = MidiBlockTiming::new(state.last_frames, state.sample_rate, monotonic_us());
     let mut consumed = 0usize;
-    while consumed < state.midi_events.capacity() {
-        let Some(msg) = state.pending_midi.pop_front() else {
-            break;
-        };
-        consumed += 1;
+    let event_limit = available.min(state.midi_events.capacity());
+    // A reset may already occupy part of the backend batch. Keep unadmitted
+    // messages in FIFO order, including when the backend rejects submission.
+    for msg in state.pending_midi.iter().take(state.midi_events.capacity()) {
         if let Some(mut event) = midi_to_rack_event(msg.data) {
+            if state.midi_events.len() == event_limit {
+                break;
+            }
             event.sample_offset = timing.offset(msg.timestamp_us);
             state.midi_events.push(event);
         }
+        consumed += 1;
     }
     if !state.midi_events.is_empty() {
-        instance.send_midi(&state.midi_events)?;
+        let result = send(&state.midi_events);
         state.midi_events.clear();
+        result?;
+    }
+    for msg in state.pending_midi.drain(..consumed) {
+        state.telemetry.record_midi_delivery(msg);
     }
     Ok(())
 }
@@ -183,33 +200,43 @@ pub(super) fn reset_all_notes(plugin: Arc<Mutex<PluginBackend>>) {
 pub(super) fn send_reset_messages(plugin: &mut PluginBackend) {
     match plugin {
         PluginBackend::Vst2 { instance, .. } => {
+            let mut midi_events: [api::MidiEvent; 64] = core::array::from_fn(|_| api::MidiEvent {
+                event_type: api::EventType::Midi,
+                byte_size: std::mem::size_of::<api::MidiEvent>() as i32,
+                delta_frames: 0,
+                flags: MidiEventFlags::REALTIME_EVENT.bits(),
+                note_length: 0,
+                note_offset: 0,
+                midi_data: [0; 3],
+                _midi_reserved: 0,
+                detune: 0,
+                note_off_velocity: 0,
+                _reserved1: 0,
+                _reserved2: 0,
+            });
+            let mut event_ptrs: [*mut api::Event; 64] = [std::ptr::null_mut(); 64];
+            let mut idx = 0;
             for ch in 0..16u8 {
                 for message in reset_messages_for_channel(ch) {
-                    let mut midi_event = api::MidiEvent {
-                        event_type: api::EventType::Midi,
-                        byte_size: std::mem::size_of::<api::MidiEvent>() as i32,
-                        delta_frames: 0,
-                        flags: MidiEventFlags::REALTIME_EVENT.bits(),
-                        note_length: 0,
-                        note_offset: 0,
-                        midi_data: message,
-                        _midi_reserved: 0,
-                        detune: 0,
-                        note_off_velocity: 0,
-                        _reserved1: 0,
-                        _reserved2: 0,
-                    };
-                    let evt = api::Events {
-                        num_events: 1,
-                        _reserved: 0,
-                        events: [
-                            &mut midi_event as *mut api::MidiEvent as *mut api::Event,
-                            std::ptr::null_mut(),
-                        ],
-                    };
-                    instance.process_events(&evt);
+                    midi_events[idx].midi_data = message;
+                    event_ptrs[idx] =
+                        &mut midi_events[idx] as *mut api::MidiEvent as *mut api::Event;
+                    idx += 1;
                 }
             }
+            #[repr(C)]
+            struct ResetBatch {
+                num_events: i32,
+                _reserved: isize,
+                events: [*mut api::Event; 64],
+            }
+            let batch = ResetBatch {
+                num_events: 64,
+                _reserved: 0,
+                events: event_ptrs,
+            };
+            let evt = unsafe { &*(&batch as *const ResetBatch as *const api::Events) };
+            instance.process_events(evt);
         }
         PluginBackend::Vst3 { instance, .. } => {
             for ch in 0..16u8 {

@@ -24,11 +24,19 @@ export function getVstEqKey(audio: AudioConfig, selectedPlugin: VstPluginEntry |
 }
 
 export function frequencyToSlider(frequency: number, minimum: number, maximum: number): number {
-  return (Math.log(frequency / minimum) / Math.log(maximum / minimum)) * 1_000;
+  if (!Number.isFinite(frequency) || frequency <= 0 || minimum <= 0 || maximum <= minimum) {
+    return 0;
+  }
+  const clamped = Math.max(minimum, Math.min(maximum, frequency));
+  return (Math.log(clamped / minimum) / Math.log(maximum / minimum)) * 1_000;
 }
 
 export function sliderToFrequency(value: number, minimum: number, maximum: number): number {
-  return Math.round(minimum * Math.pow(maximum / minimum, value / 1_000));
+  if (!Number.isFinite(value) || minimum <= 0 || maximum <= minimum) {
+    return minimum;
+  }
+  const clamped = Math.max(0, Math.min(1_000, value));
+  return Math.round(minimum * Math.pow(maximum / minimum, clamped / 1_000));
 }
 
 type Biquad = { b0: number; b1: number; b2: number; a1: number; a2: number };

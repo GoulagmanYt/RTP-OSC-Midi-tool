@@ -12,7 +12,7 @@ use crate::{
             audio_settings_from_config, fallback_vst_path, sync_rtp_discovery, sync_runtime_logging,
         },
     },
-    types::{BridgeStatus, PreflightReport, RtpSessionInfo},
+    types::{BridgeStatus, PreflightReport, RtpParticipantInfo, RtpSessionInfo},
 };
 
 use super::service_common::{
@@ -49,6 +49,7 @@ pub fn start_bridge(
     config: Config,
     state: &AppState,
 ) -> Result<BridgeStatus, CommandError> {
+    let _change = state.config_change.lock();
     sync_runtime_logging(&config, &state.dev_logging);
     set_log_all_to_file(config.logging.log_all_to_file);
     set_logs_enabled(config.logging.enabled);
@@ -86,7 +87,9 @@ pub async fn stop_bridge(app: &AppHandle, state: &AppState) -> Result<(), Comman
     let app = app.clone();
     let audio = state.audio.clone();
     let bridge = state.bridge.clone();
+    let config_change = state.config_change.clone();
     ::tauri::async_runtime::spawn_blocking(move || {
+        let _change = config_change.lock();
         // Stop every MIDI producer before removing the audio consumer. This
         // also keeps all blocking thread joins away from Tokio's async worker.
         let bridge_result = bridge.stop();
@@ -104,13 +107,16 @@ pub async fn stop_bridge(app: &AppHandle, state: &AppState) -> Result<(), Comman
 
 pub fn panic_midi(state: &AppState) -> Result<(), CommandError> {
     state
-        .audio
-        .panic_all_notes()
-        .map_err(|err| audio_error("audio.panic-failed", err.to_string()))?;
-    state
         .bridge
         .reset_keys()
-        .map_err(|err| runtime_error("runtime.reset-keys-failed", err))
+        .map_err(|err| runtime_error("runtime.reset-keys-failed", err))?;
+    if let Err(err) = state.audio.panic_all_notes() {
+        let msg = err.to_string();
+        if !msg.contains("Audio runtime not started") {
+            return Err(audio_error("audio.panic-failed", msg));
+        }
+    }
+    Ok(())
 }
 
 pub fn send_test_midi(
@@ -139,17 +145,15 @@ pub fn send_test_midi(
 }
 
 pub fn get_status(window: &Window, state: &AppState) -> BridgeStatus {
+    let _ = window;
     let cfg = state.config_store.load();
     sync_runtime_logging(&cfg, &state.dev_logging);
-    let logger = frontend_logger(window, state);
-    if let Err(err) = state.bridge.sync_rtp(&cfg, &logger, false) {
-        logger.error(format!("RTP not started: {err}"));
-    }
     let status = state.bridge.status(&cfg);
     with_audio_status(status, &state.audio)
 }
 
 pub fn restart_rtp(window: &Window, state: &AppState) -> Result<BridgeStatus, CommandError> {
+    let _guard = state.config_change.lock();
     let cfg = state.config_store.load();
     let logger = frontend_logger(window, state);
     state
@@ -164,46 +168,53 @@ pub fn refresh_rtp_sessions(
     app: &AppHandle,
     state: &AppState,
 ) -> Result<Vec<RtpSessionInfo>, CommandError> {
+    let cfg = state.config_store.load();
+    let local_port = state
+        .bridge
+        .status(&cfg)
+        .rtp_bound_port
+        .unwrap_or(cfg.rtp.port);
+    state
+        .rtp_discovery
+        .set_local_session(cfg.rtp.session_name.clone(), local_port);
+    state.rtp_discovery.start(app.clone());
     state
         .rtp_discovery
         .refresh_now(app, true)
         .map_err(|err| runtime_error("rtp.refresh-sessions-failed", err))
 }
 
-pub fn preflight_check(state: &AppState) -> Result<PreflightReport, CommandError> {
-    let cfg = state.config_store.load();
+pub fn get_rtp_participants(state: &AppState) -> Vec<RtpParticipantInfo> {
+    state.bridge.rtp_participants()
+}
+
+pub fn preflight_check(
+    config: Option<Config>,
+    state: &AppState,
+) -> Result<PreflightReport, CommandError> {
+    let cfg = config.unwrap_or_else(|| state.config_store.load());
     let mut messages = Vec::new();
 
     let midi_inputs = list_midi_inputs()?;
-    let midi_in_ok = cfg
-        .midi
-        .input_device
-        .as_ref()
-        .map(|name| {
-            if name == RTP_VIRTUAL_INPUT {
-                true
-            } else {
-                midi_inputs.iter().any(|p| p.contains(name))
-            }
-        })
-        .unwrap_or(false);
+    let midi_in_ok = match cfg.midi.input_device.as_deref() {
+        Some(name) if name == RTP_VIRTUAL_INPUT => true,
+        Some(name) if !name.trim().is_empty() => midi_inputs.iter().any(|p| p.contains(name)),
+        _ => !cfg.midi.thru_enabled,
+    };
     if !midi_in_ok {
         messages.push("MIDI IN manquant ou non configure".to_string());
     }
 
     let midi_outputs = list_midi_outputs()?;
-    let midi_out_ok = cfg
-        .midi
-        .output_device
-        .as_ref()
-        .map(|name| {
-            if name == VST_INTERNAL_OUTPUT || name == VST_INTERNAL_OUTPUT_LEGACY {
-                true
-            } else {
-                midi_outputs.iter().any(|p| p.contains(name))
-            }
-        })
-        .unwrap_or(false);
+    let midi_out_ok = if !cfg.midi.thru_enabled {
+        true
+    } else {
+        match cfg.midi.output_device.as_deref() {
+            Some(name) if name == VST_INTERNAL_OUTPUT || name == VST_INTERNAL_OUTPUT_LEGACY => true,
+            Some(name) if !name.trim().is_empty() => midi_outputs.iter().any(|p| p.contains(name)),
+            _ => false,
+        }
+    };
     if !midi_out_ok {
         messages.push("MIDI OUT manquant ou non configure".to_string());
     }
@@ -228,6 +239,7 @@ pub fn preflight_check(state: &AppState) -> Result<PreflightReport, CommandError
     }
 
     let rtp_needed = cfg.rtp.enabled
+        || cfg.rtp.thru_enabled
         || cfg.rtp.remote_enabled
         || cfg
             .midi
@@ -390,6 +402,12 @@ fn run_stress_bridge_pipeline(
             "Le moteur audio doit être démarré pour le stress test.",
         ));
     }
+    if !state.bridge.is_running() {
+        return Err(runtime_error(
+            "stress.bridge-not-running",
+            "Le pont MIDI doit être démarré pour le stress test du pipeline bridge.",
+        ));
+    }
 
     // Reset pipeline counters
     reset_pipeline_stats();
@@ -497,6 +515,33 @@ mod tests {
     use super::{stress_midi_message, stress_trailing_note_off};
 
     #[test]
+    fn preflight_checks_supplied_draft_without_changing_saved_configuration() {
+        use super::*;
+        let directory = tempfile::tempdir().unwrap();
+        let state = AppState {
+            config_store: crate::config::ConfigStore::with_path(
+                directory.path().join("config.yaml"),
+            ),
+            ..AppState::new()
+        };
+        let mut saved = Config::default();
+        saved.audio.enabled = false;
+        saved.rtp.enabled = false;
+        state.config_store.save(&saved).unwrap();
+        let mut draft = saved.clone();
+        draft.midi.input_device = Some(RTP_VIRTUAL_INPUT.into());
+        draft.midi.output_device = Some(VST_INTERNAL_OUTPUT.into());
+        // An invalid pair avoids binding any real network ports during this test.
+        draft.rtp.port = u16::MAX;
+        let report = preflight_check(Some(draft), &state).unwrap();
+        assert!(report.midi_in_ok && report.midi_out_ok && report.audio_backend_ok);
+        assert!(!report.rtp_port_ok);
+        assert_eq!(state.config_store.load(), saved);
+        let stored_report = preflight_check(None, &state).unwrap();
+        assert!(!stored_report.midi_in_ok && !stored_report.midi_out_ok);
+    }
+
+    #[test]
     fn stress_messages_are_balanced_note_pairs() {
         for pair in 0..96 {
             let note_on = stress_midi_message(pair * 2);
@@ -508,6 +553,26 @@ mod tests {
         }
         assert!(stress_trailing_note_off(100).is_none());
         assert_eq!(stress_trailing_note_off(101).unwrap()[0], 0x80);
+    }
+
+    #[test]
+    fn preflight_rejects_blank_midi_names_and_checks_thru_only_rtp() {
+        use super::*;
+        let state = AppState::new();
+        let mut config = Config::default();
+        config.audio.enabled = false;
+        config.rtp.enabled = false;
+        config.rtp.remote_enabled = false;
+        config.rtp.thru_enabled = true;
+        config.rtp.port = u16::MAX;
+        for name in ["", " ", "\t"] {
+            config.midi.input_device = Some(name.into());
+            config.midi.output_device = Some(name.into());
+            let report = preflight_check(Some(config.clone()), &state).unwrap();
+            assert!(!report.midi_in_ok && !report.midi_out_ok && !report.rtp_port_ok);
+        }
+        config.rtp.thru_enabled = false;
+        assert!(preflight_check(Some(config), &state).unwrap().rtp_port_ok);
     }
 
     #[test]

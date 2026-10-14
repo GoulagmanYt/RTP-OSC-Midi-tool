@@ -3,8 +3,112 @@ use serde::{Deserialize, Serialize};
 pub const NOTE_MIN: u8 = 21;
 pub const NOTE_MAX: u8 = 108;
 
+/// Ownership at the prepared input boundary, used for peer-scoped recovery.
+#[derive(Default)]
+pub(crate) struct SourceMidiState {
+    sources: std::collections::HashMap<std::sync::Arc<str>, SourceNotes>,
+}
+
+#[derive(Default)]
+struct SourceNotes {
+    notes: [u128; 16],
+    sustain: [bool; 16],
+}
+
+impl SourceMidiState {
+    pub(crate) fn observe(&mut self, frame: &MidiFrame) {
+        let bytes = frame.data.as_slice();
+        if bytes == [0xFF] {
+            self.sources.clear();
+            return;
+        }
+        if bytes.len() != 3
+            || !(0x80..0xF0).contains(&bytes[0])
+            || bytes[1..].iter().any(|b| *b > 127)
+        {
+            return;
+        }
+        let channel = usize::from(bytes[0] & 15);
+        let state = self.sources.entry(frame.source.clone()).or_default();
+        match bytes[0] & 0xF0 {
+            0x90 if bytes[2] > 0 => state.notes[channel] |= 1u128 << bytes[1],
+            0x80 | 0x90 => state.notes[channel] &= !(1u128 << bytes[1]),
+            0xB0 => match bytes[1] {
+                64 => state.sustain[channel] = bytes[2] >= 64,
+                120 => {
+                    state.notes[channel] = 0;
+                    state.sustain[channel] = false;
+                }
+                123 => state.notes[channel] = 0,
+                121 => state.sustain[channel] = false,
+                _ => {}
+            },
+            _ => {}
+        }
+        if state.notes.iter().all(|notes| *notes == 0) && !state.sustain.iter().any(|held| *held) {
+            self.sources.remove(&frame.source);
+        }
+    }
+
+    pub(crate) fn release_source(&mut self, source: &str) -> Vec<[u8; 3]> {
+        let Some(removed) = self.sources.remove(source) else {
+            return Vec::new();
+        };
+        let mut releases = Vec::new();
+        for channel in 0..16 {
+            let other_notes = self
+                .sources
+                .values()
+                .fold(0, |notes, state| notes | state.notes[channel]);
+            let mut exclusive = removed.notes[channel] & !other_notes;
+            while exclusive != 0 {
+                let note = exclusive.trailing_zeros() as u8;
+                exclusive &= exclusive - 1;
+                releases.push([0x80 | channel as u8, note, 0]);
+            }
+            if removed.sustain[channel]
+                && !self.sources.values().any(|state| state.sustain[channel])
+            {
+                releases.push([0xB0 | channel as u8, 64, 0]);
+            }
+        }
+        releases
+    }
+}
+
+#[cfg(test)]
+mod source_recovery_tests {
+    use super::*;
+
+    #[test]
+    fn peer_reset_releases_only_exclusive_notes_and_preserves_shared_sustain() {
+        let mut state = SourceMidiState::default();
+        for (source, bytes) in [
+            ("Keyboard", [0x90, 60, 100]),
+            ("Keyboard", [0xB0, 64, 127]),
+            ("RTP:A", [0x90, 60, 100]),
+            ("RTP:A", [0x90, 62, 100]),
+            ("RTP:A", [0xB0, 64, 127]),
+            ("RTP:B", [0x90, 64, 100]),
+        ] {
+            state.observe(&MidiFrame::copy_realtime(&bytes, std::sync::Arc::from(source)).unwrap());
+        }
+        assert_eq!(state.release_source("RTP:A"), [[0x80, 62, 0]]);
+        assert!(state.release_source("RTP:A").is_empty());
+        assert_eq!(state.release_source("RTP:B"), [[0x80, 64, 0]]);
+        assert_eq!(
+            state.release_source("Keyboard"),
+            [[0x80, 60, 0], [0xB0, 64, 0]]
+        );
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MidiFrame {
+    #[serde(default = "MidiFrame::current_generation")]
+    pub generation: u64,
+    #[serde(default)]
+    pub ingress_qpc: u64,
     pub data: smallvec::SmallVec<[u8; 32]>,
     pub source: std::sync::Arc<str>,
 }
@@ -32,6 +136,10 @@ pub(crate) fn initialize_midi_buffers() {
 }
 
 impl MidiFrame {
+    #[doc(hidden)]
+    pub fn current_generation() -> u64 {
+        crate::bridge::pipeline::midi_reset_generation()
+    }
     /// Bounded, fallible copy for processing paths. Ordinary messages stay inline.
     /// Large messages borrow reserved storage and fail explicitly on exhaustion.
     pub(crate) fn copy_realtime(bytes: &[u8], source: std::sync::Arc<str>) -> Option<Self> {
@@ -43,11 +151,19 @@ impl MidiFrame {
             return None;
         };
         data.extend_from_slice(bytes);
-        Some(Self { data, source })
+        Some(Self {
+            generation: Self::current_generation(),
+            data,
+            source,
+            ingress_qpc: crate::vst_worker::protocol::monotonic_qpc(),
+        })
     }
 
     pub(crate) fn clone_realtime(&self) -> Option<Self> {
-        Self::copy_realtime(&self.data, self.source.clone())
+        let mut copy = Self::copy_realtime(&self.data, self.source.clone())?;
+        copy.ingress_qpc = self.ingress_qpc;
+        copy.generation = self.generation;
+        Some(copy)
     }
 
     pub(crate) fn sysex_realtime(payload: &[u8], source: std::sync::Arc<str>) -> Option<Self> {
@@ -156,7 +272,8 @@ pub fn is_critical_release_message(data: &[u8]) -> bool {
     matches!(status, 0x80)
         || (status == 0x90 && data[2] == 0)
         || (status == 0xB0
-            && ((data[1] == 64 && data[2] < 64) || matches!(data[1], 120 | 121 | 123)))
+            && ((matches!(data[1], 64 | 66 | 69) && data[2] < 64)
+                || matches!(data[1], 120 | 121 | 123..=127)))
 }
 
 /// Validate complete driver/bridge messages before indexing or dispatching them.
@@ -307,6 +424,8 @@ mod tests {
                 let status = if i % 2 == 0 { 0x90 } else { 0x80 };
                 let velocity = if status == 0x90 { 100 } else { 0 };
                 tx.send(MidiFrame {
+                    generation: MidiFrame::current_generation(),
+                    ingress_qpc: crate::vst_worker::protocol::monotonic_qpc(),
                     data: smallvec::SmallVec::from_slice(&[status, note, velocity]),
                     source: std::sync::Arc::from("stress"),
                 })

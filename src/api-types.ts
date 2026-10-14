@@ -75,6 +75,7 @@ export type RtpConfig = {
 };
 
 export type AudioConfig = {
+  gameMode?: boolean;
   enabled: boolean;
   backend?: string | null;
   device?: string | null;
@@ -183,6 +184,7 @@ export type RuntimeStatus = {
   vstWorkerState?: string;
   vstWorkerRestarts?: number;
   vstWorkerLastExit?: string | null;
+  realtime?: RealtimeDiagnostics;
   audioMmcssEnabled?: boolean | null;
   audioPowerThrottlingDisabled?: boolean | null;
   audioLimiterEnabled?: boolean | null;
@@ -220,6 +222,7 @@ export type RuntimeMetrics = {
   vstWorkerState?: string;
   vstWorkerRestarts?: number;
   vstWorkerLastExit?: string | null;
+  realtime?: RealtimeDiagnostics;
   audioMmcssEnabled?: boolean | null;
   audioPowerThrottlingDisabled?: boolean | null;
   x86BridgeUnderruns?: number | null;
@@ -342,3 +345,27 @@ export interface StressTestResult {
   // End-to-end tracking
   receivedNotes?: number;
 }
+
+export type RealtimeDiagnostics = {
+  heartbeatDelayed: boolean;
+  transportHealthy?: boolean | null;
+  commonResets?: number;
+  droppedDiagnosticLogs?: number;
+  controlHealthy: boolean | null;
+  callbackHealthy: boolean | null;
+  worker: {
+    gameMode: boolean; maintenance: boolean; deferredSave: boolean; deferredEditor: boolean | null; editorOpen?: boolean;
+    midiTransportFailed?: boolean; pipeWaitMaxUs?: number; audioWaitMaxUs?: number;
+    callbackCount: number; callbackIntervalMaxUs: number;
+    midiDeliveryMaxUs: number; midiDeliveryP99Us: number;
+    midiIoThreads?: Array<{ name: string; mmcssProfile: string; highPriority: boolean; fallbackApplied: boolean }>;
+  };
+  queues: Array<{ name: string; capacity: number; depth: number; maxDepth: number; maxWaitUs?: number; noncriticalDrops: number; criticalDrops: number; noncriticalRejections?: number; criticalRejections?: number; resets: number }>;
+  threads: Array<{ name: string; mmcssProfile: string; highPriority: boolean; fallbackApplied: boolean }>;
+  network: {
+    rtpMidiReceiveBufferBytes?: number; rtpControlReceiveBufferBytes?: number;
+    rtpInvalidDatagrams?: number; rtpSocketErrors?: number; rtpLostPackets?: number;
+    oscReceiveBufferBytes: number; oscInvalidDatagrams: number;
+    oscSocketErrors: number; oscSchedulerOverflows: number;
+  };
+};

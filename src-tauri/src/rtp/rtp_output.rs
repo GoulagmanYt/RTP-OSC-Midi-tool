@@ -1,5 +1,5 @@
 use crate::{
-    bridge::pipeline::{midi_reset_generation, request_critical_midi_reset},
+    bridge::pipeline::midi_reset_generation,
     midi::{is_critical_release_message, MidiFrame},
 };
 use arc_swap::ArcSwapOption;
@@ -8,37 +8,79 @@ use rtpmidi::{
     sessions::rtp_midi_session::RtpMidiSession,
 };
 use std::{sync::Arc, time::Duration};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
+impl crate::midi_queue::Priority for OutgoingFrame {
+    fn critical(&self) -> bool {
+        crate::midi::is_critical_release_message(self.frame.data.as_slice())
+    }
+}
+
+#[cfg(test)]
+use tokio::sync::mpsc;
 
 pub(crate) struct OutgoingFrame {
     frame: MidiFrame,
     generation: u64,
+    route_generation: u64,
 }
-#[derive(Clone, Default)]
-pub(crate) struct RtpOutputRoute(Arc<ArcSwapOption<mpsc::Sender<OutgoingFrame>>>);
+#[derive(Clone)]
+pub(crate) struct RtpOutputRoute {
+    sender: Arc<ArcSwapOption<crate::midi_queue::AsyncSender<OutgoingFrame>>>,
+    enabled: Arc<parking_lot::Mutex<bool>>,
+}
+impl Default for RtpOutputRoute {
+    fn default() -> Self {
+        Self {
+            sender: Arc::new(ArcSwapOption::empty()),
+            enabled: Arc::new(parking_lot::Mutex::new(true)),
+        }
+    }
+}
 impl RtpOutputRoute {
-    pub(crate) fn set(&self, sender: Option<mpsc::Sender<OutgoingFrame>>) {
-        self.0.store(sender.map(Arc::new));
+    pub(crate) fn set_thru_enabled(&self, enabled: bool) {
+        let mut current = self.enabled.lock();
+        if *current && !enabled {
+            if let Some(sender) = self.sender.load().as_ref() {
+                sender.recovery().request_reset();
+            }
+        }
+        *current = enabled;
+    }
+    pub(crate) fn set(&self, sender: Option<crate::midi_queue::AsyncSender<OutgoingFrame>>) {
+        self.sender.store(sender.map(Arc::new));
     }
     pub(crate) fn send(&self, frame: &MidiFrame) {
         if frame.source.starts_with("RTP:") {
             return;
         }
-        let accepted = self.0.load().as_ref().is_some_and(|sender| {
-            let Some(copy) = frame.clone_realtime() else {
-                return false;
-            };
-            sender
-                .try_send(OutgoingFrame {
-                    frame: copy,
-                    generation: midi_reset_generation(),
-                })
-                .is_ok()
-        });
+        // Serialize admission with disabling/reset: a cached processing batch
+        // cannot publish new-generation notes after the transition's panic.
+        let enabled = self.enabled.lock();
+        if !*enabled {
+            return;
+        }
+        let guard = self.sender.load();
+        let Some(sender) = guard.as_ref() else {
+            return;
+        };
+        let Some(copy) = frame.clone_realtime() else {
+            super::rtp_server::record_rtp_drop();
+            if is_critical_release_message(frame.data.as_slice()) {
+                sender.recovery().request_reset();
+            }
+            return;
+        };
+        let accepted = sender
+            .try_send(OutgoingFrame {
+                generation: copy.generation,
+                frame: copy,
+                route_generation: sender.recovery().generation(),
+            })
+            .is_ok();
         if !accepted {
             super::rtp_server::record_rtp_drop();
             if is_critical_release_message(frame.data.as_slice()) {
-                request_critical_midi_reset();
+                sender.recovery().request_reset();
             }
         }
     }
@@ -46,16 +88,21 @@ impl RtpOutputRoute {
 
 pub(crate) async fn run(
     session: Arc<RtpMidiSession>,
-    mut input: mpsc::Receiver<OutgoingFrame>,
+    mut input: crate::midi_queue::AsyncReceiver<OutgoingFrame>,
     mut stop: oneshot::Receiver<()>,
 ) {
     let mut generation = midi_reset_generation();
+    let mut route_generation = input.recovery().generation();
+    let mut pending = None;
     let mut used = false;
     let mut reset_pending = false;
     let mut tick = tokio::time::interval(Duration::from_millis(2));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
-        if generation != midi_reset_generation() {
+        if generation != midi_reset_generation()
+            || route_generation != input.recovery().generation()
+        {
+            route_generation = input.recovery().generation();
             generation = midi_reset_generation();
             reset_pending |= used;
         }
@@ -75,12 +122,20 @@ pub(crate) async fn run(
             biased;
             _ = &mut stop => break,
             _ = tick.tick() => {},
-            frame = input.recv() => {
+            frame = async { if let Some(frame) = pending.take() { Some(frame) } else { input.recv().await } } => {
                 let Some(frame) = frame else { break; };
-                if frame.generation != midi_reset_generation() { continue; }
+                match crate::midi_queue::generation_action(
+                    (frame.generation, frame.route_generation),
+                    (generation, route_generation),
+                    (midi_reset_generation(), input.recovery().generation()),
+                ) {
+                    crate::midi_queue::GenerationAction::Discard => continue,
+                    crate::midi_queue::GenerationAction::Defer => { pending = Some(frame); continue; }
+                    crate::midi_queue::GenerationAction::Ready => {}
+                }
                 used = true;
                 if !matches!(tokio::time::timeout(Duration::from_millis(100), send_bytes(&session, frame.frame.data.as_slice())).await, Ok(Ok(()))) {
-                    request_critical_midi_reset();
+                    input.recovery().request_reset();
                 }
             }
         }
@@ -150,12 +205,38 @@ mod tests {
         panic!("no RTP port pair available");
     }
     #[test]
+    fn disabling_thru_rejects_late_frames_from_a_cached_processing_batch() {
+        let route = RtpOutputRoute::default();
+        let (tx, mut rx) = crate::midi_queue::async_channel(64);
+        route.set(Some(tx));
+        let frame = MidiFrame {
+            generation: MidiFrame::current_generation(),
+            ingress_qpc: 0,
+            data: smallvec::smallvec![0x90, 60, 100],
+            source: Arc::from("Keyboard"),
+        };
+        route.send(&frame);
+        let first = rx.try_recv().unwrap();
+        route.set_thru_enabled(false);
+        assert!(rx.recovery().generation() > first.route_generation);
+        route.send(&frame);
+        assert!(
+            rx.try_recv().is_err(),
+            "a stale batch must not resurrect a remote note"
+        );
+        route.set_thru_enabled(true);
+        route.send(&frame);
+        assert!(rx.try_recv().is_ok());
+    }
+    #[test]
     fn route_prevents_echo_and_requests_recovery_on_critical_overflow() {
         let _guard = crate::bridge::pipeline::TEST_PIPELINE_LOCK.lock().unwrap();
         let route = RtpOutputRoute::default();
-        let (tx, mut rx) = mpsc::channel(1);
+        let (tx, mut rx) = crate::midi_queue::async_channel(1);
         route.set(Some(tx));
         let mut frame = MidiFrame {
+            generation: MidiFrame::current_generation(),
+            ingress_qpc: crate::vst_worker::protocol::monotonic_qpc(),
             data: smallvec::smallvec![0x90, 60, 100],
             source: Arc::from("RTP:remote"),
         };
@@ -166,12 +247,14 @@ mod tests {
         frame.data[0] = 0x80;
         let generation = midi_reset_generation();
         route.send(&frame);
-        assert!(midi_reset_generation() > generation);
-        assert!(rx.try_recv().unwrap().generation < midi_reset_generation());
-        let old_route = route.0.load();
+        assert_eq!(midi_reset_generation(), generation);
+        assert!(rx.try_recv().unwrap().route_generation < rx.recovery().generation());
+        let drops_before = crate::rtp::rtp_server::rtp_dropped_count();
+        let old_route = route.sender.load();
         route.set(None); // Publication must not wait for readers of the old route.
         route.send(&frame);
         drop(old_route);
+        assert_eq!(crate::rtp::rtp_server::rtp_dropped_count(), drops_before);
     }
     #[test]
     fn forwards_wire_midi_segments_large_sysex_and_resets_remote_notes() {
@@ -186,15 +269,15 @@ mod tests {
                 receiver.add_listener(SysExPacketEvent, move |data| { sysex_tx.try_send(data.to_vec()).unwrap(); }).await;
                 sender.invite_participant(format!("127.0.0.1:{port}").parse().unwrap()).await;
                 while sender.participants().await.is_empty() { tokio::time::sleep(Duration::from_millis(2)).await; }
-                let (tx, rx) = mpsc::channel(32);
+                let (tx, rx) = crate::midi_queue::async_channel(32);
                 let (stop, cancelled) = oneshot::channel();
                 let task = tokio::spawn(run(sender.clone(), rx, cancelled));
-                tx.send(OutgoingFrame { frame: MidiFrame { data: smallvec::smallvec![0x90, 60, 100], source: Arc::from("Keyboard") }, generation: midi_reset_generation() }).await.unwrap();
+                tx.send(OutgoingFrame { frame: MidiFrame { generation: MidiFrame::current_generation(), ingress_qpc: crate::vst_worker::protocol::monotonic_qpc(), data: smallvec::smallvec![0x90, 60, 100], source: Arc::from("Keyboard") }, generation: midi_reset_generation(), route_generation: 0 }).await.unwrap();
                 assert!(matches!(notes.recv().await.unwrap(), MidiMessage::NoteOn(_, note, _) if u8::from(note) == 60));
                 let mut bytes = vec![0xF0]; bytes.extend((0..2700).map(|index| (index % 128) as u8)); bytes.push(0xF7);
                 send_bytes(&sender, &bytes).await.unwrap();
                 assert_eq!(sysex.recv().await.unwrap(), bytes[1..bytes.len()-1]);
-                request_critical_midi_reset();
+                crate::bridge::pipeline::request_critical_midi_reset();
                 for _ in 0..48 { assert!(matches!(notes.recv().await.unwrap(), MidiMessage::ControlChange(..))); }
                 let _ = stop.send(()); task.await.unwrap();
                 sender.stop_gracefully().await; receiver.stop_gracefully().await;

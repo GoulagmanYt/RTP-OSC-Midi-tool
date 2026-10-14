@@ -3,6 +3,7 @@ dist
 build_logs
 .cargo-target
 src-tauri/target
+/src-tauri/gen/schemas/
 tools/diagnostics/target
 .venv
 vendor/rack/rack-sys/external
@@ -12,3 +13,9 @@ src-tauri/binaries/*.exe
 .vscode/
 
 *.code-workspace
+
+# AI codebase export dumps (untracked / not committed)
+export_ia/
+__pycache__/
+*.pyc
+DIFF_AUDIT_FIXES.txt

@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Badge } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../../components/ui/Card";
@@ -7,6 +8,7 @@ import { Switch } from "../../components/ui/Switch";
 import type { AppConfig, DeepPartial, RtpRemoteEntry, RtpSessionInfo } from "../../api-types";
 import type { TranslateFn } from "./shared";
 import { Plus, RefreshCcw, Trash2, Wifi } from "lucide-react";
+import { RtpPortInput } from "./RtpPortInput";
 
 type Props = {
   busy: boolean;
@@ -47,6 +49,7 @@ export function RtpConfigCard({
   onUpdateConfig,
   onUpdateRemote,
 }: Props) {
+  const [portResetNonce, setPortResetNonce] = useState(0);
   return (
     <Card>
       <CardHeader>
@@ -95,12 +98,11 @@ export function RtpConfigCard({
               <Label htmlFor="rtp-port" className="text-sm">
                 {t("rtp.portLabel")}
               </Label>
-              <Input
+              <RtpPortInput
                 id="rtp-port"
-                type="number"
-                placeholder="5004"
-                value={config?.rtp.port ?? ""}
-                onChange={(e) => onUpdateConfig({ rtp: { port: Number(e.target.value || 0) } })}
+                value={config?.rtp.port}
+                resetNonce={portResetNonce}
+                onCommit={(port) => onUpdateConfig({ rtp: { port } })}
               />
               <p className="text-xs text-muted-foreground">{t("rtp.portHint")}</p>
             </div>
@@ -160,14 +162,11 @@ export function RtpConfigCard({
                           />
                         </div>
                         <div className="space-y-1">
-                          <Label className="text-xs">{t("rtp.favoritePort")}</Label>
-                          <Input
-                            type="number"
-                            placeholder="5004"
+                          <Label htmlFor={`rtp-port-${remote.id}`} className="text-xs">{t("rtp.favoritePort")}</Label>
+                          <RtpPortInput
+                            id={`rtp-port-${remote.id}`}
                             value={remote.port}
-                            onChange={(e) =>
-                              onUpdateRemote(remote.id, { port: Number(e.target.value || 0) })
-                            }
+                            onCommit={(port) => onUpdateRemote(remote.id, { port })}
                           />
                         </div>
                       </div>
@@ -184,7 +183,12 @@ export function RtpConfigCard({
                             {isRemoteConnected(remote) ? t("rtp.connected") : t("rtp.disconnected")}
                           </Badge>
                         </div>
-                        <Button variant="ghost" size="sm" onClick={() => onRemoveRemote(remote.id)}>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onMouseDown={(e) => e.preventDefault()}
+                          onClick={() => onRemoveRemote(remote.id)}
+                        >
                           <Trash2 className="h-4 w-4" />
                         </Button>
                       </div>
@@ -261,7 +265,10 @@ export function RtpConfigCard({
           <Button
             variant="outline"
             disabled={busy}
-            onClick={() => onUpdateConfig({ rtp: { sessionName: "OSCMidi", port: 5004 } })}
+            onClick={() => {
+              setPortResetNonce((prev) => prev + 1);
+              onUpdateConfig({ rtp: { sessionName: "OSCMidi", port: 5004 } });
+            }}
           >
             <RefreshCcw className="mr-2 h-4 w-4" />
             {t("common.default")}

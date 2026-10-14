@@ -1,10 +1,10 @@
 use super::pipeline::try_enqueue_midi_frame;
+use crate::midi_queue::Sender;
 use crate::{
     config::{Config, RTP_VIRTUAL_INPUT, VST_INTERNAL_OUTPUT, VST_INTERNAL_OUTPUT_LEGACY},
     logger::FrontendLogger,
     midi::MidiFrame,
 };
-use crossbeam_channel::Sender;
 use midir::{
     Ignore, MidiInput, MidiInputConnection, MidiInputPort, MidiOutput, MidiOutputConnection,
     MidiOutputPort,
@@ -178,20 +178,34 @@ pub(super) fn open_output(
     }
 }
 
+/// Resolve full names first; a legacy partial name must identify one port.
+fn select_named_port<P: Clone>(
+    ports: &[P],
+    preferred: Option<&String>,
+    mut port_name: impl FnMut(&P) -> Result<String, midir::PortInfoError>,
+) -> Option<P> {
+    let name = preferred.filter(|name| !name.trim().is_empty())?;
+    let named: Vec<_> = ports
+        .iter()
+        .filter_map(|port| port_name(port).ok().map(|label| (port, label)))
+        .collect();
+    if let Some((port, _)) = named.iter().find(|(_, label)| label == name) {
+        return Some((*port).clone());
+    }
+    let mut matches = named.iter().filter(|(_, label)| label.contains(name));
+    let (port, _) = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
+    Some((*port).clone())
+}
+
 fn select_input_port(
     input: &MidiInput,
     ports: &[MidiInputPort],
     preferred: Option<&String>,
 ) -> Option<MidiInputPort> {
-    let name = preferred?;
-    for port in ports {
-        if let Ok(port_name) = input.port_name(port) {
-            if port_name.contains(name) || port_name == *name {
-                return Some(port.clone());
-            }
-        }
-    }
-    None
+    select_named_port(ports, preferred, |port| input.port_name(port))
 }
 
 fn select_output_port(
@@ -199,15 +213,7 @@ fn select_output_port(
     ports: &[MidiOutputPort],
     preferred: Option<&String>,
 ) -> Option<MidiOutputPort> {
-    let name = preferred?;
-    for port in ports {
-        if let Ok(port_name) = output.port_name(port) {
-            if port_name.contains(name) || port_name == *name {
-                return Some(port.clone());
-            }
-        }
-    }
-    None
+    select_named_port(ports, preferred, |port| output.port_name(port))
 }
 
 pub(super) fn initial_connected_input(config: &Config) -> Option<String> {
@@ -243,6 +249,45 @@ pub(super) fn reset_midi_output(out: &mut MidiOutputConnection, logger: &Fronten
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blank_names_never_select_a_port() {
+        for name in ["", " ", "\t"] {
+            assert!(
+                select_named_port(&["Keyboard"], Some(&name.to_string()), |port| Ok(
+                    (*port).into()
+                ))
+                .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn selects_exact_port_before_earlier_partial_match() {
+        let ports = ["Keyboard 2", "Keyboard"];
+        let name = "Keyboard".to_string();
+        assert_eq!(
+            select_named_port(&ports, Some(&name), |port| Ok((*port).to_string())),
+            Some("Keyboard")
+        );
+    }
+
+    #[test]
+    fn partial_port_names_require_a_unique_match() {
+        let name = "Keyboard".to_string();
+        assert_eq!(
+            select_named_port(&["Keyboard 1", "Keyboard 2"], Some(&name), |port| Ok(
+                (*port).to_string()
+            )),
+            None
+        );
+        assert_eq!(
+            select_named_port(&["Keyboard 1", "Other"], Some(&name), |port| Ok(
+                (*port).to_string()
+            )),
+            Some("Keyboard 1")
+        );
+    }
 
     #[test]
     fn initial_connected_input_detects_rtp_virtual_port() {

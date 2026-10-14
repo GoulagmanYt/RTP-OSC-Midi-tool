@@ -1,5 +1,7 @@
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import * as api from "../api";
+import { getErrorMessage } from "../api-errors";
+import { toast } from "sonner";
 import { BridgeContext } from "./bridge/BridgeContext";
 import { useAppBootstrap } from "./bridge/useAppBootstrap";
 import { useAutosaveSettings } from "./bridge/useAutosaveSettings";
@@ -24,34 +26,47 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
   const { logs, appendLog, clearLogs } = useLogs();
   const { t } = useI18n();
 
+  const statusRequestId = useRef(0);
+  const listsRequestId = useRef(0);
+  const audioDevicesRequestId = useRef(0);
+
   const refreshStatus = useCallback(async () => {
+    const id = ++statusRequestId.current;
     try {
       const nextStatus = await api.getStatus();
-      setStatus(nextStatus);
+      if (id === statusRequestId.current) {
+        setStatus(nextStatus);
+      }
     } catch (error) {
       console.error("Failed to get status", error);
     }
   }, []);
 
   const refreshLists = useCallback(async () => {
+    const id = ++listsRequestId.current;
     try {
       const [inputs, outputs, backends] = await Promise.all([
         api.listMidiInputs(),
         api.listMidiOutputs(),
         api.listAudioBackends(),
       ]);
-      setMidiInputs(inputs);
-      setMidiOutputs(outputs);
-      setAudioBackends(backends);
+      if (id === listsRequestId.current) {
+        setMidiInputs(inputs);
+        setMidiOutputs(outputs);
+        setAudioBackends(backends);
+      }
     } catch (error) {
       console.error("Failed to refresh lists", error);
     }
   }, []);
 
   const refreshAudioDevices = useCallback(async (backend?: string | null) => {
+    const id = ++audioDevicesRequestId.current;
     try {
       const devices = await api.listAudioDevices(backend);
-      setAudioDevices(devices);
+      if (id === audioDevicesRequestId.current) {
+        setAudioDevices(devices);
+      }
     } catch (error) {
       console.error("Failed to list audio devices", error);
     }
@@ -71,6 +86,7 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
   useRuntimeEvents({
     appendLog,
     setMetrics,
+    setStatus,
     t,
   });
 
@@ -80,15 +96,29 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
     setConfig,
     setStatus,
     setPreflight,
+    setMetrics,
     refreshStatus,
     refreshLists,
     refreshAudioDevices,
     t,
   });
 
+  const handleAutosaveError = useCallback((error: unknown) => {
+    toast.error(getErrorMessage(error) || t("toasts.settings.configSaveFailed"));
+  }, [t]);
+
+  const saveAndRefreshStatus = useCallback(async (next: api.AppConfig, shouldSave?: () => boolean) => {
+    const saved = await api.saveConfig(next, shouldSave);
+    if (saved !== false) await refreshStatus();
+    return saved;
+  }, [refreshStatus]);
+
   useAutosaveSettings({
     config,
-    save: api.saveConfig,
+    save: saveAndRefreshStatus,
+    setConfig,
+    onError: handleAutosaveError,
+    loadAccepted: api.getConfig,
   });
 
   return (

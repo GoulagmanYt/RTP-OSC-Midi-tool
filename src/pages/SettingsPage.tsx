@@ -22,6 +22,7 @@ import {
 } from "../api";
 import { useI18n } from "../providers/LanguageProvider";
 import { getErrorMessage } from "../api-errors";
+import { join } from "@tauri-apps/api/path";
 
 type PaletteChoice = {
   id: "light" | "dark" | "contrast";
@@ -41,12 +42,20 @@ export default function SettingsPage() {
   const { t } = useI18n();
 
   useEffect(() => {
+    let cancelled = false;
     getAppPaths()
-      .then(setPaths)
+      .then((p) => {
+        if (!cancelled) setPaths(p);
+      })
       .catch((error) => {
-        console.error("Failed to load app paths", error);
-        toast.error(t("toasts.settings.pathsLoadFailed"));
+        if (!cancelled) {
+          console.error("Failed to load app paths", error);
+          toast.error(t("toasts.settings.pathsLoadFailed"));
+        }
       });
+    return () => {
+      cancelled = true;
+    };
   }, [t]);
 
   const currentPalette = (config?.ui.themePalette as PaletteChoice["id"]) || "light";
@@ -83,8 +92,8 @@ export default function SettingsPage() {
     }
     setBusy(true);
     try {
-      await resetConfigDefaults();
-      await reloadConfig();
+      const accepted = await resetConfigDefaults();
+      await reloadConfig(accepted);
       toast.success(t("toasts.settings.configReset"));
     } catch (e) {
       const message = getErrorMessage(e);
@@ -121,7 +130,7 @@ export default function SettingsPage() {
     try {
       const target = await save({
         title: t("settings.dialog.exportTitle"),
-        defaultPath: paths?.configDir ? `${paths.configDir}\\config.yaml` : "config.yaml",
+        defaultPath: paths?.configDir ? await join(paths.configDir, "config.yaml") : "config.yaml",
         filters: [{ name: "YAML", extensions: ["yaml", "yml"] }],
       });
       if (!target) return;
@@ -140,7 +149,7 @@ export default function SettingsPage() {
     try {
       const target = await save({
         title: t("settings.dialog.exportDiagnosticsTitle"),
-        defaultPath: paths?.configDir ? `${paths.configDir}\\diagnostic.json` : "diagnostic.json",
+        defaultPath: paths?.configDir ? await join(paths.configDir, "diagnostic.json") : "diagnostic.json",
         filters: [{ name: "JSON", extensions: ["json"] }],
       });
       if (!target) return;
@@ -163,8 +172,8 @@ export default function SettingsPage() {
         filters: [{ name: "YAML", extensions: ["yaml", "yml"] }],
       });
       if (!selected || Array.isArray(selected)) return;
-      await importConfig(selected.toString());
-      await reloadConfig();
+      const accepted = await importConfig(selected.toString());
+      await reloadConfig(accepted);
       toast.success(t("toasts.settings.importSuccess"));
     } catch (e) {
       const message = getErrorMessage(e);
@@ -242,7 +251,7 @@ export default function SettingsPage() {
                 if (!checked) {
                   await handleConfigUpdate({
                     ui: { developerMode: false },
-                    logging: { enabled: false, verbose: false, logAllToFile: false },
+                    logging: { verbose: false, logAllToFile: false },
                     osc: { logMessages: false },
                     rtp: { logMessages: false },
                   });

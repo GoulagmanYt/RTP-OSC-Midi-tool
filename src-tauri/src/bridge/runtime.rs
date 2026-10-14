@@ -5,16 +5,16 @@ use super::{
     pipeline::try_enqueue_midi_frame,
     status::{enrich_status_from_runtime, refresh_runtime_status},
 };
+use crate::midi_queue::Sender;
 use crate::{
     audio::AudioEngine,
     config::Config,
     logger::FrontendLogger,
     midi::MidiFrame,
     reliable_playback::ReliablePlaybackServer,
-    rtp::{rtp_advertisement::RtpAdvertisementStatus, RtpRemoteTarget, RtpServer},
+    rtp::{RtpRemoteTarget, RtpServer},
     types::{BridgeStatus, RtpParticipantInfo},
 };
-use crossbeam_channel::Sender;
 use parking_lot::Mutex;
 use smallvec::SmallVec;
 use std::{
@@ -44,7 +44,6 @@ pub(super) struct RtpConfigSnapshot {
     pub(super) remote_enabled: bool,
     pub(super) remote_targets: Vec<RtpRemoteTarget>,
     pub(super) log_rtp: bool,
-    pub(super) advertisement: RtpAdvertisementStatus,
 }
 
 pub(super) struct BridgeRuntime {
@@ -141,16 +140,37 @@ impl BridgeHandle {
         let velocity = velocity.min(127);
         let source = "Test MIDI".to_string();
         let data = SmallVec::from_slice(&[0x90 | ch, note, velocity]);
-        self.inject_frame(data, source.clone())?;
+        let generation = MidiFrame::current_generation();
 
-        let sink = self.rtp_sink.clone();
+        let sink = self
+            .rtp_sink
+            .load_full()
+            .map(|sender| (*sender).clone())
+            .ok_or("Bridge MIDI input unavailable")?;
+        try_enqueue_midi_frame(
+            &sink,
+            MidiFrame {
+                generation,
+                ingress_qpc: crate::vst_worker::protocol::monotonic_qpc(),
+                data,
+                source: std::sync::Arc::from(source.as_str()),
+            },
+        )
+        .map_err(|e| format!("Failed to inject test MIDI: {e}"))?;
+
+        let sink_ref = self.rtp_sink.clone();
         thread::spawn(move || {
             thread::sleep(Duration::from_millis(200));
+            if MidiFrame::current_generation() != generation {
+                return;
+            }
             let off = smallvec::SmallVec::from_slice(&[0x80 | ch, note, 0]);
-            if let Some(tx) = sink.load_full() {
+            if let Some(tx) = sink_ref.load_full() {
                 let _ = try_enqueue_midi_frame(
                     &tx,
                     MidiFrame {
+                        generation,
+                        ingress_qpc: crate::vst_worker::protocol::monotonic_qpc(),
                         data: off,
                         source: std::sync::Arc::from(source.as_str()),
                     },
@@ -182,15 +202,53 @@ impl BridgeHandle {
                     .load_full()
                     .map(|sender| (*sender).clone())
                     .ok_or("Bridge MIDI input unavailable")?;
-                let replacement = crate::osc_input::OscInputServer::start(&config.osc, sink)?;
-                if let Some(previous) = runtime.osc_input.take() {
-                    previous.stop();
+                if old.input_enabled && old.listen_port == config.osc.listen_port {
+                    if let Some(previous) = runtime.osc_input.take() {
+                        previous.stop();
+                    }
+                    match crate::osc_input::OscInputServer::start(&config.osc, sink.clone()) {
+                        Ok(replacement) => {
+                            runtime.osc_input = replacement;
+                        }
+                        Err(err) => {
+                            if let Ok(recovered) =
+                                crate::osc_input::OscInputServer::start(&old, sink)
+                            {
+                                runtime.osc_input = recovered;
+                            }
+                            return Err(err);
+                        }
+                    }
+                } else {
+                    let replacement = crate::osc_input::OscInputServer::start(&config.osc, sink)?;
+                    if let Some(previous) = runtime.osc_input.take() {
+                        previous.stop();
+                    }
+                    runtime.osc_input = replacement;
                 }
-                runtime.osc_input = replacement;
             }
-            let old_midi = runtime.config.lock().midi.clone();
-            if old_midi != config.midi {
+            let old_config = runtime.config.lock().clone();
+            self.rtp_output.set_thru_enabled(config.rtp.thru_enabled);
+            let old_midi = &old_config.midi;
+            let routing_changed = old_midi.channel_filter != config.midi.channel_filter
+                || !super::pipeline::ConfigSnapshot::from(&old_config)
+                    .same_profiles(&super::pipeline::ConfigSnapshot::from(&config));
+            let sender = self.rtp_sink.load();
+            if routing_changed {
+                if let Some(sender) = sender.as_ref() {
+                    sender.invalidate_preparation();
+                }
+            }
+            if routing_changed
+                || old_midi.input_device != config.midi.input_device
+                || old_midi.hotplug != config.midi.hotplug
+            {
                 super::pipeline::request_critical_midi_reset();
+            }
+            if routing_changed {
+                if let Some(sender) = sender.as_ref() {
+                    super::pipeline::prepare_input_routing(sender, &config);
+                }
             }
             *runtime.config.lock() = config.clone();
             refresh_runtime_status(
@@ -205,8 +263,17 @@ impl BridgeHandle {
     }
 
     pub fn status(&self, config: &Config) -> BridgeStatus {
-        let rtp_active = self.rtp_server.lock().is_some();
-        let bound_port = self.rtp_config.lock().as_ref().map(|cfg| cfg.bound_port);
+        let live_advertisement = self
+            .rtp_server
+            .lock()
+            .as_ref()
+            .map(|server| server.advertisement_status());
+        let rtp_active = live_advertisement.is_some();
+        let bound_port = if rtp_active {
+            self.rtp_config.lock().as_ref().map(|cfg| cfg.bound_port)
+        } else {
+            None
+        };
         let guard = self.inner.lock();
         let mut status = guard
             .as_ref()
@@ -217,16 +284,20 @@ impl BridgeHandle {
         }
         status.rtp_active = rtp_active;
         status.rtp_bound_port = bound_port;
-        if let Some(cfg) = self.rtp_config.lock().as_ref() {
-            status.rtp_advertised_host = cfg.advertisement.advertised_host.clone();
-            status.rtp_advertised_addresses = cfg.advertisement.advertised_addresses.clone();
-            status.rtp_network_warning = cfg.advertisement.warning.clone();
+        if let Some(adv) = live_advertisement {
+            status.rtp_advertised_host = adv.advertised_host;
+            status.rtp_advertised_addresses = adv.advertised_addresses;
+            status.rtp_network_warning = adv.warning;
         } else {
             status.rtp_advertised_host = None;
             status.rtp_advertised_addresses.clear();
             status.rtp_network_warning = None;
         }
         status
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.inner.lock().is_some()
     }
 
     pub fn rtp_participants(&self) -> Vec<RtpParticipantInfo> {
@@ -255,12 +326,15 @@ impl BridgeHandle {
             try_enqueue_midi_frame(
                 &tx,
                 MidiFrame {
+                    generation: MidiFrame::current_generation(),
+                    ingress_qpc: crate::vst_worker::protocol::monotonic_qpc(),
                     data,
                     source: std::sync::Arc::from(source.as_str()),
                 },
             )
             .and_then(|outcome| match outcome {
-                super::pipeline::EnqueueOutcome::Enqueued => Ok(()),
+                super::pipeline::EnqueueOutcome::Enqueued
+                | super::pipeline::EnqueueOutcome::Filtered => Ok(()),
                 super::pipeline::EnqueueOutcome::DroppedNonCritical => {
                     Err(super::pipeline::EnqueueError::QueueFull)
                 }

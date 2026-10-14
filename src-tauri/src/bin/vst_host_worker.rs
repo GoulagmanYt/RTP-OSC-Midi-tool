@@ -16,16 +16,18 @@ fn main() {
 mod windows_worker {
     use std::{
         collections::HashMap,
-        sync::atomic::{AtomicU32, Ordering},
+        sync::{
+            atomic::{AtomicBool, AtomicU32, Ordering},
+            Arc,
+        },
         time::Duration,
     };
 
     use osc_midi_bridge::{
         logger::{background_log, FrontendLogger},
         vst_worker::protocol::{
-            monotonic_qpc, qpc_elapsed_us, read_control_frame, read_midi_frame,
-            write_control_frame, ControlMessage, WorkerAudioStatus, WorkerMetrics,
-            CONTROL_PROTOCOL_VERSION, HOST_ABI_VERSION,
+            monotonic_qpc, read_control_frame, read_midi_frame, write_control_frame,
+            ControlMessage, WorkerAudioStatus, CONTROL_PROTOCOL_VERSION, HOST_ABI_VERSION,
         },
         AudioEngine,
     };
@@ -202,37 +204,6 @@ mod windows_worker {
         }
     }
 
-    fn metrics(audio: &AudioEngine) -> WorkerMetrics {
-        let (x86_bridge_underruns, x86_bridge_overruns, x86_worker_alive) =
-            audio.x86_bridge_metrics();
-        let (audio_peak_l, audio_peak_r) = audio.peak_levels().unwrap_or((0.0, 0.0));
-        WorkerMetrics {
-            audio_peak_l,
-            audio_peak_r,
-            audio_xruns: audio.xrun_count().unwrap_or(0),
-            stream_recovery_requests: audio.stream_recovery_requests().unwrap_or(0),
-            stream_route_changes: audio.stream_route_changes().unwrap_or(0),
-            backend_latency_us: audio.backend_latency_us().unwrap_or(0),
-            audio_midi_drops: audio.midi_drop_count().unwrap_or(0),
-            audio_lock_misses: audio.audio_lock_miss_count().unwrap_or(0),
-            audio_emergency_resets: audio.emergency_reset_count().unwrap_or(0),
-            callback_last_us: audio.callback_last_us().unwrap_or(0),
-            callback_max_us: audio.callback_max_us().unwrap_or(0),
-            callback_over_budget_count: audio.callback_over_budget_count().unwrap_or(0),
-            consecutive_deadline_misses: audio.consecutive_deadline_misses().unwrap_or(0),
-            dsp_process_last_us: audio.dsp_process_last_us().unwrap_or(0),
-            dsp_process_p95_us: audio.dsp_process_percentile_us(95).unwrap_or(0),
-            dsp_process_p99_us: audio.dsp_process_percentile_us(99).unwrap_or(0),
-            dsp_process_max_us: audio.dsp_process_max_us().unwrap_or(0),
-            midi_queue_depth: audio.audio_midi_queue_depth().unwrap_or(0),
-            midi_queue_max_depth: audio.audio_midi_queue_max_depth().unwrap_or(0),
-            midi_oldest_us: audio.audio_midi_oldest_us().unwrap_or(0),
-            x86_bridge_underruns,
-            x86_bridge_overruns,
-            x86_worker_alive,
-        }
-    }
-
     fn ready_status(
         audio: &AudioEngine,
         class_uid: Option<String>,
@@ -265,6 +236,7 @@ mod windows_worker {
 
     async fn run_midi_channel(pipe_name: String, audio: AudioEngine) -> Result<(), String> {
         let mut pipe = connect_pipe(&pipe_name).await?;
+        let mut received = 0usize;
         loop {
             let frame = read_midi_frame(&mut pipe)
                 .await
@@ -273,8 +245,12 @@ mod windows_worker {
                 audio.request_emergency_midi_reset();
                 continue;
             }
-            let age_us = qpc_elapsed_us(frame.monotonic_qpc, monotonic_qpc());
-            audio.send_midi_with_age(frame.bytes(), age_us);
+            audio.deliver_midi_wire(frame);
+            received += 1;
+            if received == 256 {
+                received = 0;
+                tokio::task::yield_now().await;
+            }
         }
     }
 
@@ -288,6 +264,19 @@ mod windows_worker {
             .map_err(|error| format!("worker task failed: {error}"))?
     }
 
+    type ControlResponse = (
+        ControlMessage,
+        tokio::sync::oneshot::Sender<Result<(), String>>,
+    );
+    async fn send_response(
+        tx: &tokio::sync::mpsc::Sender<ControlResponse>,
+        message: ControlMessage,
+    ) -> Result<(), String> {
+        let (ack, received) = tokio::sync::oneshot::channel();
+        tx.send((message, ack)).await.map_err(|e| e.to_string())?;
+        received.await.map_err(|e| e.to_string())?
+    }
+
     async fn worker_session(
         args: WorkerArgs,
         app: tauri::AppHandle,
@@ -295,7 +284,12 @@ mod windows_worker {
         audio: AudioEngine,
         mut editor_hidden: tokio::sync::mpsc::Receiver<()>,
     ) -> Result<(), String> {
-        let mut control = connect_pipe(&args.control_pipe).await?;
+        let control_runtime = osc_midi_bridge::realtime::MidiRuntime::new("vst-control-health")?;
+        let control_name = args.control_pipe.clone();
+        let mut control = control_runtime
+            .spawn(async move { connect_pipe(&control_name).await })
+            .await
+            .map_err(|e| e.to_string())??;
         write_control_frame(
             &mut control,
             &ControlMessage::Hello {
@@ -314,7 +308,7 @@ mod windows_worker {
         // partially consumed frame and permanently desynchronizing the pipe.
         let (mut control_reader, mut control_writer) = tokio::io::split(control);
         let (control_event_tx, mut control_event_rx) = tokio::sync::mpsc::channel(64);
-        tauri::async_runtime::spawn(async move {
+        control_runtime.spawn(async move {
             loop {
                 let event = read_control_frame(&mut control_reader)
                     .await
@@ -326,10 +320,70 @@ mod windows_worker {
             }
         });
 
+        let (control_tx, mut responses) = tokio::sync::mpsc::channel::<ControlResponse>(64);
+        let (heartbeat_tx, mut heartbeats) = tokio::sync::mpsc::channel::<ControlMessage>(2);
+        control_runtime.spawn(async move {
+            loop {
+                let frame = tokio::select! {
+                    biased;
+                    heartbeat = heartbeats.recv() => heartbeat.map(|frame| (frame, None)),
+                    response = responses.recv() => response.map(|(frame, ack)| (frame, Some(ack))),
+                };
+                let Some((frame, ack)) = frame else {
+                    break;
+                };
+                let write_res = tokio::time::timeout(
+                    Duration::from_secs(1),
+                    osc_midi_bridge::vst_worker::protocol::write_control_response(
+                        &mut control_writer,
+                        &frame,
+                    ),
+                )
+                .await;
+                let result = match write_res {
+                    Ok(result) => result.map_err(|e| e.to_string()),
+                    Err(_) => Err("Control writer stalled".into()),
+                };
+                let failed = result.is_err();
+                if let Some(ack) = ack {
+                    let _ = ack.send(result);
+                }
+                if failed {
+                    break;
+                }
+            }
+        });
+        // Publish only applied control state. Heartbeats must remain independent
+        // of runtime/plugin locks, including while Load or maintenance runs.
+        let applied_limiter = Arc::new(AtomicBool::new(false));
+        let health_limiter = applied_limiter.clone();
+        let health_audio = audio.clone();
+        control_runtime.spawn(async move {
+            let mut tick = tokio::time::interval(HEARTBEAT_PERIOD);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut sequence = 0u64;
+            loop {
+                tick.tick().await;
+                sequence = sequence.wrapping_add(1);
+                let mut metrics = health_audio.realtime_metrics();
+                metrics.limiter_enabled = Some(health_limiter.load(Ordering::Acquire));
+                let message = ControlMessage::Heartbeat {
+                    sequence,
+                    monotonic_qpc: monotonic_qpc(),
+                    metrics,
+                };
+                match heartbeat_tx.try_send(message) {
+                    Ok(()) | Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {}
+                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
+                }
+            }
+        });
+        let midi_runtime = osc_midi_bridge::realtime::MidiRuntime::new("vst-midi-read")?;
         let midi_audio = audio.clone();
         let midi_pipe = args.midi_pipe;
-        tauri::async_runtime::spawn(async move {
-            if let Err(error) = run_midi_channel(midi_pipe, midi_audio).await {
+        midi_runtime.spawn(async move {
+            if let Err(error) = run_midi_channel(midi_pipe, midi_audio.clone()).await {
+                midi_audio.report_midi_transport_failure();
                 if error.contains("early eof") || error.contains("broken pipe") {
                     background_log("debug", "VST worker MIDI pipe closed");
                 } else {
@@ -340,13 +394,11 @@ mod windows_worker {
 
         let mut heartbeat = tokio::time::interval(HEARTBEAT_PERIOD);
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut heartbeat_sequence = 0u64;
 
         loop {
             tokio::select! {
                 _ = heartbeat.tick() => {
-                    heartbeat_sequence = heartbeat_sequence.wrapping_add(1);
-                    let heartbeat_metrics = metrics(&audio);
+                    let heartbeat_metrics = audio.realtime_metrics();
                     if let Some(reason) = audio.stream_fault_reason() {
                         let audio_for_save = audio.clone();
                         let app_for_save = app.clone();
@@ -373,16 +425,6 @@ mod windows_worker {
                         let detail = "health check failed without a bridge diagnostic".to_string();
                         return Err(format!("Nested x86 DSP worker failed: {detail}"));
                     }
-                    write_control_frame(
-                        &mut control_writer,
-                        &ControlMessage::Heartbeat {
-                            sequence: heartbeat_sequence,
-                            monotonic_qpc: monotonic_qpc(),
-                            metrics: heartbeat_metrics,
-                        },
-                    )
-                    .await
-                    .map_err(|error| format!("Heartbeat failed: {error}"))?;
                 }
                 incoming = control_event_rx.recv() => {
                     let message = incoming
@@ -400,7 +442,10 @@ mod windows_worker {
                                 Ok(()) => {
                                     tokio::time::sleep(Duration::from_millis(u64::from(warmup_ms.clamp(500, 2_000)))).await;
                                     match ready_status(&audio, class_uid) {
-                                        Ok(status) => ControlMessage::Ready { request_id, status },
+                                        Ok(status) => {
+                                            applied_limiter.store(status.limiter_enabled, Ordering::Release);
+                                            ControlMessage::Ready { request_id, status }
+                                        },
                                         Err(message) => ControlMessage::Error { request_id: Some(request_id), code: "worker.ready-failed".into(), message },
                                     }
                                 }
@@ -425,7 +470,14 @@ mod windows_worker {
                         }
                         ControlMessage::ListParameters { request_id } => {
                             match audio.list_vst_parameters() {
-                                Ok(parameters) => ControlMessage::Parameters { request_id, parameters },
+                                Ok(parameters) => {
+                                    let parameters = if parameters.len() > osc_midi_bridge::audio::MAX_CACHED_PARAMETERS {
+                                        parameters.into_iter().take(osc_midi_bridge::audio::MAX_CACHED_PARAMETERS).collect()
+                                    } else {
+                                        parameters
+                                    };
+                                    ControlMessage::Parameters { request_id, parameters }
+                                }
                                 Err(error) => ControlMessage::Error { request_id: Some(request_id), code: "worker.parameters-failed".into(), message: error.to_string() },
                             }
                         }
@@ -436,16 +488,25 @@ mod windows_worker {
                             }
                         }
                         ControlMessage::SetGain { request_id, gain_db } => {
-                            audio.set_gain(gain_db);
-                            ControlMessage::Ack { request_id }
+                            match audio.set_gain(gain_db) {
+                                Ok(()) => ControlMessage::Ack { request_id },
+                                Err(error) => ControlMessage::Error { request_id: Some(request_id), code: "worker.gain-failed".into(), message: error.to_string() },
+                            }
                         }
                         ControlMessage::SetLimiter { request_id, enabled } => {
-                            audio.set_limiter_enabled(enabled);
-                            ControlMessage::Ack { request_id }
+                            match audio.set_limiter_enabled(enabled) {
+                                Ok(()) => {
+                                    applied_limiter.store(enabled, Ordering::Release);
+                                    ControlMessage::Ack { request_id }
+                                },
+                                Err(error) => ControlMessage::Error { request_id: Some(request_id), code: "worker.limiter-failed".into(), message: error.to_string() },
+                            }
                         }
                         ControlMessage::SetEq { request_id, settings } => {
-                            audio.set_vst_eq(settings);
-                            ControlMessage::Ack { request_id }
+                            match audio.set_vst_eq(settings) {
+                                Ok(()) => ControlMessage::Ack { request_id },
+                                Err(error) => ControlMessage::Error { request_id: Some(request_id), code: "worker.eq-failed".into(), message: error.to_string() },
+                            }
                         }
                         ControlMessage::Panic { request_id } => {
                             match audio.panic_all_notes() {
@@ -454,6 +515,13 @@ mod windows_worker {
                             }
                         }
                         ControlMessage::Ping { sequence } => ControlMessage::Pong { sequence },
+                        ControlMessage::SetGameMode { request_id, enabled } => {
+                            let audio = audio.clone(); let app = app.clone();
+                            match execute_blocking(move || audio.set_game_mode(enabled, app).map_err(|error| error.to_string())).await {
+                                Ok(()) => ControlMessage::Ack { request_id },
+                                Err(message) => ControlMessage::Error { request_id: Some(request_id), code: "worker.game-mode-failed".into(), message },
+                            }
+                        },
                         ControlMessage::SaveState { request_id } => {
                             let audio = audio.clone();
                             let app = app.clone();
@@ -469,7 +537,7 @@ mod windows_worker {
                                 audio.stop(Some(app_for_stop));
                                 Ok(())
                             }).await?;
-                            write_control_frame(&mut control_writer, &ControlMessage::Stopped { request_id })
+                            send_response(&control_tx, ControlMessage::Stopped { request_id })
                                 .await
                                 .map_err(|error| format!("Failed to acknowledge stop: {error}"))?;
                             app.exit(0);
@@ -481,7 +549,7 @@ mod windows_worker {
                             message: "Message is not a supervisor command".into(),
                         },
                     };
-                    write_control_frame(&mut control_writer, &response)
+                    send_response(&control_tx, response)
                         .await
                         .map_err(|error| format!("Failed to send worker response: {error}"))?;
                 }
@@ -498,7 +566,7 @@ mod windows_worker {
                     }).await {
                         background_log("warn", format!("VST editor-close state save failed: {error}"));
                     }
-                    write_control_frame(&mut control_writer, &ControlMessage::EditorHidden)
+                    send_response(&control_tx, ControlMessage::EditorHidden)
                         .await
                         .map_err(|error| format!("Failed to report hidden editor: {error}"))?;
                 }
@@ -572,6 +640,8 @@ mod windows_worker {
 
 #[cfg(target_os = "windows")]
 fn main() {
+    let _timer_guard = osc_midi_bridge::audio::windows_tuning::enable_high_resolution_timer();
+    osc_midi_bridge::audio::windows_tuning::apply_worker_process_priority();
     windows_worker::install_descendant_console_guard();
     if let Some(exit_code) = osc_midi_bridge::plugin_probe::probe_cli_exit_code() {
         if exit_code == 0 {

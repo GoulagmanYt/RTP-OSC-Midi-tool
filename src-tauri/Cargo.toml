@@ -1,6 +1,6 @@
 [package]
 name = "osc-midi-bridge"
-version = "2.6.0"
+version = "2.6.1"
 edition = "2021"
 description = "Low-latency Windows bridge for MIDI, RTP-MIDI, OSC, and isolated VST instruments"
 authors = ["OSCMidi contributors"]
@@ -62,6 +62,7 @@ cpal = { version = "=0.18.2", features = ["asio"] }
 vst = "0.4"
 rtrb = "0.3.5"
 rack = "0.4.8"
+socket2 = "0.6"
 smallvec = { version = "1.15", features = ["serde"] }
 tauri-plugin-dialog = "2.7.2"
 

@@ -42,13 +42,17 @@ if len(native) < 4 or struct.unpack_from("<I", native)[0] > len(native) - 4:
 summary = {"stateSha256": hashlib.sha256(data).hexdigest(),
            "nativeSha256": hashlib.sha256(native).hexdigest(),
            "stateBytes": len(data), "nativeBytes": len(native)}
-meta_match = re.search(rb"<META\s[^>]*?/>", native)
-if b"<SpliceINSTRUMENT>" in native and meta_match:
-    # The opaque plugin payload can include non-XML bytes; only inspect META.
-    meta = ET.fromstring(meta_match.group())
-    summary["preset"] = {k: meta.get(k) for k in ("family", "name", "version")}
 args.directory.mkdir(parents=True, exist_ok=False)
 (args.directory / args.state.name).write_bytes(data)
 (args.directory / "native-state.bin").write_bytes(native)
+
+meta_match = re.search(rb"""<META\b(?:[^<>"']|"[^"]*"|'[^']*')*/>""", native)
+if b"<SpliceINSTRUMENT>" in native and meta_match:
+    # The opaque plugin payload can include non-XML bytes; only inspect META.
+    try:
+        meta = ET.fromstring(meta_match.group())
+        summary["preset"] = {k: meta.get(k) for k in ("family", "name", "version")}
+    except ET.ParseError:
+        pass
 (args.directory / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
 print(json.dumps(summary, indent=2))

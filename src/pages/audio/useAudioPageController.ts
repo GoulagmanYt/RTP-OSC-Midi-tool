@@ -47,6 +47,8 @@ export function useAudioPageController() {
   );
 
   const [vstUiOpen, setVstUiOpen] = useState(false);
+  const actualEditorOpen = status?.realtime?.worker.editorOpen;
+
   const [vstParameterDialogOpen, setVstParameterDialogOpen] = useState(false);
   const [vstEqDialogOpen, setVstEqDialogOpen] = useState(false);
   const [vstPlugins, setVstPlugins] = useState<VstPluginEntry[]>([]);
@@ -58,15 +60,30 @@ export function useAudioPageController() {
   const pendingVstEq = useRef<VstEqSettings | null>(null);
   const vstEqFrame = useRef<number | null>(null);
   const vstEqSendInFlight = useRef(false);
+  const pendingVstParams = useRef<Map<number, number>>(new Map());
+  const vstParamFrame = useRef<number | null>(null);
   const vstEqControllerMounted = useRef(true);
   const flushVstEqRef = useRef<() => void>(() => undefined);
+  const flushVstParamsRef = useRef<() => void>(() => undefined);
+  const activePluginIdRef = useRef<string | null>(config?.audio.vstPluginId ?? config?.audio.vstPath ?? null);
+  const parameterRequestId = useRef(0);
 
   useEffect(() => {
+    activePluginIdRef.current = config?.audio.vstPluginId ?? config?.audio.vstPath ?? null;
+    parameterRequestId.current += 1;
+    setVstParamsLoading(false);
+  }, [config?.audio.vstPluginId, config?.audio.vstPath]);
+
+  useEffect(() => {
+    let disposed = false;
     const unlisten = listen("audio:vst-editor-hidden", () => {
-      setVstUiOpen(false);
+      if (!disposed) {
+        setVstUiOpen(false);
+      }
     });
     return () => {
-      unlisten.then((fn) => fn());
+      disposed = true;
+      unlisten.then((fn) => fn()).catch(() => undefined);
     };
   }, []);
 
@@ -130,7 +147,15 @@ export function useAudioPageController() {
     vstEqControllerMounted.current = true;
     return () => {
       vstEqControllerMounted.current = false;
-      if (vstEqFrame.current !== null) window.cancelAnimationFrame(vstEqFrame.current);
+      if (vstEqFrame.current !== null) {
+        window.cancelAnimationFrame(vstEqFrame.current);
+        vstEqFrame.current = null;
+      }
+      if (vstParamFrame.current !== null) {
+        window.cancelAnimationFrame(vstParamFrame.current);
+        vstParamFrame.current = null;
+      }
+      flushVstParamsRef.current();
     };
   }, []);
 
@@ -154,8 +179,8 @@ export function useAudioPageController() {
   }, [status?.audioLatencyMs, activeBufferSize, activeSampleRate]);
 
   const updateAudioConfig = useCallback(
-    async (patch: Partial<NonNullable<typeof config>["audio"]>) => {
-      if (!config) return;
+    async (patch: Partial<NonNullable<typeof config>["audio"]>): Promise<boolean> => {
+      if (!config || audioReloadInFlight.current) return false;
       const previousAudio = config.audio;
       const updated = { ...config, audio: { ...config.audio, ...patch } };
       const restartKeys: Array<keyof typeof patch> = [
@@ -168,39 +193,42 @@ export function useAudioPageController() {
       ];
       const requiresRestart = restartKeys.some((key) => patch[key] !== undefined);
       const shouldRestart = requiresRestart && Boolean(status?.audioRunning) && updated.audio.enabled;
-      if (shouldRestart && audioReloadInFlight.current) {
-        return;
-      }
-
-      if (shouldRestart) {
-        audioReloadInFlight.current = true;
-        setAudioReloading(true);
-      }
+      const persistImmediately = requiresRestart || patch.gameMode !== undefined;
+      let reloadAttempted = false;
+      audioReloadInFlight.current = true;
+      if (persistImmediately) setAudioReloading(true);
       try {
         await updateConfig({ audio: patch });
-        if (!shouldRestart) {
-          return;
-        }
-        await saveConfigApi(updated);
-        await reloadVst();
-        await refreshStatus();
-      } catch (e) {
-        await updateConfig({ audio: previousAudio });
-        try {
-          await saveConfigApi({ ...config, audio: previousAudio });
+        if (persistImmediately) await saveConfigApi(updated);
+        if (shouldRestart) {
+          reloadAttempted = true;
           await reloadVst();
-          await refreshStatus();
+        }
+        if (patch.gameMode) setVstUiOpen(false);
+      } catch (e) {
+        try {
+          await updateConfig({ audio: previousAudio });
+          if (persistImmediately) await saveConfigApi(config);
+          if (reloadAttempted) await reloadVst();
         } catch (rollbackError) {
           console.error("Failed to restore previous audio runtime", rollbackError);
         }
         const message = getErrorMessage(e);
         toast.error(message || t("toasts.audio.vstReloadFailed"));
+        return false;
       } finally {
-        if (shouldRestart) {
-          audioReloadInFlight.current = false;
-          setAudioReloading(false);
+        audioReloadInFlight.current = false;
+        if (persistImmediately) setAudioReloading(false);
+      }
+      // A failed status query must not undo a configuration already accepted by the runtime.
+      if (persistImmediately) {
+        try {
+          await refreshStatus();
+        } catch (error) {
+          console.error("Failed to refresh audio status", error);
         }
       }
+      return true;
     },
     [config, refreshStatus, status?.audioRunning, t, updateConfig]
   );
@@ -208,7 +236,9 @@ export function useAudioPageController() {
   const loadCachedVstPlugins = useCallback(async () => {
     try {
       const plugins = await listVstPlugins();
-      setVstPlugins(plugins);
+      if (vstEqControllerMounted.current) {
+        setVstPlugins(plugins);
+      }
     } catch (e) {
       console.error("Failed to load cached VST plugins", e);
     }
@@ -218,12 +248,16 @@ export function useAudioPageController() {
     setVstPluginsLoading(true);
     try {
       const plugins = await refreshVstPlugins();
-      setVstPlugins(plugins);
+      if (vstEqControllerMounted.current) {
+        setVstPlugins(plugins);
+      }
     } catch (e) {
       console.error("Failed to list VST plugins", e);
       toast.error(t("toasts.audio.vstListFailed"));
     } finally {
-      setVstPluginsLoading(false);
+      if (vstEqControllerMounted.current) {
+        setVstPluginsLoading(false);
+      }
     }
   }, [t]);
 
@@ -232,36 +266,59 @@ export function useAudioPageController() {
   }, [loadCachedVstPlugins]);
 
   const handleBackendChange = async (value: string) => {
-    await updateAudioConfig({ backend: value, device: null, deviceId: null });
-    await refreshAudioDevices(value);
+    if (await updateAudioConfig({ backend: value, device: null, deviceId: null })) {
+      await refreshAudioDevices(value);
+    }
   };
 
   const handleAudioToggle = async (checked: boolean) => {
-    await updateConfig({ audio: { enabled: checked } });
-    await persistConfig();
+    if (!config || audioReloadInFlight.current) return;
+    audioReloadInFlight.current = true;
+    setAudioReloading(true);
+    try {
+      const updated = { ...config, audio: { ...config.audio, enabled: checked } };
+      await updateConfig({ audio: { enabled: checked } });
+      await saveConfigApi(updated);
+      await refreshStatus();
+    } catch (error) {
+      await updateConfig({ audio: { enabled: config.audio.enabled } });
+      toast.error(getErrorMessage(error) || t("toasts.settings.configSaveFailed"));
+    } finally {
+      audioReloadInFlight.current = false;
+      setAudioReloading(false);
+    }
   };
 
   const handleGainChange = async (value: number) => {
-    await updateConfig({ audio: { gainDb: value } });
     try {
-      await setMasterGain(value);
+      await updateConfig({ audio: { gainDb: value } });
+      if (status?.audioRunning) {
+        await setMasterGain(value);
+      }
     } catch (e) {
       console.error("Failed to set master gain", e);
+      toast.error(getErrorMessage(e) || t("toasts.settings.configSaveFailed"));
     }
   };
 
   const handleLimiterToggle = async (checked: boolean) => {
-    await updateConfig({ audio: { limiterEnabled: checked } });
     try {
-      await setAudioLimiter(checked);
+      await updateConfig({ audio: { limiterEnabled: checked } });
+      if (status?.audioRunning) {
+        await setAudioLimiter(checked);
+      }
     } catch (e) {
       console.error("Failed to set limiter", e);
+      toast.error(getErrorMessage(e) || t("toasts.settings.configSaveFailed"));
     }
   };
 
   const applyVstPlugin = useCallback(
     async (plugin: VstPluginEntry) => {
       if (!config) return;
+      activePluginIdRef.current = plugin.id;
+      parameterRequestId.current += 1;
+      setVstParamsLoading(false);
       setVstUiOpen(false);
       setVstParameterDialogOpen(false);
       setVstEqDialogOpen(false);
@@ -270,17 +327,13 @@ export function useAudioPageController() {
         window.cancelAnimationFrame(vstEqFrame.current);
         vstEqFrame.current = null;
       }
-      setVstParams([]);
-      const updated = {
-        ...config,
-        audio: { ...config.audio, vstPluginId: plugin.id, vstPath: plugin.path },
-      };
-      await updateAudioConfig({ vstPluginId: plugin.id, vstPath: plugin.path });
-      try {
-        await saveConfigApi(updated);
-      } catch (e) {
-        console.error("Failed to save VST selection", e);
+      pendingVstParams.current.clear();
+      if (vstParamFrame.current !== null) {
+        window.cancelAnimationFrame(vstParamFrame.current);
+        vstParamFrame.current = null;
       }
+      setVstParams([]);
+      await updateAudioConfig({ vstPluginId: plugin.id, vstPath: plugin.path });
     },
     [config, updateAudioConfig]
   );
@@ -300,7 +353,7 @@ export function useAudioPageController() {
     setVstPluginsLoading(true);
     try {
       const tested = await retestVstPlugin(pluginId);
-      setVstPlugins((entries) => [...entries.filter((entry) => entry.id !== pluginId), tested]);
+      setVstPlugins((entries) => entries.map((entry) => (entry.id === pluginId ? tested : entry)));
     } catch (e) {
       toast.error(getErrorMessage(e) || t("toasts.audio.vstListFailed"));
     } finally {
@@ -319,8 +372,9 @@ export function useAudioPageController() {
   const handleOpenVstUi = async () => {
     try {
       await openVstUi();
-      setVstUiOpen(true);
-      toast.success(t("toasts.audio.vstOpened"));
+      setVstUiOpen(!(config?.audio.gameMode ?? true));
+      toast.success(t((config?.audio.gameMode ?? true) ? "audio.deferredOperations" : "toasts.audio.vstOpened"));
+      await refreshStatus();
     } catch (e) {
       const message = getErrorMessage(e);
       toast.error(message || t("toasts.audio.vstOpenFailed"));
@@ -340,17 +394,23 @@ export function useAudioPageController() {
   };
 
   const handleOpenVstParameters = async () => {
+    const requestedPluginId = config?.audio.vstPluginId ?? config?.audio.vstPath ?? null;
+    const requestId = ++parameterRequestId.current;
     try {
       setVstParamsLoading(true);
       const params = await listVstParameters();
+      if (!vstEqControllerMounted.current || requestId !== parameterRequestId.current || activePluginIdRef.current !== requestedPluginId) {
+        return;
+      }
       setVstParams(params);
       setVstParameterDialogOpen(true);
     } catch (e) {
+      if (!vstEqControllerMounted.current || requestId !== parameterRequestId.current) return;
       const message = getErrorMessage(e);
       toast.error(message || t("toasts.audio.vstParamOpenFailed"));
       setVstParameterDialogOpen(false);
     } finally {
-      setVstParamsLoading(false);
+      if (vstEqControllerMounted.current && requestId === parameterRequestId.current) setVstParamsLoading(false);
     }
   };
 
@@ -358,7 +418,7 @@ export function useAudioPageController() {
     try {
       await pingAudio();
       toast.success(t("toasts.audio.pingSent"));
-      refreshStatus();
+      await refreshStatus();
     } catch (e) {
       const message = getErrorMessage(e);
       toast.error(message || t("toasts.audio.pingFailed"));
@@ -372,7 +432,7 @@ export function useAudioPageController() {
     try {
       await reloadVst();
       toast.success(t("toasts.audio.vstReloaded"));
-      refreshStatus();
+      await refreshStatus();
     } catch (e) {
       const message = getErrorMessage(e);
       toast.error(message || t("toasts.audio.vstReloadFailed"));
@@ -382,15 +442,30 @@ export function useAudioPageController() {
     }
   };
 
-  const handleVstParamChange = async (index: number, value: number) => {
-    setVstParams((prev) => prev.map((param) => (param.index === index ? { ...param, value } : param)));
-    try {
-      await setVstParameter(index, value);
-    } catch (e) {
-      const message = getErrorMessage(e);
-      toast.error(message || t("toasts.audio.vstParamFailed"));
+  const flushVstParams = useCallback(() => {
+    vstParamFrame.current = null;
+    if (pendingVstParams.current.size === 0) return;
+    const entries = Array.from(pendingVstParams.current.entries());
+    pendingVstParams.current.clear();
+    for (const [idx, val] of entries) {
+      setVstParameter(idx, val).catch((e) => {
+        const message = getErrorMessage(e);
+        toast.error(message || t("toasts.audio.vstParamFailed"));
+      });
     }
-  };
+  }, [t]);
+
+  useEffect(() => {
+    flushVstParamsRef.current = flushVstParams;
+  }, [flushVstParams]);
+
+  const handleVstParamChange = useCallback(async (index: number, value: number) => {
+    setVstParams((prev) => prev.map((param) => (param.index === index ? { ...param, value } : param)));
+    pendingVstParams.current.set(index, value);
+    if (vstParamFrame.current === null) {
+      vstParamFrame.current = window.requestAnimationFrame(flushVstParams);
+    }
+  }, [flushVstParams]);
 
   const handleVstEqChange = (settings: VstEqSettings) => {
     if (!config) return;
@@ -458,7 +533,7 @@ export function useAudioPageController() {
     vstParamsLoading,
     vstPlugins,
     vstPluginsLoading,
-    vstUiOpen,
+    vstUiOpen: actualEditorOpen ?? vstUiOpen,
     handleAudioToggle,
     handleBackendChange,
     handleCloseVstUi,

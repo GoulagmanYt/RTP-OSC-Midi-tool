@@ -17,6 +17,8 @@ fn main() {
         }
         std::process::exit(exit_code);
     }
+    let _timer_guard = osc_midi_bridge::audio::windows_tuning::enable_high_resolution_timer();
+    osc_midi_bridge::audio::windows_tuning::reapply_process_priority_on_focus_loss();
     std::panic::set_hook(Box::new(|info| {
         let msg = match info.payload().downcast_ref::<&str>() {
             Some(s) => *s,
@@ -87,6 +89,7 @@ fn run_app() -> Result<(), Box<dyn std::error::Error>> {
             restart_rtp,
             preflight_check,
             refresh_rtp_sessions,
+            get_rtp_participants,
             ping_audio,
             reload_vst,
             reset_config_defaults,

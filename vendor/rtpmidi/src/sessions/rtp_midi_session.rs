@@ -866,7 +866,13 @@ mod shutdown_tests {
             }));
         }
         let completed = (0..4).all(|_| done_rx.recv_timeout(Duration::from_secs(2)).is_ok());
-        old.notify_midi_message(midi_types::MidiMessage::Reset, 0, 4, Instant::now());
+        old.notify_midi_message(
+            midi_types::MidiMessage::Reset,
+            0,
+            4,
+            Instant::now(),
+            Instant::now(),
+        );
         assert_eq!(count.load(Ordering::Relaxed), 0);
         // Release the snapshot before joining even if a regression blocked a writer.
         drop(old);
@@ -878,6 +884,7 @@ mod shutdown_tests {
             midi_types::MidiMessage::Reset,
             0,
             4,
+            Instant::now(),
             Instant::now(),
         );
         assert_eq!(count.load(Ordering::Relaxed), 64);

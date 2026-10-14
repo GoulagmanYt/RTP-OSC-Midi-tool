@@ -585,40 +585,46 @@ fn capture_all_vst3_parameters(instance: &mut rack::vst3::Vst3Plugin) -> Vec<Sta
 }
 
 pub(super) fn save_vst_state_blocking(plugin: &Arc<Mutex<PluginBackend>>, entry: &VstPluginEntry) {
+    if let Err(error) = save_vst_state_checked(plugin, entry) {
+        background_log("error", format!("VST state save failed: {error}"));
+    }
+}
+
+pub(super) fn save_vst_state_checked(
+    plugin: &Arc<Mutex<PluginBackend>>,
+    entry: &VstPluginEntry,
+) -> Result<(), String> {
     #[cfg(all(target_os = "windows", target_pointer_width = "64"))]
     {
         let mut guard = plugin.lock();
         if let PluginBackend::Remote { instance } = &mut *guard {
-            match instance.save_state() {
-                Ok(()) => background_log(
-                    "info",
-                    format!("VST state saved inside x86 worker for {}", entry.id),
-                ),
-                Err(error) => background_log(
-                    "error",
-                    format!("Failed to save VST state in x86 worker: {error}"),
-                ),
+            instance.save_state()?;
+            if let Some(path) = state_path_for_plugin(entry).map(|p| p.with_extension("live.json"))
+            {
+                if path.exists() {
+                    std::fs::remove_file(path).map_err(|e| e.to_string())?;
+                }
             }
-            return;
+            return Ok(());
         }
     }
     let Some(state_path) = state_path_for_plugin(entry) else {
         background_log("warn", "Could not determine VST state path");
-        return;
+        return Err("VST state unavailable".into());
     };
     let Some(document) = capture_document(&mut plugin.lock(), entry) else {
         background_log(
             "debug",
             "VST state not saved (no persistent state available)",
         );
-        return;
+        return Err("VST state unavailable".into());
     };
     let parameter_count = document.parameters.len();
     let native_bytes =
         document.vst2_bank.len() + document.vst2_preset.len() + document.vst3_state.len();
     let payload = encode_state_document(&document);
     if let Err(error) = crate::atomic_file::write_atomically(&state_path, &payload) {
-        background_log("error", format!("Failed to save VST state: {error}"));
+        return Err(error.to_string());
     } else {
         background_log(
             "info",
@@ -633,9 +639,52 @@ pub(super) fn save_vst_state_blocking(plugin: &Arc<Mutex<PluginBackend>>, entry:
             ),
         );
     }
+    let sidecar = state_path.with_extension("live.json");
+    if sidecar.exists() {
+        std::fs::remove_file(sidecar).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
-fn apply_vst3_parameters(instance: &mut rack::vst3::Vst3Plugin, saved: &[StateParameter]) {
+fn resolve_vst3_parameter_assignments(
+    current: &[(usize, rack::plugin_info::ParameterInfo)],
+    saved: &[StateParameter],
+    by_index_only: bool,
+) -> Vec<(usize, f32)> {
+    let mut assignments = Vec::new();
+    for parameter in saved {
+        let selected = if by_index_only {
+            current
+                .iter()
+                .find(|(index, _)| *index == parameter.index as usize)
+        } else {
+            current
+                .iter()
+                .find(|(_, info)| info.id == parameter.id)
+                .or_else(|| {
+                    current.iter().find(|(index, info)| {
+                        *index == parameter.index as usize
+                            && (parameter.name.is_empty()
+                                || info.name.eq_ignore_ascii_case(&parameter.name))
+                    })
+                })
+        };
+        let Some((index, info)) = selected else {
+            continue;
+        };
+        if info.flags & VST3_PARAMETER_IS_READ_ONLY != 0 || !parameter.value.is_finite() {
+            continue;
+        }
+        assignments.push((*index, parameter.value.clamp(0.0, 1.0)));
+    }
+    assignments
+}
+
+fn apply_vst3_parameters_internal(
+    instance: &mut rack::vst3::Vst3Plugin,
+    saved: &[StateParameter],
+    by_index_only: bool,
+) {
     let current = (0..instance.parameter_count())
         .filter_map(|index| {
             instance
@@ -644,30 +693,35 @@ fn apply_vst3_parameters(instance: &mut rack::vst3::Vst3Plugin, saved: &[StatePa
                 .map(|info| (index, info))
         })
         .collect::<Vec<_>>();
-    for parameter in saved {
-        let selected = current
-            .iter()
-            .find(|(_, info)| info.id == parameter.id)
-            .or_else(|| {
-                current.iter().find(|(index, info)| {
-                    *index == parameter.index as usize
-                        && (parameter.name.is_empty()
-                            || info.name.eq_ignore_ascii_case(&parameter.name))
-                })
-            });
-        let Some((index, info)) = selected else {
-            continue;
-        };
-        if info.flags & VST3_PARAMETER_IS_READ_ONLY != 0 || !parameter.value.is_finite() {
-            continue;
-        }
-        if let Err(error) = instance.set_parameter(*index, parameter.value.clamp(0.0, 1.0)) {
+    let assignments = resolve_vst3_parameter_assignments(&current, saved, by_index_only);
+    for (index, value) in assignments {
+        if let Err(error) = instance.set_parameter(index, value) {
             background_log(
                 "warn",
-                format!("Failed to restore VST3 parameter {}: {error}", parameter.id),
+                format!("Failed to restore VST3 parameter index {index}: {error}"),
             );
         }
     }
+}
+
+fn apply_vst3_parameters(instance: &mut rack::vst3::Vst3Plugin, saved: &[StateParameter]) {
+    apply_vst3_parameters_internal(instance, saved, false);
+}
+
+fn apply_legacy_indexed_parameters(instance: &mut rack::vst3::Vst3Plugin, values: &[f32]) {
+    let parameters = values
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, value)| StateParameter {
+            id: 0,
+            index: index as u32,
+            flags: 0,
+            name: String::new(),
+            value,
+        })
+        .collect::<Vec<_>>();
+    apply_vst3_parameters_internal(instance, &parameters, true);
 }
 
 fn restore_document(
@@ -869,18 +923,7 @@ pub(super) fn load_vst_state(
             SavedState::Params(values) => match &mut *guard {
                 PluginBackend::Vst2 { instance, .. } => apply_vst2_parameters(instance, &values),
                 PluginBackend::Vst3 { instance, .. } => {
-                    let parameters = values
-                        .into_iter()
-                        .enumerate()
-                        .map(|(index, value)| StateParameter {
-                            id: index as u32,
-                            index: index as u32,
-                            flags: 0,
-                            name: String::new(),
-                            value,
-                        })
-                        .collect::<Vec<_>>();
-                    apply_vst3_parameters(instance, &parameters);
+                    apply_legacy_indexed_parameters(instance, &values);
                 }
                 #[cfg(all(target_os = "windows", target_pointer_width = "64"))]
                 PluginBackend::Remote { .. } => {}
@@ -1005,18 +1048,9 @@ pub(crate) fn restore_vst3_state_file_for_diagnostic(
             if unsafe_legacy_parameter_values(&values, entry) {
                 return Err("unsafe exhaustive legacy parameter snapshot rejected".into());
             }
-            let parameters = values
-                .into_iter()
-                .enumerate()
-                .map(|(index, value)| StateParameter {
-                    id: index as u32,
-                    index: index as u32,
-                    value,
-                    ..Default::default()
-                })
-                .collect::<Vec<_>>();
-            apply_vst3_parameters(instance, &parameters);
-            Ok(parameters.len())
+            let count = values.len();
+            apply_legacy_indexed_parameters(instance, &values);
+            Ok(count)
         }
         SavedState::Chunk(state) | SavedState::Raw(state) => {
             if state_policy_for_entry(entry) != StatePolicy::NativePreferred {
@@ -1145,5 +1179,49 @@ mod tests {
             ..Default::default()
         };
         assert!(!unsafe_legacy_parameter_snapshot(&sparse, &entry));
+    }
+
+    #[test]
+    fn legacy_indexed_parameters_resolve_by_index_not_permuted_id() {
+        let info0 = rack::plugin_info::ParameterInfo {
+            index: 0,
+            id: 1,
+            flags: 0,
+            step_count: 0,
+            unit_id: 0,
+            name: "Param A".into(),
+            min: 0.0,
+            max: 1.0,
+            default: 0.0,
+            unit: String::new(),
+        };
+        let info1 = rack::plugin_info::ParameterInfo {
+            index: 1,
+            id: 0,
+            flags: 0,
+            step_count: 0,
+            unit_id: 0,
+            name: "Param B".into(),
+            min: 0.0,
+            max: 1.0,
+            default: 0.0,
+            unit: String::new(),
+        };
+        let current = vec![(0, info0), (1, info1)];
+        let values = [0.2f32, 0.8f32];
+        let legacy_params = values
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, value)| StateParameter {
+                id: 0,
+                index: index as u32,
+                flags: 0,
+                name: String::new(),
+                value,
+            })
+            .collect::<Vec<_>>();
+        let assignments = resolve_vst3_parameter_assignments(&current, &legacy_params, true);
+        assert_eq!(assignments, vec![(0, 0.2), (1, 0.8)]);
     }
 }

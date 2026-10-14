@@ -107,6 +107,20 @@ pub fn scan_vst_plugins_in_roots_cached(
     cached: &[VstPluginEntry],
     force_retest: bool,
 ) -> Vec<VstPluginEntry> {
+    scan_vst_plugins_with_probe(
+        roots,
+        cached,
+        force_retest,
+        &probe_plugins_isolated_for_architecture,
+    )
+}
+
+fn scan_vst_plugins_with_probe(
+    roots: &[PathBuf],
+    cached: &[VstPluginEntry],
+    force_retest: bool,
+    probe: &(impl Fn(&Path, Duration, &str) -> Vec<VstPluginEntry> + Sync),
+) -> Vec<VstPluginEntry> {
     let mut entries = Vec::new();
     let mut seen_paths = HashSet::new();
     let mut cached_by_path: HashMap<String, Vec<VstPluginEntry>> = HashMap::new();
@@ -124,10 +138,16 @@ pub fn scan_vst_plugins_in_roots_cached(
             let key = normalize_path(&path);
             if seen_paths.insert(key) {
                 let (modified, size) = plugin_file_metadata(&path);
+                let architectures = plugin_probe_arch::available_plugin_architectures(&path);
                 let cache_key = normalize_path(&path);
                 if !force_retest {
                     if let Some(hit) = cached_by_path.get(&cache_key).filter(|variants| {
                         !variants.is_empty()
+                            && architectures.iter().all(|architecture| {
+                                variants
+                                    .iter()
+                                    .any(|entry| &entry.architecture == architecture)
+                            })
                             && variants.iter().all(|entry| {
                                 entry.file_modified_ms == modified
                                     && entry.file_size == size
@@ -138,18 +158,17 @@ pub fn scan_vst_plugins_in_roots_cached(
                         continue;
                     }
                 }
-                let architectures = plugin_probe_arch::available_plugin_architectures(&path);
                 if architectures
                     .iter()
                     .any(|architecture| architecture == "x86")
                 {
                     x86_candidates.push(path.clone());
                 }
-                if architectures
+                if let Some(architecture) = architectures
                     .iter()
-                    .any(|architecture| architecture != "x86")
+                    .find(|architecture| *architecture != "x86")
                 {
-                    x64_candidates.push(path);
+                    x64_candidates.push((path, architecture.clone()));
                 }
             }
         }
@@ -162,20 +181,26 @@ pub fn scan_vst_plugins_in_roots_cached(
     } else {
         Duration::from_secs(30)
     };
-    let x86 = std::thread::spawn(move || {
-        x86_candidates
-            .into_iter()
-            .flat_map(|path| probe_plugins_isolated(&path, timeout))
-            .collect::<Vec<_>>()
+    let (x86, x64) = std::thread::scope(|scope| {
+        let x86 = scope.spawn(move || {
+            x86_candidates
+                .into_iter()
+                .flat_map(|path| probe(&path, timeout, "x86"))
+                .collect::<Vec<_>>()
+        });
+        let x64 = scope.spawn(move || {
+            x64_candidates
+                .into_iter()
+                .flat_map(|(path, architecture)| probe(&path, timeout, &architecture))
+                .collect::<Vec<_>>()
+        });
+        (
+            x86.join().unwrap_or_default(),
+            x64.join().unwrap_or_default(),
+        )
     });
-    let x64 = std::thread::spawn(move || {
-        x64_candidates
-            .into_iter()
-            .flat_map(|path| probe_plugins_isolated(&path, timeout))
-            .collect::<Vec<_>>()
-    });
-    entries.extend(x86.join().unwrap_or_default());
-    entries.extend(x64.join().unwrap_or_default());
+    entries.extend(x86);
+    entries.extend(x64);
 
     for index in 0..entries.len() {
         let mut architectures = entries
@@ -216,9 +241,17 @@ pub fn ensure_plugin_reference_in_app(
     plugin_id: Option<&str>,
 ) -> Result<VstPluginEntry, String> {
     let entries = probe_plugins_isolated(path, Duration::from_secs(30));
-    let entry = plugin_id
-        .and_then(|id| {
-            entries.iter().find(|entry| {
+    select_plugin_reference(&entries, plugin_id)
+}
+
+fn select_plugin_reference(
+    entries: &[VstPluginEntry],
+    plugin_id: Option<&str>,
+) -> Result<VstPluginEntry, String> {
+    let entry = match plugin_id {
+        Some(id) => entries
+            .iter()
+            .find(|entry| {
                 entry.id == id
                     || legacy_path_plugin_id(
                         &entry.format,
@@ -228,11 +261,14 @@ pub fn ensure_plugin_reference_in_app(
                         &entry.architecture,
                     ) == id
             })
-        })
-        .or_else(|| entries.iter().find(|entry| entry.supported))
-        .or_else(|| entries.first())
-        .cloned()
-        .ok_or_else(|| "Plugin probe returned no classes".to_string())?;
+            .ok_or_else(|| format!("Selected plugin class is no longer available: {id}"))?,
+        None => entries
+            .iter()
+            .find(|entry| entry.supported)
+            .or_else(|| entries.first())
+            .ok_or_else(|| "Plugin probe returned no classes".to_string())?,
+    }
+    .clone();
     if entry.supported {
         Ok(entry)
     } else {
@@ -294,23 +330,39 @@ pub fn probe_plugin_isolated(path: &Path, timeout: Duration) -> VstPluginEntry {
 }
 
 pub fn probe_plugins_isolated(path: &Path, timeout: Duration) -> Vec<VstPluginEntry> {
-    match run_probe_process(path, timeout) {
+    plugin_probe_arch::available_plugin_architectures(path)
+        .into_iter()
+        .flat_map(|architecture| {
+            probe_plugins_isolated_for_architecture(path, timeout, &architecture)
+        })
+        .collect()
+}
+
+fn probe_plugins_isolated_for_architecture(
+    path: &Path,
+    timeout: Duration,
+    architecture: &str,
+) -> Vec<VstPluginEntry> {
+    match run_probe_process(path, timeout, architecture) {
         Ok(entries) => entries,
         Err(reason) => vec![unsupported_entry(
             path,
             plugin_name(path),
             if is_vst3_path(path) { "VST3" } else { "VST2" }.to_string(),
             "instrument".to_string(),
-            "unknown".to_string(),
+            architecture.to_string(),
             reason,
         )],
     }
 }
 
-fn run_probe_process(path: &Path, timeout: Duration) -> Result<Vec<VstPluginEntry>, String> {
+fn run_probe_process(
+    path: &Path,
+    timeout: Duration,
+    architecture: &str,
+) -> Result<Vec<VstPluginEntry>, String> {
     let current_exe = std::env::current_exe()
         .map_err(|error| format!("Could not locate probe executable: {error}"))?;
-    let architecture = plugin_probe_arch::detect_plugin_architecture(path);
     let dedicated_name = if cfg!(windows) {
         if architecture == "x86" {
             "vst-host-worker-x86.exe"
@@ -330,6 +382,14 @@ fn run_probe_process(path: &Path, timeout: Duration) -> Result<Vec<VstPluginEntr
     let (program, use_current_exe) = if dedicated.exists() && dedicated != current_exe {
         (dedicated, false)
     } else {
+        if (architecture == "x86" && cfg!(target_pointer_width = "64"))
+            || (architecture == "x64" && cfg!(target_pointer_width = "32"))
+        {
+            return Err(format!(
+                "Missing {architecture} VST probe worker: {}",
+                dedicated.display()
+            ));
+        }
         (current_exe, true)
     };
     let program_label = program.display().to_string();
@@ -555,17 +615,152 @@ pub(crate) fn plugin_file_metadata(path: &Path) -> (Option<u64>, Option<u64>) {
     let Ok(metadata) = std::fs::metadata(path) else {
         return (None, None);
     };
-    let modified = metadata
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64);
-    (modified, Some(metadata.len()))
+    if metadata.is_dir() {
+        let mut max_modified = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64);
+        let mut total_size = 0u64;
+        let mut stack = vec![path.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let Ok(read_dir) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in read_dir.flatten() {
+                let entry_path = entry.path();
+                if let Ok(entry_meta) = entry.metadata() {
+                    if entry_meta.is_dir() {
+                        stack.push(entry_path);
+                    } else {
+                        total_size = total_size.saturating_add(entry_meta.len());
+                        if let Some(entry_mod) = entry_meta
+                            .modified()
+                            .ok()
+                            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_millis().min(u64::MAX as u128) as u64)
+                        {
+                            max_modified =
+                                Some(max_modified.map_or(entry_mod, |m| m.max(entry_mod)));
+                        }
+                    }
+                }
+            }
+        }
+        (max_modified, Some(total_size))
+    } else {
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64);
+        (modified, Some(metadata.len()))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn instrument_entry(path: &Path, architecture: &str, class: &str) -> VstPluginEntry {
+        let mut entry = unsupported_entry(
+            path,
+            "Synth".into(),
+            "VST3".into(),
+            "instrument".into(),
+            architecture.into(),
+            "fixture".into(),
+        );
+        entry.class_uid = Some(class.into());
+        entry.id =
+            crate::types::stable_plugin_id("VST3", &entry.path, Some(class), None, architecture);
+        entry.supported = true;
+        entry.unsupported_reason = None;
+        entry
+    }
+
+    #[test]
+    fn audit_bundle_binary_update_invalidates_catalogue_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = dir.path().join("Audit.vst3");
+        let binary_dir = bundle.join("Contents/x86_64-win");
+        std::fs::create_dir_all(&binary_dir).unwrap();
+        let binary = binary_dir.join("Audit.vst3");
+        std::fs::write(&binary, b"old binary").unwrap();
+        let roots = [dir.path().to_path_buf()];
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let probe = |path: &Path, _: Duration, architecture: &str| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            vec![instrument_entry(path, architecture, "class-a")]
+        };
+        let cached = scan_vst_plugins_with_probe(&roots, &[], false, &probe);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+        std::fs::write(&binary, b"new binary with changed size").unwrap();
+        let _ = scan_vst_plugins_with_probe(&roots, &cached, false, &probe);
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::Relaxed),
+            2,
+            "modified bundle binary was not re-probed"
+        );
+    }
+
+    #[test]
+    fn dual_architecture_scan_probes_each_worker_and_rebuilds_incomplete_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = dir.path().join("Dual.vst3");
+        std::fs::create_dir_all(bundle.join("Contents/x86-win")).unwrap();
+        std::fs::create_dir_all(bundle.join("Contents/x86_64-win")).unwrap();
+        let roots = [dir.path().to_path_buf()];
+        let calls = std::sync::Mutex::new(Vec::new());
+        let probe = |path: &Path, _: Duration, architecture: &str| {
+            calls.lock().unwrap().push(architecture.to_string());
+            vec![instrument_entry(path, architecture, "class-a")]
+        };
+        let entries = scan_vst_plugins_with_probe(&roots, &[], false, &probe);
+        assert_eq!(entries.len(), 2);
+        assert_ne!(entries[0].id, entries[1].id);
+        let mut architectures = calls.lock().unwrap().clone();
+        architectures.sort();
+        assert_eq!(architectures, ["x64", "x86"]);
+        let incomplete = vec![entries[0].clone(), entries[0].clone()];
+        calls.lock().unwrap().clear();
+        assert_eq!(
+            scan_vst_plugins_with_probe(&roots, &incomplete, false, &probe).len(),
+            2
+        );
+        assert_eq!(calls.lock().unwrap().len(), 2);
+        calls.lock().unwrap().clear();
+        assert_eq!(
+            scan_vst_plugins_with_probe(&roots, &entries, false, &probe).len(),
+            2
+        );
+        assert!(calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn explicit_plugin_selection_never_substitutes_another_class_or_architecture() {
+        let path = Path::new("C:/VST/Multi.vst3");
+        let entries = [
+            instrument_entry(path, "x64", "class-a"),
+            instrument_entry(path, "x86", "class-b"),
+        ];
+        assert!(select_plugin_reference(&entries, Some("removed-class")).is_err());
+        assert_eq!(
+            select_plugin_reference(&entries, Some(&entries[1].id))
+                .unwrap()
+                .id,
+            entries[1].id
+        );
+        let legacy = legacy_path_plugin_id("VST3", &entries[1].path, Some("class-b"), None, "x86");
+        assert_eq!(
+            select_plugin_reference(&entries, Some(&legacy)).unwrap().id,
+            entries[1].id
+        );
+        assert_eq!(
+            select_plugin_reference(&entries, None).unwrap().id,
+            entries[0].id
+        );
+    }
     use rack::{PluginInfo, PluginType};
     use std::fs;
     use tempfile::tempdir;

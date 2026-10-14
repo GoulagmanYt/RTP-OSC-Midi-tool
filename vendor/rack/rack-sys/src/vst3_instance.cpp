@@ -1,4 +1,6 @@
 #include "rack_vst3.h"
+#include "realtime_parameter_mailbox.h"
+#include "parameter_transfer_queue.h"
 #include "public.sdk/source/vst/hosting/module.h"
 #include "public.sdk/source/vst/hosting/plugprovider.h"
 #include "public.sdk/source/vst/hosting/hostclasses.h"
@@ -30,6 +32,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
+#include <memory>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -63,39 +66,7 @@ struct PendingParameterChange {
     int32 sample_offset = 0;
 };
 
-struct ParameterTransferQueue {
-    std::array<PendingParameterChange, kParameterTransferCapacity> entries{};
-    std::atomic<uint64_t> read_index{0};
-    std::atomic<uint64_t> write_index{0};
-    std::atomic<uint64_t> dropped{0};
-    std::mutex producer_mutex;
-
-    bool push(const PendingParameterChange& change) noexcept {
-        // Multiple non-realtime producers (plugin UI and Tauri commands) are
-        // serialized here. The audio consumer never takes this mutex.
-        std::lock_guard<std::mutex> producer_lock(producer_mutex);
-        const uint64_t write = write_index.load(std::memory_order_relaxed);
-        const uint64_t read = read_index.load(std::memory_order_acquire);
-        if (write - read >= kParameterTransferCapacity) {
-            dropped.fetch_add(1, std::memory_order_relaxed);
-            return false;
-        }
-        entries[write % kParameterTransferCapacity] = change;
-        write_index.store(write + 1, std::memory_order_release);
-        return true;
-    }
-
-    bool pop(PendingParameterChange& change) noexcept {
-        const uint64_t read = read_index.load(std::memory_order_relaxed);
-        const uint64_t write = write_index.load(std::memory_order_acquire);
-        if (read == write) {
-            return false;
-        }
-        change = entries[read % kParameterTransferCapacity];
-        read_index.store(read + 1, std::memory_order_release);
-        return true;
-    }
-};
+using ParameterTransferQueue = rack_realtime::ParameterTransferQueue<PendingParameterChange, kParameterTransferCapacity>;
 
 // Single producer (audio thread), single consumer (UI/control thread).  Unlike
 // ParameterTransferQueue this queue deliberately contains no producer mutex.
@@ -532,7 +503,10 @@ struct RackVST3Plugin {
     EventList output_events;
     ParameterTransferQueue ui_to_audio_parameters;
     RealtimeParameterQueue audio_to_ui_parameters;
-    RealtimeParameterQueue audio_to_persistent_parameters;
+    // One atomic latest value per parameter, allocated before processing starts.
+    // Persistence must retain the newest value for an arbitrarily long game
+    // session without requiring control-thread calls into the processor.
+    std::unique_ptr<rack_realtime::ParameterMailbox[]> audio_persistent_latest;
     std::array<PendingParameterChange, kRealtimeEventCapacity> audio_parameter_scratch{};
     std::array<PendingParameterChange, kRealtimeEventCapacity> direct_audio_parameters{};
     size_t direct_audio_parameter_count = 0;
@@ -635,11 +609,18 @@ static void rack_vst3_track_parameter_control(
     }
 }
 
+static void rack_vst3_publish_audio_parameter(RackVST3Plugin* plugin, uint32_t index, ParamValue value) {
+    plugin->audio_persistent_latest[index].publish(value);
+}
+
 static void rack_vst3_drain_persistent_audio_parameters(RackVST3Plugin* plugin) {
-    if (!plugin) return;
-    PendingParameterChange change;
-    while (plugin->audio_to_persistent_parameters.pop(change)) {
-        rack_vst3_track_parameter_control(plugin, change.id, change.value, true);
+    if (!plugin || !plugin->audio_persistent_latest) return;
+    for (size_t index = 0; index < plugin->parameters.size(); ++index) {
+        ParamValue value = 0;
+        if (!plugin->audio_persistent_latest[index].take_latest(value)) continue;
+        const ParamID id = plugin->parameters[index].id;
+        plugin->controller->setParamNormalized(id, value);
+        rack_vst3_track_parameter_control(plugin, id, value, true);
     }
 }
 
@@ -858,7 +839,7 @@ void rack_vst3_plugin_free(RackVST3Plugin* plugin) {
     std::lock_guard<std::mutex> lock(g_vst3_lifecycle_mutex);
     // Audio processing is stopped by the host before teardown. This mutex
     // serializes the remaining state/controller/UI operations.
-    std::lock_guard<std::mutex> state_lock(plugin->state_mutex);
+    std::unique_lock<std::mutex> state_lock(plugin->state_mutex);
     trace_free_step("begin");
 
     // Stop processing before deactivating/terminating the plugin.
@@ -911,6 +892,11 @@ void rack_vst3_plugin_free(RackVST3Plugin* plugin) {
     }
 
     trace_free_step("release remaining refs");
+    // All plug-in interfaces must be released while their module is loaded,
+    // including connection points and a combined component/controller.
+    plugin->component_cp = nullptr;
+    plugin->controller_cp = nullptr;
+    plugin->controller = nullptr;
     plugin->component_handler = nullptr;
     plugin->midi_mapping = nullptr;
     plugin->processor = nullptr;
@@ -918,6 +904,8 @@ void rack_vst3_plugin_free(RackVST3Plugin* plugin) {
     plugin->module = nullptr;
 
     trace_free_step("delete plugin");
+    // The mutex belongs to plugin: release it before destroying its storage.
+    state_lock.unlock();
     delete plugin;
 }
 
@@ -1131,6 +1119,7 @@ int rack_vst3_plugin_initialize(RackVST3Plugin* plugin, double sample_rate, uint
             }
         }
 
+        plugin->audio_persistent_latest = std::make_unique<rack_realtime::ParameterMailbox[]>(plugin->parameters.size());
         plugin->midi_controller_assignments.assign(16 * kCountCtrlNumber, kNoParamId);
         if (plugin->midi_mapping) {
             for (int16 channel = 0; channel < 16; ++channel) {
@@ -1619,7 +1608,7 @@ int rack_vst3_plugin_set_parameter(RackVST3Plugin* plugin, uint32_t index, float
 }
 
 int rack_vst3_plugin_set_parameter_audio(RackVST3Plugin* plugin, uint32_t index, float value) {
-    if (!plugin || !plugin->initialized || index >= plugin->parameters.size()) {
+    if (!plugin || !plugin->initialized || index >= plugin->parameters.size() || !std::isfinite(value)) {
         return RACK_VST3_ERROR_INVALID_PARAM;
     }
     const PendingParameterChange change{
@@ -1630,7 +1619,7 @@ int rack_vst3_plugin_set_parameter_audio(RackVST3Plugin* plugin, uint32_t index,
     for (size_t existing = 0; existing < plugin->direct_audio_parameter_count; ++existing) {
         if (plugin->direct_audio_parameters[existing].id == change.id) {
             plugin->direct_audio_parameters[existing] = change;
-            plugin->audio_to_persistent_parameters.push(change);
+            rack_vst3_publish_audio_parameter(plugin, index, change.value);
             return RACK_VST3_OK;
         }
     }
@@ -1638,7 +1627,23 @@ int rack_vst3_plugin_set_parameter_audio(RackVST3Plugin* plugin, uint32_t index,
         return RACK_VST3_ERROR_GENERIC;
     }
     plugin->direct_audio_parameters[plugin->direct_audio_parameter_count++] = change;
-    plugin->audio_to_persistent_parameters.push(change);
+    rack_vst3_publish_audio_parameter(plugin, index, change.value);
+    return RACK_VST3_OK;
+}
+
+int rack_vst3_plugin_prepare_live_parameter_restore(RackVST3Plugin* plugin, const uint32_t* indices, uint32_t count) {
+    if (!plugin || (!indices && count != 0)) return RACK_VST3_ERROR_INVALID_PARAM;
+    std::lock_guard<std::mutex> state_lock(plugin->state_mutex);
+    std::vector<ParamID> superseded;
+    superseded.reserve(count);
+    for (uint32_t offset = 0; offset < count; ++offset) {
+        if (indices[offset] >= plugin->parameters.size()) return RACK_VST3_ERROR_INVALID_PARAM;
+        superseded.push_back(plugin->parameters[indices[offset]].id);
+    }
+    std::sort(superseded.begin(), superseded.end());
+    plugin->ui_to_audio_parameters.discard_if([&](const PendingParameterChange& change) {
+        return std::binary_search(superseded.begin(), superseded.end(), change.id);
+    });
     return RACK_VST3_OK;
 }
 

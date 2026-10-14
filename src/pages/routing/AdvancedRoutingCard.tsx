@@ -8,7 +8,7 @@ import { Label } from "../../components/ui/Label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../components/ui/Select";
 import { Switch } from "../../components/ui/Switch";
 
-import type { Translate } from "./shared";
+import { clampMidiNumber, clampNullableMidiNumber, type Translate } from "./shared";
 
 type Props = {
   t: Translate;
@@ -107,7 +107,7 @@ export function AdvancedRoutingCard(props: Props) {
                         value={profile.channelFilter ?? ""}
                         onChange={(event) =>
                           updateProfile(profile.id, {
-                            channelFilter: event.target.value ? Number(event.target.value) : null,
+                            channelFilter: clampNullableMidiNumber(event.target.value, 1, 16),
                           })
                         }
                       />
@@ -122,7 +122,7 @@ export function AdvancedRoutingCard(props: Props) {
                         value={profile.noteMin ?? ""}
                         onChange={(event) =>
                           updateProfile(profile.id, {
-                            noteMin: event.target.value ? Number(event.target.value) : null,
+                            noteMin: clampNullableMidiNumber(event.target.value, 0, 127),
                           })
                         }
                       />
@@ -137,7 +137,7 @@ export function AdvancedRoutingCard(props: Props) {
                         value={profile.noteMax ?? ""}
                         onChange={(event) =>
                           updateProfile(profile.id, {
-                            noteMax: event.target.value ? Number(event.target.value) : null,
+                            noteMax: clampNullableMidiNumber(event.target.value, 0, 127),
                           })
                         }
                       />
@@ -168,7 +168,7 @@ export function AdvancedRoutingCard(props: Props) {
                                   value={entry.from}
                                   onChange={(event) =>
                                     updateProfileMap(profile.id, mapKey, idx, {
-                                      from: Number(event.target.value || 0),
+                                      from: clampMidiNumber(event.target.value, 0, 127),
                                     })
                                   }
                                 />
@@ -179,7 +179,7 @@ export function AdvancedRoutingCard(props: Props) {
                                   value={entry.to}
                                   onChange={(event) =>
                                     updateProfileMap(profile.id, mapKey, idx, {
-                                      to: Number(event.target.value || 0),
+                                      to: clampMidiNumber(event.target.value, 0, 127),
                                     })
                                   }
                                 />

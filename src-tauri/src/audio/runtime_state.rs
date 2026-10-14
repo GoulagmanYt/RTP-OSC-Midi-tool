@@ -60,6 +60,8 @@ pub(super) const MAX_PLUGIN_CHANNELS: usize = 256;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioSettings {
+    #[serde(default = "default_game_mode")]
+    pub game_mode: bool,
     pub enabled: bool,
     pub backend: Option<String>,
     pub device: Option<String>,
@@ -85,7 +87,8 @@ impl Default for AudioSettings {
             device: None,
             device_id: None,
             sample_rate: 48_000,
-            buffer_size: 256,
+            buffer_size: 512,
+            game_mode: true,
             gain_db: 0.0,
             limiter_enabled: false,
             vst_eq: VstEqSettings::default(),
@@ -147,6 +150,21 @@ pub(super) struct AudioControls {
 
 #[repr(align(64))]
 pub(super) struct AudioTelemetry {
+    pub(super) editor_open: AtomicBool,
+    pub(super) parameter_accepted_sequence: AtomicU64,
+    pub(super) parameter_failed_sequence: AtomicU64,
+    pub(super) parameter_applied_sequence: AtomicU64,
+    pub(super) midi_generation: AtomicU64,
+    pub(super) pipe_wait_max_us: AtomicU64,
+    pub(super) audio_wait_max_us: AtomicU64,
+    pub(super) x86_underruns: AtomicU32,
+    pub(super) x86_overruns: AtomicU32,
+    pub(super) x86_alive: AtomicBool,
+    pub(super) midi_delivery_max_us: AtomicU64,
+    pub(super) midi_delivery_histogram: [AtomicU64; 512],
+    pub(super) callback_count: AtomicU64,
+    pub(super) callback_last_qpc: AtomicU64,
+    pub(super) callback_interval_max_us: AtomicU64,
     pub(super) xruns: AtomicU32,
     pub(super) stream_fatal_error: AtomicU32,
     pub(super) stream_recovery_requests: AtomicU32,
@@ -176,6 +194,21 @@ pub(super) const DSP_HISTOGRAM_BUCKET_US: u32 = 250;
 impl AudioTelemetry {
     pub(super) fn new() -> Self {
         Self {
+            editor_open: AtomicBool::new(false),
+            parameter_accepted_sequence: AtomicU64::new(0),
+            parameter_applied_sequence: AtomicU64::new(0),
+            parameter_failed_sequence: AtomicU64::new(0),
+            midi_generation: AtomicU64::new(0),
+            pipe_wait_max_us: AtomicU64::new(0),
+            audio_wait_max_us: AtomicU64::new(0),
+            x86_underruns: AtomicU32::new(0),
+            x86_overruns: AtomicU32::new(0),
+            x86_alive: AtomicBool::new(true),
+            midi_delivery_max_us: AtomicU64::new(0),
+            midi_delivery_histogram: std::array::from_fn(|_| AtomicU64::new(0)),
+            callback_count: AtomicU64::new(0),
+            callback_last_qpc: AtomicU64::new(0),
+            callback_interval_max_us: AtomicU64::new(0),
             xruns: AtomicU32::new(0),
             stream_fatal_error: AtomicU32::new(0),
             stream_recovery_requests: AtomicU32::new(0),
@@ -198,6 +231,52 @@ impl AudioTelemetry {
             audio_midi_queue_max_depth: AtomicU32::new(0),
             audio_midi_oldest_us: AtomicU64::new(0),
         }
+    }
+
+    pub(super) fn record_midi_delivery(&self, packet: MidiPacket) {
+        self.record_midi_delivery_at(
+            packet.ingress_qpc,
+            packet.worker_qpc,
+            crate::vst_worker::protocol::monotonic_qpc(),
+        );
+    }
+    pub(super) fn record_midi_delivery_at(
+        &self,
+        ingress_qpc: u64,
+        worker_qpc: u64,
+        consumed_qpc: u64,
+    ) {
+        use crate::vst_worker::protocol::qpc_elapsed_us;
+        self.audio_wait_max_us
+            .fetch_max(qpc_elapsed_us(worker_qpc, consumed_qpc), Ordering::Relaxed);
+        let delay = qpc_elapsed_us(ingress_qpc, consumed_qpc);
+        self.midi_delivery_max_us
+            .fetch_max(delay, Ordering::Relaxed);
+        self.midi_delivery_histogram[(delay / 250).min(511) as usize]
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    pub(super) fn midi_delivery_percentile(&self, percentile: u64) -> u64 {
+        let total: u64 = self
+            .midi_delivery_histogram
+            .iter()
+            .map(|b| b.load(Ordering::Relaxed))
+            .sum();
+        if total == 0 {
+            return 0;
+        }
+        let target = (total * percentile).div_ceil(100);
+        let mut sum = 0;
+        for (index, bucket) in self.midi_delivery_histogram.iter().enumerate() {
+            sum += bucket.load(Ordering::Relaxed);
+            if sum >= target {
+                return if index == 511 {
+                    self.midi_delivery_max_us.load(Ordering::Relaxed)
+                } else {
+                    (index as u64 + 1) * 250
+                };
+            }
+        }
+        0
     }
 
     pub(super) fn dsp_percentile_us(&self, percentile: u32) -> u32 {
@@ -284,6 +363,7 @@ pub(super) const PARAMETER_COMMAND_CAPACITY: usize = 4096;
 #[derive(Clone, Copy, Debug)]
 #[cfg_attr(target_pointer_width = "32", allow(dead_code))]
 pub(super) struct ParameterCommand {
+    pub(super) sequence: u64,
     pub(super) index: usize,
     pub(super) id: u32,
     pub(super) flags: u32,
@@ -308,9 +388,12 @@ pub(super) fn vst_shutdown_timeout() -> Duration {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct MidiPacket {
+    pub(super) worker_qpc: u64,
+    pub(super) generation: u64,
     pub(super) data: [u8; 3],
     pub(super) len: u8,
     pub(super) timestamp_us: u64,
+    pub(super) ingress_qpc: u64,
 }
 
 impl MidiPacket {
@@ -331,9 +414,12 @@ impl MidiPacket {
             return None;
         }
         Some(Self {
+            worker_qpc: crate::vst_worker::protocol::monotonic_qpc(),
+            generation: 0,
             data,
             len: len as u8,
             timestamp_us: monotonic_us().saturating_sub(age_us),
+            ingress_qpc: crate::vst_worker::protocol::monotonic_qpc(),
         })
     }
 
@@ -366,6 +452,7 @@ impl MidiPacket {
 }
 
 pub(super) struct AudioCallbackState {
+    pub(super) midi_generation: u64,
     pub(super) midi_rx: Consumer<MidiPacket>,
     pub(super) pending_midi: VecDeque<MidiPacket>,
     pub(super) midi_events: Vec<RackMidiEvent>,
@@ -428,6 +515,7 @@ impl AudioCallbackState {
             .expect("initial EQ snapshot must be coherent");
 
         Self {
+            midi_generation: 0,
             midi_rx,
             pending_midi: VecDeque::with_capacity(MAX_PENDING_MIDI),
             midi_events: Vec::with_capacity(MIDI_EVENT_BATCH_CAPACITY),
@@ -487,16 +575,11 @@ impl AudioCallbackState {
     }
 
     pub(super) fn drain_midi(&mut self) {
-        if self
-            .emergency_reset_requested
-            .swap(false, Ordering::Relaxed)
-        {
+        if self.emergency_reset_requested.swap(false, Ordering::AcqRel) {
             self.needs_emergency_reset = true;
             self.pending_midi.clear();
-            for _ in 0..self.midi_rx.slots() {
-                let _ = self.midi_rx.pop();
-            }
         }
+        self.observe_midi_generation();
         let now_us = monotonic_us();
         // Age is telemetry, not an overflow condition. A delayed wake-up must
         // not discard valid Note-Ons/controllers while queue capacity remains.
@@ -505,7 +588,10 @@ impl AudioCallbackState {
             let Ok(msg) = self.midi_rx.pop() else {
                 break;
             };
-            self.enqueue_midi(msg);
+            self.observe_midi_generation();
+            if msg.generation == self.midi_generation {
+                self.enqueue_midi(msg);
+            }
         }
         let depth = self.pending_midi.len().saturating_add(self.midi_rx.slots());
         let depth = depth.min(u32::MAX as usize) as u32;
@@ -523,7 +609,25 @@ impl AudioCallbackState {
             .store(oldest_us, Ordering::Relaxed);
     }
 
+    fn observe_midi_generation(&mut self) {
+        let generation = self.telemetry.midi_generation.load(Ordering::Acquire);
+        if generation != self.midi_generation {
+            self.midi_generation = generation;
+            self.pending_midi.clear();
+            self.needs_emergency_reset = true;
+        }
+    }
+
     pub(super) fn enqueue_midi(&mut self, msg: MidiPacket) {
+        if !msg.is_critical_release()
+            && self.pending_midi.len()
+                >= MAX_PENDING_MIDI - crate::realtime::reserve(MAX_PENDING_MIDI)
+        {
+            self.telemetry
+                .midi_drop_count
+                .fetch_add(1, Ordering::Relaxed);
+            return;
+        }
         if self.pending_midi.len() < MAX_PENDING_MIDI {
             self.pending_midi.push_back(msg);
             return;
@@ -588,8 +692,12 @@ impl AudioCallbackState {
     }
 
     pub(super) fn drain_parameter_commands(&mut self) {
+        self.drain_parameter_commands_limit(MIDI_EVENT_BATCH_CAPACITY);
+    }
+
+    pub(super) fn drain_parameter_commands_limit(&mut self, limit: usize) {
         self.parameter_commands.clear();
-        while self.parameter_commands.len() < self.parameter_commands.capacity() {
+        for _ in 0..limit.min(MIDI_EVENT_BATCH_CAPACITY) {
             let Ok(command) = self.parameter_rx.try_recv() else {
                 break;
             };
@@ -623,4 +731,8 @@ pub(super) fn atomic_max(cell: &AtomicU32, value: u32) {
             Err(observed) => current = observed,
         }
     }
+}
+
+fn default_game_mode() -> bool {
+    true
 }

@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { refreshRtpSessions } from "../api";
+import { getRtpParticipants, refreshRtpSessions } from "../api";
 import type { RtpParticipantInfo, RtpSessionInfo } from "../api";
 import { RTP_VIRTUAL_INPUT } from "../constants";
 import { useBridge } from "../providers/BridgeProvider";
@@ -42,16 +42,39 @@ export default function RtpPage() {
   }, [t]);
   
   useEffect(() => {
+    let disposed = false;
+    let participantRevision = 0;
+    const subscriptions = new Set<() => void>();
+    const register = (unlisten: () => void) => {
+      if (disposed) unlisten();
+      else subscriptions.add(unlisten);
+    };
     const unlistenSessions = listen<RtpSessionInfo[]>("rtp:sessions", (event) => {
+      if (disposed) return;
       setSessions(event.payload);
       setDiscovering(false);
     });
     const unlistenParticipants = listen<RtpParticipantInfo[]>("rtp:participants", (event) => {
+      if (disposed) return;
+      participantRevision += 1;
       setParticipants(event.payload);
     });
+    void unlistenSessions.then(register).catch((error) => {
+      console.error("Failed to subscribe to RTP sessions", error);
+    });
+    void unlistenParticipants.then(async (unlisten) => {
+      register(unlisten);
+      if (disposed) return;
+      const revision = participantRevision;
+      const snapshot = await getRtpParticipants();
+      // An event received while the snapshot was in flight is more recent.
+      if (!disposed && participantRevision === revision) setParticipants(snapshot);
+    }).catch((error) => {
+      console.error("Failed to load RTP participants", error);
+    });
     return () => {
-      unlistenSessions.then((fn) => fn());
-      unlistenParticipants.then((fn) => fn());
+      disposed = true;
+      subscriptions.forEach((unlisten) => unlisten());
     };
   }, []);
 

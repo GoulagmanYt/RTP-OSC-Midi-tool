@@ -101,7 +101,7 @@ pub fn save_vst_cache_to_disk(entries: &[VstPluginEntry]) {
     let Ok(raw) = serde_json::to_string(entries) else {
         return;
     };
-    let _ = fs::write(path, raw);
+    let _ = crate::atomic_file::write_atomically(&path, raw.as_bytes());
 }
 
 pub fn open_folder_in_explorer(path: &Path) -> Result<(), String> {
@@ -141,6 +141,14 @@ pub fn sync_runtime_logging(config: &Config, dev_logging: &Arc<std::sync::atomic
 }
 
 pub fn sync_rtp_discovery(config: &Config, state: &AppState, app: &AppHandle) {
+    let local_port = state
+        .bridge
+        .status(config)
+        .rtp_bound_port
+        .unwrap_or(config.rtp.port);
+    state
+        .rtp_discovery
+        .set_local_session(config.rtp.session_name.clone(), local_port);
     if config.rtp.remote_enabled {
         state.rtp_discovery.start(app.clone());
     } else {
@@ -156,6 +164,7 @@ pub fn audio_settings_from_config(config: &Config) -> crate::audio::AudioSetting
         .unwrap_or(crate::config::BUNDLED_VST_EQ_KEY);
     crate::audio::AudioSettings {
         enabled: config.audio.enabled,
+        game_mode: config.audio.game_mode,
         backend: config.audio.backend.clone(),
         device: config.audio.device.clone(),
         device_id: config.audio.device_id.clone(),

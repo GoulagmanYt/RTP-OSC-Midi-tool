@@ -10,6 +10,7 @@ pub(super) struct ScheduledMidi {
     pub data: [u8; 3],
     pub len: u8,
     pub generation: u64,
+    pub ingress_qpc: u64,
 }
 
 fn take<'a>(bytes: &mut &'a [u8], size: usize) -> Result<&'a [u8], &'static str> {
@@ -102,7 +103,7 @@ fn packet(
         let inherited_tag = if tag == 1 { parent_tag } else { Some(tag) };
         while !remaining.is_empty() {
             let size = i32::from_be_bytes(take(&mut remaining, 4)?.try_into().unwrap());
-            if size <= 0 {
+            if size <= 0 || !(size as usize).is_multiple_of(4) {
                 return Err("invalid OSC bundle element size");
             }
             let element = take(&mut remaining, size as usize)?;
@@ -169,10 +170,11 @@ fn packet(
             _ => return Err("invalid OSC MIDI status"),
         };
         let mut data = [status, arguments[2], arguments[3]];
-        if data[1..usize::from(len)].iter().any(|b| *b >= 128)
-            || data[usize::from(len)..].iter().any(|b| *b != 0)
-        {
+        if data[1..usize::from(len)].iter().any(|b| *b >= 128) {
             return Err("invalid OSC MIDI data");
+        }
+        for byte in data[usize::from(len)..].iter_mut() {
+            *byte = 0;
         }
         if status & 0xF0 == 0x90 && data[2] == 0 {
             data[0] = 0x80 | (status & 15);
@@ -195,11 +197,13 @@ fn packet(
                     1 => true,
                     _ => return Err("OSC switch must be zero or one"),
                 },
-                ",f" => match f32::from_be_bytes(arguments.try_into().unwrap()) {
-                    0.0 => false,
-                    1.0 => true,
-                    _ => return Err("OSC switch must be zero or one"),
-                },
+                ",f" => {
+                    let value = f32::from_be_bytes(arguments.try_into().unwrap());
+                    if !value.is_finite() {
+                        return Err("OSC switch must be finite");
+                    }
+                    value >= 0.5
+                }
                 ",T" => true,
                 ",F" => false,
                 _ => return Err("invalid OSC switch type"),
@@ -218,10 +222,11 @@ fn packet(
         }
     }
     if let Some((data, len)) = midi {
-        if out.len() >= MAX_PACKET_MESSAGES || out.len() == out.capacity() {
+        if out.len() >= MAX_PACKET_MESSAGES {
             return Err("too many OSC messages");
         }
         out.push(ScheduledMidi {
+            ingress_qpc: crate::vst_worker::protocol::qpc_at(now),
             deadline: parent,
             order: out.len() as u64,
             data,
@@ -242,6 +247,20 @@ mod tests {
             args: vec![OscType::Int(1)],
         })
     }
+    #[test]
+    fn decoding_grows_empty_and_small_vectors_but_keeps_the_packet_limit() {
+        let packet = OscPacket::Bundle(OscBundle {
+            timetag: (0, 1).into(),
+            content: vec![message(); MAX_PACKET_MESSAGES],
+        });
+        let bytes = rosc::encoder::encode(&packet).unwrap();
+        for capacity in [0, 1] {
+            let mut out = Vec::with_capacity(capacity);
+            decode(&bytes, SystemTime::now(), Instant::now(), 0, &mut out).unwrap();
+            assert_eq!(out.len(), MAX_PACKET_MESSAGES);
+        }
+    }
+
     #[test]
     fn validates_all_atomic_types_and_rejects_bad_padding_and_truncation() {
         let packet = OscPacket::Message(OscMessage {
@@ -333,5 +352,20 @@ mod tests {
             deadline(1u64 << 32, era_wall, now, now).unwrap(),
             now + Duration::from_secs(1)
         );
+    }
+
+    #[test]
+    fn rejects_unaligned_bundle_elements() {
+        let wall = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let now = Instant::now();
+        let mut raw = Vec::new();
+        raw.extend_from_slice(b"#bundle\0");
+        raw.extend_from_slice(&1u64.to_be_bytes());
+        // Element size 5 (not a multiple of 4)
+        raw.extend_from_slice(&5i32.to_be_bytes());
+        raw.extend_from_slice(&[0u8; 8]);
+        let mut out = Vec::with_capacity(MAX_PACKET_MESSAGES);
+        let err = decode(&raw, wall, now, 0, &mut out).unwrap_err();
+        assert_eq!(err, "invalid OSC bundle element size");
     }
 }

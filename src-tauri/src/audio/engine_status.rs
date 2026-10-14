@@ -8,6 +8,17 @@ use super::{
 use crate::config::VstEqSettings;
 use crate::logger::FrontendLogger;
 
+#[cfg(target_os = "windows")]
+fn require_control_admission(admitted: bool) -> Result<(), AudioError> {
+    if admitted {
+        Ok(())
+    } else {
+        Err(AudioError::Message(
+            "Audio worker unavailable or its command queue is full".into(),
+        ))
+    }
+}
+
 impl AudioEngine {
     pub fn lifecycle_state(&self) -> &'static str {
         #[cfg(target_os = "windows")]
@@ -28,37 +39,40 @@ impl AudioEngine {
         .as_str()
     }
 
-    pub fn set_gain(&self, gain_db: f32) {
+    pub fn set_gain(&self, gain_db: f32) -> Result<(), AudioError> {
+        if !gain_db.is_finite() {
+            return Err(AudioError::Message("Gain dB must be finite".into()));
+        }
+        let clamped = gain_db.clamp(-60.0, 12.0);
         #[cfg(target_os = "windows")]
         if self.is_worker_enabled() {
-            let _ = self.worker.try_set_gain(gain_db);
-            return;
+            return require_control_admission(self.worker.try_set_gain(clamped));
         }
         if let Some(rt) = self.runtime.lock().as_mut() {
             rt.controls
                 .gain_bits
-                .store(db_to_linear(gain_db).to_bits(), Ordering::Relaxed);
+                .store(db_to_linear(clamped).to_bits(), Ordering::Relaxed);
         }
+        Ok(())
     }
 
-    pub fn set_limiter_enabled(&self, enabled: bool) {
+    pub fn set_limiter_enabled(&self, enabled: bool) -> Result<(), AudioError> {
         #[cfg(target_os = "windows")]
         if self.is_worker_enabled() {
-            let _ = self.worker.try_set_limiter_enabled(enabled);
-            return;
+            return require_control_admission(self.worker.try_set_limiter_enabled(enabled));
         }
         if let Some(rt) = self.runtime.lock().as_mut() {
             rt.controls
                 .limiter_enabled
                 .store(enabled, Ordering::Relaxed);
         }
+        Ok(())
     }
 
-    pub fn set_vst_eq(&self, settings: VstEqSettings) {
+    pub fn set_vst_eq(&self, settings: VstEqSettings) -> Result<(), AudioError> {
         #[cfg(target_os = "windows")]
         if self.is_worker_enabled() {
-            let _ = self.worker.try_set_eq(settings);
-            return;
+            return require_control_admission(self.worker.try_set_eq(settings));
         }
         if let Some(runtime) = self.runtime.lock().as_ref() {
             runtime
@@ -66,6 +80,7 @@ impl AudioEngine {
                 .equalizer
                 .publish(&settings, runtime.sample_rate);
         }
+        Ok(())
     }
 
     pub fn current_backend(&self) -> Option<String> {
@@ -204,10 +219,10 @@ impl AudioEngine {
 
     pub fn stream_fault_reason(&self) -> Option<String> {
         let code = self
-            .runtime
-            .lock()
+            .health_telemetry
+            .load()
             .as_ref()
-            .map(|runtime| runtime.telemetry.stream_fatal_error.load(Ordering::Acquire))
+            .map(|telemetry| telemetry.stream_fatal_error.load(Ordering::Acquire))
             .unwrap_or(0);
         let reason = match code {
             1 => "audio device busy",
@@ -364,10 +379,7 @@ impl AudioEngine {
         }
         self.runtime.lock().as_ref().map(|runtime| {
             #[cfg(all(target_os = "windows", target_pointer_width = "64"))]
-            if matches!(
-                &*runtime.plugin.lock(),
-                super::runtime_state::PluginBackend::Remote { .. }
-            ) {
+            if runtime.is_x86_bridge {
                 return runtime
                     .plugin_latency_samples
                     .saturating_sub(runtime.requested_buffer_size);
@@ -387,10 +399,7 @@ impl AudioEngine {
         }
         self.runtime.lock().as_ref().map(|runtime| {
             #[cfg(all(target_os = "windows", target_pointer_width = "64"))]
-            if matches!(
-                &*runtime.plugin.lock(),
-                super::runtime_state::PluginBackend::Remote { .. }
-            ) {
+            if runtime.is_x86_bridge {
                 return runtime.requested_buffer_size;
             }
             #[cfg(not(all(target_os = "windows", target_pointer_width = "64")))]
@@ -426,37 +435,22 @@ impl AudioEngine {
                 metrics.x86_worker_alive,
             );
         }
-        #[cfg(all(target_os = "windows", target_pointer_width = "64"))]
-        if let Some(runtime) = self.runtime.lock().as_ref() {
-            if !runtime.is_x86_bridge {
-                return (0, 0, false);
-            }
-            if let Some(mut plugin) = runtime.plugin.try_lock() {
-                if let super::runtime_state::PluginBackend::Remote { instance } = &mut *plugin {
-                    return instance.telemetry();
-                }
-            }
-            // The ASIO callback owns this mutex while it publishes/consumes a
-            // bridge block. A telemetry lock miss is expected contention, not
-            // evidence that the nested worker died. Reporting false here made
-            // the heartbeat kill a healthy x86 host nondeterministically.
-            return (0, 0, true);
+        if let Some(t) = self.health_telemetry.load().as_ref() {
+            return (
+                t.x86_underruns.load(Ordering::Relaxed),
+                t.x86_overruns.load(Ordering::Relaxed),
+                t.x86_alive.load(Ordering::Relaxed),
+            );
         }
         (0, 0, false)
     }
 
     #[cfg(all(target_os = "windows", target_pointer_width = "64"))]
     pub fn x86_bridge_fault_reason(&self) -> Option<String> {
-        let runtime_guard = self.runtime.lock();
-        let runtime = runtime_guard.as_ref()?;
-        if !runtime.is_x86_bridge {
-            return None;
-        }
-        let mut plugin = runtime.plugin.try_lock()?;
-        match &mut *plugin {
-            super::runtime_state::PluginBackend::Remote { instance } => instance.fault_reason(),
-            _ => None,
-        }
+        let telemetry = self.health_telemetry.load();
+        let telemetry = telemetry.as_ref()?;
+        (!telemetry.x86_alive.load(Ordering::Acquire))
+            .then(|| "x86 DSP bridge stopped or stalled".to_owned())
     }
 
     pub fn midi_drop_count(&self) -> Option<u32> {
@@ -688,13 +682,44 @@ impl AudioEngine {
         if !self.is_running() {
             return Err(AudioError::Message("Audio runtime not started".into()));
         }
+        self.queue_ping()
+    }
 
-        self.send_midi(&[0x90, 60, 100]);
-        let cloned = self.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(220));
-            cloned.send_midi(&[0x80, 60, 0]);
-        });
+    fn queue_ping(&self) -> Result<(), AudioError> {
+        #[cfg(target_os = "windows")]
+        if self.is_worker_enabled() {
+            return self.worker.queue_ping().map_err(AudioError::Message);
+        }
+        let ingress = self
+            .midi_tx
+            .load_full()
+            .ok_or_else(|| AudioError::Message("Audio runtime not started".into()))?;
+        let generation = ingress.telemetry.midi_generation.load(Ordering::Acquire);
+        let mut on = super::runtime_state::MidiPacket::from_bytes(&[0x90, 60, 100]).unwrap();
+        on.generation = generation;
+        if ingress.send(on) != super::engine::MidiSendOutcome::Sent {
+            return Err(AudioError::Message(
+                "Audio test note could not be queued".into(),
+            ));
+        }
+        let release_ingress = ingress.clone();
+        std::thread::Builder::new()
+            .name("audio-test-note-off".into())
+            .spawn(move || {
+                std::thread::sleep(Duration::from_millis(220));
+                let mut off = super::runtime_state::MidiPacket::from_bytes(&[0x80, 60, 0]).unwrap();
+                off.generation = generation;
+                // Keep both the original queue and epoch, including if Panic
+                // races with admission or a reload publishes another queue.
+                release_ingress.send(off);
+            })
+            .map_err(|error| {
+                ingress
+                    .telemetry
+                    .midi_generation
+                    .fetch_add(1, Ordering::AcqRel);
+                AudioError::Message(format!("Failed to schedule audio test release: {error}"))
+            })?;
         Ok(())
     }
 
@@ -705,5 +730,50 @@ impl AudioEngine {
         logger: FrontendLogger,
     ) -> Result<(), AudioError> {
         self.start(settings, vst_fallback, logger)
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod control_tests {
+    use super::*;
+
+    #[test]
+    fn public_controls_report_unavailable_worker_instead_of_success() {
+        let audio = AudioEngine::new();
+        audio.worker_enabled.store(true, Ordering::Release);
+        assert!(audio.set_gain(-12.0).is_err());
+        assert!(audio.set_limiter_enabled(true).is_err());
+        assert!(audio.set_vst_eq(VstEqSettings::default()).is_err());
+    }
+
+    #[test]
+    fn ping_release_keeps_its_audio_epoch_and_original_ingress() {
+        use super::super::engine::MidiIngress;
+        use super::super::runtime_state::{AudioTelemetry, MidiPacket};
+        let audio = AudioEngine::new();
+        let (tx, mut rx) = rtrb::RingBuffer::<MidiPacket>::new(16);
+        let telemetry = std::sync::Arc::new(AudioTelemetry::new());
+        audio
+            .midi_tx
+            .store(Some(std::sync::Arc::new(MidiIngress::new(
+                tx,
+                telemetry.clone(),
+            ))));
+        audio.queue_ping().unwrap();
+        assert_eq!(rx.pop().unwrap().data, [0x90, 60, 100]);
+        telemetry.midi_generation.fetch_add(1, Ordering::AcqRel);
+        let (new_tx, mut new_rx) = rtrb::RingBuffer::<MidiPacket>::new(16);
+        audio
+            .midi_tx
+            .store(Some(std::sync::Arc::new(MidiIngress::new(
+                new_tx,
+                std::sync::Arc::new(AudioTelemetry::new()),
+            ))));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(rx.pop().is_err(), "Panic must cancel the old ping release");
+        assert!(
+            new_rx.pop().is_err(),
+            "reload must not receive the old ping release"
+        );
     }
 }

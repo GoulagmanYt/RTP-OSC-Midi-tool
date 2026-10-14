@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use tauri::{AppHandle, Window};
 
 use crate::{
@@ -6,8 +7,8 @@ use crate::{
     tauri::{
         state::AppState,
         utils::{
-            audio_settings_from_config, fallback_vst_path, retain_instrument_entries,
-            save_vst_cache_to_disk,
+            audio_settings_from_config, fallback_vst_path, open_folder_in_explorer,
+            retain_instrument_entries, save_vst_cache_to_disk,
         },
     },
     types::{legacy_path_plugin_id, AudioDeviceEntry, BridgeStatus, VstParameter, VstPluginEntry},
@@ -79,14 +80,33 @@ pub fn refresh_vst_plugins(state: &AppState) -> Vec<VstPluginEntry> {
                 })
             });
             if let Some(entry) = legacy_match.or_else(|| {
+                if cfg.audio.vst_plugin_id.is_some() {
+                    return None;
+                }
                 plugins
                     .iter()
                     .find(|entry| entry.path.eq_ignore_ascii_case(path) && entry.supported)
             }) {
-                let mut migrated = cfg;
-                migrated.audio.vst_plugin_id = Some(entry.id.clone());
-                migrated.version = crate::config::AppConfig::CURRENT_VERSION;
-                let _ = state.config_store.save(&migrated);
+                let _guard = state.config_change.lock();
+                let mut latest_cfg = state.config_store.load();
+                let still_matches_path = latest_cfg
+                    .audio
+                    .vst_path
+                    .as_deref()
+                    .is_some_and(|p| p.eq_ignore_ascii_case(path));
+                let still_needs_migration = !latest_cfg
+                    .audio
+                    .vst_plugin_id
+                    .as_ref()
+                    .is_some_and(|id| plugins.iter().any(|e| e.id == *id));
+                if still_matches_path
+                    && still_needs_migration
+                    && latest_cfg.audio.vst_plugin_id == cfg.audio.vst_plugin_id
+                {
+                    latest_cfg.audio.vst_plugin_id = Some(entry.id.clone());
+                    latest_cfg.version = crate::config::AppConfig::CURRENT_VERSION;
+                    let _ = state.config_store.save(&latest_cfg);
+                }
             }
         }
     }
@@ -127,12 +147,14 @@ pub fn open_vst_folder(id: &str, state: &AppState) -> Result<(), CommandError> {
         .as_ref()
         .and_then(|entries| entries.iter().find(|entry| entry.id == id).cloned())
         .ok_or_else(|| audio_error("audio.vst-not-found", "VST catalogue entry not found"))?;
-    #[cfg(target_os = "windows")]
-    std::process::Command::new("explorer.exe")
-        .arg("/select,")
-        .arg(&entry.path)
-        .spawn()
-        .map_err(|error| audio_error("audio.open-vst-folder-failed", error.to_string()))?;
+    let path = PathBuf::from(&entry.path);
+    let target_dir = if path.is_dir() {
+        path
+    } else {
+        path.parent().map(|p| p.to_path_buf()).unwrap_or(path)
+    };
+    open_folder_in_explorer(&target_dir)
+        .map_err(|error| audio_error("audio.open-vst-folder-failed", error))?;
     Ok(())
 }
 
@@ -185,21 +207,34 @@ pub fn close_vst_ui(app: &AppHandle, state: &AppState) -> Result<(), CommandErro
 }
 
 pub fn set_master_gain(gain_db: f32, state: &AppState) -> Result<(), CommandError> {
-    state.audio.set_gain(gain_db);
-    Ok(())
+    if !gain_db.is_finite() {
+        return Err(audio_error(
+            "audio.invalid-gain",
+            "Gain must be a finite number",
+        ));
+    }
+    let clamped_gain = gain_db.clamp(-60.0, 12.0);
+    state
+        .audio
+        .set_gain(clamped_gain)
+        .map_err(|err| audio_error("audio.set-gain-failed", err.to_string()))
 }
 
 pub fn set_audio_limiter(enabled: bool, state: &AppState) -> Result<(), CommandError> {
-    state.audio.set_limiter_enabled(enabled);
-    Ok(())
+    state
+        .audio
+        .set_limiter_enabled(enabled)
+        .map_err(|err| audio_error("audio.set-limiter-failed", err.to_string()))
 }
 
 pub fn set_vst_eq(
     settings: crate::config::VstEqSettings,
     state: &AppState,
 ) -> Result<(), CommandError> {
-    state.audio.set_vst_eq(settings);
-    Ok(())
+    state
+        .audio
+        .set_vst_eq(settings)
+        .map_err(|err| audio_error("audio.set-eq-failed", err.to_string()))
 }
 
 pub fn ping_audio(app: &AppHandle, window: &Window, state: &AppState) -> Result<(), CommandError> {

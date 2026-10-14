@@ -29,9 +29,15 @@ pub(super) fn replay_last_output_or_silence<T: Sample + FromSample<f32>>(
 
     let mut peak_l = 0.0f32;
     let mut peak_r = 0.0f32;
-    let sample_count = data.len().max(1) as f32;
+    let frames = data.len() / device_channels;
     for (idx, slot) in data.iter_mut().enumerate() {
-        let ramp = 1.0 - (idx as f32 / sample_count);
+        // Every channel in a frame must receive the same gain, and the final
+        // frame must reach silence before a subsequent missed callback.
+        let ramp = if frames > 1 {
+            1.0 - ((idx / device_channels).min(frames - 1) as f32 / (frames - 1) as f32)
+        } else {
+            0.0
+        };
         let sample = state.last_output.get(idx).copied().unwrap_or(0.0) * ramp;
         *slot = T::from_sample(sample);
         match idx % device_channels {
@@ -51,8 +57,7 @@ pub(super) fn replay_last_output_or_silence<T: Sample + FromSample<f32>>(
         .telemetry
         .meter_right
         .store(peak_r.min(1.0).to_bits(), Ordering::Relaxed);
-    let rendered = data.len().min(state.last_output.len());
-    state.last_output[..rendered].fill(0.0);
+    state.last_output.fill(0.0);
     state.recovering_from_silence = true;
 }
 
@@ -103,4 +108,34 @@ pub(super) fn process_vst3_plugin(
 pub(super) fn limit_sample(sample: f32) -> f32 {
     const LIMIT: f32 = 0.98;
     sample.clamp(-LIMIT, LIMIT)
+}
+
+pub(super) fn output_sample(sample: f32, gain: f32, limiter: bool) -> f32 {
+    let scaled = sample * gain;
+    if !scaled.is_finite() {
+        return 0.0;
+    }
+    if limiter {
+        limit_sample(scaled)
+    } else {
+        scaled
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::output_sample;
+
+    #[test]
+    fn output_gain_cannot_send_nonfinite_samples_to_the_device() {
+        for limiter in [false, true] {
+            for sample in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, f32::MAX] {
+                assert_eq!(output_sample(sample, 4.0, limiter), 0.0);
+            }
+            assert_eq!(output_sample(0.25, 2.0, limiter), 0.5);
+        }
+        assert_eq!(output_sample(1.0, 2.0, false), 2.0);
+        assert_eq!(output_sample(1.0, 2.0, true), 0.98);
+        assert_eq!(output_sample(-1.0, 2.0, true), -0.98);
+    }
 }

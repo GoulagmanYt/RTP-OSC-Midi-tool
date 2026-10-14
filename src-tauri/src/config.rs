@@ -1,6 +1,11 @@
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, fs, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::PathBuf,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use crate::types::RuntimeStatus;
 
@@ -223,6 +228,8 @@ pub const BUNDLED_VST_EQ_KEY: &str = "__bundled_default__";
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioConfig {
+    #[serde(default = "default_game_mode")]
+    pub game_mode: bool,
     pub enabled: bool,
     pub backend: Option<String>,
     pub device: Option<String>,
@@ -249,7 +256,8 @@ impl Default for AudioConfig {
             device: None,
             device_id: None,
             sample_rate: 48_000,
-            buffer_size: 256,
+            buffer_size: 512,
+            game_mode: true,
             gain_db: 0.0,
             limiter_enabled: false,
             vst_plugin_id: None,
@@ -314,6 +322,33 @@ pub struct AppConfig {
 
 impl AppConfig {
     pub const CURRENT_VERSION: u32 = 4;
+
+    pub fn parse_yaml(raw: &str) -> Result<Self, String> {
+        let mut value =
+            serde_yaml::from_str::<serde_yaml::Value>(raw).map_err(|e| e.to_string())?;
+        let version = value
+            .get("version")
+            .and_then(serde_yaml::Value::as_u64)
+            .unwrap_or_default() as u32;
+        if matches!(version, 2 | 3) {
+            if let Some(mapping) = value.as_mapping_mut() {
+                mapping.insert(
+                    serde_yaml::Value::String("version".into()),
+                    serde_yaml::Value::Number(AppConfig::CURRENT_VERSION.into()),
+                );
+            }
+        } else if version != AppConfig::CURRENT_VERSION {
+            return Err(format!(
+                "Unsupported configuration version {version}; expected {}",
+                AppConfig::CURRENT_VERSION
+            ));
+        }
+        let mut cfg = serde_yaml::from_value::<AppConfig>(value).map_err(|e| e.to_string())?;
+        for settings in cfg.audio.vst_eq_by_plugin.values_mut() {
+            *settings = settings.normalized(cfg.audio.sample_rate);
+        }
+        Ok(cfg)
+    }
 }
 
 impl Default for AppConfig {
@@ -378,50 +413,68 @@ impl ConfigStore {
                 return AppConfig::default();
             }
         };
-        let Ok(mut value) = serde_yaml::from_str::<serde_yaml::Value>(&raw) else {
-            log::error!(
-                "Invalid YAML configuration preserved at {:?}; using defaults for this session",
-                self.path
-            );
-            return AppConfig::default();
-        };
-        let version = value
-            .get("version")
-            .and_then(serde_yaml::Value::as_u64)
+        let raw_version = serde_yaml::from_str::<serde_yaml::Value>(&raw)
+            .ok()
+            .and_then(|v| v.get("version").and_then(serde_yaml::Value::as_u64))
             .unwrap_or_default() as u32;
-        if matches!(version, 2 | 3) {
-            if let Some(mapping) = value.as_mapping_mut() {
-                mapping.insert(
-                    serde_yaml::Value::String("version".into()),
-                    serde_yaml::Value::Number(AppConfig::CURRENT_VERSION.into()),
+        match AppConfig::parse_yaml(&raw) {
+            Ok(cfg) => {
+                if matches!(raw_version, 2 | 3) {
+                    if let Err(error) = self.save(&cfg) {
+                        log::warn!("Unable to persist migrated configuration: {error}");
+                    }
+                }
+                cfg
+            }
+            Err(error) => {
+                log::error!(
+                    "Invalid configuration preserved at {:?}: {error}; using defaults for this session",
+                    self.path
                 );
+                AppConfig::default()
             }
-        } else if version != AppConfig::CURRENT_VERSION {
-            log::error!(
-                "Unsupported configuration version {version} preserved at {:?}; using defaults for this session",
-                self.path
-            );
-            return AppConfig::default();
         }
-        let Ok(mut cfg) = serde_yaml::from_value::<AppConfig>(value) else {
-            log::error!(
-                "Invalid configuration schema preserved at {:?}; using defaults for this session",
-                self.path
-            );
-            return AppConfig::default();
+    }
+
+    fn backup_if_unreadable(&self) -> Result<(), String> {
+        let raw = match fs::read_to_string(&self.path) {
+            Ok(content) => content,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => {
+                let msg = format!("Failed to read existing config file for backup: {e}");
+                log::warn!("{msg}");
+                return Err(msg);
+            }
         };
-        for settings in cfg.audio.vst_eq_by_plugin.values_mut() {
-            *settings = settings.normalized(cfg.audio.sample_rate);
+        if AppConfig::parse_yaml(&raw).is_ok() {
+            return Ok(());
         }
-        if matches!(version, 2 | 3) {
-            if let Err(error) = self.save(&cfg) {
-                log::warn!("Unable to persist migrated configuration: {error}");
-            }
-        }
-        cfg
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let backup_path = self.path.with_extension(format!("yaml.invalid-{stamp}"));
+        fs::copy(&self.path, &backup_path).map_err(|e| {
+            let msg = format!("Failed to back up unreadable config file: {e}");
+            log::warn!("{msg}");
+            msg
+        })?;
+        log::warn!(
+            "Unreadable or invalid configuration backed up to {:?}",
+            backup_path
+        );
+        Ok(())
     }
 
     pub fn save(&self, cfg: &AppConfig) -> Result<(), String> {
+        if cfg.version != AppConfig::CURRENT_VERSION {
+            return Err(format!(
+                "Unsupported configuration version {}; expected {}",
+                cfg.version,
+                AppConfig::CURRENT_VERSION
+            ));
+        }
+        self.backup_if_unreadable()?;
         let raw = serde_yaml::to_string(cfg).map_err(|e| e.to_string())?;
         crate::atomic_file::write_atomically(&self.path, raw.as_bytes()).map_err(|e| e.to_string())
     }
@@ -520,6 +573,7 @@ impl From<&AppConfig> for RuntimeStatus {
             vst_worker_state: "disabled".to_string(),
             vst_worker_restarts: 0,
             vst_worker_last_exit: None,
+            realtime: Default::default(),
             audio_mmcss_enabled: None,
             audio_power_throttling_disabled: None,
             audio_limiter_enabled: None,
@@ -530,8 +584,28 @@ impl From<&AppConfig> for RuntimeStatus {
     }
 }
 
+fn default_game_mode() -> bool {
+    true
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn legacy_audio_config_enables_game_mode_without_changing_explicit_audio_format() {
+        let mut legacy = serde_json::to_value(super::AudioConfig::default()).unwrap();
+        legacy.as_object_mut().unwrap().remove("gameMode");
+        legacy["sampleRate"] = 48_000.into();
+        legacy["bufferSize"] = 512.into();
+        let config: super::AudioConfig = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(config.game_mode);
+        assert_eq!((config.sample_rate, config.buffer_size), (48_000, 512));
+        legacy["gameMode"] = false.into();
+        legacy["bufferSize"] = 256.into();
+        let explicit: super::AudioConfig = serde_json::from_value(legacy).unwrap();
+        assert!(!explicit.game_mode);
+        assert_eq!(explicit.buffer_size, 256);
+    }
+
     use super::*;
     use tempfile::tempdir;
 
@@ -565,6 +639,60 @@ mod tests {
 
         assert_eq!(config.version, AppConfig::CURRENT_VERSION);
         assert_eq!(std::fs::read_to_string(path).expect("preserved"), original);
+    }
+
+    #[test]
+    fn store_backs_up_invalid_config_on_save() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("config.yaml");
+        let broken = "invalid_yaml: [missing bracket";
+        std::fs::write(&path, broken).expect("write broken");
+
+        let store = ConfigStore::with_path(path.clone());
+        let _ = store.load();
+
+        let default_cfg = AppConfig::default();
+        store.save(&default_cfg).expect("save valid");
+
+        // The active config file now has the valid config
+        let new_raw = std::fs::read_to_string(&path).expect("read new");
+        assert!(AppConfig::parse_yaml(&new_raw).is_ok());
+
+        // An invalid backup file was created containing the broken content
+        let entries = std::fs::read_dir(dir.path()).expect("read_dir");
+        let backup = entries.filter_map(|e| e.ok()).find(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with("config.yaml.invalid-")
+        });
+        assert!(backup.is_some(), "Backup file should exist");
+        let backup_content = std::fs::read_to_string(backup.unwrap().path()).expect("read backup");
+        assert_eq!(backup_content, broken);
+    }
+
+    #[test]
+    fn store_save_fails_if_backup_of_invalid_config_fails() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("config.yaml");
+        let broken = "invalid_yaml: [missing bracket";
+        std::fs::write(&path, broken).expect("write broken");
+
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let backup_path = path.with_extension(format!("yaml.invalid-{stamp}"));
+        // Create a directory where the backup file would be written, causing fs::copy to fail
+        std::fs::create_dir(&backup_path).expect("create dir collision");
+
+        let store = ConfigStore::with_path(path.clone());
+        let default_cfg = AppConfig::default();
+        let result = store.save(&default_cfg);
+
+        assert!(result.is_err(), "save should fail when backup fails");
+        // Verify the original broken file is preserved and not overwritten
+        let preserved = std::fs::read_to_string(&path).expect("read preserved");
+        assert_eq!(preserved, broken);
     }
 
     #[test]

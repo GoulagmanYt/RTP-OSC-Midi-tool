@@ -92,7 +92,11 @@ mod fixture {
         write_control_frame(
             &mut control,
             &ControlMessage::Hello {
-                protocol_version: CONTROL_PROTOCOL_VERSION,
+                protocol_version: if mode == "legacy" {
+                    8
+                } else {
+                    CONTROL_PROTOCOL_VERSION
+                },
                 host_abi_version: HOST_ABI_VERSION,
                 session_id: args.session_id,
                 token: args.token,
@@ -124,6 +128,13 @@ mod fixture {
         let mut heartbeat = tokio::time::interval(Duration::from_millis(100));
         let mut sequence = 0u64;
         let mut hang_deadline = None;
+        let mut silence_until = None;
+        let mut slow_ack = None;
+        let mut loaded = false;
+        let mut game_mode = false;
+        let mut limiter_enabled = false;
+        let mut editor_open = false;
+        let mut deferred_editor = None;
         loop {
             if hang_deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
                 std::future::pending::<()>().await;
@@ -131,10 +142,17 @@ mod fixture {
             tokio::select! {
                 _ = heartbeat.tick() => {
                     sequence = sequence.wrapping_add(1);
+                    if let Some((deadline, request_id)) = slow_ack {
+                        if tokio::time::Instant::now() >= deadline {
+                            write_control_frame(&mut control_writer, &ControlMessage::Ack { request_id }).await.map_err(|e| e.to_string())?;
+                            slow_ack = None;
+                        }
+                    }
+                    if silence_until.is_some_and(|deadline| tokio::time::Instant::now() < deadline) { continue; }
                     write_control_frame(&mut control_writer, &ControlMessage::Heartbeat {
                         sequence,
                         monotonic_qpc: monotonic_qpc(),
-                        metrics: WorkerMetrics::default(),
+                        metrics: WorkerMetrics { callback_count: if loaded && mode != "callback-blocked" { sequence } else { 0 }, game_mode, limiter_enabled: Some(limiter_enabled), editor_open, deferred_editor, ..WorkerMetrics::default() },
                     }).await.map_err(|error| error.to_string())?;
                 }
                 message = control_rx.recv() => {
@@ -142,6 +160,18 @@ mod fixture {
                         .ok_or_else(|| "control reader exited".to_string())??;
                     let response = match message {
                         ControlMessage::Load { request_id, settings, class_uid, .. } => {
+                            if mode == "recover-controls" {
+                                if let Ok(expected) = std::env::var("OSCMIDI_VST_FIXTURE_EXPECT_SETTINGS") {
+                                    let expected: AudioSettings = serde_json::from_str(&expected).map_err(|e| e.to_string())?;
+                                    if serde_json::to_value(&settings).unwrap() != serde_json::to_value(&expected).unwrap() {
+                                        return Err("recovery settings differ from admitted live controls".into());
+                                    }
+                                }
+                            }
+                            loaded = true;
+                            game_mode = settings.game_mode;
+                            limiter_enabled = settings.limiter_enabled;
+                            if mode == "silence-two-seconds" { silence_until = Some(tokio::time::Instant::now() + Duration::from_secs(2)); }
                             match mode.as_str() {
                                 "crash" => std::process::abort(),
                                 "hang" => {
@@ -158,14 +188,44 @@ mod fixture {
                         }
                         ControlMessage::ListParameters { request_id } => ControlMessage::Parameters { request_id, parameters: Vec::new() },
                         ControlMessage::Ping { sequence } => ControlMessage::Pong { sequence },
-                        ControlMessage::OpenEditor { request_id }
-                        | ControlMessage::CloseEditor { request_id }
-                        | ControlMessage::SetParameter { request_id, .. }
+                        ControlMessage::SaveState { request_id } if mode == "slow-command" => {
+                            slow_ack = Some((tokio::time::Instant::now() + Duration::from_secs(3), request_id));
+                            continue;
+                        }
+                        ControlMessage::SaveState { .. } if mode == "recover-controls" => std::process::exit(23),
+                        ControlMessage::SetGameMode { request_id, enabled } => {
+                            game_mode = enabled;
+                            if enabled { editor_open = false; }
+                            else if let Some(open) = deferred_editor.take() { editor_open = open; }
+                            ControlMessage::Ack { request_id }
+                        }
+                        ControlMessage::OpenEditor { request_id } => {
+                            if game_mode { deferred_editor = Some(true); }
+                            else { editor_open = true; }
+                            ControlMessage::Ack { request_id }
+                        }
+                        ControlMessage::CloseEditor { request_id } => {
+                            if game_mode { deferred_editor = Some(false); }
+                            else { editor_open = false; }
+                            ControlMessage::Ack { request_id }
+                        }
+                        ControlMessage::SetParameter { request_id, .. }
                         | ControlMessage::SetGain { request_id, .. }
-                        | ControlMessage::SetLimiter { request_id, .. }
                         | ControlMessage::SetEq { request_id, .. }
                         | ControlMessage::SaveState { request_id }
                         | ControlMessage::Panic { request_id } => ControlMessage::Ack { request_id },
+                        ControlMessage::SetLimiter { request_id, enabled } => {
+                            if mode == "reject-limiter" {
+                                ControlMessage::Error {
+                                    request_id: Some(request_id),
+                                    code: "fixture.limiter-rejected".into(),
+                                    message: "fixture rejected limiter change".into(),
+                                }
+                            } else {
+                                limiter_enabled = enabled;
+                                ControlMessage::Ack { request_id }
+                            }
+                        }
                         _ => ControlMessage::Error { request_id: None, code: "fixture.invalid-command".into(), message: "invalid fixture command".into() },
                     };
                     write_control_frame(&mut control_writer, &response).await.map_err(|error| error.to_string())?;

@@ -118,7 +118,7 @@ VST2 SDK, so new host capabilities and conformance work target VST3.
 
 ### Development
 
-- Node.js 22.22.2+, 24.15+ or 26+, with npm.
+- Node.js 20.19+ or 22.12+, with npm.
 - Stable Rust toolchain installed through `rustup`.
 - Visual Studio Build Tools with the x64 MSVC C++ toolchain and a Windows SDK.
 - CMake.
@@ -198,11 +198,11 @@ Successful outputs are preserved in `artifacts\`:
 
 | Output | Description |
 | --- | --- |
-| `portable\` | Ready-to-run folder containing both required executables |
+| `portable\` | Ready-to-run folder containing the application and both VST workers |
 | `OSCMidi_*_portable.zip` | Complete portable distribution |
 | `OSCMidi_*.msi` | Windows installer |
 | `SHA256SUMS.txt` | Integrity hashes for the generated deliverables |
-| `BUILDINFO.json` | Exact source commit and workflow run used for the packages |
+| `BUILDINFO.json` | Exact source commit and workflow run used for packages built by GitHub Actions |
 | `logs\` | Ten most recent build logs |
 
 Run `artifacts\portable\OSCMidi.exe` directly, install the MSI, or copy/extract the complete portable folder. `OSCMidi.exe` requires both architecture-specific VST workers beside it and must never be copied alone.
@@ -211,9 +211,9 @@ The cleanup runs after both successful and failed builds. It removes `node_modul
 
 ## Automated releases
 
-[Validate](.github/workflows/validate.yml) checks every pull request in three parallel jobs: frontend lint/tests and npm audit on Linux, Rust dependency auditing on Linux, and the complete Windows Rust workspace validation. Pull requests restore the trusted `main` Rust cache without writing branch-specific multi-gigabyte caches.
+[Validate](.github/workflows/validate.yml) checks every pull request: frontend lint, tests, production build and npm audit on Linux with Node 20.19, 22.12 and 24; Rust dependency auditing on Linux; and the complete Windows Rust workspace validation. Pull requests restore the trusted `main` Rust cache without writing branch-specific multi-gigabyte caches.
 
-[Build Windows App](.github/workflows/build-windows.yml) is reserved for pushes to `main`, version tags and manual dispatch. It builds both worker architectures, the Tauri application, the MSI and the portable archive without repeating the pull-request test matrix.
+[Build Windows App](.github/workflows/build-windows.yml) is reserved for pushes to `main`, version tags and manual dispatch. It runs frontend checks and Rust validation before building both worker architectures, the Tauri application, the MSI and the portable archive. PowerShell validation stops at the first failed native command.
 
 On a successful push to `main`, the workflow reads the common version from `package.json`, `package-lock.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml` and `tools/diagnostics/Cargo.toml`:
 

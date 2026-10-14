@@ -84,7 +84,13 @@ export default function Dashboard() {
 
   useEffect(() => {
     if (lastDropoutAt === null) return;
-    const id = window.setInterval(() => setNow(Date.now()), 5000);
+    const id = window.setInterval(() => {
+      const currentNow = Date.now();
+      setNow(currentNow);
+      if (currentNow - lastDropoutAt >= 30_000) {
+        window.clearInterval(id);
+      }
+    }, 5000);
     return () => window.clearInterval(id);
   }, [lastDropoutAt]);
 
@@ -100,7 +106,7 @@ export default function Dashboard() {
     try {
       await pingAudio();
       toast.success(t("toasts.audio.pingSent"));
-      refreshStatus();
+      await refreshStatus();
     } catch (e) {
       const message = getErrorMessage(e);
       toast.error(message || t("toasts.audio.pingFailed"));
@@ -111,7 +117,7 @@ export default function Dashboard() {
     try {
       await reloadVst();
       toast.success(t("toasts.audio.vstReloaded"));
-      refreshStatus();
+      await refreshStatus();
     } catch (e) {
       const message = getErrorMessage(e);
       toast.error(message || t("toasts.audio.vstReloadFailed"));

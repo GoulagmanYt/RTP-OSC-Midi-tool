@@ -51,7 +51,7 @@ type Props = {
   onRetestVst: (pluginId: string) => Promise<void>;
   onOpenVstFolder: (pluginId: string) => Promise<void>;
   onToggleAudio: (checked: boolean) => Promise<void>;
-  onUpdateAudioConfig: (patch: Partial<AppConfig["audio"]>) => Promise<void>;
+  onUpdateAudioConfig: (patch: Partial<AppConfig["audio"]>) => Promise<boolean | void>;
 };
 
 export function AudioConfigCard({
@@ -97,6 +97,8 @@ export function AudioConfigCard({
   onToggleAudio,
   onUpdateAudioConfig,
 }: Props) {
+  const savedScanPaths = (config?.audio.vstScanPaths || []).join(";");
+  const [scanPathsDraft, setScanPathsDraft] = useState<string | null>(null);
   const [vstSearch, setVstSearch] = useState("");
   const [vstFormat, setVstFormat] = useState("all");
   const [vstArchitecture, setVstArchitecture] = useState("all");
@@ -249,6 +251,25 @@ export function AudioConfigCard({
           </Label>
           <Switch checked={config?.audio.limiterEnabled ?? false} onCheckedChange={onLimiterToggle} />
         </div>
+
+        <div className="flex items-center justify-between gap-3">
+          <Label htmlFor="audio-game-mode" className="flex flex-col gap-1">
+            <span>{t("audio.gameMode")}</span>
+            <span className="text-xs font-normal text-muted-foreground">{t("audio.gameModeHint")}</span>
+          </Label>
+          <Switch id="audio-game-mode" checked={config?.audio.gameMode ?? true}
+            disabled={!config || audioReloading || status?.realtime?.worker.maintenance}
+            onCheckedChange={(gameMode) => { void onUpdateAudioConfig({ gameMode }); }} />
+        </div>
+        {status?.realtime?.worker.maintenance && <p role="status" className="text-xs text-amber-600">{t("audio.maintenance")}</p>}
+        {(status?.realtime?.worker.deferredSave || status?.realtime?.worker.deferredEditor != null) &&
+          <p role="status" className="text-xs text-muted-foreground">{t("audio.deferredOperations")}</p>}
+        {config?.ui.developerMode && status?.realtime && (
+          <div className="text-xs text-muted-foreground">
+            {t("audio.deliveryLatency")}: p99 {(status.realtime.worker.midiDeliveryP99Us / 1000).toFixed(2)} ms / max {(status.realtime.worker.midiDeliveryMaxUs / 1000).toFixed(2)} ms
+            <br />{t("audio.callbackInterval")}: {(status.realtime.worker.callbackIntervalMaxUs / 1000).toFixed(2)} ms
+          </div>
+        )}
 
         <div className="flex items-center justify-between text-xs text-muted-foreground">
           <span>{t("audio.estimatedLatency")}</span>
@@ -452,7 +473,7 @@ export function AudioConfigCard({
                 ) : null}
                 {filteredVstPlugins.map((plugin) => (
                   <SelectItem key={plugin.id} value={plugin.id} disabled={!plugin.supported}>
-                    {`${plugin.name} · ${plugin.format} · ${plugin.architecture} · ${plugin.status}`}
+                    {[plugin.name, plugin.format, plugin.architecture, plugin.status].join(" \u00b7 ")}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -521,12 +542,16 @@ export function AudioConfigCard({
             <Label htmlFor="vst-scan-paths">{t("audio.vstCustomPaths")}</Label>
             <Input
               id="vst-scan-paths"
-              value={(config?.audio.vstScanPaths || []).join(";")}
-              onChange={(event) =>
-                onUpdateAudioConfig({
-                  vstScanPaths: event.target.value.split(";").map((path) => path.trim()).filter(Boolean),
-                })
-              }
+              value={scanPathsDraft ?? savedScanPaths}
+              onChange={(event) => setScanPathsDraft(event.target.value)}
+              onBlur={async (event) => {
+                const vstScanPaths = event.target.value.split(";").map((path) => path.trim()).filter(Boolean);
+                if (vstScanPaths.join(";") !== savedScanPaths) {
+                  const accepted = await onUpdateAudioConfig({ vstScanPaths });
+                  if (accepted === false) return;
+                }
+                setScanPathsDraft(null);
+              }}
               placeholder={t("audio.vstCustomPathsPlaceholder")}
             />
             <p className="text-xs text-muted-foreground">{t("audio.vstCustomPathsHint")}</p>
