@@ -46,6 +46,17 @@ jobs:
           npm test
           npm run build
 
+  frontend-required:
+    name: Frontend
+    runs-on: ubuntu-latest
+    needs: frontend
+    if: always()
+    steps:
+      - name: Require every Node.js frontend job to pass
+        env:
+          FRONTEND_RESULT: ${{ needs.frontend.result }}
+        run: test "$FRONTEND_RESULT" = "success"
+
   dependency-audit:
     name: Dependency audit
     runs-on: ubuntu-latest
