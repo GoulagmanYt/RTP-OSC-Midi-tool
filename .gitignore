@@ -3,6 +3,7 @@ dist
 build_logs
 .cargo-target
 src-tauri/target
+/src-tauri/gen/schemas/
 tools/diagnostics/target
 .venv
 vendor/rack/rack-sys/external
