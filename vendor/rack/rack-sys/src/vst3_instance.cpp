@@ -839,7 +839,7 @@ void rack_vst3_plugin_free(RackVST3Plugin* plugin) {
     std::lock_guard<std::mutex> lock(g_vst3_lifecycle_mutex);
     // Audio processing is stopped by the host before teardown. This mutex
     // serializes the remaining state/controller/UI operations.
-    std::lock_guard<std::mutex> state_lock(plugin->state_mutex);
+    std::unique_lock<std::mutex> state_lock(plugin->state_mutex);
     trace_free_step("begin");
 
     // Stop processing before deactivating/terminating the plugin.
@@ -892,6 +892,11 @@ void rack_vst3_plugin_free(RackVST3Plugin* plugin) {
     }
 
     trace_free_step("release remaining refs");
+    // All plug-in interfaces must be released while their module is loaded,
+    // including connection points and a combined component/controller.
+    plugin->component_cp = nullptr;
+    plugin->controller_cp = nullptr;
+    plugin->controller = nullptr;
     plugin->component_handler = nullptr;
     plugin->midi_mapping = nullptr;
     plugin->processor = nullptr;
@@ -899,6 +904,8 @@ void rack_vst3_plugin_free(RackVST3Plugin* plugin) {
     plugin->module = nullptr;
 
     trace_free_step("delete plugin");
+    // The mutex belongs to plugin: release it before destroying its storage.
+    state_lock.unlock();
     delete plugin;
 }
 

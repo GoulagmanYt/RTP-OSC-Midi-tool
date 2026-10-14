@@ -745,7 +745,10 @@ mod tests {
 
     fn get_test_plugin() -> Result<(crate::vst3::Vst3Scanner, PluginInfo)> {
         let scanner = crate::vst3::Vst3Scanner::new()?;
-        let plugins = scanner.scan()?;
+        let path = std::env::var_os("RACK_TEST_VST3_PATH").ok_or_else(|| {
+            Error::Other("Set RACK_TEST_VST3_PATH to an explicit native test fixture".into())
+        })?;
+        let plugins = scanner.scan_path(std::path::Path::new(&path))?;
 
         if plugins.is_empty() {
             return Err(Error::Other(
@@ -757,28 +760,20 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Requires an explicit RACK_TEST_VST3_PATH fixture; run native compatibility tests separately"]
     fn test_plugin_creation() {
-        let (scanner, info) = match get_test_plugin() {
-            Ok(result) => result,
-            Err(_) => {
-                println!("Skipping test - no VST3 plugins found");
-                return;
-            }
-        };
+        let (scanner, info) = get_test_plugin()
+            .expect("An explicit, loadable RACK_TEST_VST3_PATH fixture is required");
 
         let result = scanner.load(&info);
         assert!(result.is_ok(), "Plugin creation should succeed");
     }
 
     #[test]
+    #[ignore = "Requires an explicit RACK_TEST_VST3_PATH fixture; run native compatibility tests separately"]
     fn test_plugin_initialize() {
-        let (scanner, info) = match get_test_plugin() {
-            Ok(result) => result,
-            Err(_) => {
-                println!("Skipping test - no VST3 plugins found");
-                return;
-            }
-        };
+        let (scanner, info) = get_test_plugin()
+            .expect("An explicit, loadable RACK_TEST_VST3_PATH fixture is required");
 
         let mut plugin = scanner.load(&info).expect("Plugin creation should succeed");
         let result = plugin.initialize(48000.0, 512);
@@ -787,14 +782,10 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Requires an explicit RACK_TEST_VST3_PATH fixture; run native compatibility tests separately"]
     fn test_drop_behavior() {
-        let (scanner, info) = match get_test_plugin() {
-            Ok(result) => result,
-            Err(_) => {
-                println!("Skipping test - no VST3 plugins found");
-                return;
-            }
-        };
+        let (scanner, info) = get_test_plugin()
+            .expect("An explicit, loadable RACK_TEST_VST3_PATH fixture is required");
 
         {
             let _plugin = scanner.load(&info).expect("Plugin creation should succeed");
@@ -803,14 +794,10 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Requires an explicit RACK_TEST_VST3_PATH fixture; run native compatibility tests separately"]
     fn test_parameter_range_clamping() {
-        let (scanner, info) = match get_test_plugin() {
-            Ok(result) => result,
-            Err(_) => {
-                println!("Skipping test - no VST3 plugins found");
-                return;
-            }
-        };
+        let (scanner, info) = get_test_plugin()
+            .expect("An explicit, loadable RACK_TEST_VST3_PATH fixture is required");
 
         let mut plugin = scanner.load(&info).expect("Plugin creation should succeed");
         plugin
@@ -846,14 +833,10 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Requires an explicit RACK_TEST_VST3_PATH fixture; run native compatibility tests separately"]
     fn test_parameter_extreme_values() {
-        let (scanner, info) = match get_test_plugin() {
-            Ok(result) => result,
-            Err(_) => {
-                println!("Skipping test - no VST3 plugins found");
-                return;
-            }
-        };
+        let (scanner, info) = get_test_plugin()
+            .expect("An explicit, loadable RACK_TEST_VST3_PATH fixture is required");
 
         let mut plugin = scanner.load(&info).expect("Plugin creation should succeed");
         plugin
