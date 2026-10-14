@@ -25,6 +25,21 @@ try {
         if (Get-Process -Id $processId -ErrorAction SilentlyContinue) { throw "Owned process $processId survived cleanup" }
     }
     Write-Output 'PASS: root, child and grandchild are tracked and cleaned up'
+    $unrelated = Start-Process -FilePath $powerShellExe -ArgumentList '-NoProfile','-File',$childPath -WindowStyle Hidden -PassThru
+    try {
+        # Model a reused ancestor PID: the original retained root has exited,
+        # while CIM now reports a new process using that parent ID.
+        $fakeProcesses = @([pscustomobject]@{ ParentProcessId = $root.Id; ProcessId = $unrelated.Id })
+        function Get-CimInstance { $fakeProcesses }
+        try { Update-OwnedProcesses -RootProcess $root -OwnedProcesses $owned }
+        finally { Remove-Item -LiteralPath Function:\Get-CimInstance }
+        if ($owned.Count -ne 0) { throw 'An exited root adopted a process through its obsolete PID' }
+        if ($unrelated.HasExited) { throw 'Unrelated process was stopped' }
+        Write-Output 'PASS: an exited root cannot adopt processes through a reused PID'
+    } finally {
+        if (-not $unrelated.HasExited) { $unrelated.Kill(); $unrelated.WaitForExit() }
+        $unrelated.Dispose()
+    }
 } finally {
     Stop-OwnedProcesses -OwnedProcesses $owned
     if (-not $root.HasExited) { $root.Kill(); $root.WaitForExit() }

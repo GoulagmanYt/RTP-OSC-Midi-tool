@@ -3,7 +3,12 @@ function Update-OwnedProcesses {
     param([System.Diagnostics.Process]$RootProcess, [System.Collections.Generic.Dictionary[int,System.Diagnostics.Process]]$OwnedProcesses)
     $snapshot = @(Get-CimInstance Win32_Process)
     $ids = [System.Collections.Generic.HashSet[int]]::new()
-    [void]$ids.Add($RootProcess.Id)
+    # An exited root's numeric PID may already belong to another process.
+    # Continue discovering through retained, live descendants only.
+    if (-not $RootProcess.HasExited) { [void]$ids.Add($RootProcess.Id) }
+    foreach ($ownedProcess in $OwnedProcesses.Values) {
+        if (-not $ownedProcess.HasExited) { [void]$ids.Add($ownedProcess.Id) }
+    }
     do {
         $added = $false
         foreach ($item in $snapshot) {
