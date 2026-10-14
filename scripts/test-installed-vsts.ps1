@@ -36,12 +36,20 @@ if ($vst2Roots.Count -gt 0) {
 $results = foreach ($plugin in $plugins) {
   $stdoutPath = [System.IO.Path]::GetTempFileName()
   $stderrPath = [System.IO.Path]::GetTempFileName()
-  $args = '{0} "{1}"' -f $plugin.Mode, $plugin.Path
-  $proc = Start-Process -FilePath $smokeExe -ArgumentList $args -Wait -PassThru -NoNewWindow -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
-  $exitCode = $proc.ExitCode
+  $smokeArgs = '{0} "{1}"' -f $plugin.Mode, $plugin.Path
+  $proc = Start-Process -FilePath $smokeExe -ArgumentList $smokeArgs -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+  $timedOut = -not $proc.WaitForExit(30000)
+  if ($timedOut) {
+    $proc.Kill()
+    $proc.WaitForExit()
+    $statusText = "timeout"
+    $exitCode = -1
+  } else {
+    $exitCode = $proc.ExitCode
+    $statusText = if ($exitCode -eq 0) { "ok" } else { "fail" }
+  }
   $stdoutText = [string](Get-Content -LiteralPath $stdoutPath -Raw)
   $stderrText = [string](Get-Content -LiteralPath $stderrPath -Raw)
-  $statusText = if ($exitCode -eq 0) { "ok" } else { "fail" }
   [pscustomobject]@{
     mode = $plugin.Mode
     path = $plugin.Path
@@ -51,7 +59,8 @@ $results = foreach ($plugin in $plugins) {
     stderr = $stderrText
   }
 
-  Remove-Item $stdoutPath, $stderrPath -ErrorAction SilentlyContinue
+  $proc.Dispose()
+  Remove-Item -LiteralPath $stdoutPath, $stderrPath -ErrorAction SilentlyContinue
 }
 
 $reportDir = Join-Path $repoRoot "reports"

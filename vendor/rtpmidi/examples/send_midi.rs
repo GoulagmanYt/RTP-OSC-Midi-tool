@@ -31,7 +31,7 @@ async fn main() {
 
                 let response = MidiMessage::NoteOn(
                     channel,
-                    Note::from(u8::from(key) - 12), // Down 1 octave
+                    Note::from(u8::from(key).saturating_sub(12)), // Down 1 octave
                     velocity,
                 );
 

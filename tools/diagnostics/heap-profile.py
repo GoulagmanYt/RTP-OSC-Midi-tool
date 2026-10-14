@@ -21,10 +21,10 @@ if args.pid <= 0 or not 1 <= args.seconds <= 43200:
     parser.error("Positive PID and 1..43200 seconds required")
 detached = threading.Event()
 errors = []
-with args.output.open("x", encoding="utf-8", buffering=1) as output:
-    session = frida.attach(args.pid)
-    session.on("detached", lambda *_: detached.set())
-    try:
+session = frida.attach(args.pid)
+session.on("detached", lambda *_: detached.set())
+try:
+    with args.output.open("x", encoding="utf-8", buffering=1) as output:
         script = session.create_script(Path(__file__).with_suffix(".js").read_text(encoding="utf-8"))
         def on_message(message, data):
             output.write(json.dumps({"unixTime": time.time(), "message": message}) + "\n")
@@ -34,8 +34,12 @@ with args.output.open("x", encoding="utf-8", buffering=1) as output:
         script.load()
         detached.wait(args.seconds)
         if not detached.is_set():
-            script.exports_sync.snapshot()
-    finally:
-        session.detach()
+            try:
+                script.exports_sync.snapshot()
+            except frida.InvalidOperationError:
+                if not detached.is_set():
+                    raise
+finally:
+    session.detach()
 if errors:
     raise SystemExit("Instrumentation errors recorded; profile is invalid")

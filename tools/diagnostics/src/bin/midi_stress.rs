@@ -24,6 +24,15 @@ fn print_usage() {
     );
 }
 
+fn next_val(args: &[String], i: &mut usize, flag: &str) -> Result<String, String> {
+    if *i + 1 < args.len() {
+        *i += 1;
+        Ok(args[*i].clone())
+    } else {
+        Err(format!("Missing value for {flag}"))
+    }
+}
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
@@ -41,19 +50,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut i = 2;
     while i < args.len() {
         match args[i].as_str() {
-            "--rate" => rate = args[i + 1].parse().unwrap_or(rate),
-            "--duration" => duration = args[i + 1].parse().unwrap_or(duration),
-            "--target" => target = args[i + 1].clone(),
-            "--port-name" => port_name = args[i + 1].clone(),
-            _ => {}
+            "--rate" => {
+                rate = next_val(&args, &mut i, "--rate")?.parse()?;
+            }
+            "--duration" => {
+                duration = next_val(&args, &mut i, "--duration")?.parse()?;
+            }
+            "--target" => {
+                target = next_val(&args, &mut i, "--target")?;
+            }
+            "--port-name" => {
+                port_name = next_val(&args, &mut i, "--port-name")?;
+            }
+            unknown => {
+                return Err(format!("Unknown argument: {unknown}").into());
+            }
         }
-        i += 2;
+        i += 1;
+    }
+
+    if rate == 0 || duration == 0 {
+        return Err("Rate and duration must be positive".into());
     }
 
     match mode {
         "rtp" => rtp_mode(&target, rate, duration).await?,
         "local" => local_mode(&port_name, rate, duration).await?,
-        _ => print_usage(),
+        _ => return Err(format!("Unknown mode: {mode}").into()),
     }
 
     Ok(())
@@ -88,7 +111,9 @@ async fn rtp_mode(
     let interval = Duration::from_nanos(1_000_000_000 / rate.max(1) as u64);
 
     let sent = Arc::new(AtomicUsize::new(0));
+    let errors = Arc::new(AtomicUsize::new(0));
     let mut next_tick = start;
+    let mut toggle = false;
 
     let sent_clone = sent.clone();
     let monitor = tokio::spawn(async move {
@@ -102,16 +127,32 @@ async fn rtp_mode(
     });
 
     while start.elapsed() < duration_d {
-        // Envoi NoteOn/NoteOff
-        let msg = rtpmidi::packets::midi_packets::rtp_midi_message::RtpMidiMessage::MidiMessage(
+        // Envoi NoteOn/NoteOff alterné
+        let midi_msg = if toggle {
+            MidiMessage::NoteOff(
+                midi_types::Channel::C1,
+                midi_types::Note::C3,
+                midi_types::Value7::new(0),
+            )
+        } else {
             MidiMessage::NoteOn(
                 midi_types::Channel::C1,
                 midi_types::Note::C3,
                 midi_types::Value7::new(100),
-            ),
-        );
-        let _ = session.send_midi(&msg).await;
-        sent.fetch_add(1, Ordering::Relaxed);
+            )
+        };
+        toggle = !toggle;
+
+        let msg =
+            rtpmidi::packets::midi_packets::rtp_midi_message::RtpMidiMessage::MidiMessage(midi_msg);
+        match session.send_midi(&msg).await {
+            Ok(_) => {
+                sent.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(_) => {
+                errors.fetch_add(1, Ordering::Relaxed);
+            }
+        }
 
         next_tick += interval;
         let now = Instant::now();
@@ -120,15 +161,33 @@ async fn rtp_mode(
         }
     }
 
+    // NoteOff final pour laisser la cible dans un état propre
+    let final_note_off =
+        rtpmidi::packets::midi_packets::rtp_midi_message::RtpMidiMessage::MidiMessage(
+            MidiMessage::NoteOff(
+                midi_types::Channel::C1,
+                midi_types::Note::C3,
+                midi_types::Value7::new(0),
+            ),
+        );
+    let release_result = session.send_midi(&final_note_off).await;
+    session.stop_gracefully().await;
+    release_result?;
+
     monitor.abort();
     let total = sent.load(Ordering::Relaxed);
+    let total_errors = errors.load(Ordering::Relaxed);
     println!(
-        "FINAL: Injected {} RTP messages in {}s (Avg: {}/s)",
+        "FINAL: Injected {} RTP messages in {}s (Avg: {}/s, Errors: {})",
         total,
         duration,
-        total as f64 / duration as f64
+        total as f64 / duration as f64,
+        total_errors
     );
 
+    if total_errors > 0 {
+        return Err(format!("{total_errors} RTP sends failed").into());
+    }
     Ok(())
 }
 
@@ -202,4 +261,17 @@ async fn local_mode(
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn missing_option_values_return_errors_instead_of_panicking() {
+        for flag in ["--rate", "--duration", "--target", "--port-name"] {
+            let args = vec!["midi_stress".into(), "rtp".into(), flag.into()];
+            let mut index = 2;
+            assert!(next_val(&args, &mut index, flag).is_err());
+        }
+    }
 }

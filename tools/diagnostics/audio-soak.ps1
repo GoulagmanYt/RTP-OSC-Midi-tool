@@ -11,6 +11,7 @@ param(
     [string]$ReportName = 'splice-asio-soak'
 )
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'process-tree.ps1')
 if ($DurationSeconds -lt 1 -or $DurationSeconds -gt 43200) { throw 'Duration must be 1..43200 seconds' }
 if ($ActiveSeconds -lt -1 -or $ActiveSeconds -gt $DurationSeconds) { throw 'ActiveSeconds must be -1 or 0..DurationSeconds' }
 if ($CycleSeconds -lt 0 -or $CycleSeconds -gt $DurationSeconds -or ($CycleSeconds -gt 0 -and ($ActiveSeconds -lt 0 -or $ActiveSeconds -gt $CycleSeconds))) { throw 'CycleSeconds requires 0..ActiveSeconds <= CycleSeconds <= DurationSeconds' }
@@ -61,16 +62,18 @@ $arguments = @('--events-per-second', $EventsPerSecond, '--game-mode', $GameMode
 if ($ActiveSeconds -ge 0) { $arguments += @('--active-seconds', $ActiveSeconds) }
 if ($CycleSeconds -gt 0) { $arguments += @('--cycle-seconds', $CycleSeconds) }
 $run = Start-Process -FilePath $diagnosticPath -ArgumentList $arguments -WorkingDirectory $repository -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $repository ".cargo-target/$ReportName.log") -RedirectStandardError (Join-Path $repository ".cargo-target/$ReportName-errors.log")
+$ownedProcesses = [System.Collections.Generic.Dictionary[int,System.Diagnostics.Process]]::new()
 try {
     $processHandle = $run.Handle # retain the process handle for its exit code
     do {
-        $ownedIds = @($run.Id) + @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $($run.Id)" | Select-Object -ExpandProperty ProcessId)
-        $samples = @(Get-Process -Id $ownedIds -ErrorAction SilentlyContinue | ForEach-Object {
+        Update-OwnedProcesses -RootProcess $run -OwnedProcesses $ownedProcesses
+        $samples = @($ownedProcesses.Values | Where-Object { -not $_.HasExited } | ForEach-Object {
+            $_.Refresh()
             @{ id = $_.Id; name = $_.ProcessName; privateBytes = $_.PrivateMemorySize64; workingSetBytes = $_.WorkingSet64; handles = $_.HandleCount; threads = $_.Threads.Count; cpuSeconds = $_.TotalProcessorTime.TotalSeconds }
         })
         @{ elapsedSeconds = ([DateTime]::UtcNow - $started).TotalSeconds; processes = $samples } | ConvertTo-Json -Compress -Depth 4 | Add-Content -LiteralPath $memoryPath -Encoding UTF8
         if (([DateTime]::UtcNow - $started).TotalSeconds -gt $DurationSeconds + 180) { throw 'Endurance run exceeded shutdown allowance' }
-        if ($MaxWorkerPrivateMB -gt 0 -and ($samples | Where-Object { $_.name -eq 'vst-host-worker' -and $_.privateBytes -gt ($MaxWorkerPrivateMB * 1MB) })) {
+        if ($MaxWorkerPrivateMB -gt 0 -and ($samples | Where-Object { $_.name -match '^vst-host-worker' -and $_.privateBytes -gt ($MaxWorkerPrivateMB * 1MB) })) {
             'Worker private memory exceeded the diagnostic limit' | Set-Content -LiteralPath ($reportPath + '.stop') -Encoding UTF8
         }
         $run.WaitForExit(10000) | Out-Null
@@ -79,6 +82,8 @@ try {
     if ($run.ExitCode -ne 0) { throw "Audio diagnostic failed with exit code $($run.ExitCode); inspect the saved reports" }
     Write-Output "Completed: $reportPath"
 } finally {
+    try { Update-OwnedProcesses -RootProcess $run -OwnedProcesses $ownedProcesses } catch { Write-Warning "Final process inventory failed: $_" }
     if (-not $run.HasExited) { $run.Kill(); $run.WaitForExit() }
+    Stop-OwnedProcesses -OwnedProcesses $ownedProcesses
     $run.Dispose()
 }
