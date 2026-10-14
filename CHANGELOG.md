@@ -2,7 +2,14 @@
 
 All notable changes to OSCMidi are documented here.
 
-## Unreleased
+## 2.6.1 - 2026-10-14
+
+### Changed
+
+- Improve Windows audio and MIDI scheduling under CPU contention with worker priority, timer resolution, multimedia scheduling for MIDI processing/MIDI Thru/OSC threads and disabled power throttling.
+- Expand developer diagnostics with bounded plugin runs, memory profiling and independent host comparisons; restrict process cleanup to owned workers and reject reused root PIDs.
+- Support the frontend toolchain's Node.js requirements consistently in local builds and CI, including automatic selection of a compatible NVM installation.
+- Remove unused recovery parsers, upstream workflow copies and obsolete build metadata; regenerate Tauri schemas locally instead of tracking them.
 
 ### Fixed
 
@@ -13,9 +20,14 @@ All notable changes to OSCMidi are documented here.
 - Preserve Note-Off/Note-On timing order in the x86 VST bridge with a shared clock origin for each audio block.
 - Refresh the reported limiter state from the worker's applied controls without restarting audio.
 - Load connected RTP participants when opening the RTP page and preserve newer connection events while the initial snapshot is in flight.
-- Give dedicated MIDI processing, MIDI Thru and OSC workers Windows multimedia scheduling priority and disable their power throttling to reduce delivery delays during CPU contention.
 - Match output queue capacity to the 8,192-message input queue so a scheduling interruption can be absorbed without overflowing a smaller downstream queue.
 - Stop feeding disabled MIDI Thru outputs and prevent UI-only OSC queue overflow from resetting VST notes and sustain. Active outputs retain emergency recovery when a critical release is lost.
+- Preserve MIDI releases and sustain state through queue pressure, VST switching, failed startup and audio recovery.
+- Correct RTP packet-loss accounting, journal recovery, peer routing, dual-stack address matching and shutdown deadlocks; restore remote playback after interruptions.
+- Validate and migrate imported configurations consistently, create backups on save, write exports atomically and roll back runtime controls when persistence fails.
+- Keep live VST controls, parameter replies, EQ translations and worker status coherent across asynchronous updates; reject obsolete replies and invalid numeric inputs.
+- Bound plugin discovery and probing, detect directory-junction cycles and release native VST3 interfaces before unloading modules.
+- Preserve remote editor state and connection state across reloads, reconnects and interface changes; allow incomplete RTP port edits without persisting invalid values.
 
 ## 2.6.0 - 2026-09-02
 
