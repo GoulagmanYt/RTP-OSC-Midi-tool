@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Badge } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../../components/ui/Card";
@@ -48,6 +49,7 @@ export function RtpConfigCard({
   onUpdateConfig,
   onUpdateRemote,
 }: Props) {
+  const [portResetNonce, setPortResetNonce] = useState(0);
   return (
     <Card>
       <CardHeader>
@@ -99,6 +101,7 @@ export function RtpConfigCard({
               <RtpPortInput
                 id="rtp-port"
                 value={config?.rtp.port}
+                resetNonce={portResetNonce}
                 onCommit={(port) => onUpdateConfig({ rtp: { port } })}
               />
               <p className="text-xs text-muted-foreground">{t("rtp.portHint")}</p>
@@ -180,7 +183,12 @@ export function RtpConfigCard({
                             {isRemoteConnected(remote) ? t("rtp.connected") : t("rtp.disconnected")}
                           </Badge>
                         </div>
-                        <Button variant="ghost" size="sm" onClick={() => onRemoveRemote(remote.id)}>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onMouseDown={(e) => e.preventDefault()}
+                          onClick={() => onRemoveRemote(remote.id)}
+                        >
                           <Trash2 className="h-4 w-4" />
                         </Button>
                       </div>
@@ -257,7 +265,10 @@ export function RtpConfigCard({
           <Button
             variant="outline"
             disabled={busy}
-            onClick={() => onUpdateConfig({ rtp: { sessionName: "OSCMidi", port: 5004 } })}
+            onClick={() => {
+              setPortResetNonce((prev) => prev + 1);
+              onUpdateConfig({ rtp: { sessionName: "OSCMidi", port: 5004 } });
+            }}
           >
             <RefreshCcw className="mr-2 h-4 w-4" />
             {t("common.default")}

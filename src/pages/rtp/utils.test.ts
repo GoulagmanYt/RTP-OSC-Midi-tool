@@ -8,9 +8,9 @@ import {
 } from "./utils";
 
 describe("syncAutoConnectRemotes", () => {
-  it("updates auto-connect remotes when a discovered session matches by name", () => {
+  it("updates auto-connect remotes when an unresolved remote matches a discovered session by name", () => {
     const remotes: RtpRemoteEntry[] = [
-      { id: "1", name: "Stage Piano", host: "10.0.0.10", port: 5004, autoConnect: true },
+      { id: "1", name: "Stage Piano", host: "", port: 5004, autoConnect: true },
       { id: "2", name: "Drums", host: "10.0.0.20", port: 5006, autoConnect: false },
     ];
     const sessions: RtpSessionInfo[] = [
@@ -28,6 +28,21 @@ describe("syncAutoConnectRemotes", () => {
       autoConnect: true,
     });
     expect(result.remotes[1]).toEqual(remotes[1]);
+  });
+
+  it("preserves manually configured host and port even when a discovered session matches by name", () => {
+    const remotes: RtpRemoteEntry[] = [
+      { id: "1", name: "Stage Piano", host: "10.0.0.10", port: 5004, autoConnect: true },
+    ];
+    const sessions: RtpSessionInfo[] = [
+      { name: "stage piano", host: "192.168.1.50", port: 6000, addresses: ["192.168.1.51"] },
+    ];
+
+    const result = syncAutoConnectRemotes(remotes, sessions);
+
+    expect(result.changed).toBe(false);
+    expect(result.remotes[0].host).toBe("10.0.0.10");
+    expect(result.remotes[0].port).toBe(5004);
   });
 });
 

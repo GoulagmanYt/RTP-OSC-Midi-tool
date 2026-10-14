@@ -86,6 +86,7 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
   useRuntimeEvents({
     appendLog,
     setMetrics,
+    setStatus,
     t,
   });
 
@@ -95,6 +96,7 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
     setConfig,
     setStatus,
     setPreflight,
+    setMetrics,
     refreshStatus,
     refreshLists,
     refreshAudioDevices,

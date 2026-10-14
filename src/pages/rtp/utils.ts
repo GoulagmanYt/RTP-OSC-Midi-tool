@@ -4,6 +4,7 @@ export function syncAutoConnectRemotes(remotes: RtpRemoteEntry[], sessions: RtpS
   let changed = false;
   const next = remotes.map((remote) => {
     if (!remote.autoConnect || !remote.name) return remote;
+    if (remote.host.trim() !== "") return remote;
     const match = sessions.find((session) => session.name.toLowerCase() === remote.name.toLowerCase());
     if (!match) return remote;
     const host = match.addresses[0] ?? match.host;

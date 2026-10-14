@@ -1,15 +1,16 @@
 import { useEffect, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
-import type { LogEntry, RuntimeMetrics } from "../../api";
+import type { LogEntry, RuntimeMetrics, RuntimeStatus } from "../../api";
 
 type RuntimeEventsOptions = {
   appendLog: (entry: LogEntry) => void;
   setMetrics: (metrics: RuntimeMetrics) => void;
+  setStatus?: React.Dispatch<React.SetStateAction<RuntimeStatus | null>>;
   t: (key: string, vars?: Record<string, string | number>) => string;
 };
 
-export function useRuntimeEvents({ appendLog, setMetrics, t }: RuntimeEventsOptions) {
+export function useRuntimeEvents({ appendLog, setMetrics, setStatus, t }: RuntimeEventsOptions) {
   const lastAudioHealth = useRef<{
     xruns: number | null;
     midiDrops: number | null;
@@ -45,6 +46,18 @@ export function useRuntimeEvents({ appendLog, setMetrics, t }: RuntimeEventsOpti
       if (disposed) return;
       const payload = event.payload;
       setMetrics(payload);
+
+      if (payload.vstWorkerState && setStatus) {
+        setStatus((prev) =>
+          prev && prev.vstWorkerState !== "disabled" && prev.vstWorkerState !== payload.vstWorkerState
+            ? {
+                ...prev,
+                vstWorkerState: payload.vstWorkerState,
+                audioRunning: payload.vstWorkerState === "ready",
+              }
+            : prev
+        );
+      }
 
       const current = {
         xruns: payload.audioXruns ?? null,
@@ -97,7 +110,7 @@ export function useRuntimeEvents({ appendLog, setMetrics, t }: RuntimeEventsOpti
       subscriptions.forEach((unlisten) => unlisten());
       subscriptions.clear();
     };
-  }, [appendLog, setMetrics, t]);
+  }, [appendLog, setMetrics, setStatus, t]);
 }
 
 function positiveDelta(previous: number | null, current: number | null) {

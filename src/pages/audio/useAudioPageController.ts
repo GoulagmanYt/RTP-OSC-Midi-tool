@@ -65,6 +65,14 @@ export function useAudioPageController() {
   const vstEqControllerMounted = useRef(true);
   const flushVstEqRef = useRef<() => void>(() => undefined);
   const flushVstParamsRef = useRef<() => void>(() => undefined);
+  const activePluginIdRef = useRef<string | null>(config?.audio.vstPluginId ?? config?.audio.vstPath ?? null);
+  const parameterRequestId = useRef(0);
+
+  useEffect(() => {
+    activePluginIdRef.current = config?.audio.vstPluginId ?? config?.audio.vstPath ?? null;
+    parameterRequestId.current += 1;
+    setVstParamsLoading(false);
+  }, [config?.audio.vstPluginId, config?.audio.vstPath]);
 
   useEffect(() => {
     let disposed = false;
@@ -283,8 +291,10 @@ export function useAudioPageController() {
 
   const handleGainChange = async (value: number) => {
     try {
-      await setMasterGain(value);
       await updateConfig({ audio: { gainDb: value } });
+      if (status?.audioRunning) {
+        await setMasterGain(value);
+      }
     } catch (e) {
       console.error("Failed to set master gain", e);
       toast.error(getErrorMessage(e) || t("toasts.settings.configSaveFailed"));
@@ -293,8 +303,10 @@ export function useAudioPageController() {
 
   const handleLimiterToggle = async (checked: boolean) => {
     try {
-      await setAudioLimiter(checked);
       await updateConfig({ audio: { limiterEnabled: checked } });
+      if (status?.audioRunning) {
+        await setAudioLimiter(checked);
+      }
     } catch (e) {
       console.error("Failed to set limiter", e);
       toast.error(getErrorMessage(e) || t("toasts.settings.configSaveFailed"));
@@ -304,6 +316,9 @@ export function useAudioPageController() {
   const applyVstPlugin = useCallback(
     async (plugin: VstPluginEntry) => {
       if (!config) return;
+      activePluginIdRef.current = plugin.id;
+      parameterRequestId.current += 1;
+      setVstParamsLoading(false);
       setVstUiOpen(false);
       setVstParameterDialogOpen(false);
       setVstEqDialogOpen(false);
@@ -379,17 +394,23 @@ export function useAudioPageController() {
   };
 
   const handleOpenVstParameters = async () => {
+    const requestedPluginId = config?.audio.vstPluginId ?? config?.audio.vstPath ?? null;
+    const requestId = ++parameterRequestId.current;
     try {
       setVstParamsLoading(true);
       const params = await listVstParameters();
+      if (!vstEqControllerMounted.current || requestId !== parameterRequestId.current || activePluginIdRef.current !== requestedPluginId) {
+        return;
+      }
       setVstParams(params);
       setVstParameterDialogOpen(true);
     } catch (e) {
+      if (!vstEqControllerMounted.current || requestId !== parameterRequestId.current) return;
       const message = getErrorMessage(e);
       toast.error(message || t("toasts.audio.vstParamOpenFailed"));
       setVstParameterDialogOpen(false);
     } finally {
-      setVstParamsLoading(false);
+      if (vstEqControllerMounted.current && requestId === parameterRequestId.current) setVstParamsLoading(false);
     }
   };
 

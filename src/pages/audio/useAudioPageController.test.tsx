@@ -73,7 +73,7 @@ describe("audio configuration transactions", () => {
     expect(mocks.toastError).toHaveBeenCalledWith("ASIO failed");
   });
 
-  it("reports rejected live controls without persisting their unaccepted values", async () => {
+  it("persists config changes and reports live control errors", async () => {
     mocks.setMasterGain.mockRejectedValueOnce(new Error("gain queue full"));
     mocks.setAudioLimiter.mockRejectedValueOnce(new Error("limiter queue full"));
     vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -82,8 +82,22 @@ describe("audio configuration transactions", () => {
       await result.current.handleGainChange(-12);
       await result.current.handleLimiterToggle(false);
     });
-    expect(mocks.updateConfig).not.toHaveBeenCalled();
+    expect(mocks.updateConfig).toHaveBeenCalledWith({ audio: { gainDb: -12 } });
+    expect(mocks.updateConfig).toHaveBeenCalledWith({ audio: { limiterEnabled: false } });
     expect(mocks.toastError.mock.calls).toEqual([["gain queue full"], ["limiter queue full"]]);
+  });
+
+  it("does not call live controls when audio is not running", async () => {
+    mocks.bridge.status = { running: true, audioRunning: false } as RuntimeStatus;
+    const { result } = renderHook(() => useAudioPageController());
+    await act(async () => {
+      await result.current.handleGainChange(-6);
+      await result.current.handleLimiterToggle(true);
+    });
+    expect(mocks.updateConfig).toHaveBeenCalledWith({ audio: { gainDb: -6 } });
+    expect(mocks.updateConfig).toHaveBeenCalledWith({ audio: { limiterEnabled: true } });
+    expect(mocks.setMasterGain).not.toHaveBeenCalled();
+    expect(mocks.setAudioLimiter).not.toHaveBeenCalled();
   });
 
   it("saves the new audio enabled value rather than the previous render", async () => {

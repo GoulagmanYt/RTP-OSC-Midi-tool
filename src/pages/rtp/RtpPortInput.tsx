@@ -1,19 +1,24 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Input } from "../../components/ui/Input";
 
 type Props = {
   id: string;
   value?: number;
+  resetNonce?: number;
   onCommit: (port: number) => void;
 };
 
 // Remount the draft when an import, reset or rollback replaces the saved port.
 export function RtpPortInput(props: Props) {
-  return <PortDraft key={props.value ?? "empty"} {...props} />;
+  return <PortDraft key={`${props.resetNonce ?? 0}-${props.value ?? "empty"}`} {...props} />;
 }
 
 function PortDraft({ id, value, onCommit }: Props) {
   const [draft, setDraft] = useState(value?.toString() ?? "");
+
+  useEffect(() => {
+    setDraft(value !== undefined ? String(value) : "");
+  }, [value]);
   return (
     <Input
       id={id}

@@ -11,6 +11,7 @@ type BridgeActionsOptions = {
   setConfig: Dispatch<SetStateAction<api.AppConfig | null>>;
   setStatus: Dispatch<SetStateAction<api.RuntimeStatus | null>>;
   setPreflight: Dispatch<SetStateAction<api.PreflightReport | null>>;
+  setMetrics?: Dispatch<SetStateAction<api.RuntimeMetrics | null>>;
   refreshStatus: () => Promise<void>;
   refreshLists: () => Promise<void>;
   refreshAudioDevices: (backend?: string | null) => Promise<void>;
@@ -23,6 +24,7 @@ export function useBridgeActions({
   setConfig,
   setStatus,
   setPreflight,
+  setMetrics,
   refreshStatus,
   refreshLists,
   refreshAudioDevices,
@@ -92,6 +94,7 @@ export function useBridgeActions({
     try {
       if (status.running) {
         await api.stopBridge();
+        setMetrics?.(null);
         await refreshStatus();
         return;
       }
@@ -116,7 +119,7 @@ export function useBridgeActions({
     } finally {
       toggleInProgress.current = false;
     }
-  }, [config, refreshStatus, runPreflight, setStatus, status, t]);
+  }, [config, refreshStatus, runPreflight, setMetrics, setStatus, status, t]);
 
   return {
     updateConfig,

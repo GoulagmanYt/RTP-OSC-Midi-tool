@@ -32,7 +32,7 @@ interface CommandPaletteProps {
 
 export default function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
   const navigate = useNavigate();
-  const { toggleBridge, status, reloadConfig } = useBridge();
+  const { toggleBridge, status, reloadConfig, refreshStatus, config } = useBridge();
   const { t } = useI18n();
 
   const runCommand = (command: () => void | Promise<void>) => {
@@ -90,6 +90,7 @@ export default function CommandPalette({ open, onOpenChange }: CommandPalettePro
             onSelect={() =>
               runCommand(async () => {
                 await restartRtp();
+                await refreshStatus();
               })
             }
           >
@@ -99,7 +100,14 @@ export default function CommandPalette({ open, onOpenChange }: CommandPalettePro
           <CommandItem
             onSelect={() =>
               runCommand(async () => {
+                const wasDeferredByGameMode = Boolean(config?.audio.gameMode && !status?.realtime?.worker.editorOpen);
                 await openVstUi();
+                await refreshStatus();
+                if (wasDeferredByGameMode) {
+                  toast.success(t("audio.deferredOperations"));
+                } else {
+                  toast.success(t("toasts.audio.vstOpened"));
+                }
               })
             }
           >

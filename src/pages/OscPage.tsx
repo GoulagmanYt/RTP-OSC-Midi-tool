@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useBridge } from "../providers/BridgeProvider";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "../components/ui/Card";
 import { Label } from "../components/ui/Label";
@@ -14,6 +14,7 @@ import { getErrorMessage } from "../api-errors";
 export default function OscPage() {
   const { config, updateConfig, saveConfig } = useBridge();
   const [busy, setBusy] = useState(false);
+  const [portResetNonce, setPortResetNonce] = useState(0);
   const { t } = useI18n();
 
   const handleSave = async () => {
@@ -74,6 +75,7 @@ export default function OscPage() {
                   id="osc-port"
                   placeholder="9000"
                   value={config?.osc.targetPort}
+                  resetNonce={portResetNonce}
                   onCommit={(targetPort) => updateConfig({ osc: { targetPort } })}
                 />
               </div>
@@ -100,6 +102,7 @@ export default function OscPage() {
                   id="osc-listen-port"
                   placeholder="9001"
                   value={config?.osc.listenPort}
+                  resetNonce={portResetNonce}
                   onCommit={(listenPort) => updateConfig({ osc: { listenPort } })}
                 />
               </div>
@@ -130,7 +133,17 @@ export default function OscPage() {
             <Button
               variant="outline"
               disabled={busy}
-              onClick={() => updateConfig({ osc: { targetIp: "127.0.0.1", targetPort: 9000 } })}
+              onClick={() => {
+                setPortResetNonce((prev) => prev + 1);
+                updateConfig({
+                  osc: {
+                    targetIp: "127.0.0.1",
+                    targetPort: 9000,
+                    listenIp: "127.0.0.1",
+                    listenPort: 9001,
+                  },
+                });
+              }}
             >
               <RefreshCcw className="h-4 w-4 mr-2" />
               {t("common.default")}
@@ -205,15 +218,20 @@ type OscPortInputProps = {
   id: string;
   value?: number;
   placeholder?: string;
+  resetNonce?: number;
   onCommit: (port: number) => void;
 };
 
 export function OscPortInput(props: OscPortInputProps) {
-  return <OscPortDraft key={props.value ?? "empty"} {...props} />;
+  return <OscPortDraft key={`${props.resetNonce ?? 0}-${props.value ?? "empty"}`} {...props} />;
 }
 
 function OscPortDraft({ id, value, placeholder = "9000", onCommit }: OscPortInputProps) {
   const [draft, setDraft] = useState(value?.toString() ?? "");
+
+  useEffect(() => {
+    setDraft(value !== undefined ? String(value) : "");
+  }, [value]);
 
   const commit = () => {
     const port = Number(draft);
