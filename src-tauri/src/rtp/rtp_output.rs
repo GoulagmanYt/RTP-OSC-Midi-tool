@@ -23,17 +23,43 @@ pub(crate) struct OutgoingFrame {
     generation: u64,
     route_generation: u64,
 }
-#[derive(Clone, Default)]
-pub(crate) struct RtpOutputRoute(Arc<ArcSwapOption<crate::midi_queue::AsyncSender<OutgoingFrame>>>);
+#[derive(Clone)]
+pub(crate) struct RtpOutputRoute {
+    sender: Arc<ArcSwapOption<crate::midi_queue::AsyncSender<OutgoingFrame>>>,
+    enabled: Arc<parking_lot::Mutex<bool>>,
+}
+impl Default for RtpOutputRoute {
+    fn default() -> Self {
+        Self {
+            sender: Arc::new(ArcSwapOption::empty()),
+            enabled: Arc::new(parking_lot::Mutex::new(true)),
+        }
+    }
+}
 impl RtpOutputRoute {
+    pub(crate) fn set_thru_enabled(&self, enabled: bool) {
+        let mut current = self.enabled.lock();
+        if *current && !enabled {
+            if let Some(sender) = self.sender.load().as_ref() {
+                sender.recovery().request_reset();
+            }
+        }
+        *current = enabled;
+    }
     pub(crate) fn set(&self, sender: Option<crate::midi_queue::AsyncSender<OutgoingFrame>>) {
-        self.0.store(sender.map(Arc::new));
+        self.sender.store(sender.map(Arc::new));
     }
     pub(crate) fn send(&self, frame: &MidiFrame) {
         if frame.source.starts_with("RTP:") {
             return;
         }
-        let guard = self.0.load();
+        // Serialize admission with disabling/reset: a cached processing batch
+        // cannot publish new-generation notes after the transition's panic.
+        let enabled = self.enabled.lock();
+        if !*enabled {
+            return;
+        }
+        let guard = self.sender.load();
         let Some(sender) = guard.as_ref() else {
             return;
         };
@@ -179,6 +205,30 @@ mod tests {
         panic!("no RTP port pair available");
     }
     #[test]
+    fn disabling_thru_rejects_late_frames_from_a_cached_processing_batch() {
+        let route = RtpOutputRoute::default();
+        let (tx, mut rx) = crate::midi_queue::async_channel(64);
+        route.set(Some(tx));
+        let frame = MidiFrame {
+            generation: MidiFrame::current_generation(),
+            ingress_qpc: 0,
+            data: smallvec::smallvec![0x90, 60, 100],
+            source: Arc::from("Keyboard"),
+        };
+        route.send(&frame);
+        let first = rx.try_recv().unwrap();
+        route.set_thru_enabled(false);
+        assert!(rx.recovery().generation() > first.route_generation);
+        route.send(&frame);
+        assert!(
+            rx.try_recv().is_err(),
+            "a stale batch must not resurrect a remote note"
+        );
+        route.set_thru_enabled(true);
+        route.send(&frame);
+        assert!(rx.try_recv().is_ok());
+    }
+    #[test]
     fn route_prevents_echo_and_requests_recovery_on_critical_overflow() {
         let _guard = crate::bridge::pipeline::TEST_PIPELINE_LOCK.lock().unwrap();
         let route = RtpOutputRoute::default();
@@ -200,7 +250,7 @@ mod tests {
         assert_eq!(midi_reset_generation(), generation);
         assert!(rx.try_recv().unwrap().route_generation < rx.recovery().generation());
         let drops_before = crate::rtp::rtp_server::rtp_dropped_count();
-        let old_route = route.0.load();
+        let old_route = route.sender.load();
         route.set(None); // Publication must not wait for readers of the old route.
         route.send(&frame);
         drop(old_route);

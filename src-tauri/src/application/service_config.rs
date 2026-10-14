@@ -58,9 +58,11 @@ fn apply_and_save_config(
     let _change = state.config_change.lock();
     let previous = state.config_store.load();
     let audio_was_running = state.audio.is_running();
+    let audio_was_requested = state.audio.has_runtime_request();
     let bridge_running = state.bridge.status(&previous).running;
     let logger = frontend_logger(window, state);
     let mut audio_restart_attempted = false;
+    let mut audio_stop_attempted = false;
     let mut applied_gain_db = previous.audio.gain_db;
     let mut applied_limiter = previous.audio.limiter_enabled;
     let prev_eq_key = previous
@@ -97,7 +99,8 @@ fn apply_and_save_config(
             let should_run = desired_audio_running(
                 previous.audio.enabled,
                 cfg.audio.enabled,
-                audio_was_running,
+                audio_was_running
+                    || (audio_stop_attempted && cfg.audio.enabled && audio_was_requested),
                 bridge_running,
             );
             if should_run && (force || audio_restart_attempted || !state.audio.is_running()) {
@@ -125,7 +128,14 @@ fn apply_and_save_config(
                     .get(eq_key)
                     .cloned()
                     .unwrap_or_default();
-            } else if !should_run && (audio_restart_attempted || state.audio.is_running()) {
+            } else if !should_run
+                && should_stop_audio(
+                    cfg.audio.enabled,
+                    audio_restart_attempted,
+                    state.audio.is_running(),
+                )
+            {
+                audio_stop_attempted = true;
                 state.audio.stop(Some(window.app_handle().clone()));
             } else if should_run {
                 apply_gain_change(&mut applied_gain_db, cfg.audio.gain_db, |gain_db| {
@@ -220,11 +230,17 @@ fn desired_audio_running(
     initially_running: bool,
     bridge_running: bool,
 ) -> bool {
-    if previous_enabled == next_enabled {
+    if !next_enabled {
+        false
+    } else if previous_enabled == next_enabled {
         initially_running
     } else {
         next_enabled && (bridge_running || initially_running)
     }
+}
+
+fn should_stop_audio(enabled: bool, restart_attempted: bool, running: bool) -> bool {
+    !enabled || restart_attempted || running
 }
 
 pub fn save_config(window: &Window, config: Config, state: &AppState) -> Result<(), CommandError> {
@@ -379,6 +395,14 @@ mod tests {
         assert!(!desired_audio_running(false, true, false, false));
         assert!(!desired_audio_running(true, true, false, true));
         assert!(desired_audio_running(true, true, true, false));
+        assert!(
+            should_stop_audio(false, false, false),
+            "disable cancels pending recovery"
+        );
+        assert!(
+            !should_stop_audio(true, false, false),
+            "unrelated saves preserve pending recovery"
+        );
     }
 
     #[test]

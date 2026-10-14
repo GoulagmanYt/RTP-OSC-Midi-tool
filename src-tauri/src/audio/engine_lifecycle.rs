@@ -135,15 +135,15 @@ fn refresh_vst_parameter_cache(
         super::runtime_state::PluginBackend::Vst2 { instance, .. } => {
             let parameters = instance.get_parameter_object();
             for parameter in cache.iter_mut() {
-                parameter.value = parameters
-                    .get_parameter(parameter.index as i32)
-                    .clamp(0.0, 1.0);
+                parameter.value = super::plugin_host::normalized_parameter_value(
+                    parameters.get_parameter(parameter.index as i32),
+                );
             }
         }
         super::runtime_state::PluginBackend::Vst3 { instance, .. } => {
             for parameter in cache.iter_mut() {
                 if let Ok(value) = instance.get_parameter(parameter.index) {
-                    parameter.value = value.clamp(0.0, 1.0);
+                    parameter.value = super::plugin_host::normalized_parameter_value(value);
                 }
             }
         }

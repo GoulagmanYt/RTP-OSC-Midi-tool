@@ -35,6 +35,16 @@ use super::runtime_state::{
     AudioError, AudioSettings, PluginBackend, Vst2TimeContext, MAX_PLUGIN_CHANNELS,
 };
 
+pub const MAX_CACHED_PARAMETERS: usize = 2048;
+
+pub(super) fn normalized_parameter_value(value: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
 #[cfg(target_os = "windows")]
 pub(super) const VST2_RESIZE_MESSAGE: u32 = WM_APP + 0x317;
 #[cfg(target_os = "windows")]
@@ -212,10 +222,11 @@ pub(super) fn load_plugin_backend(
     }
 
     let parameters = instance.get_parameter_object();
-    let parameter_cache = (0..info.parameters.max(0) as usize)
+    let parameter_count = (info.parameters.max(0) as usize).min(MAX_CACHED_PARAMETERS);
+    let parameter_cache = (0..parameter_count)
         .map(|index| {
             let index_i32 = index as i32;
-            let value = parameters.get_parameter(index_i32);
+            let value = normalized_parameter_value(parameters.get_parameter(index_i32));
             VstParameter {
                 index,
                 id: index as u32,
@@ -248,13 +259,14 @@ pub(super) fn load_plugin_backend(
 fn cache_vst3_parameters(
     instance: &mut rack::vst3::Vst3Plugin,
 ) -> Result<Vec<VstParameter>, AudioError> {
-    let count = instance.parameter_count();
+    let count = instance.parameter_count().min(MAX_CACHED_PARAMETERS);
     let mut parameters = Vec::with_capacity(count);
     for index in 0..count {
         let info = instance.parameter_info(index).map_err(|error| {
             AudioError::Message(format!("VST3 parameter metadata failed: {error}"))
         })?;
-        let value = instance.get_parameter(index).unwrap_or(info.default);
+        let raw = instance.get_parameter(index).unwrap_or(info.default);
+        let value = normalized_parameter_value(raw);
         parameters.push(VstParameter {
             index,
             id: info.id,
@@ -526,5 +538,24 @@ impl Host for SimpleHost {
             )
         }
         .is_ok()
+    }
+}
+
+#[cfg(test)]
+mod parameter_value_tests {
+    use super::normalized_parameter_value;
+
+    #[test]
+    fn parameter_values_remain_finite_and_normalized_after_loading_or_restoration() {
+        for (input, expected) in [
+            (f32::NAN, 0.0),
+            (f32::INFINITY, 0.0),
+            (f32::NEG_INFINITY, 0.0),
+            (-0.2, 0.0),
+            (1.2, 1.0),
+            (0.4, 0.4),
+        ] {
+            assert_eq!(normalized_parameter_value(input), expected);
+        }
     }
 }

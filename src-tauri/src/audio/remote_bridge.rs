@@ -790,6 +790,9 @@ impl RemotePlugin {
             }
             if Instant::now() >= deadline {
                 shared.command.store(COMMAND_NONE, Ordering::Release);
+                shared
+                    .command_status
+                    .store(COMMAND_FAILED, Ordering::Release);
                 return Err(format!("x86 {operation} command timed out"));
             }
             std::thread::sleep(Duration::from_millis(10));
@@ -1750,6 +1753,62 @@ mod tests {
         let serial = NEXT.fetch_add(1, Ordering::Relaxed);
         let name = format!("Local\\OSCMIDI-DSP-test-{}-{serial}", std::process::id());
         Mapping::create(&name, serial, 512, &PrivateKernelSecurity::new().unwrap()).unwrap()
+    }
+
+    // Audit characterization: no native plugin or audio device is loaded.
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn audit_timed_out_x86_control_masks_subsequent_dsp_stall() {
+        use std::os::windows::process::CommandExt;
+        let mapping = test_mapping();
+        mapping
+            .get()
+            .server_status
+            .store(SERVER_READY, Ordering::Release);
+        let request_event = unsafe { CreateEventW(None, false, false, None) }.unwrap();
+        // Already-exited child is only an owned process handle for Drop.
+        // realtime_health, as in production, reads shared state, not try_wait.
+        let mut child = Command::new("cmd.exe")
+            .args(["/d", "/c", "exit", "0"])
+            .creation_flags(0x0800_0000)
+            .spawn()
+            .unwrap();
+        child.wait().unwrap();
+        let mut remote = RemotePlugin {
+            mapping,
+            request_event,
+            child,
+            next_sequence: 1,
+            output_channels: 2,
+            input_channels: 0,
+            latency_samples: 0,
+            sample_rate: 48_000,
+            panic_pending: false,
+            pending_parameter_changes: Vec::with_capacity(BRIDGE_MAX_PARAMETER_CHANGES),
+            parameter_sequences: [0; BRIDGE_SLOTS],
+            consecutive_missed_frames: 0,
+            parameter_cache: Vec::new(),
+            last_output_samples: [0.0; BRIDGE_MAX_CHANNELS],
+        };
+        let error = remote
+            .control_command(COMMAND_OPEN_EDITOR, "audit")
+            .unwrap_err();
+        assert!(error.contains("timed out"));
+        assert_eq!(
+            remote.mapping.get().command.load(Ordering::Acquire),
+            COMMAND_NONE
+        );
+        assert_eq!(
+            remote.mapping.get().command_status.load(Ordering::Acquire),
+            COMMAND_FAILED
+        );
+        let mut midi = VecDeque::new();
+        let mut outputs = vec![vec![0.0; 512]; 2];
+        for _ in 0..500 {
+            remote.process(&mut midi, &[], &mut outputs, 512, None);
+        }
+        assert!(!remote.realtime_health().2);
+        assert!(mapping_error(remote.mapping.get()).contains("5000 ms"));
     }
 
     #[test]

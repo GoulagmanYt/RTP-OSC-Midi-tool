@@ -87,10 +87,26 @@ pub fn refresh_vst_plugins(state: &AppState) -> Vec<VstPluginEntry> {
                     .iter()
                     .find(|entry| entry.path.eq_ignore_ascii_case(path) && entry.supported)
             }) {
-                let mut migrated = cfg;
-                migrated.audio.vst_plugin_id = Some(entry.id.clone());
-                migrated.version = crate::config::AppConfig::CURRENT_VERSION;
-                let _ = state.config_store.save(&migrated);
+                let _guard = state.config_change.lock();
+                let mut latest_cfg = state.config_store.load();
+                let still_matches_path = latest_cfg
+                    .audio
+                    .vst_path
+                    .as_deref()
+                    .is_some_and(|p| p.eq_ignore_ascii_case(path));
+                let still_needs_migration = !latest_cfg
+                    .audio
+                    .vst_plugin_id
+                    .as_ref()
+                    .is_some_and(|id| plugins.iter().any(|e| e.id == *id));
+                if still_matches_path
+                    && still_needs_migration
+                    && latest_cfg.audio.vst_plugin_id == cfg.audio.vst_plugin_id
+                {
+                    latest_cfg.audio.vst_plugin_id = Some(entry.id.clone());
+                    latest_cfg.version = crate::config::AppConfig::CURRENT_VERSION;
+                    let _ = state.config_store.save(&latest_cfg);
+                }
             }
         }
     }

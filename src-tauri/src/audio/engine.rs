@@ -44,7 +44,7 @@ use crate::plugin_probe::detect_vst3_channels;
 
 pub(super) struct MidiIngress {
     producer: Mutex<Producer<MidiPacket>>,
-    telemetry: Arc<AudioTelemetry>,
+    pub(super) telemetry: Arc<AudioTelemetry>,
     reserve: usize,
 }
 impl MidiIngress {
@@ -54,6 +54,31 @@ impl MidiIngress {
             reserve,
             producer: Mutex::new(producer),
             telemetry,
+        }
+    }
+
+    pub(super) fn send(&self, packet: MidiPacket) -> MidiSendOutcome {
+        if packet.generation != self.telemetry.midi_generation.load(Ordering::Acquire) {
+            return MidiSendOutcome::AudioStopped;
+        }
+        if self.producer.try_lock().is_some_and(|mut producer| {
+            if !packet.is_critical_release() && producer.slots() <= self.reserve {
+                return false;
+            }
+            producer.push(packet).is_ok()
+        }) {
+            return MidiSendOutcome::Sent;
+        }
+        self.telemetry
+            .midi_drop_count
+            .fetch_add(1, Ordering::Relaxed);
+        if packet.is_critical_release() {
+            self.telemetry
+                .midi_generation
+                .fetch_add(1, Ordering::AcqRel);
+            MidiSendOutcome::CriticalFallbackReset
+        } else {
+            MidiSendOutcome::DroppedNonCritical
         }
     }
 }
@@ -131,6 +156,16 @@ impl AudioEngine {
 
     pub fn send_midi(&self, bytes: &[u8]) {
         let _ = self.send_midi_with_outcome(bytes);
+    }
+
+    /// Includes a worker waiting for automatic recovery, whose intent must be
+    /// restored if disabling it cannot be committed to disk.
+    pub fn has_runtime_request(&self) -> bool {
+        #[cfg(target_os = "windows")]
+        if self.is_worker_enabled() {
+            return true;
+        }
+        self.is_running()
     }
 
     /// Requests a panic without blocking the bridge or an input callback.
@@ -222,24 +257,7 @@ impl AudioEngine {
             return MidiSendOutcome::AudioStopped;
         };
         packet.generation = ingress.telemetry.midi_generation.load(Ordering::Acquire);
-        if ingress.producer.try_lock().is_some_and(|mut producer| {
-            if !packet.is_critical_release() && producer.slots() <= ingress.reserve {
-                return false;
-            }
-            producer.push(packet).is_ok()
-        }) {
-            return MidiSendOutcome::Sent;
-        }
-        ingress
-            .telemetry
-            .midi_drop_count
-            .fetch_add(1, Ordering::Relaxed);
-        if packet.is_critical_release() {
-            self.request_emergency_midi_reset();
-            MidiSendOutcome::CriticalFallbackReset
-        } else {
-            MidiSendOutcome::DroppedNonCritical
-        }
+        ingress.send(packet)
     }
 
     #[cfg(target_os = "windows")]

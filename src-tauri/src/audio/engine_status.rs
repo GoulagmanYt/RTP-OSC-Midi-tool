@@ -682,13 +682,44 @@ impl AudioEngine {
         if !self.is_running() {
             return Err(AudioError::Message("Audio runtime not started".into()));
         }
+        self.queue_ping()
+    }
 
-        self.send_midi(&[0x90, 60, 100]);
-        let cloned = self.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(220));
-            cloned.send_midi(&[0x80, 60, 0]);
-        });
+    fn queue_ping(&self) -> Result<(), AudioError> {
+        #[cfg(target_os = "windows")]
+        if self.is_worker_enabled() {
+            return self.worker.queue_ping().map_err(AudioError::Message);
+        }
+        let ingress = self
+            .midi_tx
+            .load_full()
+            .ok_or_else(|| AudioError::Message("Audio runtime not started".into()))?;
+        let generation = ingress.telemetry.midi_generation.load(Ordering::Acquire);
+        let mut on = super::runtime_state::MidiPacket::from_bytes(&[0x90, 60, 100]).unwrap();
+        on.generation = generation;
+        if ingress.send(on) != super::engine::MidiSendOutcome::Sent {
+            return Err(AudioError::Message(
+                "Audio test note could not be queued".into(),
+            ));
+        }
+        let release_ingress = ingress.clone();
+        std::thread::Builder::new()
+            .name("audio-test-note-off".into())
+            .spawn(move || {
+                std::thread::sleep(Duration::from_millis(220));
+                let mut off = super::runtime_state::MidiPacket::from_bytes(&[0x80, 60, 0]).unwrap();
+                off.generation = generation;
+                // Keep both the original queue and epoch, including if Panic
+                // races with admission or a reload publishes another queue.
+                release_ingress.send(off);
+            })
+            .map_err(|error| {
+                ingress
+                    .telemetry
+                    .midi_generation
+                    .fetch_add(1, Ordering::AcqRel);
+                AudioError::Message(format!("Failed to schedule audio test release: {error}"))
+            })?;
         Ok(())
     }
 
@@ -713,5 +744,36 @@ mod control_tests {
         assert!(audio.set_gain(-12.0).is_err());
         assert!(audio.set_limiter_enabled(true).is_err());
         assert!(audio.set_vst_eq(VstEqSettings::default()).is_err());
+    }
+
+    #[test]
+    fn ping_release_keeps_its_audio_epoch_and_original_ingress() {
+        use super::super::engine::MidiIngress;
+        use super::super::runtime_state::{AudioTelemetry, MidiPacket};
+        let audio = AudioEngine::new();
+        let (tx, mut rx) = rtrb::RingBuffer::<MidiPacket>::new(16);
+        let telemetry = std::sync::Arc::new(AudioTelemetry::new());
+        audio
+            .midi_tx
+            .store(Some(std::sync::Arc::new(MidiIngress::new(
+                tx,
+                telemetry.clone(),
+            ))));
+        audio.queue_ping().unwrap();
+        assert_eq!(rx.pop().unwrap().data, [0x90, 60, 100]);
+        telemetry.midi_generation.fetch_add(1, Ordering::AcqRel);
+        let (new_tx, mut new_rx) = rtrb::RingBuffer::<MidiPacket>::new(16);
+        audio
+            .midi_tx
+            .store(Some(std::sync::Arc::new(MidiIngress::new(
+                new_tx,
+                std::sync::Arc::new(AudioTelemetry::new()),
+            ))));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(rx.pop().is_err(), "Panic must cancel the old ping release");
+        assert!(
+            new_rx.pop().is_err(),
+            "reload must not receive the old ping release"
+        );
     }
 }

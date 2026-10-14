@@ -213,6 +213,7 @@ impl RtpServer {
         let session_name_for_join = name.clone();
         let session_name_for_midi = name.clone();
         let session_name_for_sysex = name.clone();
+        let source_faults = Arc::new(SourceRecovery::default());
         let midi_sink = sink.clone();
         let participants = Arc::new(Mutex::new(Vec::<RtpParticipantInfo>::new()));
         let participants_for_join = participants.clone();
@@ -238,6 +239,7 @@ impl RtpServer {
                 scheduled_rx,
                 midi_sink.clone(),
                 logger.clone(),
+                source_faults.clone(),
             ));
             // ── Listener MIDI ────────────────────────────────────────────────
             // HOT PATH : ce callback est appelé sur chaque message reçu.
@@ -245,12 +247,18 @@ impl RtpServer {
             //   • Pas de verrou long-durée.
             //   • Pas d'allocation évitable.
             //   • File bornée et ordonnancement selon le timestamp RTP.
-            let rtp_logger = logger.clone();
+            let fault_sources = peer_sources.clone();
+            let fault_fallback = rtp_source.clone();
+            let fault_requests = source_faults.clone();
             session
-                .add_listener(StreamFaultEvent, |_| request_critical_midi_reset())
+                .add_listener(StreamFaultEvent, move |ssrc| {
+                    record_rtp_drop();
+                    request_peer_recovery(ssrc, &fault_sources, &fault_fallback, &fault_requests);
+                })
                 .await;
             let sysex_tx = scheduled_tx.clone();
             let sysex_source = rtp_source.clone();
+            let sysex_recovery = source_faults.clone();
             session
                 .add_listener(TimestampedSysExEvent, move |event| {
                     let source = if event.ssrc != 0 {
@@ -270,6 +278,7 @@ impl RtpServer {
                     frame.ingress_qpc = crate::vst_worker::protocol::qpc_at(event.received_at);
                     if sysex_tx
                         .try_send(TimedRtpFrame {
+                            source_epoch: sysex_recovery.epoch(&frame.source),
                             generation: frame.generation,
                             critical: false,
                             frame,
@@ -282,6 +291,10 @@ impl RtpServer {
                     }
                 })
                 .await;
+            let rtp_logger = logger.clone();
+            let midi_tx = scheduled_tx.clone();
+            let midi_source = rtp_source.clone();
+            let midi_recovery = source_faults.clone();
             session
                 .add_listener(TimestampedMidiMessageEvent, move |event| {
                     let bytes = midi_to_bytes(event.message);
@@ -313,10 +326,11 @@ impl RtpServer {
                             event.ssrc,
                         )
                     } else {
-                        std::sync::Arc::clone(&rtp_source)
+                        std::sync::Arc::clone(&midi_source)
                     };
                     let generation = MidiFrame::current_generation();
                     let timed = TimedRtpFrame {
+                        source_epoch: midi_recovery.epoch(&source),
                         frame: MidiFrame {
                             generation,
                             ingress_qpc: crate::vst_worker::protocol::qpc_at(event.received_at),
@@ -333,7 +347,7 @@ impl RtpServer {
                         .load()
                         .as_ref()
                         .is_some_and(|sink| classify_input_frame(sink, &timed.frame));
-                    if let Err(error) = scheduled_tx.try_send(timed) {
+                    if let Err(error) = midi_tx.try_send(timed) {
                         DROPPED_MIDI_COUNT.fetch_add(1, Ordering::Relaxed);
                         if error.into_inner().critical {
                             request_critical_midi_reset();
@@ -375,11 +389,18 @@ impl RtpServer {
 
             // ── Listener : participant parti ──────────────────────────────────
             let left_logger = logger.clone();
+            let left_faults = source_faults.clone();
+            let left_fallback = rtp_source.clone();
             session
                 .add_listener(ParticipantLeftEvent, move |participant| {
                     let peer_ssrc = participant.ssrc().get();
+                    request_peer_recovery(
+                        peer_ssrc,
+                        &peer_sources_for_left,
+                        &left_fallback,
+                        &left_faults,
+                    );
                     peer_sources_for_left.write().remove(&peer_ssrc);
-                    request_critical_midi_reset();
                     let name = participant.name().to_str().unwrap_or("Unknown");
                     {
                         let mut guard = participants_for_left.lock();
@@ -395,6 +416,9 @@ impl RtpServer {
                 .await;
 
             let loss_logger = logger.clone();
+            let loss_faults = source_faults.clone();
+            let loss_sources = peer_sources.clone();
+            let loss_fallback = rtp_source.clone();
             session
                 .add_listener(PacketLossEvent, move |loss| {
                     crate::realtime::RTP_LOST_PACKETS
@@ -403,7 +427,12 @@ impl RtpServer {
                     // deterministic controller reset is safer than leaving notes or
                     // sustain latched after a proven RTP sequence gap.
                     if !loss.recovered {
-                        request_critical_midi_reset();
+                        request_peer_recovery(
+                            loss.ssrc,
+                            &loss_sources,
+                            &loss_fallback,
+                            &loss_faults,
+                        );
                     }
                     if should_sample_rtp_log() {
                         let logger = loss_logger.clone();
@@ -548,6 +577,7 @@ impl RtpServer {
 }
 
 struct TimedRtpFrame {
+    source_epoch: u64,
     critical: bool,
     frame: MidiFrame,
     deadline: Instant,
@@ -572,11 +602,73 @@ impl Ord for TimedRtpFrame {
     }
 }
 
+#[derive(Default)]
+struct SourceRecovery {
+    state: Mutex<SourceRecoveryState>,
+}
+#[derive(Default)]
+struct SourceRecoveryState {
+    epochs: HashMap<Arc<str>, u64>,
+    pending: HashMap<Arc<str>, u64>,
+}
+impl SourceRecovery {
+    fn epoch(&self, source: &str) -> u64 {
+        self.state.lock().epochs.get(source).copied().unwrap_or(0)
+    }
+    fn request(&self, source: Arc<str>) {
+        let mut state = self.state.lock();
+        let epoch = state.epochs.entry(source.clone()).or_default();
+        *epoch = epoch.wrapping_add(1);
+        let epoch = *epoch;
+        state.pending.insert(source, epoch);
+    }
+}
+
+fn request_peer_recovery(
+    ssrc: u32,
+    peers: &RwLock<HashMap<u32, Arc<str>>>,
+    fallback: &Arc<str>,
+    requests: &SourceRecovery,
+) {
+    let peers = peers.read();
+    if ssrc == 0 {
+        for source in peers.values() {
+            requests.request(source.clone());
+        }
+        requests.request(fallback.clone());
+    } else if let Some(source) = peers.get(&ssrc) {
+        requests.request(source.clone());
+    } else {
+        requests.request(fallback.clone());
+    }
+}
+
+fn source_frame_is_stale(frame: &TimedRtpFrame, cutoffs: &HashMap<Arc<str>, u64>) -> bool {
+    cutoffs
+        .get(&frame.frame.source)
+        .is_some_and(|cutoff| frame.source_epoch < *cutoff)
+}
+
+fn recover_scheduled_source(
+    source: Arc<str>,
+    cutoff: u64,
+    pending: &mut BinaryHeap<TimedRtpFrame>,
+    cutoffs: &mut HashMap<Arc<str>, u64>,
+    sink: &arc_swap::ArcSwapOption<Sender<MidiFrame>>,
+) {
+    pending.retain(|event| event.frame.source != source || event.source_epoch >= cutoff);
+    cutoffs.insert(source.clone(), cutoff);
+    let frame = MidiFrame::copy_realtime(&[0xFF], source).expect("inline reset");
+    dispatch_scheduled_frame(sink, frame);
+}
+
 async fn run_rtp_scheduler(
     mut receiver: crate::midi_queue::AsyncReceiver<TimedRtpFrame>,
     sink: Arc<arc_swap::ArcSwapOption<Sender<MidiFrame>>>,
     logger: FrontendLogger,
+    source_faults: Arc<SourceRecovery>,
 ) {
+    let mut cutoffs = HashMap::<Arc<str>, u64>::new();
     let mut pending = BinaryHeap::<TimedRtpFrame>::with_capacity(RTP_PENDING_CAPACITY);
     let mut order = 0u64;
     let mut generation = midi_reset_generation();
@@ -584,7 +676,12 @@ async fn run_rtp_scheduler(
         let current = midi_reset_generation();
         if current != generation {
             pending.clear();
+            cutoffs.clear();
             generation = current;
+        }
+        let faults = std::mem::take(&mut source_faults.state.lock().pending);
+        for (source, cutoff) in faults {
+            recover_scheduled_source(source, cutoff, &mut pending, &mut cutoffs, &sink);
         }
         let now = Instant::now();
         for _ in 0..256 {
@@ -605,7 +702,7 @@ async fn run_rtp_scheduler(
         tokio::select! {
             event = receiver.recv() => {
                 let Some(mut event) = event else { break; };
-                if event.generation != midi_reset_generation() { continue; }
+                if event.generation != midi_reset_generation() || source_frame_is_stale(&event, &cutoffs) { continue; }
                 // Observe recovery before admitting this new generation; otherwise
                 // the next scheduler turn would clear a freshly admitted event.
                 if event.generation != generation { pending.clear(); generation = event.generation; }
@@ -667,6 +764,60 @@ mod tests {
     use super::*;
 
     #[test]
+    fn peer_fault_recovery_discards_only_pre_fault_work_and_preserves_global_epoch() {
+        let _guard = crate::bridge::pipeline::TEST_PIPELINE_LOCK.lock().unwrap();
+        let generation = midi_reset_generation();
+        let peers = RwLock::new(HashMap::from([
+            (1, Arc::from("RTP:A")),
+            (2, Arc::from("RTP:B")),
+        ]));
+        let requests = SourceRecovery::default();
+        request_peer_recovery(1, &peers, &Arc::from("RTP:Session"), &requests);
+        assert_eq!(requests.state.lock().pending.len(), 1);
+        assert!(requests.state.lock().pending.contains_key("RTP:A"));
+        let (tx, rx) = crate::midi_queue::bounded(16);
+        let sink = arc_swap::ArcSwapOption::from(Some(Arc::new(tx)));
+        let frame = |source: &str, qpc| MidiFrame {
+            generation,
+            ingress_qpc: qpc,
+            data: smallvec::smallvec![0x90, 60, 100],
+            source: Arc::from(source),
+        };
+        let mut pending = BinaryHeap::new();
+        for (order, (source, qpc)) in [("RTP:A", 10), ("RTP:A", 30), ("RTP:B", 10)]
+            .into_iter()
+            .enumerate()
+        {
+            pending.push(TimedRtpFrame {
+                source_epoch: qpc,
+                critical: false,
+                frame: frame(source, qpc),
+                deadline: Instant::now(),
+                generation,
+                order: order as u64,
+            });
+        }
+        let mut cutoffs = HashMap::new();
+        recover_scheduled_source(Arc::from("RTP:A"), 20, &mut pending, &mut cutoffs, &sink);
+        assert_eq!(pending.len(), 2);
+        let reset = rx.try_recv().unwrap();
+        assert_eq!(reset.source.as_ref(), "RTP:A");
+        assert_eq!(reset.data.as_slice(), [0xFF]);
+        let event = |source, epoch| TimedRtpFrame {
+            source_epoch: epoch,
+            frame: frame(source, 1),
+            critical: false,
+            deadline: Instant::now(),
+            generation,
+            order: 0,
+        };
+        assert!(source_frame_is_stale(&event("RTP:A", 10), &cutoffs));
+        assert!(!source_frame_is_stale(&event("RTP:A", 30), &cutoffs));
+        assert!(!source_frame_is_stale(&event("RTP:B", 10), &cutoffs));
+        assert_eq!(midi_reset_generation(), generation);
+    }
+
+    #[test]
     fn scheduler_routes_during_concurrent_publication_without_contention_drops() {
         let _guard = crate::bridge::pipeline::TEST_PIPELINE_LOCK.lock().unwrap();
         let (first_tx, first_rx) = crate::midi_queue::bounded(1000);
@@ -704,6 +855,7 @@ mod tests {
         let mut heap = BinaryHeap::with_capacity(3);
         for order in [2, 0, 1] {
             heap.push(TimedRtpFrame {
+                source_epoch: 0,
                 critical: false,
                 frame: MidiFrame {
                     generation: MidiFrame::current_generation(),

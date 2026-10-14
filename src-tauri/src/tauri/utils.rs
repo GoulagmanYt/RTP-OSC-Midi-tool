@@ -141,6 +141,14 @@ pub fn sync_runtime_logging(config: &Config, dev_logging: &Arc<std::sync::atomic
 }
 
 pub fn sync_rtp_discovery(config: &Config, state: &AppState, app: &AppHandle) {
+    let local_port = state
+        .bridge
+        .status(config)
+        .rtp_bound_port
+        .unwrap_or(config.rtp.port);
+    state
+        .rtp_discovery
+        .set_local_session(config.rtp.session_name.clone(), local_port);
     if config.rtp.remote_enabled {
         state.rtp_discovery.start(app.clone());
     } else {

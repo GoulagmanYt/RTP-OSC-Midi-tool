@@ -12,7 +12,7 @@ use crate::{
     logger::FrontendLogger,
     midi::MidiFrame,
     reliable_playback::ReliablePlaybackServer,
-    rtp::{rtp_advertisement::RtpAdvertisementStatus, RtpRemoteTarget, RtpServer},
+    rtp::{RtpRemoteTarget, RtpServer},
     types::{BridgeStatus, RtpParticipantInfo},
 };
 use parking_lot::Mutex;
@@ -44,7 +44,6 @@ pub(super) struct RtpConfigSnapshot {
     pub(super) remote_enabled: bool,
     pub(super) remote_targets: Vec<RtpRemoteTarget>,
     pub(super) log_rtp: bool,
-    pub(super) advertisement: RtpAdvertisementStatus,
 }
 
 pub(super) struct BridgeRuntime {
@@ -141,17 +140,36 @@ impl BridgeHandle {
         let velocity = velocity.min(127);
         let source = "Test MIDI".to_string();
         let data = SmallVec::from_slice(&[0x90 | ch, note, velocity]);
-        self.inject_frame(data, source.clone())?;
+        let generation = MidiFrame::current_generation();
 
-        let sink = self.rtp_sink.clone();
+        let sink = self
+            .rtp_sink
+            .load_full()
+            .map(|sender| (*sender).clone())
+            .ok_or("Bridge MIDI input unavailable")?;
+        try_enqueue_midi_frame(
+            &sink,
+            MidiFrame {
+                generation,
+                ingress_qpc: crate::vst_worker::protocol::monotonic_qpc(),
+                data,
+                source: std::sync::Arc::from(source.as_str()),
+            },
+        )
+        .map_err(|e| format!("Failed to inject test MIDI: {e}"))?;
+
+        let sink_ref = self.rtp_sink.clone();
         thread::spawn(move || {
             thread::sleep(Duration::from_millis(200));
+            if MidiFrame::current_generation() != generation {
+                return;
+            }
             let off = smallvec::SmallVec::from_slice(&[0x80 | ch, note, 0]);
-            if let Some(tx) = sink.load_full() {
+            if let Some(tx) = sink_ref.load_full() {
                 let _ = try_enqueue_midi_frame(
                     &tx,
                     MidiFrame {
-                        generation: MidiFrame::current_generation(),
+                        generation,
                         ingress_qpc: crate::vst_worker::protocol::monotonic_qpc(),
                         data: off,
                         source: std::sync::Arc::from(source.as_str()),
@@ -210,6 +228,7 @@ impl BridgeHandle {
                 }
             }
             let old_config = runtime.config.lock().clone();
+            self.rtp_output.set_thru_enabled(config.rtp.thru_enabled);
             let old_midi = &old_config.midi;
             let routing_changed = old_midi.channel_filter != config.midi.channel_filter
                 || !super::pipeline::ConfigSnapshot::from(&old_config)
@@ -244,8 +263,17 @@ impl BridgeHandle {
     }
 
     pub fn status(&self, config: &Config) -> BridgeStatus {
-        let rtp_active = self.rtp_server.lock().is_some();
-        let bound_port = self.rtp_config.lock().as_ref().map(|cfg| cfg.bound_port);
+        let live_advertisement = self
+            .rtp_server
+            .lock()
+            .as_ref()
+            .map(|server| server.advertisement_status());
+        let rtp_active = live_advertisement.is_some();
+        let bound_port = if rtp_active {
+            self.rtp_config.lock().as_ref().map(|cfg| cfg.bound_port)
+        } else {
+            None
+        };
         let guard = self.inner.lock();
         let mut status = guard
             .as_ref()
@@ -256,10 +284,10 @@ impl BridgeHandle {
         }
         status.rtp_active = rtp_active;
         status.rtp_bound_port = bound_port;
-        if let Some(cfg) = self.rtp_config.lock().as_ref() {
-            status.rtp_advertised_host = cfg.advertisement.advertised_host.clone();
-            status.rtp_advertised_addresses = cfg.advertisement.advertised_addresses.clone();
-            status.rtp_network_warning = cfg.advertisement.warning.clone();
+        if let Some(adv) = live_advertisement {
+            status.rtp_advertised_host = adv.advertised_host;
+            status.rtp_advertised_addresses = adv.advertised_addresses;
+            status.rtp_network_warning = adv.warning;
         } else {
             status.rtp_advertised_host = None;
             status.rtp_advertised_addresses.clear();

@@ -272,6 +272,35 @@ where
     writer.flush().await
 }
 
+/// Worker responses may contain unbounded third-party metadata.
+pub async fn write_control_response<W>(writer: &mut W, message: &ControlMessage) -> io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    match write_control_frame(writer, message).await {
+        Err(error) if error.kind() == io::ErrorKind::InvalidInput => {
+            let request_id = match message {
+                ControlMessage::Parameters { request_id, .. }
+                | ControlMessage::Ready { request_id, .. }
+                | ControlMessage::Ack { request_id }
+                | ControlMessage::Stopped { request_id } => Some(*request_id),
+                ControlMessage::Error { request_id, .. } => *request_id,
+                _ => None,
+            };
+            write_control_frame(
+                writer,
+                &ControlMessage::Error {
+                    request_id,
+                    code: "worker.frame-too-large".into(),
+                    message: "Response exceeds IPC frame limit".into(),
+                },
+            )
+            .await
+        }
+        result => result,
+    }
+}
+
 pub async fn read_control_frame<R>(reader: &mut R) -> io::Result<ControlMessage>
 where
     R: AsyncRead + Unpin,

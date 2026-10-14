@@ -78,7 +78,12 @@ pub(super) fn refresh_runtime_status(
     runtime.status.midi_output = runtime.actual_midi_out.lock().clone();
     runtime.status.osc_target = format!("{}:{}", config.osc.target_ip, config.osc.target_port);
     runtime.status.rtp_active = rtp_active;
-    runtime.status.rtp_bound_port = rtp_bound_port;
+    runtime.status.rtp_bound_port = if rtp_active { rtp_bound_port } else { None };
+    if !rtp_active {
+        runtime.status.rtp_advertised_host = None;
+        runtime.status.rtp_advertised_addresses.clear();
+        runtime.status.rtp_network_warning = None;
+    }
 }
 
 pub(super) fn enrich_status_from_runtime(status: &mut BridgeStatus, runtime: &BridgeRuntime) {

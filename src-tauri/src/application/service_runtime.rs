@@ -107,13 +107,16 @@ pub async fn stop_bridge(app: &AppHandle, state: &AppState) -> Result<(), Comman
 
 pub fn panic_midi(state: &AppState) -> Result<(), CommandError> {
     state
-        .audio
-        .panic_all_notes()
-        .map_err(|err| audio_error("audio.panic-failed", err.to_string()))?;
-    state
         .bridge
         .reset_keys()
-        .map_err(|err| runtime_error("runtime.reset-keys-failed", err))
+        .map_err(|err| runtime_error("runtime.reset-keys-failed", err))?;
+    if let Err(err) = state.audio.panic_all_notes() {
+        let msg = err.to_string();
+        if !msg.contains("Audio runtime not started") {
+            return Err(audio_error("audio.panic-failed", msg));
+        }
+    }
+    Ok(())
 }
 
 pub fn send_test_midi(
@@ -142,17 +145,15 @@ pub fn send_test_midi(
 }
 
 pub fn get_status(window: &Window, state: &AppState) -> BridgeStatus {
+    let _ = window;
     let cfg = state.config_store.load();
     sync_runtime_logging(&cfg, &state.dev_logging);
-    let logger = frontend_logger(window, state);
-    if let Err(err) = state.bridge.sync_rtp(&cfg, &logger, false) {
-        logger.error(format!("RTP not started: {err}"));
-    }
     let status = state.bridge.status(&cfg);
     with_audio_status(status, &state.audio)
 }
 
 pub fn restart_rtp(window: &Window, state: &AppState) -> Result<BridgeStatus, CommandError> {
+    let _guard = state.config_change.lock();
     let cfg = state.config_store.load();
     let logger = frontend_logger(window, state);
     state
@@ -167,6 +168,16 @@ pub fn refresh_rtp_sessions(
     app: &AppHandle,
     state: &AppState,
 ) -> Result<Vec<RtpSessionInfo>, CommandError> {
+    let cfg = state.config_store.load();
+    let local_port = state
+        .bridge
+        .status(&cfg)
+        .rtp_bound_port
+        .unwrap_or(cfg.rtp.port);
+    state
+        .rtp_discovery
+        .set_local_session(cfg.rtp.session_name.clone(), local_port);
+    state.rtp_discovery.start(app.clone());
     state
         .rtp_discovery
         .refresh_now(app, true)
@@ -195,10 +206,14 @@ pub fn preflight_check(
     }
 
     let midi_outputs = list_midi_outputs()?;
-    let midi_out_ok = match cfg.midi.output_device.as_deref() {
-        Some(name) if name == VST_INTERNAL_OUTPUT || name == VST_INTERNAL_OUTPUT_LEGACY => true,
-        Some(name) if !name.trim().is_empty() => midi_outputs.iter().any(|p| p.contains(name)),
-        _ => !cfg.midi.thru_enabled,
+    let midi_out_ok = if !cfg.midi.thru_enabled {
+        true
+    } else {
+        match cfg.midi.output_device.as_deref() {
+            Some(name) if name == VST_INTERNAL_OUTPUT || name == VST_INTERNAL_OUTPUT_LEGACY => true,
+            Some(name) if !name.trim().is_empty() => midi_outputs.iter().any(|p| p.contains(name)),
+            _ => false,
+        }
     };
     if !midi_out_ok {
         messages.push("MIDI OUT manquant ou non configure".to_string());

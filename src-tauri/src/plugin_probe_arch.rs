@@ -58,15 +58,31 @@ pub fn detect_vst3_architecture(path: &Path) -> String {
 }
 
 fn find_first_vst3_binary(path: &Path) -> Option<PathBuf> {
-    let mut stack = vec![path.to_path_buf()];
-    while let Some(dir) = stack.pop() {
+    let mut stack = vec![(path.to_path_buf(), 0usize)];
+    let mut visited = std::collections::HashSet::new();
+    if let Ok(canonical) = fs::canonicalize(path) {
+        visited.insert(canonical);
+    } else {
+        visited.insert(path.to_path_buf());
+    }
+    while let Some((dir, depth)) = stack.pop() {
+        if depth > 32 {
+            continue;
+        }
         let Ok(read_dir) = fs::read_dir(&dir) else {
             continue;
         };
         for entry in read_dir.flatten() {
             let entry_path = entry.path();
             if entry_path.is_dir() {
-                stack.push(entry_path);
+                if let Ok(canonical) = fs::canonicalize(&entry_path) {
+                    if !visited.insert(canonical) {
+                        continue;
+                    }
+                } else if !visited.insert(entry_path.clone()) {
+                    continue;
+                }
+                stack.push((entry_path, depth + 1));
                 continue;
             }
             if is_vst3_path(&entry_path) {

@@ -3,35 +3,14 @@ use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tauri::async_runtime::{self, JoinHandle};
 use tauri::Emitter;
 use tokio::sync::oneshot;
-use tokio::time::interval;
 
 use crate::{logger::background_log, types::RtpSessionInfo};
 
 const RTP_SESSIONS_EVENT: &str = "rtp:sessions";
-const DISCOVERY_TIMEOUT: Duration = Duration::from_millis(500);
-const DISCOVERY_TTL: Duration = Duration::from_secs(30);
-const DISCOVERY_INTERVAL: Duration = Duration::from_secs(10);
-const DISCOVERY_INTERVAL_IDLE: Duration = Duration::from_secs(30);
-
-#[cfg(test)]
-mod port_tests {
-    use super::*;
-
-    #[test]
-    fn ephemeral_port_checks_use_an_adjacent_ephemeral_pair() {
-        assert_eq!(ports_available(0), Ok(true));
-        assert_eq!(ports_available(u16::MAX), Ok(false));
-        let occupied = UdpSocket::bind("0.0.0.0:0").unwrap();
-        assert_eq!(
-            ports_available(occupied.local_addr().unwrap().port()),
-            Ok(false)
-        );
-    }
-}
 
 pub fn ports_available(port: u16) -> Result<bool, String> {
     if port == u16::MAX {
@@ -81,120 +60,50 @@ pub fn ports_available(port: u16) -> Result<bool, String> {
     Ok(false)
 }
 
-pub fn discover_sessions(timeout: Duration) -> Result<Vec<RtpSessionInfo>, String> {
-    let mdns = ServiceDaemon::new().map_err(|e| e.to_string())?;
-    let receiver = mdns
-        .browse("_apple-midi._udp.local.")
-        .map_err(|e| e.to_string())?;
-
-    let deadline = Instant::now() + timeout;
-    let mut sessions: HashMap<String, RtpSessionInfo> = HashMap::new();
-
-    while Instant::now() < deadline {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        let wait = remaining.min(Duration::from_millis(200));
-        let event = match receiver.recv_timeout(wait) {
-            Ok(event) => event,
-            Err(_) => continue,
-        };
-
-        if let ServiceEvent::ServiceResolved(info) = event {
-            if info.get_addresses().is_empty() {
-                continue;
-            }
-
-            let fullname = info.get_fullname();
-            let name = fullname
-                .strip_suffix("._apple-midi._udp.local.")
-                .unwrap_or(fullname)
-                .to_string();
-            let host = info.get_hostname().trim_end_matches('.').to_string();
-            let mut addresses: Vec<String> = info
-                .get_addresses()
-                .iter()
-                .map(|ip| ip.to_string())
-                .collect();
-            addresses.sort_by(|a, b| {
-                let a_v6 = a.contains(':');
-                let b_v6 = b.contains(':');
-                (a_v6, a).cmp(&(b_v6, b))
-            });
-
-            let key = format!("{}:{}", fullname, info.get_port());
-            sessions
-                .entry(key)
-                .and_modify(|existing| {
-                    for addr in &addresses {
-                        if !existing.addresses.contains(addr) {
-                            existing.addresses.push(addr.clone());
-                        }
-                    }
-                })
-                .or_insert_with(|| RtpSessionInfo {
-                    name: if name.is_empty() { host.clone() } else { name },
-                    host,
-                    port: info.get_port(),
-                    addresses,
-                });
-        }
-    }
-
-    let _ = mdns.shutdown();
-
-    let mut list: Vec<RtpSessionInfo> = sessions.into_values().collect();
-    list.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(list)
+#[derive(Clone)]
+struct LocalSession {
+    name: String,
+    port: u16,
+    addresses: Vec<String>,
 }
 
-#[derive(Default, Debug)]
-struct RtpDiscoveryCache {
-    sessions: Vec<RtpSessionInfo>,
-    updated_at: Option<Instant>,
-}
-
-impl RtpDiscoveryCache {
-    fn is_stale(&self) -> bool {
-        self.updated_at
-            .map(|ts| ts.elapsed() >= DISCOVERY_TTL)
-            .unwrap_or(true)
-    }
-
-    fn update(&mut self, sessions: Vec<RtpSessionInfo>) -> bool {
-        let changed = self.sessions != sessions;
-        self.sessions = sessions;
-        self.updated_at = Some(Instant::now());
-        changed
-    }
-}
-
-#[derive(Debug)]
+#[derive(Clone)]
 pub struct RtpDiscoveryManager {
-    cache: Arc<Mutex<RtpDiscoveryCache>>,
-    task: Mutex<Option<JoinHandle<()>>>,
-    stop_tx: Mutex<Option<oneshot::Sender<()>>>,
-}
-
-impl Clone for RtpDiscoveryManager {
-    fn clone(&self) -> Self {
-        Self {
-            cache: self.cache.clone(),
-            task: Mutex::new(None),
-            stop_tx: Mutex::new(None),
-        }
-    }
+    daemon: Arc<Mutex<Option<ServiceDaemon>>>,
+    sessions: Arc<Mutex<HashMap<String, RtpSessionInfo>>>,
+    task: Arc<Mutex<Option<JoinHandle<()>>>>,
+    stop_tx: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+    local_filter: Arc<Mutex<Option<LocalSession>>>,
 }
 
 impl RtpDiscoveryManager {
     pub fn new() -> Self {
         Self {
-            cache: Arc::new(Mutex::new(RtpDiscoveryCache::default())),
-            task: Mutex::new(None),
-            stop_tx: Mutex::new(None),
+            daemon: Arc::new(Mutex::new(None)),
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            task: Arc::new(Mutex::new(None)),
+            stop_tx: Arc::new(Mutex::new(None)),
+            local_filter: Arc::new(Mutex::new(None)),
         }
     }
 
+    pub fn set_local_session(&self, name: String, port: u16) {
+        let mut addresses = local_ip_address::list_afinet_netifas()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(_, ip)| ip.to_string())
+            .collect::<Vec<_>>();
+        addresses.extend(["127.0.0.1".into(), "::1".into()]);
+        *self.local_filter.lock() = Some(LocalSession {
+            name,
+            port,
+            addresses,
+        });
+    }
+
     pub fn cached(&self) -> Vec<RtpSessionInfo> {
-        self.cache.lock().sessions.clone()
+        let map = self.sessions.lock();
+        filter_and_sort_sessions(&map, &self.local_filter.lock())
     }
 
     pub fn start(&self, app_handle: tauri::AppHandle) {
@@ -202,104 +111,85 @@ impl RtpDiscoveryManager {
         if task_guard.is_some() {
             return;
         }
+        let daemon = match ServiceDaemon::new() {
+            Ok(d) => d,
+            Err(err) => {
+                background_log("warn", format!("RTP discovery daemon error: {err}"));
+                return;
+            }
+        };
+        let receiver = match daemon.browse("_apple-midi._udp.local.") {
+            Ok(rx) => rx,
+            Err(err) => {
+                background_log("warn", format!("RTP discovery browse error: {err}"));
+                let _ = daemon.shutdown();
+                return;
+            }
+        };
+        *self.daemon.lock() = Some(daemon);
         let (stop_tx, mut stop_rx) = oneshot::channel();
         *self.stop_tx.lock() = Some(stop_tx);
-        let cache = self.cache.clone();
-        *task_guard = Some(async_runtime::spawn(async move {
-            let initial = cache.lock().sessions.clone();
-            emit_sessions(&app_handle, &initial);
-            let mut ticker = interval(DISCOVERY_INTERVAL);
-            let mut idle_streak = 0u32;
-            loop {
-                tokio::select! {
-                    _ = &mut stop_rx => break,
-                    _ = ticker.tick() => {
-                        let should_refresh = { cache.lock().is_stale() };
-                        if !should_refresh { continue; }
+        let sessions_map = self.sessions.clone();
+        let local_filter = self.local_filter.clone();
 
-                        let handle = async_runtime::spawn_blocking(|| discover_sessions(DISCOVERY_TIMEOUT));
-                        match handle.await {
-                            Ok(Ok(sessions)) => {
-                                let changed = { cache.lock().update(sessions.clone()) };
-                                if changed {
-                                    idle_streak = 0;
-                                    emit_sessions(&app_handle, &sessions);
-                                } else {
-                                    idle_streak += 1;
-                                }
-                                let next = if idle_streak > 3 {
-                                    DISCOVERY_INTERVAL_IDLE
-                                } else {
-                                    DISCOVERY_INTERVAL
-                                };
-                                ticker = interval(next);
-                                ticker.tick().await;
-                            }
-                            Ok(Err(err)) => background_log("warn", format!("RTP discovery: {err}")),
-                            Err(err) => background_log("warn", format!("RTP discovery task: {err}")),
-                        }
+        *task_guard = Some(async_runtime::spawn_blocking(move || loop {
+            if !matches!(stop_rx.try_recv(), Err(oneshot::error::TryRecvError::Empty)) {
+                break;
+            }
+            match receiver.recv_timeout(Duration::from_millis(200)) {
+                Ok(ServiceEvent::ServiceResolved(info)) => {
+                    if info.get_addresses().is_empty() {
+                        continue;
+                    }
+                    let mut map = sessions_map.lock();
+                    let changed = update_resolved_service(
+                        &mut map,
+                        info.get_fullname(),
+                        session_from_info(&info),
+                    );
+                    if changed {
+                        let list = filter_and_sort_sessions(&map, &local_filter.lock());
+                        emit_sessions(&app_handle, &list);
                     }
                 }
+                Ok(ServiceEvent::ServiceRemoved(_, fullname)) => {
+                    let mut map = sessions_map.lock();
+                    let before_len = map.len();
+                    map.remove(&fullname);
+                    if map.len() != before_len {
+                        let list = filter_and_sort_sessions(&map, &local_filter.lock());
+                        emit_sessions(&app_handle, &list);
+                    }
+                }
+                _ => {}
             }
         }));
     }
 
-    /// Arrête la tâche de découverte en arrière-plan.
-    ///
-    /// FIX : l'ancienne implémentation utilisait `async_runtime::block_on(handle)`
-    /// pour attendre la fin de la tâche. Appeler `block_on` depuis un contexte
-    /// tokio (ex. un command handler Tauri async) provoque une panique
-    /// "Cannot start a runtime from within a runtime".
-    ///
-    /// Nouveau comportement : on envoie le signal d'arrêt puis on `abort()` la
-    /// tâche. La tâche se terminera proprement sur la prochaine itération du
-    /// select (via stop_rx), ou sera annulée immédiatement par abort().
-    /// Pas besoin d'attendre la jointure depuis un contexte sync.
     pub fn stop(&self) {
+        let mut task = self.task.lock();
         if let Some(stop_tx) = self.stop_tx.lock().take() {
-            // Signal gracieux : la boucle interne s'arrête sur la prochaine
-            // itération du select!.
             let _ = stop_tx.send(());
         }
-        if let Some(handle) = self.task.lock().take() {
-            // abort() annule la tâche sans bloquer le thread courant.
-            // Sûr à appeler depuis n'importe quel contexte (sync ou async).
-            handle.abort();
+        if let Some(handle) = task.take() {
+            // spawn_blocking cannot be aborted after starting. Wait for the
+            // bounded receive loop before clearing the cache or restarting.
+            let _ = crate::tauri::utils::safe_block_on(handle);
         }
+        if let Some(daemon) = self.daemon.lock().take() {
+            let _ = daemon.shutdown();
+        }
+        self.sessions.lock().clear();
     }
 
-    /// Découvre les sessions RTP immédiatement et met à jour le cache.
-    ///
-    /// FIX : l'ancienne implémentation utilisait `async_runtime::block_on`
-    /// autour d'un `spawn_blocking`, ce qui panique si appelé depuis un
-    /// context tokio.
-    ///
-    /// Nouveau comportement : `tokio::task::block_in_place` exécute le code
-    /// bloquant directement sur le thread courant après l'avoir sorti du pool
-    /// async — valide depuis un contexte tokio multi-thread (utilisé par Tauri).
     pub fn refresh_now(
         &self,
         app_handle: &tauri::AppHandle,
-        force: bool,
+        _force: bool,
     ) -> Result<Vec<RtpSessionInfo>, String> {
-        if !force {
-            let cache = self.cache.lock();
-            if !cache.is_stale() {
-                let sessions = cache.sessions.clone();
-                drop(cache);
-                emit_sessions(app_handle, &sessions);
-                return Ok(sessions);
-            }
-        }
-
-        // block_in_place est sans danger depuis un runtime tokio multi-thread :
-        // il cède temporairement le thread au code bloquant sans bloquer
-        // l'executor, contrairement à block_on qui paniquerait ici.
-        let sessions = tokio::task::block_in_place(|| discover_sessions(DISCOVERY_TIMEOUT))?;
-
-        let _changed = self.cache.lock().update(sessions.clone());
-        emit_sessions(app_handle, &sessions);
-        Ok(sessions)
+        let list = self.cached();
+        emit_sessions(app_handle, &list);
+        Ok(list)
     }
 }
 
@@ -309,6 +199,134 @@ impl Default for RtpDiscoveryManager {
     }
 }
 
+fn session_from_info(info: &mdns_sd::ResolvedService) -> RtpSessionInfo {
+    let fullname = info.get_fullname();
+    let name = fullname
+        .strip_suffix("._apple-midi._udp.local.")
+        .unwrap_or(fullname)
+        .to_string();
+    let host = info.get_hostname().trim_end_matches('.').to_string();
+    let mut addresses: Vec<String> = info
+        .get_addresses()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    addresses.sort_by(|a, b| (a.contains(':'), a).cmp(&(b.contains(':'), b)));
+    RtpSessionInfo {
+        name: if name.is_empty() { host.clone() } else { name },
+        host,
+        port: info.get_port(),
+        addresses,
+    }
+}
+
+fn update_resolved_service(
+    map: &mut HashMap<String, RtpSessionInfo>,
+    fullname: &str,
+    session: RtpSessionInfo,
+) -> bool {
+    let changed = map.get(fullname).is_none_or(|previous| {
+        previous.host != session.host
+            || previous.port != session.port
+            || previous.addresses != session.addresses
+            || previous.name != session.name
+    });
+    map.insert(fullname.to_string(), session);
+    changed
+}
+
+fn filter_and_sort_sessions(
+    map: &HashMap<String, RtpSessionInfo>,
+    filter: &Option<LocalSession>,
+) -> Vec<RtpSessionInfo> {
+    let mut list: Vec<RtpSessionInfo> = map
+        .values()
+        .filter(|s| {
+            if let Some(local) = filter.as_ref() {
+                if s.port == local.port
+                    && s.name.eq_ignore_ascii_case(&local.name)
+                    && s.addresses
+                        .iter()
+                        .any(|address| local.addresses.contains(address))
+                {
+                    return false;
+                }
+            }
+            true
+        })
+        .cloned()
+        .collect();
+    list.sort_by(|a, b| a.name.cmp(&b.name));
+    list
+}
+
 fn emit_sessions(app_handle: &tauri::AppHandle, sessions: &[RtpSessionInfo]) {
     let _ = app_handle.emit(RTP_SESSIONS_EVENT, sessions);
+}
+
+#[cfg(test)]
+mod port_tests {
+    use super::*;
+
+    #[test]
+    fn same_name_and_port_do_not_hide_a_remote_machine() {
+        let map = HashMap::from([(
+            "Peer._apple-midi._udp.local.".into(),
+            RtpSessionInfo {
+                name: "OSCMidi".into(),
+                host: "remote.local".into(),
+                port: 5004,
+                addresses: vec!["192.0.2.20".into()],
+            },
+        )]);
+        assert_eq!(
+            filter_and_sort_sessions(
+                &map,
+                &Some(LocalSession {
+                    name: "OSCMidi".into(),
+                    port: 5004,
+                    addresses: vec!["192.0.2.10".into()]
+                })
+            )
+            .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn resolved_service_replaces_obsolete_addresses_and_ports() {
+        let mut map = HashMap::new();
+        let make = |host: &str, port, address: &str| RtpSessionInfo {
+            name: "Peer".into(),
+            host: host.into(),
+            port,
+            addresses: vec![address.into()],
+        };
+        assert!(update_resolved_service(
+            &mut map,
+            "Peer._apple-midi._udp.local.",
+            make("old.local", 5004, "192.0.2.10")
+        ));
+        assert!(update_resolved_service(
+            &mut map,
+            "Peer._apple-midi._udp.local.",
+            make("new.local", 5006, "192.0.2.20")
+        ));
+        assert_eq!(map.len(), 1);
+        let session = map.values().next().unwrap();
+        assert_eq!(session.host, "new.local");
+        assert_eq!(session.port, 5006);
+        assert_eq!(session.addresses, ["192.0.2.20"]);
+    }
+
+    #[test]
+    fn ephemeral_port_checks_use_an_adjacent_ephemeral_pair() {
+        assert_eq!(ports_available(0), Ok(true));
+        assert_eq!(ports_available(u16::MAX), Ok(false));
+        let occupied = UdpSocket::bind("0.0.0.0:0").unwrap();
+        assert_eq!(
+            ports_available(occupied.local_addr().unwrap().port()),
+            Ok(false)
+        );
+    }
 }

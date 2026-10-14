@@ -417,6 +417,111 @@ impl VstWorkerSupervisor {
         self.try_send_midi_at(bytes, monotonic_qpc())
     }
 
+    pub(crate) fn queue_ping(&self) -> Result<(), String> {
+        let lifecycle = self.inner.lifecycle_generation.load(Ordering::Acquire);
+        let sender = self
+            .inner
+            .midi_route
+            .load_full()
+            .ok_or("Worker MIDI route unavailable")?;
+        let generation = self.inner.midi_generation.load(Ordering::Acquire);
+        if self.inner.lifecycle_generation.load(Ordering::Acquire) != lifecycle {
+            return Err("Audio test superseded by a lifecycle change".into());
+        }
+        let mut on = MidiWireFrame::new(
+            self.inner.midi_sequence.fetch_add(1, Ordering::Relaxed),
+            monotonic_qpc(),
+            &[0x90, 60, 100],
+        )
+        .unwrap();
+        on.generation = generation;
+        sender
+            .try_send(on)
+            .map_err(|_| "Audio test note could not be queued")?;
+        let supervisor = self.task_context();
+        let release_supervisor = supervisor.task_context();
+        let fallback_sender = sender.clone();
+        std::thread::Builder::new()
+            .name("audio-test-note-off".into())
+            .spawn(move || {
+                std::thread::sleep(Duration::from_millis(220));
+                if release_supervisor
+                    .inner
+                    .midi_generation
+                    .load(Ordering::Acquire)
+                    != generation
+                    || release_supervisor
+                        .inner
+                        .lifecycle_generation
+                        .load(Ordering::Acquire)
+                        != lifecycle
+                {
+                    return;
+                }
+                let mut off = MidiWireFrame::new(
+                    release_supervisor
+                        .inner
+                        .midi_sequence
+                        .fetch_add(1, Ordering::Relaxed),
+                    monotonic_qpc(),
+                    &[0x80, 60, 0],
+                )
+                .unwrap();
+                off.generation = generation;
+                // Captured route and epoch prevent a delayed release from reaching
+                // a replacement worker or cutting a note admitted after Panic.
+                if sender.try_send(off).is_err()
+                    && release_supervisor
+                        .inner
+                        .midi_generation
+                        .load(Ordering::Acquire)
+                        == generation
+                {
+                    if let Ok(_gate) = release_supervisor.inner.lifecycle.try_lock() {
+                        if release_supervisor
+                            .inner
+                            .lifecycle_generation
+                            .load(Ordering::Acquire)
+                            == lifecycle
+                            && release_supervisor
+                                .inner
+                                .midi_generation
+                                .load(Ordering::Acquire)
+                                == generation
+                            && release_supervisor
+                                .inner
+                                .midi_route
+                                .load()
+                                .as_ref()
+                                .is_some_and(|current| Arc::ptr_eq(current, &sender))
+                        {
+                            release_supervisor.request_emergency_reset();
+                        }
+                    }
+                }
+            })
+            .map_err(|error| {
+                if let Ok(_gate) = supervisor.inner.lifecycle.try_lock() {
+                    if supervisor
+                        .inner
+                        .lifecycle_generation
+                        .load(Ordering::Acquire)
+                        == lifecycle
+                        && supervisor
+                            .inner
+                            .midi_route
+                            .load()
+                            .as_ref()
+                            .is_some_and(|current| Arc::ptr_eq(current, &fallback_sender))
+                    {
+                        supervisor.request_emergency_reset();
+                    }
+                }
+                format!("Failed to schedule audio test release: {error}")
+            })?;
+        Ok(())
+    }
+
     pub fn try_send_midi_at(&self, bytes: &[u8], ingress_qpc: u64) -> bool {
         let frame = MidiWireFrame::new(
             self.inner.midi_sequence.fetch_add(1, Ordering::Relaxed),
@@ -1317,6 +1422,44 @@ fn set_session_fault(inner: &Arc<SupervisorInner>, error: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ping_release_stays_on_its_original_worker_route_and_epoch() {
+        let supervisor = VstWorkerSupervisor::new();
+        let (tx, mut rx) = crate::midi_queue::async_channel(16);
+        supervisor.inner.midi_route.store(Some(Arc::new(tx)));
+        supervisor.queue_ping().unwrap();
+        assert_eq!(rx.try_recv().unwrap().bytes(), [0x90, 60, 100]);
+        supervisor.request_emergency_reset();
+        let (new_tx, mut new_rx) = crate::midi_queue::async_channel(16);
+        supervisor.inner.midi_route.store(Some(Arc::new(new_tx)));
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(rx.try_recv().is_err());
+        assert!(new_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn delayed_ping_after_reload_cannot_panic_the_replacement_worker() {
+        let supervisor = VstWorkerSupervisor::new();
+        let (tx, mut rx) = crate::midi_queue::async_channel(16);
+        supervisor.inner.midi_route.store(Some(Arc::new(tx)));
+        supervisor.queue_ping().unwrap();
+        assert_eq!(rx.try_recv().unwrap().bytes(), [0x90, 60, 100]);
+        drop(rx);
+        supervisor
+            .inner
+            .lifecycle_generation
+            .fetch_add(1, Ordering::AcqRel);
+        let (new_tx, mut new_rx) = crate::midi_queue::async_channel(16);
+        supervisor.inner.midi_route.store(Some(Arc::new(new_tx)));
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(supervisor.inner.midi_generation.load(Ordering::Acquire), 0);
+        assert!(!supervisor
+            .inner
+            .emergency_reset_pending
+            .load(Ordering::Acquire));
+        assert!(new_rx.try_recv().is_err());
+    }
 
     #[tokio::test]
     async fn stalled_control_write_does_not_suspend_surveillance() {

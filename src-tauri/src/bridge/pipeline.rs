@@ -247,7 +247,11 @@ impl OscOutputState {
             return;
         };
         if frame.data.as_slice() == [0xFF] {
-            self.sources.clear();
+            if frame.source.starts_with("RTP:") {
+                self.sources.remove(&frame.source);
+            } else {
+                self.sources.clear();
+            }
             return;
         }
         if !(0x80..0xF0).contains(&status) {
@@ -673,6 +677,38 @@ mod tests {
             data: smallvec::SmallVec::from_slice(data),
             source: Arc::from("test"),
         }
+    }
+
+    #[test]
+    fn osc_peer_reset_preserves_other_sources_notes_and_sustain() {
+        let mut state = OscOutputState::default();
+        for (source, data) in [
+            ("Keyboard", [0x90, 60, 100]),
+            ("Keyboard", [0xB0, 64, 127]),
+            ("RTP:A", [0x90, 62, 100]),
+        ] {
+            let mut input = frame(&data);
+            input.source = Arc::from(source);
+            state.observe(&input);
+        }
+        let mut sent = Vec::new();
+        state
+            .flush(|note, pressed| {
+                sent.push((note, pressed));
+                Ok(())
+            })
+            .unwrap();
+        sent.clear();
+        let mut reset = frame(&[0xFF]);
+        reset.source = Arc::from("RTP:A");
+        state.observe(&reset);
+        state
+            .flush(|note, pressed| {
+                sent.push((note, pressed));
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(sent, [(Some(42), false)]);
     }
 
     #[test]

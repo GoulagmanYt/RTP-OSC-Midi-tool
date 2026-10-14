@@ -332,12 +332,15 @@ mod windows_worker {
                 let Some((frame, ack)) = frame else {
                     break;
                 };
-                let result = match tokio::time::timeout(
+                let write_res = tokio::time::timeout(
                     Duration::from_secs(1),
-                    write_control_frame(&mut control_writer, &frame),
+                    osc_midi_bridge::vst_worker::protocol::write_control_response(
+                        &mut control_writer,
+                        &frame,
+                    ),
                 )
-                .await
-                {
+                .await;
+                let result = match write_res {
                     Ok(result) => result.map_err(|e| e.to_string()),
                     Err(_) => Err("Control writer stalled".into()),
                 };
@@ -467,7 +470,14 @@ mod windows_worker {
                         }
                         ControlMessage::ListParameters { request_id } => {
                             match audio.list_vst_parameters() {
-                                Ok(parameters) => ControlMessage::Parameters { request_id, parameters },
+                                Ok(parameters) => {
+                                    let parameters = if parameters.len() > osc_midi_bridge::audio::MAX_CACHED_PARAMETERS {
+                                        parameters.into_iter().take(osc_midi_bridge::audio::MAX_CACHED_PARAMETERS).collect()
+                                    } else {
+                                        parameters
+                                    };
+                                    ControlMessage::Parameters { request_id, parameters }
+                                }
                                 Err(error) => ControlMessage::Error { request_id: Some(request_id), code: "worker.parameters-failed".into(), message: error.to_string() },
                             }
                         }

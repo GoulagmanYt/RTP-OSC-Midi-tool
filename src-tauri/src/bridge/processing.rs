@@ -142,12 +142,16 @@ fn processing_loop(
     let mut unused_notes = crate::midi::ActiveNotes::default();
     let mut generation = midi_reset_generation();
     let mut pending = None;
+    let mut source_state = crate::midi::SourceMidiState::default();
+    let mut scoped_releases = std::collections::VecDeque::new();
 
     while !stop.load(Ordering::Relaxed) {
         let observed_generation = midi_reset_generation();
         let _ = take_critical_midi_reset_request();
         if generation != observed_generation {
             generation = observed_generation;
+            source_state = crate::midi::SourceMidiState::default();
+            scoped_releases.clear();
             // Invalidate queued work before allowing new notes after the reset.
             audio.request_emergency_midi_reset();
             panic_revision.fetch_add(1, Ordering::AcqRel);
@@ -164,8 +168,9 @@ fn processing_loop(
 
         // Batch-drain the bounded input queue. Audio injection happens first;
         // OSC and MIDI Thru are dispatched to independent bounded workers.
-        let first = pending
-            .take()
+        let first = scoped_releases
+            .pop_front()
+            .or_else(|| pending.take())
             .map_or_else(|| midi_rx.recv_timeout(Duration::from_millis(1)), Ok);
         match first {
             Ok(frame) => {
@@ -185,6 +190,18 @@ fn processing_loop(
                     GenerationAction::Ready => {}
                 }
                 update_pipeline_queue_depth(midi_rx.len());
+                if frame.source.starts_with("RTP:") && frame.data.as_slice() == [0xFF] {
+                    for bytes in source_state.release_source(&frame.source) {
+                        let mut release =
+                            crate::midi::MidiFrame::copy_realtime(&bytes, frame.source.clone())
+                                .expect("inline release");
+                        release.generation = frame.generation;
+                        scoped_releases.push_back(release);
+                    }
+                    send_fanout(&osc_tx, frame, generation, snapshot.osc_enabled);
+                    continue;
+                }
+                source_state.observe(&frame);
                 record_activity(&activity, &frame);
                 let Some((midi_thru_frame, osc_frame)) =
                     frame.clone_realtime().zip(frame.clone_realtime())
@@ -218,7 +235,10 @@ fn processing_loop(
                     if stop.load(Ordering::Relaxed) || midi_reset_generation() != generation {
                         break;
                     }
-                    let Ok(frame) = midi_rx.try_recv() else {
+                    let Ok(frame) = scoped_releases
+                        .pop_front()
+                        .map_or_else(|| midi_rx.try_recv(), Ok)
+                    else {
                         break;
                     };
                     match generation_action(
@@ -234,6 +254,18 @@ fn processing_loop(
                         GenerationAction::Ready => {}
                     }
                     update_pipeline_queue_depth(midi_rx.len());
+                    if frame.source.starts_with("RTP:") && frame.data.as_slice() == [0xFF] {
+                        for bytes in source_state.release_source(&frame.source) {
+                            let mut release =
+                                crate::midi::MidiFrame::copy_realtime(&bytes, frame.source.clone())
+                                    .expect("inline release");
+                            release.generation = frame.generation;
+                            scoped_releases.push_back(release);
+                        }
+                        send_fanout(&osc_tx, frame, generation, snapshot.osc_enabled);
+                        continue;
+                    }
+                    source_state.observe(&frame);
                     record_activity(&activity, &frame);
                     let Some((midi_thru_frame, osc_frame)) =
                         frame.clone_realtime().zip(frame.clone_realtime())

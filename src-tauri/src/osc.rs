@@ -59,6 +59,14 @@ impl OscClient {
         Ok(Self { socket, target })
     }
 
+    pub fn for_config(enabled: bool, ip: &str, port: u16) -> Result<Self, String> {
+        match Self::new(ip, port) {
+            Ok(client) => Ok(client),
+            Err(err) if enabled => Err(err),
+            Err(_) => Self::new("127.0.0.1", 9000),
+        }
+    }
+
     #[cfg(test)]
     fn send_param(&self, name: &str, pressed: bool) -> Result<(), String> {
         self.send_encoded(&encode_param(name, pressed))

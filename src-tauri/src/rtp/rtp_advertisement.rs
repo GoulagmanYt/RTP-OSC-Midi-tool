@@ -24,7 +24,6 @@ pub struct RtpAdvertisementStatus {
 }
 
 pub struct RtpMdnsAdvertisement {
-    daemon: Option<ServiceDaemon>,
     status: Arc<Mutex<RtpAdvertisementStatus>>,
     monitor_stop: Option<mpsc::Sender<()>>,
     monitor: Option<JoinHandle<()>>,
@@ -39,89 +38,80 @@ struct RtpMdnsMonitorConfig {
 
 impl RtpMdnsAdvertisement {
     pub fn start(session_name: &str, port: u16, logger: &FrontendLogger) -> Self {
-        let interfaces = match collect_local_interface_addresses() {
-            Ok(interfaces) => interfaces,
-            Err(err) => {
-                let warning = format!("RTP-MIDI mDNS address scan failed: {err}");
-                logger.warn(warning.clone());
-                return Self {
-                    daemon: None,
-                    status: Arc::new(Mutex::new(RtpAdvertisementStatus {
-                        warning: Some(warning),
-                        ..RtpAdvertisementStatus::default()
-                    })),
-                    monitor_stop: None,
-                    monitor: None,
-                };
-            }
-        };
-
-        let addresses = select_advertised_addresses(&interfaces);
-        if addresses.is_empty() {
-            let warning = "RTP-MIDI mDNS has no usable local IPv4 address to advertise".to_string();
+        let mut initial_warning = None;
+        let interfaces = collect_local_interface_addresses().unwrap_or_else(|err| {
+            let warning = format!("RTP-MIDI mDNS address scan failed: {err}");
             logger.warn(warning.clone());
-            return Self {
-                daemon: None,
-                status: Arc::new(Mutex::new(RtpAdvertisementStatus {
-                    warning: Some(warning),
-                    ..RtpAdvertisementStatus::default()
-                })),
-                monitor_stop: None,
-                monitor: None,
-            };
-        }
-
+            initial_warning = Some(warning);
+            Vec::new()
+        });
+        let addresses = select_advertised_addresses(&interfaces);
         let host_name = advertised_host_name(session_name, "");
+        let service_fullname = format!("{session_name}.{APPLE_MIDI_SERVICE_TYPE}");
+        let daemon = ServiceDaemon::new()
+            .map_err(|err| {
+                let warning = format!("RTP-MIDI mDNS daemon creation failed: {err}");
+                logger.warn(warning.clone());
+                initial_warning = Some(warning);
+            })
+            .ok();
+
         let address_text = addresses
             .iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>();
 
-        match register_mdns_service(session_name, &host_name, addresses, port) {
-            Ok((daemon, service_fullname)) => {
-                logger.info(format!(
-                    "RTP-MIDI mDNS advertised as {host_name} on {}",
-                    address_text.join(", ")
-                ));
-                let status = Arc::new(Mutex::new(RtpAdvertisementStatus {
-                    advertised_host: Some(host_name.clone()),
-                    advertised_addresses: address_text,
-                    warning: None,
-                }));
-                let (monitor_stop, monitor_rx) = mpsc::channel();
-                let monitor = spawn_interface_monitor(
-                    daemon.clone(),
-                    RtpMdnsMonitorConfig {
-                        session_name: session_name.to_string(),
-                        host_name,
-                        service_fullname,
-                        port,
-                    },
-                    Arc::clone(&status),
-                    monitor_rx,
-                    logger.clone(),
-                );
-                Self {
-                    daemon: Some(daemon),
-                    status,
-                    monitor_stop: Some(monitor_stop),
-                    monitor,
+        let (warning, advertised_addrs) = if let Some(warning) = initial_warning {
+            (Some(warning), Vec::new())
+        } else if addresses.is_empty() {
+            let warning = "RTP-MIDI mDNS has no usable local IPv4 address to advertise".to_string();
+            logger.warn(warning.clone());
+            (Some(warning), Vec::new())
+        } else {
+            match register_mdns_service_on(
+                daemon.as_ref().expect("initial daemon available"),
+                session_name,
+                &host_name,
+                addresses,
+                port,
+            ) {
+                Ok(_) => {
+                    logger.info(format!(
+                        "RTP-MIDI mDNS advertised as {host_name} on {}",
+                        address_text.join(", ")
+                    ));
+                    (None, address_text)
+                }
+                Err(err) => {
+                    let warning = format!("RTP-MIDI mDNS advertisement failed: {err}");
+                    logger.warn(warning.clone());
+                    (Some(warning), Vec::new())
                 }
             }
-            Err(err) => {
-                let warning = format!("RTP-MIDI mDNS advertisement failed: {err}");
-                logger.warn(warning.clone());
-                Self {
-                    daemon: None,
-                    status: Arc::new(Mutex::new(RtpAdvertisementStatus {
-                        advertised_host: Some(host_name),
-                        advertised_addresses: address_text,
-                        warning: Some(warning),
-                    })),
-                    monitor_stop: None,
-                    monitor: None,
-                }
-            }
+        };
+
+        let status = Arc::new(Mutex::new(RtpAdvertisementStatus {
+            advertised_host: Some(host_name.clone()),
+            advertised_addresses: advertised_addrs,
+            warning,
+        }));
+        let (monitor_stop, monitor_rx) = mpsc::channel();
+        let monitor = spawn_interface_monitor(
+            daemon,
+            RtpMdnsMonitorConfig {
+                session_name: session_name.to_string(),
+                host_name,
+                service_fullname,
+                port,
+            },
+            Arc::clone(&status),
+            monitor_rx,
+            logger.clone(),
+        );
+        Self {
+            status,
+            monitor_stop: Some(monitor_stop),
+            monitor,
         }
     }
 
@@ -136,14 +126,11 @@ impl RtpMdnsAdvertisement {
         if let Some(monitor) = self.monitor.take() {
             let _ = monitor.join();
         }
-        if let Some(daemon) = self.daemon {
-            let _ = daemon.shutdown();
-        }
     }
 }
 
 fn spawn_interface_monitor(
-    daemon: ServiceDaemon,
+    mut daemon: Option<ServiceDaemon>,
     config: RtpMdnsMonitorConfig,
     status: Arc<Mutex<RtpAdvertisementStatus>>,
     stop: mpsc::Receiver<()>,
@@ -151,52 +138,72 @@ fn spawn_interface_monitor(
 ) -> Option<JoinHandle<()>> {
     std::thread::Builder::new()
         .name("rtp-mdns-monitor".to_string())
-        .spawn(move || loop {
-            match stop.recv_timeout(Duration::from_secs(5)) {
-                Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-            }
-            let Ok(interfaces) = collect_local_interface_addresses() else {
-                continue;
-            };
-            let addresses = select_advertised_addresses(&interfaces);
-            let address_text = addresses
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>();
-            let unchanged = status.lock().advertised_addresses == address_text;
-            if unchanged {
-                continue;
-            }
-            if addresses.is_empty() {
-                let _ = daemon.unregister(&config.service_fullname);
-                let mut current = status.lock();
-                current.advertised_addresses.clear();
-                current.warning =
-                    Some("RTP-MIDI mDNS has no usable local IPv4 address to advertise".to_string());
-                continue;
-            }
-            match register_mdns_service_on(
-                &daemon,
-                &config.session_name,
-                &config.host_name,
-                addresses,
-                config.port,
-            ) {
-                Ok(_) => {
-                    logger.info(format!(
-                        "RTP-MIDI mDNS interfaces updated: {}",
-                        address_text.join(", ")
-                    ));
+        .spawn(move || {
+            loop {
+                match stop.recv_timeout(Duration::from_secs(5)) {
+                    Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                }
+                if daemon.is_none() {
+                    match ServiceDaemon::new() {
+                        Ok(created) => daemon = Some(created),
+                        Err(error) => {
+                            status.lock().warning =
+                                Some(format!("RTP-MIDI mDNS daemon creation failed: {error}"));
+                            continue;
+                        }
+                    }
+                }
+                let daemon = daemon.as_ref().expect("monitor daemon initialized");
+                let Ok(interfaces) = collect_local_interface_addresses() else {
+                    continue;
+                };
+                let addresses = select_advertised_addresses(&interfaces);
+                let address_text = addresses
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>();
+                let unchanged = {
+                    let current = status.lock();
+                    current.warning.is_none() && current.advertised_addresses == address_text
+                };
+                if unchanged {
+                    continue;
+                }
+                if addresses.is_empty() {
+                    let _ = daemon.unregister(&config.service_fullname);
                     let mut current = status.lock();
-                    current.advertised_addresses = address_text;
-                    current.warning = None;
+                    current.advertised_addresses.clear();
+                    current.warning = Some(
+                        "RTP-MIDI mDNS has no usable local IPv4 address to advertise".to_string(),
+                    );
+                    continue;
                 }
-                Err(error) => {
-                    let warning = format!("RTP-MIDI mDNS interface update failed: {error}");
-                    logger.warn(warning.clone());
-                    status.lock().warning = Some(warning);
+                match register_mdns_service_on(
+                    daemon,
+                    &config.session_name,
+                    &config.host_name,
+                    addresses,
+                    config.port,
+                ) {
+                    Ok(_) => {
+                        logger.info(format!(
+                            "RTP-MIDI mDNS interfaces updated: {}",
+                            address_text.join(", ")
+                        ));
+                        let mut current = status.lock();
+                        current.advertised_addresses = address_text;
+                        current.warning = None;
+                    }
+                    Err(error) => {
+                        let warning = format!("RTP-MIDI mDNS interface update failed: {error}");
+                        logger.warn(warning.clone());
+                        status.lock().warning = Some(warning);
+                    }
                 }
+            }
+            if let Some(daemon) = daemon {
+                let _ = daemon.shutdown();
             }
         })
         .ok()
@@ -208,18 +215,6 @@ fn collect_local_interface_addresses() -> Result<Vec<LocalInterfaceAddress>, Str
         .into_iter()
         .map(|(name, ip)| LocalInterfaceAddress { name, ip })
         .collect())
-}
-
-fn register_mdns_service(
-    session_name: &str,
-    host_name: &str,
-    addresses: Vec<IpAddr>,
-    port: u16,
-) -> Result<(ServiceDaemon, String), String> {
-    let mdns = ServiceDaemon::new().map_err(|err| err.to_string())?;
-    let service_fullname =
-        register_mdns_service_on(&mdns, session_name, host_name, addresses, port)?;
-    Ok((mdns, service_fullname))
 }
 
 fn register_mdns_service_on(

@@ -53,11 +53,28 @@ pub fn is_vst3_path(path: &Path) -> bool {
 
 pub fn scan_plugin_candidates(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    scan_dir(root, &mut out);
+    let mut visited_dirs = HashSet::new();
+    scan_dir(root, &mut out, &mut visited_dirs, 0);
     out
 }
 
-fn scan_dir(root: &Path, out: &mut Vec<PathBuf>) {
+fn scan_dir(
+    root: &Path,
+    out: &mut Vec<PathBuf>,
+    visited_dirs: &mut HashSet<PathBuf>,
+    depth: usize,
+) {
+    if depth > 32 {
+        return;
+    }
+    if let Ok(canonical) = fs::canonicalize(root) {
+        if !visited_dirs.insert(canonical) {
+            return;
+        }
+    } else if !visited_dirs.insert(root.to_path_buf()) {
+        return;
+    }
+
     let Ok(read_dir) = fs::read_dir(root) else {
         return;
     };
@@ -68,7 +85,7 @@ fn scan_dir(root: &Path, out: &mut Vec<PathBuf>) {
             if is_vst3_path(&path) {
                 out.push(path);
             } else {
-                scan_dir(&path, out);
+                scan_dir(&path, out, visited_dirs, depth + 1);
             }
             continue;
         }

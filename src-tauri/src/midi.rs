@@ -3,6 +3,106 @@ use serde::{Deserialize, Serialize};
 pub const NOTE_MIN: u8 = 21;
 pub const NOTE_MAX: u8 = 108;
 
+/// Ownership at the prepared input boundary, used for peer-scoped recovery.
+#[derive(Default)]
+pub(crate) struct SourceMidiState {
+    sources: std::collections::HashMap<std::sync::Arc<str>, SourceNotes>,
+}
+
+#[derive(Default)]
+struct SourceNotes {
+    notes: [u128; 16],
+    sustain: [bool; 16],
+}
+
+impl SourceMidiState {
+    pub(crate) fn observe(&mut self, frame: &MidiFrame) {
+        let bytes = frame.data.as_slice();
+        if bytes == [0xFF] {
+            self.sources.clear();
+            return;
+        }
+        if bytes.len() != 3
+            || !(0x80..0xF0).contains(&bytes[0])
+            || bytes[1..].iter().any(|b| *b > 127)
+        {
+            return;
+        }
+        let channel = usize::from(bytes[0] & 15);
+        let state = self.sources.entry(frame.source.clone()).or_default();
+        match bytes[0] & 0xF0 {
+            0x90 if bytes[2] > 0 => state.notes[channel] |= 1u128 << bytes[1],
+            0x80 | 0x90 => state.notes[channel] &= !(1u128 << bytes[1]),
+            0xB0 => match bytes[1] {
+                64 => state.sustain[channel] = bytes[2] >= 64,
+                120 => {
+                    state.notes[channel] = 0;
+                    state.sustain[channel] = false;
+                }
+                123 => state.notes[channel] = 0,
+                121 => state.sustain[channel] = false,
+                _ => {}
+            },
+            _ => {}
+        }
+        if state.notes.iter().all(|notes| *notes == 0) && !state.sustain.iter().any(|held| *held) {
+            self.sources.remove(&frame.source);
+        }
+    }
+
+    pub(crate) fn release_source(&mut self, source: &str) -> Vec<[u8; 3]> {
+        let Some(removed) = self.sources.remove(source) else {
+            return Vec::new();
+        };
+        let mut releases = Vec::new();
+        for channel in 0..16 {
+            let other_notes = self
+                .sources
+                .values()
+                .fold(0, |notes, state| notes | state.notes[channel]);
+            let mut exclusive = removed.notes[channel] & !other_notes;
+            while exclusive != 0 {
+                let note = exclusive.trailing_zeros() as u8;
+                exclusive &= exclusive - 1;
+                releases.push([0x80 | channel as u8, note, 0]);
+            }
+            if removed.sustain[channel]
+                && !self.sources.values().any(|state| state.sustain[channel])
+            {
+                releases.push([0xB0 | channel as u8, 64, 0]);
+            }
+        }
+        releases
+    }
+}
+
+#[cfg(test)]
+mod source_recovery_tests {
+    use super::*;
+
+    #[test]
+    fn peer_reset_releases_only_exclusive_notes_and_preserves_shared_sustain() {
+        let mut state = SourceMidiState::default();
+        for (source, bytes) in [
+            ("Keyboard", [0x90, 60, 100]),
+            ("Keyboard", [0xB0, 64, 127]),
+            ("RTP:A", [0x90, 60, 100]),
+            ("RTP:A", [0x90, 62, 100]),
+            ("RTP:A", [0xB0, 64, 127]),
+            ("RTP:B", [0x90, 64, 100]),
+        ] {
+            state.observe(&MidiFrame::copy_realtime(&bytes, std::sync::Arc::from(source)).unwrap());
+        }
+        assert_eq!(state.release_source("RTP:A"), [[0x80, 62, 0]]);
+        assert!(state.release_source("RTP:A").is_empty());
+        assert_eq!(state.release_source("RTP:B"), [[0x80, 64, 0]]);
+        assert_eq!(
+            state.release_source("Keyboard"),
+            [[0x80, 60, 0], [0xB0, 64, 0]]
+        );
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MidiFrame {
     #[serde(default = "MidiFrame::current_generation")]
