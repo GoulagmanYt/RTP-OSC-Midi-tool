@@ -273,6 +273,12 @@ impl Default for AudioConfig {
 pub struct UiConfig {
     pub theme: Theme,
     pub theme_palette: String,
+    #[serde(default = "default_accent_color")]
+    pub accent_color: String,
+    #[serde(default = "default_background_tone")]
+    pub light_background: String,
+    #[serde(default = "default_background_tone")]
+    pub dark_background: String,
     pub corner_radius: f32,
     pub auto_start: bool,
     pub developer_mode: bool,
@@ -283,11 +289,22 @@ impl Default for UiConfig {
         Self {
             theme: Theme::Light,
             theme_palette: "light".to_string(),
+            accent_color: default_accent_color(),
+            light_background: default_background_tone(),
+            dark_background: default_background_tone(),
             corner_radius: 12.0,
             auto_start: false,
             developer_mode: false,
         }
     }
+}
+
+fn default_accent_color() -> String {
+    "blue".to_string()
+}
+
+fn default_background_tone() -> String {
+    "default".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -590,6 +607,24 @@ fn default_game_mode() -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn appearance_preferences_preserve_old_configs_and_round_trip() {
+        let mut legacy = serde_json::to_value(super::UiConfig::default()).unwrap();
+        for key in ["accentColor", "lightBackground", "darkBackground"] {
+            legacy.as_object_mut().unwrap().remove(key);
+        }
+        let mut config: super::UiConfig = serde_json::from_value(legacy).unwrap();
+        assert_eq!(config.accent_color, "blue");
+        assert_eq!(config.light_background, "default");
+        assert_eq!(config.dark_background, "default");
+        config.accent_color = "purple".into();
+        config.light_background = "white".into();
+        config.dark_background = "graphite".into();
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        let restored: super::UiConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(restored, config);
+    }
+
     #[test]
     fn legacy_audio_config_enables_game_mode_without_changing_explicit_audio_format() {
         let mut legacy = serde_json::to_value(super::AudioConfig::default()).unwrap();

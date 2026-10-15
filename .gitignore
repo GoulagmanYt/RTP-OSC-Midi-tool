@@ -19,3 +19,7 @@ export_ia/
 __pycache__/
 *.pyc
 DIFF_AUDIT_FIXES.txt
+
+# Local browser review artifacts
+/.playwright-cli/
+/output/playwright/

@@ -54,21 +54,21 @@ export function RtpConfigCard({
     <Card>
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
-          <Wifi className="h-5 w-5 text-blue-500" />
+          <Wifi className="h-5 w-5 text-muted-foreground" />
           {t("rtp.title")}
         </CardTitle>
         <CardDescription>{t("rtp.description")}</CardDescription>
       </CardHeader>
       <CardContent className="space-y-6">
-        <div className="flex items-center justify-between rounded-lg border border-slate-100 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-900/50">
+        <div className="flex items-center justify-between rounded-lg border border-border/60 bg-background p-4">
           <div className="flex flex-col gap-1">
-            <Label className="font-medium">{t("rtp.enable")}</Label>
+            <Label htmlFor="rtp-enabled" className="font-medium">{t("rtp.enable")}</Label>
             <p className="text-xs text-muted-foreground">{t("rtp.enableHint")}</p>
           </div>
-          <Switch checked={config?.rtp.enabled ?? false} onCheckedChange={onToggleRtp} />
+          <Switch id="rtp-enabled" checked={config?.rtp.enabled ?? false} onCheckedChange={onToggleRtp} />
         </div>
 
-        <div className="flex items-center justify-between rounded-lg border border-slate-100 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-900/50">
+        <div className="flex items-center justify-between rounded-lg border border-border/60 bg-background p-4">
           <div className="flex flex-col gap-1">
             <Label htmlFor="rtp-thru">{t("rtp.thruEnable")}</Label>
             <p className="text-xs text-muted-foreground">{t("rtp.thruHint")}</p>
@@ -77,7 +77,7 @@ export function RtpConfigCard({
             onCheckedChange={(thruEnabled) => onUpdateConfig({ rtp: { thruEnabled } })} />
         </div>
 
-        <div className="space-y-4 rounded-lg border border-slate-100 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-900/50">
+        <div className="space-y-4 rounded-lg border border-border/60 bg-background p-4">
           <h3 className="text-sm font-semibold">{t("rtp.sessionConfig")}</h3>
           <div className="grid gap-4 md:grid-cols-2">
             <div className="space-y-2">
@@ -109,14 +109,14 @@ export function RtpConfigCard({
           </div>
         </div>
 
-        <div className="space-y-4 rounded-lg border border-slate-100 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-900/50">
+        <div className="space-y-4 rounded-lg border border-border/60 bg-background p-4">
           <h3 className="text-sm font-semibold">{t("rtp.remoteConfig")}</h3>
           <div className="flex items-center justify-between">
             <div className="flex flex-col gap-1">
-              <Label className="font-medium">{t("rtp.remoteEnable")}</Label>
+              <Label htmlFor="rtp-remote-enabled" className="font-medium">{t("rtp.remoteEnable")}</Label>
               <p className="text-xs text-muted-foreground">{t("rtp.remoteEnableHint")}</p>
             </div>
-            <Switch
+            <Switch id="rtp-remote-enabled"
               checked={remoteEnabled}
               onCheckedChange={(checked) => onUpdateConfig({ rtp: { remoteEnabled: checked } })}
             />
@@ -140,12 +140,12 @@ export function RtpConfigCard({
                   {remotes.map((remote) => (
                     <div
                       key={remote.id}
-                      className="space-y-3 rounded-md border border-slate-100 bg-white/70 p-3 dark:border-slate-800 dark:bg-slate-950/40"
+                      className="space-y-3 rounded-md border border-border/60 bg-card p-3"
                     >
                       <div className="grid gap-3 md:grid-cols-3">
                         <div className="space-y-1">
-                          <Label className="text-xs">{t("rtp.favoriteName")}</Label>
-                          <Input
+                          <Label htmlFor={`rtp-name-${remote.id}`} className="text-xs">{t("rtp.favoriteName")}</Label>
+                          <Input id={`rtp-name-${remote.id}`}
                             type="text"
                             placeholder="pianoledvisualizer"
                             value={remote.name}
@@ -153,8 +153,8 @@ export function RtpConfigCard({
                           />
                         </div>
                         <div className="space-y-1">
-                          <Label className="text-xs">{t("rtp.favoriteHost")}</Label>
-                          <Input
+                          <Label htmlFor={`rtp-host-${remote.id}`} className="text-xs">{t("rtp.favoriteHost")}</Label>
+                          <Input id={`rtp-host-${remote.id}`}
                             type="text"
                             placeholder="192.168.0.50"
                             value={remote.host}
@@ -172,13 +172,13 @@ export function RtpConfigCard({
                       </div>
                       <div className="flex items-center justify-between">
                         <div className="flex items-center gap-3">
-                          <Switch
+                          <Switch id={`rtp-auto-${remote.id}`}
                             checked={remote.autoConnect}
                             onCheckedChange={(checked) =>
                               onUpdateRemote(remote.id, { autoConnect: checked })
                             }
                           />
-                          <span className="text-xs text-muted-foreground">{t("rtp.autoConnect")}</span>
+                          <Label htmlFor={`rtp-auto-${remote.id}`} className="text-xs text-muted-foreground">{t("rtp.autoConnect")}</Label>
                           <Badge variant={isRemoteConnected(remote) ? "success" : "secondary"}>
                             {isRemoteConnected(remote) ? t("rtp.connected") : t("rtp.disconnected")}
                           </Badge>
@@ -200,19 +200,19 @@ export function RtpConfigCard({
           ) : null}
         </div>
 
-        <div className="space-y-4 rounded-lg border border-slate-100 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-900/50">
+        <div className="space-y-4 rounded-lg border border-border/60 bg-background p-4">
           <h3 className="text-sm font-semibold">{t("rtp.advanced")}</h3>
           <div className="space-y-3">
             <div className="flex items-center justify-between">
-              <Label className="text-sm">{t("rtp.logRtp")}</Label>
-              <Switch
+              <Label htmlFor="rtp-log-messages" className="text-sm">{t("rtp.logRtp")}</Label>
+              <Switch id="rtp-log-messages"
                 checked={config?.rtp.logMessages ?? false}
                 onCheckedChange={(checked) => onUpdateConfig({ rtp: { logMessages: checked } })}
               />
             </div>
             <div className="flex items-center justify-between">
-              <Label className="text-sm">{t("rtp.verbose")}</Label>
-              <Switch
+              <Label htmlFor="rtp-verbose" className="text-sm">{t("rtp.verbose")}</Label>
+              <Switch id="rtp-verbose"
                 checked={config?.logging.verbose ?? false}
                 onCheckedChange={(checked) => onUpdateConfig({ logging: { verbose: checked } })}
               />
@@ -221,7 +221,7 @@ export function RtpConfigCard({
         </div>
 
         {remoteEnabled ? (
-          <div className="space-y-4 rounded-lg border border-slate-100 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-900/50">
+          <div className="space-y-4 rounded-lg border border-border/60 bg-background p-4">
             <div className="flex items-center justify-between">
               <div>
                 <h3 className="text-sm font-semibold">{t("rtp.discoveredTitle")}</h3>
@@ -239,7 +239,7 @@ export function RtpConfigCard({
                 sessions.map((session) => (
                   <div
                     key={`${session.name}-${session.host}-${session.port}`}
-                    className="flex items-center justify-between rounded-md border border-slate-100 bg-white/70 px-3 py-2 dark:border-slate-800 dark:bg-slate-950/40"
+                    className="flex items-center justify-between rounded-md border border-border/60 bg-card px-3 py-2"
                   >
                     <div className="space-y-0.5">
                       <div className="text-sm font-medium">{session.name}</div>

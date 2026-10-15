@@ -91,7 +91,7 @@ export function DiagnosticsGrid({
 
   return (
     <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-      <Card className="min-h-[180px] min-w-0 border-muted bg-card/60 backdrop-blur-sm">
+      <Card className="min-h-[180px] min-w-0">
         <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
           <CardTitle className="text-base font-semibold">{t("dashboard.midiVst")}</CardTitle>
           <Waves className="h-5 w-5 text-muted-foreground" />
@@ -119,7 +119,7 @@ export function DiagnosticsGrid({
         </CardContent>
       </Card>
 
-      <Card className="min-h-[180px] min-w-0 border-muted bg-card/60 backdrop-blur-sm">
+      <Card className="min-h-[180px] min-w-0">
         <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
           <CardTitle className="text-base font-semibold">{t("dashboard.runtimeSignals")}</CardTitle>
           <Music className="h-5 w-5 text-muted-foreground" />
@@ -147,7 +147,7 @@ export function DiagnosticsGrid({
         </CardContent>
       </Card>
 
-      <Card className="min-h-[180px] min-w-0 border-muted bg-card/60 backdrop-blur-sm">
+      <Card className="min-h-[180px] min-w-0">
         <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
           <CardTitle className="text-base font-semibold">{t("dashboard.latencyVst")}</CardTitle>
           <Timer className="h-5 w-5 text-muted-foreground" />
@@ -175,7 +175,7 @@ export function DiagnosticsGrid({
               {vstMidiCompatible === null ? "--" : vstMidiCompatible ? t("dashboard.loaded") : t("dashboard.missing")}
             </span>
           </div>
-          {bufferMismatch ? <p className="text-xs text-amber-600">{t("dashboard.bufferMismatchWarning")}</p> : null}
+          {bufferMismatch ? <p className="text-xs text-warning">{t("dashboard.bufferMismatchWarning")}</p> : null}
           <div className="flex items-center justify-between">
             <span>{t("dashboard.estRoundtrip")}</span>
             <span className="font-medium">{latencyDisplay !== null ? `${latencyDisplay} ${t("units.ms")}` : "--"}</span>
@@ -203,7 +203,7 @@ export function DiagnosticsGrid({
         </CardContent>
       </Card>
 
-      <Card className="min-h-[180px] min-w-0 border-muted bg-card/60 backdrop-blur-sm">
+      <Card className="min-h-[180px] min-w-0">
         <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
           <CardTitle className="text-base font-semibold">{t("dashboard.preflightTitle")}</CardTitle>
           <RefreshCcw className="h-5 w-5 text-muted-foreground" />
@@ -230,7 +230,7 @@ export function DiagnosticsGrid({
         </CardContent>
       </Card>
 
-      <Card className="min-h-[180px] min-w-0 border-muted bg-card/60 backdrop-blur-sm">
+      <Card className="min-h-[180px] min-w-0">
         <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
           <CardTitle className="text-base font-semibold">{t("dashboard.meters")}</CardTitle>
           <BarChart3 className="h-5 w-5 text-muted-foreground" />

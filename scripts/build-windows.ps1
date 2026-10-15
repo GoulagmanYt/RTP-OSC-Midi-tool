@@ -196,6 +196,33 @@ function Import-VisualStudioEnvironment {
         }
 }
 
+function Stop-WorkspaceNodeProcesses {
+    # A dev server can outlive its npm/cmd parent. Loaded native modules give
+    # us an absolute workspace path even when Node's command line is relative.
+    $modulePrefix = [System.IO.Path]::GetFullPath((Join-Path $repositoryRoot 'node_modules')).TrimEnd('\') + '\'
+    foreach ($nodeProcess in @(Get-Process -Name node -ErrorAction SilentlyContinue)) {
+        $lockedModule = $null
+        try {
+            $lockedModule = $nodeProcess.Modules | Where-Object {
+                $_.FileName -and
+                $_.FileName.StartsWith($modulePrefix, [System.StringComparison]::OrdinalIgnoreCase) -and
+                $_.FileName.EndsWith('.node', [System.StringComparison]::OrdinalIgnoreCase)
+            } | Select-Object -First 1
+        }
+        catch {
+            # No evidence of a workspace lock: leave this process alone.
+            continue
+        }
+        if (-not $lockedModule) { continue }
+
+        Write-BuildLog "Stopping workspace Node process $($nodeProcess.Id) holding $($lockedModule.FileName)." Yellow
+        Stop-Process -InputObject $nodeProcess -Force -ErrorAction Stop
+        if (-not $nodeProcess.WaitForExit(5000)) {
+            throw "Workspace Node process $($nodeProcess.Id) did not exit; close its development terminal and retry."
+        }
+    }
+}
+
 function Stop-WorkspaceCargoProcesses {
     $processes = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
         Where-Object {
@@ -499,6 +526,7 @@ try {
     Write-BuildLog "Windows, Node.js v$nodeVersion, Rust, CMake, and LLVM prerequisites are ready." Green
 
     Show-BuildStage 2 15 'Installing frontend dependencies'
+    Stop-WorkspaceNodeProcesses
     Invoke-BuildCommand $npm @('ci', '--no-fund', '--no-audit')
 
     Show-BuildStage 3 30 'Validating the frontend'
@@ -534,6 +562,7 @@ catch {
 finally {
     Show-BuildStage 7 96 'Automatic cleanup'
     try {
+        Stop-WorkspaceNodeProcesses
         Stop-WorkspaceCargoProcesses
         @(
             '.cargo-target'

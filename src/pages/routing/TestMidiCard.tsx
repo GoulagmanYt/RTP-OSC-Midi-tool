@@ -58,7 +58,7 @@ export function TestMidiCard(props: Props) {
     <Card>
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
-          <Zap className="h-5 w-5 text-blue-500" />
+          <Zap className="h-5 w-5 text-muted-foreground" />
           {t("routing.testMidiTitle")}
         </CardTitle>
         <CardDescription>{t("routing.testMidiDescription")}</CardDescription>
@@ -67,8 +67,9 @@ export function TestMidiCard(props: Props) {
         <div className="grid gap-3 md:grid-cols-5">
           {controls.map(({ label, value, setter, min, max }) => (
             <div key={label} className="space-y-1">
-              <Label className="text-xs">{t(label)}</Label>
+              <Label htmlFor={`test-${label}`} className="text-xs">{t(label)}</Label>
               <Input
+                id={`test-${label}`}
                 type="number"
                 min={min}
                 max={max}

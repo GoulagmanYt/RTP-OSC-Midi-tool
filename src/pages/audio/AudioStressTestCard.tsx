@@ -92,12 +92,12 @@ export function AudioStressTestCard({ bridgeRunning, audioRunning, t }: Props) {
             {running ? t("stress.running") : t("stress.run")}
           </Button>
           {!audioRunning && (
-            <span className="text-sm text-amber-600">
+            <span className="text-sm text-warning">
               {t("stress.audioRequired")}
             </span>
           )}
           {audioRunning && requiresBridge && !bridgeRunning && (
-            <span className="text-sm text-amber-600">
+            <span className="text-sm text-warning">
               {t("stress.bridgeRequired")}
             </span>
           )}
@@ -125,14 +125,14 @@ export function AudioStressTestCard({ bridgeRunning, audioRunning, t }: Props) {
               </div>
               <div className="flex flex-col">
                 <span className="text-muted-foreground">{t("stress.drops")}</span>
-                <span className={`font-semibold flex items-center gap-1 ${result.droppedNotes > 0 ? "text-red-500" : "text-green-500"}`}>
+                <span className={`font-semibold flex items-center gap-1 ${result.droppedNotes > 0 ? "text-destructive" : "text-success"}`}>
                   {result.droppedNotes > 0 ? <XCircle className="h-4 w-4" /> : <CheckCircle className="h-4 w-4" />}
                   {result.droppedNotes.toLocaleString()}
                 </span>
               </div>
               <div className="flex flex-col">
                 <span className="text-muted-foreground">{t("stress.xruns")}</span>
-                <span className={`font-semibold flex items-center gap-1 ${result.xruns > 0 ? "text-red-500" : "text-green-500"}`}>
+                <span className={`font-semibold flex items-center gap-1 ${result.xruns > 0 ? "text-destructive" : "text-success"}`}>
                   {result.xruns > 0 ? <XCircle className="h-4 w-4" /> : <CheckCircle className="h-4 w-4" />}
                   {result.xruns.toLocaleString()}
                 </span>
@@ -150,7 +150,7 @@ export function AudioStressTestCard({ bridgeRunning, audioRunning, t }: Props) {
                         {t("stress.bridgeSegment")}
                       </div>
                       <div className="space-y-0.5 text-muted-foreground">
-                        <div>{t("stress.dropsShort")}: <span className={result.segmentBridge.dropped > 0 ? "text-red-600 dark:text-red-400 font-medium" : "text-green-600 dark:text-green-400"}>{result.segmentBridge.dropped}</span></div>
+                        <div>{t("stress.dropsShort")}: <span className={result.segmentBridge.dropped > 0 ? "text-destructive font-medium" : "text-success"}>{result.segmentBridge.dropped}</span></div>
                         {result.receivedNotes !== undefined && (
                           <div>{t("stress.received")}: {result.receivedNotes.toLocaleString()}</div>
                         )}
@@ -165,8 +165,8 @@ export function AudioStressTestCard({ bridgeRunning, audioRunning, t }: Props) {
                         Audio/VST
                       </div>
                       <div className="space-y-0.5 text-muted-foreground">
-                        <div>{t("stress.dropsShort")}: <span className={result.segmentAudio.dropped > 0 ? "text-red-600 dark:text-red-400 font-medium" : "text-green-600 dark:text-green-400"}>{result.segmentAudio.dropped}</span></div>
-                        <div>{t("stress.xrunsShort")}: <span className={result.segmentAudio.xruns > 0 ? "text-red-600 dark:text-red-400 font-medium" : "text-green-600 dark:text-green-400"}>{result.segmentAudio.xruns}</span></div>
+                        <div>{t("stress.dropsShort")}: <span className={result.segmentAudio.dropped > 0 ? "text-destructive font-medium" : "text-success"}>{result.segmentAudio.dropped}</span></div>
+                        <div>{t("stress.xrunsShort")}: <span className={result.segmentAudio.xruns > 0 ? "text-destructive font-medium" : "text-success"}>{result.segmentAudio.xruns}</span></div>
                         {result.segmentAudio.latencyMs !== null && (
                           <div>{t("stress.latency")}: {result.segmentAudio.latencyMs.toFixed(1)}ms</div>
                         )}
@@ -178,12 +178,12 @@ export function AudioStressTestCard({ bridgeRunning, audioRunning, t }: Props) {
             )}
 
             {result.droppedNotes === 0 && result.xruns === 0 ? (
-              <p className="text-xs text-green-600 dark:text-green-400">
+              <p className="text-xs text-success">
                 <CheckCircle className="h-3 w-3 inline mr-1" />
                 {t("stress.stable")}
               </p>
             ) : (
-              <div className="text-xs text-red-600 dark:text-red-400 space-y-1">
+              <div className="text-xs text-destructive space-y-1">
                 <p className="font-medium"><XCircle className="h-3 w-3 inline mr-1" />{t("stress.unstable")}</p>
                 {result.segmentBridge && result.segmentBridge.dropped > 0 && <p>• {t("stress.bridgeDropsHint")}</p>}
                 {result.segmentAudio && result.segmentAudio.dropped > 0 && result.segmentAudio.xruns === 0 && (

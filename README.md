@@ -207,6 +207,8 @@ Successful outputs are preserved in `artifacts\`:
 
 Run `artifacts\portable\OSCMidi.exe` directly, install the MSI, or copy/extract the complete portable folder. `OSCMidi.exe` requires both architecture-specific VST workers beside it and must never be copied alone.
 
+Before installing dependencies and during cleanup, the build stops Node processes that have a native `.node` module loaded from this repository's `node_modules`. This releases Windows file locks left by development servers, including servers whose command line uses a relative path. Each stopped process is logged; processes without a matching loaded module are left running. Run `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-build-windows-processes.ps1` to check this process selection.
+
 The cleanup runs after both successful and failed builds. It removes `node_modules`, Rust target directories, generated VST dependencies, staged sidecars and frontend output. Before deleting a generated directory, the script refuses to continue if Git reports any tracked file inside it. Deliverables, current and legacy logs, diagnostic reports and developer-managed Python environments are preserved. The next invocation is consequently a full clean build.
 
 ## Automated releases

@@ -114,6 +114,9 @@ export type AudioDeviceEntry = {
 export type UiConfig = {
   theme: Theme;
   themePalette: string;
+  accentColor?: string;
+  lightBackground?: string;
+  darkBackground?: string;
   cornerRadius: number;
   autoStart: boolean;
   developerMode: boolean;

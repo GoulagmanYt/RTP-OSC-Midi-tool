@@ -52,7 +52,7 @@ export function AdvancedRoutingCard(props: Props) {
     <Card>
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
-          <SlidersHorizontal className="h-5 w-5 text-blue-500" />
+          <SlidersHorizontal className="h-5 w-5 text-muted-foreground" />
           {t("routing.advancedTitle")}
         </CardTitle>
         <CardDescription>{t("routing.advancedDescription")}</CardDescription>
@@ -76,7 +76,7 @@ export function AdvancedRoutingCard(props: Props) {
               {profiles.map((profile) => (
                 <div
                   key={profile.id}
-                  className="space-y-4 rounded-md border border-slate-100 bg-white/70 p-4 dark:border-slate-800 dark:bg-slate-950/40"
+                  className="space-y-4 rounded-md border border-border/60 bg-card p-4"
                 >
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <Input
