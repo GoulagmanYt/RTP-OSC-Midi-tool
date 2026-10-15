@@ -619,7 +619,10 @@ impl AudioEngine {
                 .status
                 .map(|status| status.mmcss_enabled);
         }
-        super::windows_tuning::audio_mmcss_enabled()
+        self.health_telemetry
+            .load()
+            .as_ref()
+            .and_then(|telemetry| super::windows_tuning::audio_mmcss_enabled(telemetry))
     }
 
     pub fn power_throttling_disabled(&self) -> Option<bool> {

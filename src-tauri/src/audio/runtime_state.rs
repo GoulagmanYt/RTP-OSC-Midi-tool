@@ -4,7 +4,7 @@ use std::{
     collections::VecDeque,
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering},
         Arc, OnceLock,
     },
     time::{Duration, Instant},
@@ -150,6 +150,8 @@ pub(super) struct AudioControls {
 
 #[repr(align(64))]
 pub(super) struct AudioTelemetry {
+    pub(super) callback_gate: super::callback_gate::CallbackGate,
+    pub(super) mmcss_enabled: AtomicU8,
     pub(super) editor_open: AtomicBool,
     pub(super) parameter_accepted_sequence: AtomicU64,
     pub(super) parameter_failed_sequence: AtomicU64,
@@ -194,6 +196,8 @@ pub(super) const DSP_HISTOGRAM_BUCKET_US: u32 = 250;
 impl AudioTelemetry {
     pub(super) fn new() -> Self {
         Self {
+            mmcss_enabled: AtomicU8::new(0),
+            callback_gate: super::callback_gate::CallbackGate::default(),
             editor_open: AtomicBool::new(false),
             parameter_accepted_sequence: AtomicU64::new(0),
             parameter_applied_sequence: AtomicU64::new(0),
@@ -477,10 +481,6 @@ pub(super) struct AudioCallbackState {
     pub(super) last_frames: usize,
     pub(super) error_count: u32,
     pub(super) recovering_from_silence: bool,
-    #[cfg(target_os = "windows")]
-    pub(super) mmcss_applied: bool,
-    #[cfg(target_os = "windows")]
-    pub(super) mmcss_registration: Option<super::windows_tuning::MmcssRegistration>,
 }
 
 // SAFETY: AudioCallbackState is moved into the callback before any callback runs and
@@ -544,10 +544,6 @@ impl AudioCallbackState {
             last_frames: 0,
             error_count: 0,
             recovering_from_silence: false,
-            #[cfg(target_os = "windows")]
-            mmcss_applied: false,
-            #[cfg(target_os = "windows")]
-            mmcss_registration: None,
         }
     }
 

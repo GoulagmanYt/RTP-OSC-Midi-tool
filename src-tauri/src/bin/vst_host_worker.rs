@@ -641,16 +641,20 @@ mod windows_worker {
 #[cfg(target_os = "windows")]
 fn main() {
     let _timer_guard = osc_midi_bridge::audio::windows_tuning::enable_high_resolution_timer();
+    let _tuning_diagnostics =
+        osc_midi_bridge::audio::windows_tuning::start_audio_tuning_diagnostics();
     osc_midi_bridge::audio::windows_tuning::apply_worker_process_priority();
     windows_worker::install_descendant_console_guard();
     if let Some(exit_code) = osc_midi_bridge::plugin_probe::probe_cli_exit_code() {
         if exit_code == 0 {
             return;
         }
+        drop(_tuning_diagnostics);
         std::process::exit(exit_code);
     }
     if let Err(error) = windows_worker::run() {
         eprintln!("vst-host-worker: {error}");
+        drop(_tuning_diagnostics);
         std::process::exit(2);
     }
 }

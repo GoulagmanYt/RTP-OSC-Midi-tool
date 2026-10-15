@@ -12,8 +12,6 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8};
 static WORKER_PROCESS: AtomicBool = AtomicBool::new(false);
 
 #[cfg(target_os = "windows")]
-static AUDIO_MMCSS_ENABLED: AtomicU8 = AtomicU8::new(0);
-#[cfg(target_os = "windows")]
 static AUDIO_POWER_THROTTLING_DISABLED: AtomicU8 = AtomicU8::new(0);
 #[cfg(target_os = "windows")]
 static AUDIO_TUNING_WARNINGS: AtomicU32 = AtomicU32::new(0);
@@ -56,7 +54,7 @@ pub(super) fn flush_audio_tuning_warnings() {
         (
             WARN_MMCSS_ALREADY_REGISTERED,
             "info",
-            "MMCSS: audio thread already registered by ASIO driver (OK)",
+            "MMCSS: preserving an existing audio thread registration",
         ),
         (
             WARN_MMCSS_UNAVAILABLE,
@@ -81,6 +79,59 @@ pub(super) fn flush_audio_tuning_warnings() {
     ] {
         if warnings & bit != 0 {
             background_log(level, message);
+        }
+    }
+}
+
+/// Own one ordinary diagnostics thread for the process, including nested DSP workers.
+pub struct AudioTuningDiagnosticsGuard {
+    #[cfg(target_os = "windows")]
+    stop: std::sync::mpsc::Sender<()>,
+    #[cfg(target_os = "windows")]
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+#[must_use = "keep the diagnostics guard until process shutdown"]
+pub fn start_audio_tuning_diagnostics() -> AudioTuningDiagnosticsGuard {
+    #[cfg(target_os = "windows")]
+    {
+        let (stop, receiver) = std::sync::mpsc::channel();
+        let thread = std::thread::Builder::new()
+            .name("audio-tuning-diagnostics".into())
+            .spawn(move || loop {
+                let result = receiver.recv_timeout(std::time::Duration::from_millis(500));
+                flush_audio_tuning_warnings();
+                if !matches!(result, Err(std::sync::mpsc::RecvTimeoutError::Timeout)) {
+                    break;
+                }
+            });
+        let thread = match thread {
+            Ok(thread) => Some(thread),
+            Err(error) => {
+                background_log(
+                    "warn",
+                    format!("Failed to start audio tuning diagnostics: {error}"),
+                );
+                None
+            }
+        };
+        AudioTuningDiagnosticsGuard { stop, thread }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        AudioTuningDiagnosticsGuard {}
+    }
+}
+
+impl Drop for AudioTuningDiagnosticsGuard {
+    fn drop(&mut self) {
+        #[cfg(target_os = "windows")]
+        {
+            let _ = self.stop.send(());
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+            flush_audio_tuning_warnings();
         }
     }
 }
@@ -134,6 +185,8 @@ fn is_thread_already_in_task_error(err: &windows::core::Error) -> bool {
 pub(crate) struct MmcssRegistration {
     handle: windows::Win32::Foundation::HANDLE,
     owner_thread_id: u32,
+    // Registrations must never cross a thread boundary, including inside a Send closure.
+    _thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 
 /// Keep MIDI delivery eligible for multimedia scheduling while a game is busy.
@@ -161,6 +214,7 @@ pub(crate) fn prioritize_midi_thread() -> Option<MmcssRegistration> {
                 Some(MmcssRegistration {
                     handle,
                     owner_thread_id: GetCurrentThreadId(),
+                    _thread_bound: std::marker::PhantomData,
                 })
             }
             Err((pro_audio_error, audio_error)) => {
@@ -229,6 +283,7 @@ pub(crate) fn prioritize_dsp_thread() -> Option<MmcssRegistration> {
                 Some(MmcssRegistration {
                     handle,
                     owner_thread_id: GetCurrentThreadId(),
+                    _thread_bound: std::marker::PhantomData,
                 })
             }
             Err((pro_audio_error, audio_error)) => {
@@ -277,10 +332,10 @@ pub(crate) fn prioritize_dsp_thread() -> Option<()> {
 #[cfg(target_os = "windows")]
 impl Drop for MmcssRegistration {
     fn drop(&mut self) {
-        // MMCSS registrations are thread-affine. CPAL is allowed to destroy its
-        // callback closure from another thread, in which case Windows releases
-        // the registration when the callback thread terminates.
+        // Safe code cannot move this guard. Record a violation rather than silently
+        // abandoning the registration if an unsafe caller breaks that invariant.
         if unsafe { GetCurrentThreadId() } != self.owner_thread_id {
+            record_audio_tuning_warning(WARN_MMCSS_RELEASE);
             return;
         }
         unsafe {
@@ -292,10 +347,10 @@ impl Drop for MmcssRegistration {
 }
 
 #[cfg(target_os = "windows")]
-pub(super) fn apply_audio_thread_priority(state: &mut AudioCallbackState) {
-    if state.mmcss_applied {
-        return;
-    }
+#[must_use = "keep the MMCSS guard alive until the callback finishes"]
+pub(super) fn apply_audio_thread_priority(
+    state: &mut AudioCallbackState,
+) -> Option<MmcssRegistration> {
     unsafe {
         let mut task_index = 0u32;
         let mmcss_result = AvSetMmThreadCharacteristicsW(w!("Pro Audio"), &mut task_index).or_else(
@@ -304,32 +359,41 @@ pub(super) fn apply_audio_thread_priority(state: &mut AudioCallbackState) {
                     .map_err(|audio_error| (pro_audio_error, audio_error))
             },
         );
-        match mmcss_result {
+        let registration = match mmcss_result {
             Ok(handle) => {
-                store_bool(&AUDIO_MMCSS_ENABLED, true);
+                store_bool(&state.telemetry.mmcss_enabled, true);
                 if AvSetMmThreadPriority(handle, AVRT_PRIORITY_CRITICAL).is_err() {
                     record_audio_tuning_warning(WARN_MMCSS_PRIORITY);
                 }
-                state.mmcss_registration = Some(MmcssRegistration {
+                Some(MmcssRegistration {
                     handle,
                     owner_thread_id: GetCurrentThreadId(),
-                });
+                    _thread_bound: std::marker::PhantomData,
+                })
             }
             Err((pro_audio_error, audio_error)) => {
                 if is_thread_already_in_task_error(&pro_audio_error)
                     || is_thread_already_in_task_error(&audio_error)
                 {
-                    store_bool(&AUDIO_MMCSS_ENABLED, true);
-                    record_audio_tuning_warning(WARN_MMCSS_ALREADY_REGISTERED);
+                    if state.telemetry.mmcss_enabled.swap(2, Ordering::Relaxed) != 2 {
+                        record_audio_tuning_warning(WARN_MMCSS_ALREADY_REGISTERED);
+                    }
                 } else {
-                    store_bool(&AUDIO_MMCSS_ENABLED, false);
+                    store_bool(&state.telemetry.mmcss_enabled, false);
                     record_audio_tuning_warning(WARN_MMCSS_UNAVAILABLE);
                     // A bounded fallback avoids starving the Tauri, network and driver threads.
                     if SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST).is_err() {
                         record_audio_tuning_warning(WARN_THREAD_PRIORITY);
                     }
                 }
+                None
             }
+        };
+        // These settings belong to the actual calling thread, not CPAL's closure.
+        // Cache no native handles: the AVRT registration above ends this callback.
+        thread_local! { static CONFIGURED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+        if CONFIGURED.with(|configured| configured.replace(true)) {
+            return registration;
         }
         if SetThreadPriorityBoost(GetCurrentThread(), false).is_err() {
             record_audio_tuning_warning(WARN_PRIORITY_BOOST);
@@ -349,12 +413,14 @@ pub(super) fn apply_audio_thread_priority(state: &mut AudioCallbackState) {
         if !thread_power_ok {
             record_audio_tuning_warning(WARN_POWER_THROTTLING);
         }
+        registration
     }
-    state.mmcss_applied = true;
 }
 
 #[cfg(not(target_os = "windows"))]
-pub(super) fn apply_audio_thread_priority(_state: &mut AudioCallbackState) {}
+pub(super) fn apply_audio_thread_priority(_state: &mut AudioCallbackState) -> Option<()> {
+    None
+}
 
 #[cfg(target_os = "windows")]
 pub struct HighResolutionTimerGuard {
@@ -559,12 +625,16 @@ pub fn apply_process_priority(_logger: &FrontendLogger) {}
 pub fn reapply_process_priority_on_focus_loss() {}
 
 #[cfg(target_os = "windows")]
-pub(super) fn audio_mmcss_enabled() -> Option<bool> {
-    load_bool(&AUDIO_MMCSS_ENABLED)
+pub(super) fn audio_mmcss_enabled(
+    telemetry: &super::runtime_state::AudioTelemetry,
+) -> Option<bool> {
+    load_bool(&telemetry.mmcss_enabled)
 }
 
 #[cfg(not(target_os = "windows"))]
-pub(super) fn audio_mmcss_enabled() -> Option<bool> {
+pub(super) fn audio_mmcss_enabled(
+    _telemetry: &super::runtime_state::AudioTelemetry,
+) -> Option<bool> {
     None
 }
 
@@ -580,11 +650,236 @@ pub(super) fn audio_power_throttling_disabled() -> Option<bool> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "windows")]
+    fn isolated(test_name: &str) -> bool {
+        if std::env::var("OSCMIDI_TUNING_TEST").as_deref() == Ok(test_name) {
+            return false;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test_name, "--nocapture"])
+            .env("OSCMIDI_TUNING_TEST", test_name)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        true
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn tuning_diagnostics_drains_release_and_power_failures_without_status_reads() {
+        use super::*;
+        if isolated("audio::windows_tuning::tests::tuning_diagnostics_drains_release_and_power_failures_without_status_reads") { return; }
+        drop(MmcssRegistration {
+            handle: Default::default(),
+            owner_thread_id: unsafe { GetCurrentThreadId() },
+            _thread_bound: std::marker::PhantomData,
+        });
+        assert_ne!(
+            AUDIO_TUNING_WARNINGS.load(Ordering::Acquire) & WARN_MMCSS_RELEASE,
+            0
+        );
+        record_audio_tuning_warning(WARN_POWER_THROTTLING);
+        let diagnostics = start_audio_tuning_diagnostics();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while AUDIO_TUNING_WARNINGS.load(Ordering::Acquire) != 0
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(AUDIO_TUNING_WARNINGS.load(Ordering::Acquire), 0);
+        record_audio_tuning_warning(WARN_MMCSS_RELEASE | WARN_POWER_THROTTLING);
+        drop(diagnostics);
+        assert_eq!(AUDIO_TUNING_WARNINGS.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn callback_mmcss_handles_follow_invocations_across_thread_migration() {
+        let mut state = callback_state();
+        for _ in 0..8 {
+            state = std::thread::spawn(move || {
+                let scope = super::apply_audio_thread_priority(&mut state);
+                assert!(scope.is_some());
+                drop(scope);
+                let mut index = 0;
+                let handle = unsafe {
+                    super::AvSetMmThreadCharacteristicsW(super::w!("Pro Audio"), &mut index)
+                }
+                .unwrap();
+                unsafe {
+                    super::AvRevertMmThreadCharacteristics(handle).unwrap();
+                }
+                state
+            })
+            .join()
+            .unwrap();
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn callback_closures_dropped_after_owner_exit_do_not_leak_handles() {
+        use windows::Win32::System::Threading::GetProcessHandleCount;
+        if isolated("audio::windows_tuning::tests::callback_closures_dropped_after_owner_exit_do_not_leak_handles") { return; }
+        let invoke = || {
+            std::thread::spawn(|| {
+                let mut state = callback_state();
+                let scope = super::apply_audio_thread_priority(&mut state);
+                assert!(scope.is_some());
+                drop(scope);
+                state
+            })
+            .join()
+            .unwrap()
+        };
+        drop(invoke()); // Warm up AVRT and thread infrastructure before counting.
+        let count = || {
+            let mut value = 0;
+            unsafe {
+                GetProcessHandleCount(super::GetCurrentProcess(), &mut value).unwrap();
+            }
+            value
+        };
+        let before = count();
+        let states = (0..32).map(|_| invoke()).collect::<Vec<_>>();
+        assert_eq!(count(), before, "handles survived their callback owners");
+        drop(states); // CPAL may destroy closures here, on a different thread.
+        assert_eq!(count(), before);
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn replacement_stream_starts_with_unknown_mmcss_status() {
+        use std::sync::Arc;
+        std::thread::spawn(|| {
+            let engine = crate::audio::AudioEngine::new();
+            let mut old = callback_state();
+            let scope = super::apply_audio_thread_priority(&mut old);
+            engine.health_telemetry.store(Some(old.telemetry.clone()));
+            assert_eq!(engine.mmcss_enabled(), Some(true));
+            drop(scope);
+            engine.health_telemetry.store(Some(Arc::new(
+                crate::audio::runtime_state::AudioTelemetry::new(),
+            )));
+            assert_eq!(engine.mmcss_enabled(), None);
+            engine.health_telemetry.store(None);
+            assert_eq!(engine.mmcss_enabled(), None);
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn borrowed_mmcss_registration_is_preserved() {
+        std::thread::spawn(|| {
+            let mut index = 0;
+            let owner =
+                unsafe { super::AvSetMmThreadCharacteristicsW(super::w!("Audio"), &mut index) }
+                    .unwrap();
+            let mut state = callback_state();
+            let scope = super::apply_audio_thread_priority(&mut state);
+            assert!(scope.is_none());
+            drop(state);
+            unsafe {
+                super::AvSetMmThreadPriority(owner, super::AVRT_PRIORITY_CRITICAL).unwrap();
+            }
+            unsafe {
+                super::AvRevertMmThreadCharacteristics(owner).unwrap();
+            }
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[cfg(target_os = "windows")]
+    fn callback_state() -> super::AudioCallbackState {
+        use crate::audio::runtime_state::{AudioControls, AudioTelemetry};
+        use std::sync::{atomic::AtomicBool, Arc};
+        super::AudioCallbackState::new(
+            rtrb::RingBuffer::new(8).1,
+            0,
+            2,
+            64,
+            2,
+            Arc::new(AudioControls {
+                gain_bits: std::sync::atomic::AtomicU32::new(1.0f32.to_bits()),
+                limiter_enabled: AtomicBool::new(false),
+                equalizer: crate::audio::equalizer::PublishedEq::new(&Default::default(), 48_000),
+            }),
+            Arc::new(AudioTelemetry::new()),
+            Arc::new(AtomicBool::new(false)),
+            48_000,
+            crossbeam_channel::bounded(8).1,
+        )
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn callback_mmcss_scope_releases_before_closure_destruction() {
+        std::thread::spawn(|| {
+            let mut state = callback_state();
+            let scope = super::apply_audio_thread_priority(&mut state);
+            drop(scope);
+            let mut index = 0;
+            let handle = unsafe {
+                super::AvSetMmThreadCharacteristicsW(super::w!("Pro Audio"), &mut index)
+            }
+            .expect(
+                "callback registration must be released while its closure state is still alive",
+            );
+            unsafe {
+                super::AvRevertMmThreadCharacteristics(handle).unwrap();
+            }
+            state
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn stopped_engine_does_not_report_another_streams_mmcss() {
+        std::thread::spawn(|| {
+            let mut state = callback_state();
+            let scope = super::apply_audio_thread_priority(&mut state);
+            let engine = crate::audio::AudioEngine::new();
+            assert_eq!(engine.mmcss_enabled(), None);
+            drop(scope);
+        })
+        .join()
+        .unwrap();
+    }
+
     #[test]
     #[cfg(target_os = "windows")]
     fn worker_priority_survives_reapplication() {
         use super::*;
-        use windows::Win32::System::Threading::GetPriorityClass;
+        use windows::Win32::System::Threading::{GetPriorityClass, GetProcessInformation};
+
+        fn assert_worker_policy() {
+            let mut power = PROCESS_POWER_THROTTLING_STATE {
+                Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+                ..Default::default()
+            };
+            unsafe {
+                assert_eq!(GetPriorityClass(GetCurrentProcess()), HIGH_PRIORITY_CLASS.0);
+                GetProcessInformation(
+                    GetCurrentProcess(),
+                    ProcessPowerThrottling,
+                    &mut power as *mut _ as _,
+                    std::mem::size_of_val(&power) as u32,
+                )
+                .unwrap();
+            }
+            assert_eq!(power.ControlMask & 0x5, 0x5);
+            assert_eq!(power.StateMask & 0x5, 0);
+        }
 
         // Priority and worker role are process-wide: keep the test runner untouched.
         const CHILD_ENV: &str = "OSCMIDI_TEST_WORKER_PRIORITY";
@@ -613,6 +908,7 @@ mod tests {
             ABOVE_NORMAL_PRIORITY_CLASS.0
         );
         apply_worker_process_priority();
+        assert_worker_policy();
         assert_eq!(
             unsafe { GetPriorityClass(GetCurrentProcess()) },
             HIGH_PRIORITY_CLASS.0
@@ -620,6 +916,7 @@ mod tests {
         // This is the same policy gate used when audio startup reapplies tuning.
         assert!(reapply_worker_policy());
         reapply_process_priority_on_focus_loss();
+        assert_worker_policy();
         assert_eq!(
             unsafe { GetPriorityClass(GetCurrentProcess()) },
             HIGH_PRIORITY_CLASS.0

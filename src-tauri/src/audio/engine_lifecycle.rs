@@ -160,7 +160,9 @@ impl AudioEngine {
                 .map_err(AudioError::Message);
         }
 
+        let _control = self.control_gate.lock();
         if self.game_mode.load(Ordering::Acquire) {
+            self.deferred_save_generation.fetch_add(1, Ordering::AcqRel);
             self.deferred_save.store(true, Ordering::Release);
             return self.persist_live_parameters();
         }
@@ -186,7 +188,9 @@ impl AudioEngine {
         let scheduled = app_handle.run_on_main_thread(move || {
             let _maintenance = maintenance;
             let result = super::state_codec::save_vst_state_checked(&plugin_for_main, &vst_plugin);
-            let _ = tx.send(result);
+            super::game_mode::finish_maintenance(_maintenance, || {
+                let _ = tx.send(result);
+            });
         });
         match scheduled {
             Ok(()) => rx
@@ -216,30 +220,33 @@ impl AudioEngine {
                 .store(AudioLifecycleState::Stopped as u8, Ordering::Release);
             return;
         }
+        let _control = self.control_gate.lock();
+        if let Err(error) = self.wait_for_maintenance_completion() {
+            background_log(
+                "error",
+                format!("Cannot stop audio during native maintenance: {error}"),
+            );
+            return;
+        }
         let _lifecycle_guard = self.lifecycle_gate.lock();
-        let _ = self.stop_locked(app_handle, false);
+        if let Err(error) = self.stop_locked(app_handle, false) {
+            background_log("error", format!("Failed to stop audio: {error}"));
+        }
     }
 
     fn stop_locked(
         &self,
         app_handle: Option<tauri::AppHandle>,
         retain_audio_device: bool,
-    ) -> Option<RetainedAudioDevice> {
+    ) -> Result<Option<RetainedAudioDevice>, AudioError> {
         self.lifecycle_state
             .store(AudioLifecycleState::Stopping as u8, Ordering::Release);
         let app_handle_for_drop = app_handle.clone();
         let runtime = self.runtime.lock().take();
+        self.health_telemetry.store(None);
         let mut retained_device = None;
-        self.midi_tx.store(None);
-        self.midi_emergency_reset_requested
-            .store(false, Ordering::Relaxed);
-
+        let midi_ingress = self.midi_tx.swap(None);
         if let Some(runtime) = runtime {
-            self.editor_open.store(false, Ordering::Release);
-            runtime
-                .telemetry
-                .editor_open
-                .store(false, Ordering::Release);
             let values = {
                 let changes = self.live_parameters.lock();
                 let cache = runtime.parameter_cache.lock();
@@ -266,6 +273,30 @@ impl AudioEngine {
                     false
                 }
             };
+            if !runtime
+                .telemetry
+                .callback_gate
+                .close_and_wait(std::time::Duration::from_secs(5))
+            {
+                // No native teardown is safe until every admitted callback exits.
+                // Preserve the runtime so a stalled callback can finish and stop can be retried.
+                runtime.telemetry.callback_gate.reopen();
+                self.health_telemetry.store(Some(runtime.telemetry.clone()));
+                *self.runtime.lock() = Some(runtime);
+                self.midi_tx.store(midi_ingress);
+                self.lifecycle_state
+                    .store(AudioLifecycleState::Faulted as u8, Ordering::Release);
+                return Err(AudioError::Message(
+                    "Timed out waiting for audio callback before shutdown".into(),
+                ));
+            }
+            self.midi_emergency_reset_requested
+                .store(false, Ordering::Relaxed);
+            self.editor_open.store(false, Ordering::Release);
+            runtime
+                .telemetry
+                .editor_open
+                .store(false, Ordering::Release);
             if retain_audio_device {
                 retained_device = Some(RetainedAudioDevice {
                     device: runtime._device.clone(),
@@ -286,6 +317,10 @@ impl AudioEngine {
             let editor_window_arc = runtime.editor_window.clone();
             let quarantine_destructor =
                 requires_vst3_destructor_quarantine(&vst_path, runtime.vst_class_uid.as_deref());
+
+            // An editor close can outlive its UI wait timeout. Reset while native
+            // access is still exclusive; all later close/save/drop work is queued on UI.
+            reset_all_notes(plugin.clone());
 
             if let Some(handle) = app_handle {
                 let (tx, rx) = mpsc::channel();
@@ -335,7 +370,6 @@ impl AudioEngine {
                 std::mem::forget(editor_win);
             }
 
-            reset_all_notes(plugin.clone());
             drop(runtime);
             if parameters_applied {
                 if let Some(handle) = app_handle_for_drop.as_ref() {
@@ -366,7 +400,7 @@ impl AudioEngine {
                 std::mem::forget(plugin);
                 self.lifecycle_state
                     .store(AudioLifecycleState::Stopped as u8, Ordering::Release);
-                return retained_device;
+                return Ok(retained_device);
             }
             if let Some(handle) = app_handle_for_drop {
                 let (tx, rx) = mpsc::channel();
@@ -390,13 +424,13 @@ impl AudioEngine {
                 }
                 self.lifecycle_state
                     .store(AudioLifecycleState::Stopped as u8, Ordering::Release);
-                return retained_device;
+                return Ok(retained_device);
             }
             drop(plugin);
         }
         self.lifecycle_state
             .store(AudioLifecycleState::Stopped as u8, Ordering::Release);
-        retained_device
+        Ok(retained_device)
     }
 
     pub fn list_backends(&self) -> Vec<String> {
@@ -456,15 +490,21 @@ impl AudioEngine {
         vst_fallback: Option<PathBuf>,
         logger: FrontendLogger,
     ) -> Result<(), AudioError> {
+        let _control = self.control_gate.lock();
+        self.wait_for_maintenance_completion()?;
         let Some(_lifecycle_guard) = self.lifecycle_gate.try_lock() else {
             return Err(AudioError::Message(
                 "An audio start/reload/stop operation is already in progress".into(),
             ));
         };
-        let retained_device = self.stop_locked(Some(logger.app_handle()), true);
+        let retained_device = self.stop_locked(Some(logger.app_handle()), true)?;
         self.game_mode.store(settings.game_mode, Ordering::Release);
+        self.game_mode_generation.fetch_add(1, Ordering::AcqRel);
         self.deferred_editor.store(0, Ordering::Release);
         self.deferred_save.store(false, Ordering::Release);
+        self.deferred_editor_generation
+            .fetch_add(1, Ordering::AcqRel);
+        self.deferred_save_generation.fetch_add(1, Ordering::AcqRel);
         self.lifecycle_state
             .store(AudioLifecycleState::Loading as u8, Ordering::Release);
 
@@ -491,13 +531,15 @@ impl AudioEngine {
         vst_fallback: Option<PathBuf>,
         logger: FrontendLogger,
     ) -> Result<(), AudioError> {
+        let _control = self.control_gate.lock();
+        self.wait_for_maintenance_completion()?;
         let Some(_lifecycle_guard) = self.lifecycle_gate.try_lock() else {
             return Err(AudioError::Message(
                 "An audio start/reload/stop operation is already in progress".into(),
             ));
         };
 
-        let _ = self.stop_locked(Some(logger.app_handle()), false);
+        self.stop_locked(Some(logger.app_handle()), false)?;
         self.lifecycle_state
             .store(AudioLifecycleState::Loading as u8, Ordering::Release);
         self.worker_enabled.store(true, Ordering::Release);

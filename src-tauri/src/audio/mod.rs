@@ -1,6 +1,7 @@
 //! Module audio - moteur audio de production.
 
 mod callback;
+mod callback_gate;
 mod callback_midi;
 mod callback_render;
 mod device_selection;

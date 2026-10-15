@@ -18,6 +18,8 @@ fn main() {
         std::process::exit(exit_code);
     }
     let _timer_guard = osc_midi_bridge::audio::windows_tuning::enable_high_resolution_timer();
+    let _tuning_diagnostics =
+        osc_midi_bridge::audio::windows_tuning::start_audio_tuning_diagnostics();
     osc_midi_bridge::audio::windows_tuning::reapply_process_priority_on_focus_loss();
     std::panic::set_hook(Box::new(|info| {
         let msg = match info.payload().downcast_ref::<&str>() {

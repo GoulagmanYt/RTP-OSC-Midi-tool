@@ -184,7 +184,24 @@ fn audio_callback<T: Sample + FromSample<f32>>(
         return;
     }
 
-    apply_audio_thread_priority(state);
+    let telemetry = Arc::clone(&state.telemetry);
+    let Some(_admission) = telemetry.callback_gate.try_enter() else {
+        // CPAL pause is asynchronous. Keep the clock running with silence while
+        // control owns the plugin, without ever attempting its mutex.
+        data.fill(silence);
+        state.last_output.fill(0.0);
+        state.recovering_from_silence = true;
+        telemetry
+            .meter_left
+            .store(0.0f32.to_bits(), Ordering::Relaxed);
+        telemetry
+            .meter_right
+            .store(0.0f32.to_bits(), Ordering::Relaxed);
+        finish_callback_timing(state, frames, callback_started);
+        return;
+    };
+    // The AVRT handle is owned by this invocation, never by the movable closure.
+    let _mmcss = apply_audio_thread_priority(state);
     if !state.prepare(frames) {
         state.telemetry.xruns.fetch_add(1, Ordering::Relaxed);
         data.fill(silence);
@@ -198,6 +215,7 @@ fn audio_callback<T: Sample + FromSample<f32>>(
             .telemetry
             .meter_right
             .store(0.0f32.to_bits(), Ordering::Relaxed);
+        drop(_mmcss);
         finish_callback_timing(state, frames, callback_started);
         return;
     }
@@ -211,6 +229,7 @@ fn audio_callback<T: Sample + FromSample<f32>>(
                 .audio_lock_miss_count
                 .fetch_add(1, Ordering::Relaxed);
             replay_output_or_silence(data, device_channels, silence, state);
+            drop(_mmcss);
             finish_callback_timing(state, frames, callback_started);
             return;
         }
@@ -270,6 +289,7 @@ fn audio_callback<T: Sample + FromSample<f32>>(
                 state.telemetry.xruns.fetch_add(1, Ordering::Relaxed);
                 state.record_error();
                 replay_output_or_silence(data, device_channels, silence, state);
+                drop(_mmcss);
                 finish_callback_timing(state, frames, callback_started);
                 return;
             }
@@ -323,6 +343,7 @@ fn audio_callback<T: Sample + FromSample<f32>>(
                     state.telemetry.xruns.fetch_add(1, Ordering::Relaxed);
                     state.record_error();
                     replay_output_or_silence(data, device_channels, silence, state);
+                    drop(_mmcss);
                     finish_callback_timing(state, frames, callback_started);
                     return;
                 }
@@ -365,6 +386,7 @@ fn audio_callback<T: Sample + FromSample<f32>>(
             ) {
                 state.telemetry.xruns.fetch_add(1, Ordering::Relaxed);
                 replay_output_or_silence(data, device_channels, silence, state);
+                drop(_mmcss);
                 finish_callback_timing(state, frames, callback_started);
                 return;
             }
@@ -382,6 +404,7 @@ fn audio_callback<T: Sample + FromSample<f32>>(
             .telemetry
             .meter_right
             .store(0.0f32.to_bits(), Ordering::Relaxed);
+        drop(_mmcss);
         finish_callback_timing(state, frames, callback_started);
         return;
     }
@@ -454,6 +477,7 @@ fn audio_callback<T: Sample + FromSample<f32>>(
         .meter_right
         .store(peak_r.min(1.0).to_bits(), Ordering::Relaxed);
     state.recovering_from_silence = false;
+    drop(_mmcss);
     finish_callback_timing(state, frames, callback_started);
 }
 
