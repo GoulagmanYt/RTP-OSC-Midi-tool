@@ -26,8 +26,6 @@
   <a href="#architecture">Architecture</a>
   ·
   <a href="#development">Development</a>
-  ·
-  <a href="CHANGELOG.md">Changelog</a>
 </p>
 
 ---
@@ -90,7 +88,7 @@ flowchart LR
 
     IPC <--> WORKER64[vst-host-worker-x64.exe]
     WORKER64 <-- shared memory / one buffer --> WORKER32[vst-host-worker-x86.exe]
-    WORKER --> VST[VST2 / VST3 instrument]
+    WORKER64 --> VST[VST2 / VST3 instrument]
     VST --> EQ[Per-instrument 3-band EQ]
     EQ --> AUDIO[ASIO / WASAPI output]
 ```
@@ -287,7 +285,7 @@ The host intentionally avoids sforzando's unsafe native VST3 state path, but its
 3. Run the relevant frontend and Rust checks.
 4. Include test or build evidence in the pull request description.
 
-Please review [CHANGELOG.md](CHANGELOG.md) and the architecture documents before changing the real-time audio or worker lifecycle.
+Review [the architecture](src-tauri/ARCHITECTURE.md) before changing the real-time audio or worker lifecycle.
 
 ## License
 

@@ -7,7 +7,7 @@ if ($DurationSeconds -lt 1 -or $DurationSeconds -gt 43200) { throw 'Duration mus
 if ($ReportName -notmatch '^[a-zA-Z0-9_-]+$') { throw 'ReportName must be a filename stem' }
 $repository = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 $diagnosticPath = (Resolve-Path (Join-Path $repository '.cargo-target/debug/rtp_reliability.exe')).Path
-$reportDirectory = Join-Path $repository 'docs/measurements'
+$reportDirectory = Join-Path $repository 'reports/measurements'
 $reportPath = Join-Path $reportDirectory "$ReportName.json"
 $memoryPath = Join-Path $reportDirectory "$ReportName-processes.jsonl"
 New-Item -ItemType Directory -Path $reportDirectory -Force | Out-Null
