@@ -298,6 +298,14 @@ impl AudioEngine {
             metrics.x86_worker_alive = t.x86_alive.load(Ordering::Relaxed);
             metrics.callback_count = t.callback_count.load(Ordering::Relaxed);
             metrics.callback_interval_max_us = t.callback_interval_max_us.load(Ordering::Relaxed);
+            let tri_state = |cell: &std::sync::atomic::AtomicU8| match cell.load(Ordering::Relaxed)
+            {
+                1 => Some(false),
+                2 => Some(true),
+                _ => None,
+            };
+            metrics.audio_mmcss_owned = tri_state(&t.mmcss_owned);
+            metrics.audio_mmcss_critical = tri_state(&t.mmcss_critical);
             metrics.audio_peak_l = f32::from_bits(t.meter_left.load(Ordering::Relaxed));
             metrics.audio_peak_r = f32::from_bits(t.meter_right.load(Ordering::Relaxed));
             metrics.audio_xruns = t.xruns.load(Ordering::Relaxed);

@@ -11,6 +11,7 @@ mod engine_lifecycle;
 mod engine_status;
 mod equalizer;
 mod game_mode;
+mod midi_playback;
 mod plugin_host;
 #[cfg(target_os = "windows")]
 mod remote_bridge;

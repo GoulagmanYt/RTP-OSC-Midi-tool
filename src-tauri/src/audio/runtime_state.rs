@@ -152,6 +152,8 @@ pub(super) struct AudioControls {
 pub(super) struct AudioTelemetry {
     pub(super) callback_gate: super::callback_gate::CallbackGate,
     pub(super) mmcss_enabled: AtomicU8,
+    pub(super) mmcss_owned: AtomicU8,
+    pub(super) mmcss_critical: AtomicU8,
     pub(super) editor_open: AtomicBool,
     pub(super) parameter_accepted_sequence: AtomicU64,
     pub(super) parameter_failed_sequence: AtomicU64,
@@ -197,6 +199,8 @@ impl AudioTelemetry {
     pub(super) fn new() -> Self {
         Self {
             mmcss_enabled: AtomicU8::new(0),
+            mmcss_owned: AtomicU8::new(0),
+            mmcss_critical: AtomicU8::new(0),
             callback_gate: super::callback_gate::CallbackGate::default(),
             editor_open: AtomicBool::new(false),
             parameter_accepted_sequence: AtomicU64::new(0),
@@ -460,6 +464,7 @@ pub(super) struct AudioCallbackState {
     pub(super) midi_generation: u64,
     pub(super) midi_rx: Consumer<MidiPacket>,
     pub(super) pending_midi: VecDeque<MidiPacket>,
+    pub(super) midi_playback: super::midi_playback::MidiPlaybackClock,
     pub(super) midi_events: Vec<RackMidiEvent>,
     pub(super) vst2_midi_events: Vec<api::MidiEvent>,
     pub(super) vst2_event_batch: Vst2EventBatch,
@@ -519,6 +524,7 @@ impl AudioCallbackState {
             midi_generation: 0,
             midi_rx,
             pending_midi: VecDeque::with_capacity(MAX_PENDING_MIDI),
+            midi_playback: super::midi_playback::MidiPlaybackClock::default(),
             midi_events: Vec::with_capacity(MIDI_EVENT_BATCH_CAPACITY),
             vst2_midi_events: Vec::with_capacity(MIDI_EVENT_BATCH_CAPACITY),
             vst2_event_batch: Vst2EventBatch {
@@ -600,6 +606,7 @@ impl AudioCallbackState {
                 .fetch_add(1, Ordering::AcqRel);
             self.needs_emergency_reset = true;
             self.pending_midi.clear();
+            self.midi_playback.reset();
         }
         self.observe_midi_generation();
         let now_us = monotonic_us();
@@ -631,11 +638,19 @@ impl AudioCallbackState {
             .store(oldest_us, Ordering::Relaxed);
     }
 
+    pub(super) fn next_midi_timestamp_us(&self) -> Option<u64> {
+        self.pending_midi
+            .front()
+            .or_else(|| self.midi_rx.peek().ok())
+            .map(|packet| packet.timestamp_us)
+    }
+
     fn observe_midi_generation(&mut self) {
         let generation = self.telemetry.midi_generation.load(Ordering::Acquire);
         if generation != self.midi_generation {
             self.midi_generation = generation;
             self.pending_midi.clear();
+            self.midi_playback.reset();
             self.needs_emergency_reset = true;
         }
     }
@@ -680,6 +695,7 @@ impl AudioCallbackState {
 
         let discarded = self.pending_midi.len() as u32;
         self.pending_midi.clear();
+        self.midi_playback.reset();
         self.pending_midi.push_back(msg);
         self.needs_emergency_reset = true;
         self.telemetry

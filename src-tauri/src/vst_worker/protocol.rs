@@ -56,6 +56,12 @@ pub struct WorkerMetrics {
     pub callback_count: u64,
     #[serde(default)]
     pub callback_interval_max_us: u64,
+    /// None until a callback publishes tuning, or when reading an older worker.
+    #[serde(default)]
+    pub audio_mmcss_owned: Option<bool>,
+    /// None for driver-owned registration: the host cannot inspect its AVRT priority.
+    #[serde(default)]
+    pub audio_mmcss_critical: Option<bool>,
     #[serde(default)]
     pub game_mode: bool,
     #[serde(default)]

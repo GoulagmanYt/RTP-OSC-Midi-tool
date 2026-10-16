@@ -360,6 +360,7 @@ export type RealtimeDiagnostics = {
     gameMode: boolean; maintenance: boolean; deferredSave: boolean; deferredEditor: boolean | null; editorOpen?: boolean;
     midiTransportFailed?: boolean; pipeWaitMaxUs?: number; audioWaitMaxUs?: number;
     callbackCount: number; callbackIntervalMaxUs: number;
+    audioMmcssOwned?: boolean | null; audioMmcssCritical?: boolean | null;
     midiDeliveryMaxUs: number; midiDeliveryP99Us: number;
     midiIoThreads?: Array<{ name: string; mmcssProfile: string; highPriority: boolean; fallbackApplied: boolean }>;
   };

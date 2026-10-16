@@ -334,7 +334,7 @@ mod tests {
         rx: rtrb::Consumer<MidiPacket>,
         emergency_reset_requested: Arc<AtomicBool>,
     ) -> AudioCallbackState {
-        AudioCallbackState::new(
+        let mut state = AudioCallbackState::new(
             rx,
             0,
             2,
@@ -352,7 +352,9 @@ mod tests {
             emergency_reset_requested,
             48_000,
             crossbeam_channel::bounded(8).1,
-        )
+        );
+        state.last_frames = 1024;
+        state
     }
 
     #[test]
@@ -1002,6 +1004,133 @@ mod tests {
         assert!(
             rx.pop().is_err(),
             "ring should not receive stale fallback data"
+        );
+    }
+
+    #[test]
+    fn late_vst3_note_keeps_release_pending_instead_of_collapsing_duration() {
+        use super::super::callback_midi::submit_pending_vst3_midi_at;
+
+        let (_, rx) = RingBuffer::new(8);
+        let mut state = callback_test_state(rx, Arc::new(AtomicBool::new(false)));
+        state.last_frames = 480;
+        for (data, stamp) in [([0x90, 60, 100], 900_000), ([0x80, 60, 0], 950_000)] {
+            let mut packet = MidiPacket::from_bytes(&data).unwrap();
+            packet.timestamp_us = stamp;
+            state.pending_midi.push_back(packet);
+        }
+        let mut delivered = Vec::new();
+        submit_pending_vst3_midi_at(&mut state, 512, 1_000_000, |events| {
+            delivered.extend_from_slice(events);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            delivered.len(),
+            1,
+            "a late release must retain time after its Note-On"
+        );
+        assert!(matches!(
+            delivered[0].kind,
+            RackMidiEventKind::NoteOn { .. }
+        ));
+        assert_eq!(state.pending_midi.len(), 1);
+        assert!(state.pending_midi[0].is_note_off());
+        for now_us in [1_010_000, 1_020_000] {
+            submit_pending_vst3_midi_at(&mut state, 512, now_us, |events| {
+                delivered.extend_from_slice(events);
+                Ok(())
+            })
+            .unwrap();
+        }
+        assert_eq!(delivered.len(), 2);
+        assert_eq!(delivered[1].sample_offset, 240);
+        assert!(state.pending_midi.is_empty());
+        assert_eq!(state.telemetry.midi_drop_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn late_vst2_chord_and_sustain_keep_time_after_rejected_vst3_submission() {
+        use super::super::callback_midi::{prepare_pending_vst2_midi, submit_pending_vst3_midi_at};
+        let (_, rx) = RingBuffer::new(16);
+        let mut state = callback_test_state(rx, Arc::new(AtomicBool::new(false)));
+        state.last_frames = 480;
+        let events = [
+            ([0x90, 60, 100], 900_000),
+            ([0x90, 64, 100], 900_000),
+            ([0xB0, 64, 127], 905_000),
+            ([0x80, 60, 0], 930_000),
+            ([0x90, 60, 100], 940_000),
+            ([0xB0, 64, 0], 945_000),
+            ([0x80, 60, 0], 950_000),
+            ([0x80, 64, 0], 950_000),
+        ];
+        for (data, stamp) in events {
+            let mut packet = MidiPacket::from_bytes(&data).unwrap();
+            packet.timestamp_us = stamp;
+            state.pending_midi.push_back(packet);
+        }
+        assert!(
+            submit_pending_vst3_midi_at(&mut state, 512, 1_000_000, |_| {
+                Err(rack::Error::Other("rejected".into()))
+            })
+            .is_err()
+        );
+        assert_eq!(state.pending_midi.len(), events.len());
+        let mut delivered = Vec::new();
+        for index in 0..4 {
+            prepare_pending_vst2_midi(&mut state, 1_000_000 + index * 10_000);
+            for event in &state.vst2_midi_events {
+                delivered.push((event.midi_data, index * 480 + event.delta_frames as u64));
+            }
+        }
+        assert_eq!(
+            delivered.iter().map(|(data, _)| *data).collect::<Vec<_>>(),
+            events.map(|(data, _)| data)
+        );
+        assert_eq!(
+            delivered[0].1, delivered[1].1,
+            "chord must remain simultaneous"
+        );
+        assert_eq!(delivered[3].1 - delivered[0].1, 720);
+        assert!(
+            delivered[4].1 > delivered[3].1,
+            "release must precede retrigger"
+        );
+        assert!(state.pending_midi.is_empty());
+    }
+
+    #[test]
+    fn recovery_does_not_skip_notes_beyond_the_ingress_drain_budget() {
+        use super::super::callback_midi::submit_pending_vst3_midi_at;
+        let (mut tx, rx) = RingBuffer::new(1024);
+        let mut state = callback_test_state(rx, Arc::new(AtomicBool::new(false)));
+        state.last_frames = 480;
+        for index in 0..MIDI_DRAIN_BUDGET_PER_CALLBACK + 2 {
+            let (bytes, stamp) = if index < MIDI_DRAIN_BUDGET_PER_CALLBACK {
+                ([0xB0, 1, 80], 900_000)
+            } else if index == MIDI_DRAIN_BUDGET_PER_CALLBACK {
+                ([0x90, 60, 100], 901_000)
+            } else {
+                ([0x80, 60, 0], 902_000)
+            };
+            let mut packet = MidiPacket::from_bytes(&bytes).unwrap();
+            packet.timestamp_us = stamp;
+            tx.push(packet).unwrap();
+        }
+        state.drain_midi();
+        submit_pending_vst3_midi_at(&mut state, 512, 1_000_000, |_| Ok(())).unwrap();
+        state.drain_midi();
+        let mut offsets = Vec::new();
+        submit_pending_vst3_midi_at(&mut state, 512, 1_010_000, |events| {
+            offsets.extend(events.iter().map(|event| event.sample_offset));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(offsets.len(), 2);
+        assert!(
+            offsets[1] > offsets[0],
+            "ring backlog must not collapse a note behind the drain budget"
         );
     }
 

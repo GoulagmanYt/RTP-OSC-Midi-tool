@@ -13,41 +13,8 @@ use vst::{
 
 use super::runtime_state::{monotonic_us, AudioCallbackState, PluginBackend};
 
-// One origin per block prevents conversion work itself from shifting later events
-// backwards. Clamp regressing ingress timestamps without reordering Note-Off/On.
-pub(super) struct MidiBlockTiming {
-    start_us: u64,
-    sample_rate: u32,
-    last_frame: u32,
-    last_offset: u32,
-}
-
-impl MidiBlockTiming {
-    pub(super) fn new(frames: usize, sample_rate: u32, now_us: u64) -> Self {
-        let frames = frames.max(1);
-        let period_us = (frames as u64)
-            .saturating_mul(1_000_000)
-            .checked_div(u64::from(sample_rate.max(1)))
-            .unwrap_or(0);
-        Self {
-            start_us: now_us.saturating_sub(period_us),
-            sample_rate,
-            last_frame: frames.saturating_sub(1).min(u32::MAX as usize) as u32,
-            last_offset: 0,
-        }
-    }
-
-    pub(super) fn offset(&mut self, timestamp_us: u64) -> u32 {
-        let offset = timestamp_us
-            .saturating_sub(self.start_us)
-            .saturating_mul(u64::from(self.sample_rate))
-            .checked_div(1_000_000)
-            .unwrap_or(0)
-            .min(u64::from(self.last_frame)) as u32;
-        self.last_offset = self.last_offset.max(offset);
-        self.last_offset
-    }
-}
+#[cfg(test)]
+use super::midi_playback::MidiBlockTiming;
 
 pub(super) fn midi_to_rack_event(data: [u8; 3]) -> Option<RackMidiEvent> {
     let status = data[0];
@@ -108,12 +75,34 @@ pub(super) fn process_pending_vst2_midi(
     state: &mut AudioCallbackState,
     instance: &mut PluginInstance,
 ) {
+    prepare_pending_vst2_midi(state, monotonic_us());
+    if state.vst2_event_batch.num_events > 0 {
+        // VST2 Events declares two pointers; the preallocated batch has room
+        // for every event, as required by the C flexible-array ABI.
+        let events = unsafe {
+            &*(&state.vst2_event_batch as *const super::runtime_state::Vst2EventBatch
+                as *const api::Events)
+        };
+        instance.process_events(events);
+    }
+}
+
+pub(super) fn prepare_pending_vst2_midi(state: &mut AudioCallbackState, now_us: u64) {
     state.vst2_midi_events.clear();
-    let mut timing = MidiBlockTiming::new(state.last_frames, state.sample_rate, monotonic_us());
+    let mut timing = state.midi_playback.begin_block(
+        state.last_frames,
+        state.sample_rate,
+        now_us,
+        state.pending_midi.front().map(|packet| packet.timestamp_us),
+    );
     while state.vst2_midi_events.len() < state.vst2_midi_events.capacity() {
-        let Some(msg) = state.pending_midi.pop_front() else {
+        let Some(msg) = state.pending_midi.front().copied() else {
             break;
         };
+        if !timing.contains(msg.timestamp_us) {
+            break;
+        }
+        state.pending_midi.pop_front();
         state.telemetry.record_midi_delivery(msg);
         let delta_frames = timing.offset(msg.timestamp_us) as i32;
         state.vst2_midi_events.push(api::MidiEvent {
@@ -131,20 +120,13 @@ pub(super) fn process_pending_vst2_midi(
             _reserved2: 0,
         });
     }
+    state
+        .midi_playback
+        .commit(&timing, state.next_midi_timestamp_us());
     for (index, event) in state.vst2_midi_events.iter_mut().enumerate() {
         state.vst2_event_batch.events[index] = event as *mut api::MidiEvent as *mut api::Event;
     }
     state.vst2_event_batch.num_events = state.vst2_midi_events.len() as i32;
-    if state.vst2_event_batch.num_events > 0 {
-        // VST2 models Events as a C flexible array whose Rust declaration has
-        // only two pointer slots. Vst2EventBatch provides the full preallocated
-        // 512-pointer layout expected by the ABI.
-        let events = unsafe {
-            &*(&state.vst2_event_batch as *const super::runtime_state::Vst2EventBatch
-                as *const api::Events)
-        };
-        instance.process_events(events);
-    }
 }
 
 pub(super) fn process_pending_vst3_midi(
@@ -160,17 +142,30 @@ pub(super) fn submit_pending_vst3_midi(
     available: usize,
     send: impl FnOnce(&[RackMidiEvent]) -> Result<(), rack::Error>,
 ) -> Result<(), rack::Error> {
-    if state.pending_midi.is_empty() {
-        return Ok(());
-    }
+    submit_pending_vst3_midi_at(state, available, monotonic_us(), send)
+}
 
+pub(super) fn submit_pending_vst3_midi_at(
+    state: &mut AudioCallbackState,
+    available: usize,
+    now_us: u64,
+    send: impl FnOnce(&[RackMidiEvent]) -> Result<(), rack::Error>,
+) -> Result<(), rack::Error> {
     state.midi_events.clear();
-    let mut timing = MidiBlockTiming::new(state.last_frames, state.sample_rate, monotonic_us());
+    let mut timing = state.midi_playback.begin_block(
+        state.last_frames,
+        state.sample_rate,
+        now_us,
+        state.pending_midi.front().map(|packet| packet.timestamp_us),
+    );
     let mut consumed = 0usize;
     let event_limit = available.min(state.midi_events.capacity());
     // A reset may already occupy part of the backend batch. Keep unadmitted
     // messages in FIFO order, including when the backend rejects submission.
     for msg in state.pending_midi.iter().take(state.midi_events.capacity()) {
+        if !timing.contains(msg.timestamp_us) {
+            break;
+        }
         if let Some(mut event) = midi_to_rack_event(msg.data) {
             if state.midi_events.len() == event_limit {
                 break;
@@ -188,6 +183,9 @@ pub(super) fn submit_pending_vst3_midi(
     for msg in state.pending_midi.drain(..consumed) {
         state.telemetry.record_midi_delivery(msg);
     }
+    state
+        .midi_playback
+        .commit(&timing, state.next_midi_timestamp_us());
     Ok(())
 }
 

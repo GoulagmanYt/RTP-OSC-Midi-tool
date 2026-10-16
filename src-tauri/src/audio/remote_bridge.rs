@@ -55,7 +55,8 @@ use crate::{
 };
 
 use super::{
-    callback_midi::{midi_to_rack_event, MidiBlockTiming},
+    callback_midi::midi_to_rack_event,
+    midi_playback::{MidiBlockTiming, MidiPlaybackClock},
     plugin_host::{load_plugin_backend, set_active_vst2_editor_window, VST2_RESIZE_MESSAGE},
     runtime_state::{MidiPacket, PluginBackend, Vst2EventBatch, MIDI_EVENT_BATCH_CAPACITY},
     state_codec::{load_vst_state, save_vst_state_checked},
@@ -358,6 +359,7 @@ pub(super) struct RemotePlugin {
     latency_samples: u32,
     sample_rate: u32,
     panic_pending: bool,
+    midi_playback: MidiPlaybackClock,
     pending_parameter_changes: Vec<super::runtime_state::ParameterCommand>,
     parameter_sequences: [u64; BRIDGE_SLOTS],
     consecutive_missed_frames: u64,
@@ -511,6 +513,7 @@ impl RemotePlugin {
             latency_samples,
             sample_rate,
             panic_pending: false,
+            midi_playback: MidiPlaybackClock::default(),
             pending_parameter_changes: Vec::with_capacity(BRIDGE_MAX_PARAMETER_CHANGES),
             parameter_sequences: [0; BRIDGE_SLOTS],
             consecutive_missed_frames: 0,
@@ -546,6 +549,7 @@ impl RemotePlugin {
         outputs: &mut [Vec<f32>],
         frames: usize,
         telemetry: Option<&super::runtime_state::AudioTelemetry>,
+        next_ingress_us: Option<u64>,
     ) -> bool {
         if frames == 0 || frames > BRIDGE_MAX_FRAMES {
             return false;
@@ -663,15 +667,19 @@ impl RemotePlugin {
                 event_count = write_panic_events(&mut slot.events);
                 self.panic_pending = false;
             }
-            event_count = write_bridge_midi_events(
-                &mut slot.events,
-                midi,
-                event_count,
-                MidiBlockTiming::new(
-                    frames,
-                    self.sample_rate,
-                    super::runtime_state::monotonic_us(),
-                ),
+            let mut timing = self.midi_playback.begin_block(
+                frames,
+                self.sample_rate,
+                super::runtime_state::monotonic_us(),
+                midi.front().map(|packet| packet.timestamp_us),
+            );
+            event_count =
+                write_bridge_midi_events(&mut slot.events, midi, event_count, &mut timing);
+            self.midi_playback.commit(
+                &timing,
+                midi.front()
+                    .map(|packet| packet.timestamp_us)
+                    .or(next_ingress_us),
             );
             let parameter_count = self
                 .pending_parameter_changes
@@ -715,6 +723,7 @@ impl RemotePlugin {
 
     pub(super) fn panic_all_notes(&mut self) {
         self.panic_pending = true;
+        self.midi_playback.reset();
     }
 
     pub(super) fn prepare_live_parameter_restore(
@@ -861,12 +870,16 @@ fn write_bridge_midi_events(
     events: &mut [BridgeMidiEvent; BRIDGE_MAX_MIDI],
     midi: &mut VecDeque<MidiPacket>,
     mut event_count: usize,
-    mut timing: MidiBlockTiming,
+    timing: &mut MidiBlockTiming,
 ) -> usize {
     while event_count < BRIDGE_MAX_MIDI {
-        let Some(packet) = midi.pop_front() else {
+        let Some(packet) = midi.front().copied() else {
             break;
         };
+        if !timing.contains(packet.timestamp_us) {
+            break;
+        }
+        midi.pop_front();
         events[event_count] = BridgeMidiEvent {
             ingress_qpc: packet.ingress_qpc,
             worker_qpc: packet.worker_qpc,
@@ -1773,7 +1786,7 @@ mod tests {
             &mut events,
             &mut midi,
             0,
-            MidiBlockTiming::new(480, 48_000, 1_010_000),
+            &mut MidiBlockTiming::new(480, 48_000, 1_010_000),
         );
         assert_eq!(count, 4);
         assert!(midi.is_empty());
@@ -1825,6 +1838,7 @@ mod tests {
             latency_samples: 0,
             sample_rate: 48_000,
             panic_pending: false,
+            midi_playback: MidiPlaybackClock::default(),
             pending_parameter_changes: Vec::with_capacity(BRIDGE_MAX_PARAMETER_CHANGES),
             parameter_sequences: [0; BRIDGE_SLOTS],
             consecutive_missed_frames: 0,
@@ -1857,7 +1871,7 @@ mod tests {
         let mut midi = VecDeque::new();
         let mut outputs = vec![vec![0.0; 512]; 2];
         for _ in 0..500 {
-            remote.process(&mut midi, &[], &mut outputs, 512, None);
+            remote.process(&mut midi, &[], &mut outputs, 512, None, None);
         }
         assert!(!remote.realtime_health().2);
         assert!(mapping_error(remote.mapping.get()).contains("5000 ms"));
@@ -1885,7 +1899,7 @@ mod tests {
             let mut midi = VecDeque::new();
             let mut outputs = vec![vec![0.0; 512]; 2];
             for _ in 0..500 {
-                remote.process(&mut midi, &[], &mut outputs, 512, None);
+                remote.process(&mut midi, &[], &mut outputs, 512, None, None);
             }
             assert!(
                 !remote.realtime_health().2,
@@ -1905,11 +1919,11 @@ mod tests {
         let mut midi = VecDeque::new();
         let mut outputs = vec![vec![0.0; 512]; 2];
         for _ in 0..500 {
-            remote.process(&mut midi, &[], &mut outputs, 512, None);
+            remote.process(&mut midi, &[], &mut outputs, 512, None, None);
         }
         assert!(remote.realtime_health().2);
         for _ in 0..1000 {
-            remote.process(&mut midi, &[], &mut outputs, 512, None);
+            remote.process(&mut midi, &[], &mut outputs, 512, None, None);
         }
         assert!(!remote.realtime_health().2);
     }
@@ -1963,7 +1977,7 @@ mod tests {
             slot.sequence.store(1, Ordering::Relaxed);
             slot.frames.store(512, Ordering::Relaxed);
             slot.state.store(SLOT_READY, Ordering::Release);
-            remote.process(&mut midi, &[], &mut outputs, 512, None);
+            remote.process(&mut midi, &[], &mut outputs, 512, None, None);
         }
         assert!(remote.realtime_health().2);
     }
@@ -2194,7 +2208,7 @@ mod tests {
         let mut outputs = vec![vec![0.0f32; 512]; remote.output_channels()];
         let mut energy = 0.0f32;
         for _ in 0..32 {
-            if remote.process(&mut midi, &[], &mut outputs, 512, None) {
+            if remote.process(&mut midi, &[], &mut outputs, 512, None, None) {
                 energy += outputs
                     .iter()
                     .flat_map(|channel| channel.iter())
@@ -2204,7 +2218,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(12));
         }
         midi.push_back(MidiPacket::from_bytes(&[0x80, 60, 0]).expect("note off"));
-        let _ = remote.process(&mut midi, &[], &mut outputs, 512, None);
+        let _ = remote.process(&mut midi, &[], &mut outputs, 512, None, None);
         for sequence in 0..10_000u32 {
             let note = 36 + ((sequence / 2) % 48) as u8;
             let bytes: &[u8] = match sequence % 6 {
@@ -2218,7 +2232,7 @@ mod tests {
             midi.push_back(MidiPacket::from_bytes(bytes).expect("stress MIDI event"));
         }
         for _ in 0..24 {
-            let _ = remote.process(&mut midi, &[], &mut outputs, 512, None);
+            let _ = remote.process(&mut midi, &[], &mut outputs, 512, None, None);
             std::thread::sleep(Duration::from_millis(12));
         }
         assert!(
@@ -2226,7 +2240,7 @@ mod tests {
             "the x86 bridge did not drain 10,000 MIDI events"
         );
         remote.panic_all_notes();
-        let _ = remote.process(&mut midi, &[], &mut outputs, 512, None);
+        let _ = remote.process(&mut midi, &[], &mut outputs, 512, None, None);
         assert!(
             energy.is_finite() && energy > 0.001,
             "bridged VST rendered silence"
@@ -2240,7 +2254,7 @@ mod tests {
             "maintenance must preserve the DSP pipeline sequence"
         );
         assert!(
-            remote.process(&mut midi, &[], &mut outputs, 512, None),
+            remote.process(&mut midi, &[], &mut outputs, 512, None, None),
             "the completed DSP block must remain available after maintenance"
         );
         assert_eq!(remote.next_sequence, sequence_before_save + 1);
