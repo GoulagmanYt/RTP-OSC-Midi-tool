@@ -363,6 +363,7 @@ pub(super) const MIDI_EVENT_BATCH_CAPACITY: usize = 512;
 pub(super) const RESET_CONTROLLERS: [u8; 4] = [64, 120, 121, 123];
 pub(super) const VST_EDITOR_IDLE_TIMER_MS: u32 = 50;
 pub(super) const PARAMETER_COMMAND_CAPACITY: usize = 4096;
+pub(super) const OVERSIZED_CALLBACK_ERROR: u32 = 13;
 
 #[derive(Clone, Copy, Debug)]
 #[cfg_attr(target_pointer_width = "32", allow(dead_code))]
@@ -549,6 +550,26 @@ impl AudioCallbackState {
 
     pub(super) fn prepare(&mut self, frames: usize) -> bool {
         if frames > self.max_frames {
+            // The advertised backend maximum has changed or was inaccurate.
+            // Keep the buffers fixed, but let the supervisor recover the stream
+            // instead of silently rejecting every subsequent oversized block.
+            if self
+                .telemetry
+                .stream_fatal_error
+                .compare_exchange(
+                    0,
+                    OVERSIZED_CALLBACK_ERROR,
+                    Ordering::AcqRel,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                self.telemetry
+                    .stream_recovery_requests
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            self.emergency_reset_requested
+                .store(true, Ordering::Release);
             return false;
         }
 
@@ -572,6 +593,11 @@ impl AudioCallbackState {
 
     pub(super) fn drain_midi(&mut self) {
         if self.emergency_reset_requested.swap(false, Ordering::AcqRel) {
+            // A standalone panic must invalidate ring entries as well as the
+            // callback backlog. Producers stamp subsequent events with the new epoch.
+            self.telemetry
+                .midi_generation
+                .fetch_add(1, Ordering::AcqRel);
             self.needs_emergency_reset = true;
             self.pending_midi.clear();
         }
@@ -652,12 +678,13 @@ impl AudioCallbackState {
             return;
         }
 
+        let discarded = self.pending_midi.len() as u32;
         self.pending_midi.clear();
         self.pending_midi.push_back(msg);
         self.needs_emergency_reset = true;
         self.telemetry
             .midi_drop_count
-            .fetch_add(1, Ordering::Relaxed);
+            .fetch_add(discarded, Ordering::Relaxed);
     }
 
     fn drop_oldest_note_on(&mut self) -> bool {

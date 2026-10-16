@@ -237,11 +237,6 @@ fn audio_callback<T: Sample + FromSample<f32>>(
 
     if state.needs_emergency_reset {
         send_reset_messages(&mut plugin);
-        state.needs_emergency_reset = false;
-        state
-            .telemetry
-            .emergency_reset_count
-            .fetch_add(1, Ordering::Relaxed);
     }
 
     match &mut *plugin {
@@ -393,6 +388,22 @@ fn audio_callback<T: Sample + FromSample<f32>>(
             record_dsp_timing(&state.telemetry, dsp_started);
         }
     }
+
+    if state.needs_emergency_reset {
+        let pending = match &*plugin {
+            PluginBackend::Vst3 { instance, .. } => instance.midi_reset_pending(),
+            _ => false,
+        };
+        if !pending {
+            state.needs_emergency_reset = false;
+            state
+                .telemetry
+                .emergency_reset_count
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    // Native plugin access is complete; conversion and equalization do not need it.
+    drop(plugin);
 
     if state.plugin_outputs == 0 {
         data.fill(silence);

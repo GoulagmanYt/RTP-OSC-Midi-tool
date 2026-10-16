@@ -8,6 +8,7 @@ tools/diagnostics/target
 .venv
 vendor/rack/rack-sys/external
 reports
+docs/superpowers/
 artifacts/
 src-tauri/binaries/*.exe
 .vscode/

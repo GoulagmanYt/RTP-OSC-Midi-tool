@@ -536,6 +536,11 @@ extern "C" {
     // MIDI API
     // ============================================================================
 
+    /// Request/reset status on the same serialized thread as process().
+    /// `plugin` must be a valid live instance; no concurrent native calls.
+    pub fn rack_vst3_plugin_request_midi_reset(plugin: *mut RackVST3Plugin) -> c_int;
+    pub fn rack_vst3_plugin_midi_reset_pending(plugin: *mut RackVST3Plugin) -> c_int;
+
     /// Send MIDI events to plugin
     ///
     /// # Returns

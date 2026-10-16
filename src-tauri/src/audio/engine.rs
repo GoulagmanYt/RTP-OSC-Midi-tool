@@ -356,6 +356,120 @@ mod tests {
     }
 
     #[test]
+    fn realtime_flag_only_reset_does_not_replay_old_ring_notes() {
+        let (mut tx, rx) = RingBuffer::new(8);
+        tx.push(MidiPacket::from_bytes(&[0x90, 60, 100]).unwrap())
+            .unwrap();
+        let mut state = callback_test_state(rx, Arc::new(AtomicBool::new(true)));
+        state.drain_midi();
+        assert!(state.needs_emergency_reset);
+        assert!(
+            state.pending_midi.is_empty(),
+            "a pre-panic Note-On was admitted again"
+        );
+    }
+
+    #[test]
+    fn realtime_critical_overflow_accounts_for_every_discarded_message() {
+        let (_, rx) = RingBuffer::new(8);
+        let mut state = callback_test_state(rx, Arc::new(AtomicBool::new(false)));
+        for _ in 0..MAX_PENDING_MIDI {
+            state.enqueue_midi(MidiPacket::from_bytes(&[0x80, 60, 0]).unwrap());
+        }
+        state.enqueue_midi(MidiPacket::from_bytes(&[0xB0, 64, 0]).unwrap());
+        assert!(state.needs_emergency_reset);
+        assert_eq!(state.pending_midi.back().unwrap().data, [0xB0, 64, 0]);
+        assert_eq!(
+            state.telemetry.midi_drop_count.load(Ordering::Relaxed),
+            MAX_PENDING_MIDI as u32
+        );
+    }
+
+    #[test]
+    fn realtime_oversized_callback_requests_recovery_once_without_moving_buffers() {
+        let (_, rx) = RingBuffer::new(8);
+        let mut state = callback_test_state(rx, Arc::new(AtomicBool::new(false)));
+        let input = state.input_silence.as_ptr();
+        let output = state.outputs[0].as_ptr();
+        assert!(!state.prepare(1025));
+        assert!(!state.prepare(4096));
+        assert_eq!(
+            state
+                .telemetry
+                .stream_recovery_requests
+                .load(Ordering::Relaxed),
+            1
+        );
+        assert_ne!(
+            state.telemetry.stream_fatal_error.load(Ordering::Acquire),
+            0
+        );
+        assert_eq!(state.input_silence.as_ptr(), input);
+        assert_eq!(state.outputs[0].as_ptr(), output);
+        assert!(state.prepare(64));
+    }
+
+    #[test]
+    fn realtime_replay_larger_than_capacity_fills_the_tail_with_silence() {
+        let (_, rx) = RingBuffer::new(8);
+        let mut state = callback_test_state(rx, Arc::new(AtomicBool::new(false)));
+        state.last_output.fill(0.5);
+        let mut output = vec![f32::NAN; 8192];
+        replay_last_output_or_silence(&mut output, 2, 0.0, &mut state);
+        assert_eq!(output[0], 0.5);
+        assert!(output.iter().all(|sample| sample.is_finite()));
+        assert!(output[2048..].iter().all(|sample| *sample == 0.0));
+    }
+
+    #[test]
+    fn realtime_200_events_per_second_preserve_releases_and_fifo() {
+        use super::super::callback_midi::submit_pending_vst3_midi;
+        let (mut tx, rx) = RingBuffer::new(1024);
+        let mut state = callback_test_state(rx, Arc::new(AtomicBool::new(false)));
+        // Ten seconds of 200 events/s, delivered in 100 ms scheduling bursts.
+        for _ in 0..100 {
+            for _ in 0..5 {
+                for bytes in [
+                    [0x90, 60, 100],
+                    [0xB0, 64, 127],
+                    [0x80, 60, 0],
+                    [0xB0, 64, 0],
+                ] {
+                    tx.push(MidiPacket::from_bytes(&bytes).unwrap()).unwrap();
+                }
+            }
+            state.drain_midi();
+            submit_pending_vst3_midi(&mut state, 512, |events| {
+                assert_eq!(events.len(), 20);
+                for group in events.chunks_exact(4) {
+                    assert!(matches!(group[0].kind, rack::MidiEventKind::NoteOn { .. }));
+                    assert!(matches!(
+                        group[1].kind,
+                        rack::MidiEventKind::ControlChange {
+                            controller: 64,
+                            value: 127,
+                            ..
+                        }
+                    ));
+                    assert!(matches!(group[2].kind, rack::MidiEventKind::NoteOff { .. }));
+                    assert!(matches!(
+                        group[3].kind,
+                        rack::MidiEventKind::ControlChange {
+                            controller: 64,
+                            value: 0,
+                            ..
+                        }
+                    ));
+                }
+                Ok(())
+            })
+            .unwrap();
+        }
+        assert!(state.pending_midi.is_empty());
+        assert_eq!(state.telemetry.midi_drop_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
     fn vst3_reset_batch_preserves_notes_across_capacity_boundary() {
         use super::super::callback_midi::submit_pending_vst3_midi;
 

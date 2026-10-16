@@ -11,7 +11,7 @@ use vst::{
     plugin::Plugin,
 };
 
-use super::runtime_state::{monotonic_us, AudioCallbackState, PluginBackend, RESET_CONTROLLERS};
+use super::runtime_state::{monotonic_us, AudioCallbackState, PluginBackend};
 
 // One origin per block prevents conversion work itself from shifting later events
 // backwards. Clamp regressing ingress timestamps without reordering Note-Off/On.
@@ -239,19 +239,9 @@ pub(super) fn send_reset_messages(plugin: &mut PluginBackend) {
             instance.process_events(evt);
         }
         PluginBackend::Vst3 { instance, .. } => {
-            for ch in 0..16u8 {
-                for controller in RESET_CONTROLLERS {
-                    let event = RackMidiEvent {
-                        sample_offset: 0,
-                        kind: RackMidiEventKind::ControlChange {
-                            controller,
-                            value: 0,
-                            channel: ch,
-                        },
-                    };
-                    let _ = instance.send_midi(std::slice::from_ref(&event));
-                }
-            }
+            // Dedicated admission cannot lose the panic to a full MIDI batch.
+            // Completion is checked only after a successful process() call.
+            let _ = instance.request_midi_reset();
         }
         #[cfg(all(target_os = "windows", target_pointer_width = "64"))]
         PluginBackend::Remote { instance } => instance.panic_all_notes(),

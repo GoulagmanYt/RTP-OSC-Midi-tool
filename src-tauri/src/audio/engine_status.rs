@@ -236,6 +236,9 @@ impl AudioEngine {
             9 => "audio operation unsupported",
             10 => "invalid audio stream configuration",
             11 => "unclassified audio stream failure",
+            super::runtime_state::OVERSIZED_CALLBACK_ERROR => {
+                "audio callback exceeded the preallocated frame capacity"
+            }
             _ => return None,
         };
         Some(reason.to_string())

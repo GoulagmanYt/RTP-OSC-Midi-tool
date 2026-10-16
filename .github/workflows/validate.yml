@@ -186,3 +186,10 @@ jobs:
           cargo fmt --manifest-path vendor/vst/Cargo.toml -- --check
           cargo check --manifest-path vendor/vst/Cargo.toml --all-targets --features disable_deprecation_warning
           cargo test --manifest-path vendor/vst/Cargo.toml --all-targets --features disable_deprecation_warning
+
+      - name: Validate native realtime audio regressions
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          cmake -S vendor/rack/rack-sys -B .cargo-target/realtime-tests -DBUILD_REALTIME_TESTS=ON
+          cmake --build .cargo-target/realtime-tests --config RelWithDebInfo --target rack_realtime_audio_test --parallel 4
+          ctest --test-dir .cargo-target/realtime-tests -C RelWithDebInfo --output-on-failure

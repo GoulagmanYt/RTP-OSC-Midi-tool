@@ -51,9 +51,27 @@ impl Vst3Plugin {
     /// Remaining space in the preallocated MIDI batch, including any events
     /// already queued by earlier calls to `send_midi` before `process`.
     pub fn remaining_midi_capacity(&self) -> usize {
+        if self.midi_reset_pending() {
+            return 0;
+        }
         self.midi_events
             .capacity()
             .saturating_sub(self.midi_events.len())
+    }
+
+    /// Admit an emergency panic even when the ordinary MIDI batch is full.
+    /// Call only from the same serialized thread as process().
+    pub fn request_midi_reset(&mut self) -> Result<()> {
+        let result = unsafe { ffi::rack_vst3_plugin_request_midi_reset(self.inner.as_ptr()) };
+        if result != ffi::RACK_VST3_OK {
+            return Err(map_error(result));
+        }
+        self.midi_events.clear();
+        Ok(())
+    }
+
+    pub fn midi_reset_pending(&self) -> bool {
+        unsafe { ffi::rack_vst3_plugin_midi_reset_pending(self.inner.as_ptr()) != 0 }
     }
 
     /// Create a new VST3 plugin instance
