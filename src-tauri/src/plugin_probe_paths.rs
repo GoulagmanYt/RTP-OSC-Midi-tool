@@ -54,14 +54,57 @@ pub fn is_vst3_path(path: &Path) -> bool {
 pub fn scan_plugin_candidates(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut visited_dirs = HashSet::new();
-    scan_dir(root, &mut out, &mut visited_dirs, 0);
+    let mut visited_plugins = HashSet::new();
+    scan_dir(root, &mut out, &mut visited_dirs, &mut visited_plugins, 0);
     out
+}
+
+#[derive(Hash, PartialEq, Eq)]
+pub(super) enum PluginIdentity {
+    #[cfg(windows)]
+    File {
+        volume: u32,
+        index: u64,
+    },
+    Path(PathBuf),
+}
+
+pub(super) fn plugin_identity(path: &Path) -> PluginIdentity {
+    #[cfg(windows)]
+    {
+        use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+        use windows::Win32::{
+            Foundation::HANDLE,
+            Storage::FileSystem::{
+                GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS,
+            },
+        };
+        // Open the target, including VST3 bundle directories. Volume + file
+        // index also identify hard links, which canonical path spelling cannot.
+        if let Ok(file) = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0)
+            .open(path)
+        {
+            let mut info = BY_HANDLE_FILE_INFORMATION::default();
+            if unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info) }
+                .is_ok()
+            {
+                return PluginIdentity::File {
+                    volume: info.dwVolumeSerialNumber,
+                    index: ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64,
+                };
+            }
+        }
+    }
+    PluginIdentity::Path(fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()))
 }
 
 fn scan_dir(
     root: &Path,
     out: &mut Vec<PathBuf>,
     visited_dirs: &mut HashSet<PathBuf>,
+    visited_plugins: &mut HashSet<PluginIdentity>,
     depth: usize,
 ) {
     if depth > 32 {
@@ -82,15 +125,32 @@ fn scan_dir(
     for entry in read_dir.flatten() {
         let path = entry.path();
         if path.is_dir() {
+            // A selected root may itself be a junction, but never descend into
+            // directory reparse points found underneath it. This also bounds
+            // traversal when canonicalization cannot resolve a junction cycle.
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::MetadataExt;
+                use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+                if fs::symlink_metadata(&path).map_or(true, |metadata| {
+                    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0
+                }) {
+                    continue;
+                }
+            }
             if is_vst3_path(&path) {
-                out.push(path);
+                if visited_plugins.insert(plugin_identity(&path)) {
+                    out.push(path);
+                }
             } else {
-                scan_dir(&path, out, visited_dirs, depth + 1);
+                scan_dir(&path, out, visited_dirs, visited_plugins, depth + 1);
             }
             continue;
         }
 
-        if is_vst2_path(&path) || is_vst3_path(&path) {
+        if (is_vst2_path(&path) || is_vst3_path(&path))
+            && visited_plugins.insert(plugin_identity(&path))
+        {
             out.push(path);
         }
     }

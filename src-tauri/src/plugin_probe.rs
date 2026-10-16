@@ -122,7 +122,7 @@ fn scan_vst_plugins_with_probe(
     probe: &(impl Fn(&Path, Duration, &str) -> Vec<VstPluginEntry> + Sync),
 ) -> Vec<VstPluginEntry> {
     let mut entries = Vec::new();
-    let mut seen_paths = HashSet::new();
+    let mut seen_plugins = HashSet::new();
     let mut cached_by_path: HashMap<String, Vec<VstPluginEntry>> = HashMap::new();
     for entry in cached {
         cached_by_path
@@ -135,8 +135,8 @@ fn scan_vst_plugins_with_probe(
 
     for root in unique_existing_roots(roots) {
         for path in scan_plugin_candidates(&root) {
-            let key = normalize_path(&path);
-            if seen_paths.insert(key) {
+            // Configured roots may contain different hard links to one DLL.
+            if seen_plugins.insert(plugin_probe_paths::plugin_identity(&path)) {
                 let (modified, size) = plugin_file_metadata(&path);
                 let architectures = plugin_probe_arch::available_plugin_architectures(&path);
                 let cache_key = normalize_path(&path);
@@ -796,6 +796,25 @@ mod tests {
         let entries = scan_plugin_candidates(dir.path());
         assert!(entries.iter().any(|p| p.ends_with("Synth.dll")));
         assert!(entries.iter().any(|p| p.ends_with("Piano.vst3")));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn scan_probes_a_physical_dll_only_once_across_roots() {
+        let dir = tempdir().unwrap();
+        let first = dir.path().join("first");
+        let second = dir.path().join("second");
+        fs::create_dir(&first).unwrap();
+        fs::create_dir(&second).unwrap();
+        let dll = first.join("instrument.dll");
+        fs::write(&dll, b"MZ").unwrap();
+        fs::hard_link(&dll, second.join("alias.dll")).unwrap();
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        scan_vst_plugins_with_probe(&[first, second], &[], false, &|_, _, _| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Vec::new()
+        });
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
 
     #[test]

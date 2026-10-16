@@ -8,7 +8,10 @@ use crate::{audio::AudioSettings, config::VstEqSettings, types::VstParameter};
 // Version 9 carries game-mode health and ingress timestamps.
 pub const CONTROL_PROTOCOL_VERSION: u32 = 9;
 pub const HOST_ABI_VERSION: u32 = crate::types::VST_HOST_ABI_VERSION;
-pub const MAX_CONTROL_FRAME_BYTES: usize = 1024 * 1024;
+// A normal 8,192-parameter catalogue is ~1.14 MB of JSON, exceeding 1 MiB.
+// Allow 8 MiB for longer names/units while keeping allocations on both ends
+// bounded. Unbounded third-party metadata still gets the error-reply fallback.
+pub const MAX_CONTROL_FRAME_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_MIDI_BYTES: usize = 3;
 pub const MIDI_FRAME_BYTES: usize = 8 + 8 + 8 + 1 + MAX_MIDI_BYTES;
 

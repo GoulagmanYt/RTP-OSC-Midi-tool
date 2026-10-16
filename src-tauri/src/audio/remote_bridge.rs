@@ -82,7 +82,7 @@ fn merge_parameter_commands(
 }
 
 const BRIDGE_MAGIC: u32 = 0x4F53_4342;
-const BRIDGE_VERSION: u32 = 7;
+const BRIDGE_VERSION: u32 = 8;
 const BRIDGE_SLOTS: usize = 3;
 const BRIDGE_MAX_FRAMES: usize = 8192;
 const BRIDGE_MAX_CHANNELS: usize = 64;
@@ -95,6 +95,8 @@ const SLOT_READY: u32 = 2;
 const SERVER_READY: u32 = 1;
 const SERVER_FAILED: u32 = 2;
 const COMMAND_NONE: u32 = 0;
+// Reserve ownership before publishing status, for parent and worker commands.
+const COMMAND_RESERVED: u32 = u32::MAX;
 const COMMAND_OPEN_EDITOR: u32 = 1;
 const COMMAND_CLOSE_EDITOR: u32 = 2;
 const COMMAND_SAVE_STATE: u32 = 3;
@@ -102,6 +104,9 @@ const COMMAND_PREPARE_LIVE_RESTORE: u32 = 4;
 const COMMAND_PENDING: u32 = 1;
 const COMMAND_OK: u32 = 2;
 const COMMAND_FAILED: u32 = 3;
+// Only the DSP owner may release an expired command: a native call can still
+// be running after the caller's deadline and must not complete a newer request.
+const COMMAND_TIMED_OUT: u32 = 4;
 const REMOTE_EDITOR_STYLE: WINDOW_STYLE =
     WINDOW_STYLE(WS_OVERLAPPED.0 | WS_CAPTION.0 | WS_SYSMENU.0 | WS_MINIMIZEBOX.0);
 static REMOTE_EDITOR_CLOSE_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -114,9 +119,10 @@ thread_local! {
 }
 // Eight 512-frame callbacks at 48 kHz represented only ~85 ms and caused
 // healthy legacy plug-ins to be restarted after ordinary scheduling spikes.
-// Keep the callback non-blocking, but require a sustained two-second DSP stall
+// Keep the callback non-blocking, but require a sustained five-second DSP stall
 // before declaring the isolated process unhealthy.
 const BRIDGE_STALL_BUDGET_MS: u64 = 5_000;
+const BRIDGE_CONTROL_BUDGET_MS: u64 = 10_000;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -549,10 +555,12 @@ impl RemotePlugin {
         let shared = self.mapping.get_mut();
         let expected_sequence = self.next_sequence.saturating_sub(1);
         let mut rendered = false;
+        let mut dsp_progress = false;
         for (slot_index, slot) in shared.slots.iter().enumerate() {
             if slot.state.load(Ordering::Acquire) != SLOT_READY {
                 continue;
             }
+            dsp_progress = true;
             if let Some(telemetry) = telemetry {
                 // DSP completion is independent of whether its audio block is
                 // still useful (late results and frame-size changes included).
@@ -609,15 +617,28 @@ impl RemotePlugin {
                 }
                 self.last_output_samples[channel] = 0.0;
             }
-            let control_busy = shared.command.load(Ordering::Acquire) != COMMAND_NONE
-                || shared.command_status.load(Ordering::Acquire) == COMMAND_PENDING;
-            if control_busy {
+            let command = shared.command.load(Ordering::Acquire);
+            let control_busy = command != COMMAND_NONE
+                && command != COMMAND_RESERVED
+                && shared.command_status.load(Ordering::Acquire) == COMMAND_PENDING;
+            if dsp_progress {
                 self.consecutive_missed_frames = 0;
             } else {
                 self.consecutive_missed_frames =
                     self.consecutive_missed_frames.saturating_add(frames as u64);
             }
-            if bridge_stall_budget_exceeded(self.consecutive_missed_frames, self.sample_rate) {
+            // Internal saves have no waiting caller to expire them. Even a
+            // genuinely pending control may defer surveillance only finitely.
+            let control_grace_frames = if control_busy {
+                (self.sample_rate as u64).saturating_mul(BRIDGE_CONTROL_BUDGET_MS) / 1000
+            } else {
+                0
+            };
+            if bridge_stall_budget_exceeded(
+                self.consecutive_missed_frames
+                    .saturating_sub(control_grace_frames),
+                self.sample_rate,
+            ) {
                 set_mapping_error(
                     shared,
                     "x86 DSP bridge produced no completed block for 5000 ms",
@@ -764,18 +785,11 @@ impl RemotePlugin {
 
     fn control_command(&mut self, command: u32, operation: &str) -> Result<(), String> {
         let shared = self.mapping.get();
-        if shared
-            .command
-            .compare_exchange(COMMAND_NONE, command, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
+        if !begin_control_command(shared, command) {
             return Err(format!("x86 {operation} command already in progress"));
         }
-        shared
-            .command_status
-            .store(COMMAND_PENDING, Ordering::Release);
         let _ = unsafe { SetEvent(self.request_event) };
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + Duration::from_millis(BRIDGE_CONTROL_BUDGET_MS);
         loop {
             match shared.command_status.load(Ordering::Acquire) {
                 COMMAND_OK => {
@@ -789,15 +803,57 @@ impl RemotePlugin {
                 _ => {}
             }
             if Instant::now() >= deadline {
-                shared.command.store(COMMAND_NONE, Ordering::Release);
-                shared
+                // Leave ownership with the worker until it returns from any
+                // native call. Terminal status immediately resumes DSP checks.
+                if shared
                     .command_status
-                    .store(COMMAND_FAILED, Ordering::Release);
-                return Err(format!("x86 {operation} command timed out"));
+                    .compare_exchange(
+                        COMMAND_PENDING,
+                        COMMAND_TIMED_OUT,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_ok()
+                {
+                    return Err(format!("x86 {operation} command timed out"));
+                }
+                // Completion won the race with the deadline; consume it.
+                continue;
             }
             std::thread::sleep(Duration::from_millis(10));
         }
     }
+}
+
+fn begin_control_command(shared: &BridgeShared, command: u32) -> bool {
+    if shared
+        .command
+        .compare_exchange(
+            COMMAND_NONE,
+            COMMAND_RESERVED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .is_err()
+    {
+        return false;
+    }
+    shared
+        .command_status
+        .store(COMMAND_PENDING, Ordering::Relaxed);
+    shared.command.store(command, Ordering::Release);
+    true
+}
+
+fn finish_control_command(shared: &BridgeShared, status: u32) {
+    // Preserve expiration if the deadline raced a native call's completion.
+    // The DSP owner retires the command once, at the end of its iteration.
+    let _ = shared.command_status.compare_exchange(
+        COMMAND_PENDING,
+        status,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    );
 }
 
 #[cfg(target_pointer_width = "64")]
@@ -1251,21 +1307,7 @@ fn run_dsp_server(args: DspArgs, logger: FrontendLogger) -> Result<(), String> {
         let mut internal_state_save = false;
         if REMOTE_EDITOR_CLOSE_REQUESTED.swap(false, Ordering::AcqRel) {
             mapping.get().editor_open.store(0, Ordering::Release);
-            if mapping
-                .get()
-                .command
-                .compare_exchange(
-                    COMMAND_NONE,
-                    COMMAND_SAVE_STATE,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
-                .is_ok()
-            {
-                mapping
-                    .get()
-                    .command_status
-                    .store(COMMAND_PENDING, Ordering::Release);
+            if begin_control_command(mapping.get(), COMMAND_SAVE_STATE) {
                 // Capture below, after all accepted DSP requests have run.
                 internal_state_save = true;
             } else {
@@ -1274,6 +1316,7 @@ fn run_dsp_server(args: DspArgs, logger: FrontendLogger) -> Result<(), String> {
         }
         let command = mapping.get().command.load(Ordering::Acquire);
         if command != COMMAND_NONE
+            && command != COMMAND_RESERVED
             && command != COMMAND_SAVE_STATE
             && mapping.get().command_status.load(Ordering::Acquire) == COMMAND_PENDING
         {
@@ -1315,17 +1358,11 @@ fn run_dsp_server(args: DspArgs, logger: FrontendLogger) -> Result<(), String> {
                     if command == COMMAND_CLOSE_EDITOR {
                         mapping.get().editor_open.store(0, Ordering::Release);
                     }
-                    mapping
-                        .get()
-                        .command_status
-                        .store(COMMAND_OK, Ordering::Release);
+                    finish_control_command(mapping.get(), COMMAND_OK);
                 }
                 Err(error) => {
                     set_command_error(mapping.get_mut(), &error);
-                    mapping
-                        .get()
-                        .command_status
-                        .store(COMMAND_FAILED, Ordering::Release);
+                    finish_control_command(mapping.get(), COMMAND_FAILED);
                 }
             }
         }
@@ -1415,11 +1452,10 @@ fn service_dsp_cycle(
             continue;
         }
         if let Err(error) = process(slot, frames, event_count, parameter_count) {
+            slot.state.store(SLOT_EMPTY, Ordering::Release);
+            set_mapping_error(shared, &error);
             if shared.command.load(Ordering::Acquire) == COMMAND_SAVE_STATE {
-                set_command_error(shared, &error);
-                shared
-                    .command_status
-                    .store(COMMAND_FAILED, Ordering::Release);
+                finish_control_command(shared, COMMAND_FAILED);
             }
             return Err(error);
         }
@@ -1429,14 +1465,21 @@ fn service_dsp_cycle(
         && shared.command_status.load(Ordering::Acquire) == COMMAND_PENDING
     {
         match capture() {
-            Ok(()) => shared.command_status.store(COMMAND_OK, Ordering::Release),
+            Ok(()) => finish_control_command(shared, COMMAND_OK),
             Err(error) => {
                 set_command_error(shared, &error);
-                shared
-                    .command_status
-                    .store(COMMAND_FAILED, Ordering::Release);
+                finish_control_command(shared, COMMAND_FAILED);
             }
         }
+    }
+    // This iteration owns all native calls, so a command not started before
+    // expiry can now be retired safely as well.
+    let command = shared.command.load(Ordering::Acquire);
+    if command != COMMAND_NONE
+        && command != COMMAND_RESERVED
+        && shared.command_status.load(Ordering::Acquire) == COMMAND_TIMED_OUT
+    {
+        shared.command.store(COMMAND_NONE, Ordering::Release);
     }
     Ok(())
 }
@@ -1755,10 +1798,8 @@ mod tests {
         Mapping::create(&name, serial, 512, &PrivateKernelSecurity::new().unwrap()).unwrap()
     }
 
-    // Audit characterization: no native plugin or audio device is loaded.
-    #[test]
     #[cfg(target_pointer_width = "64")]
-    fn audit_timed_out_x86_control_masks_subsequent_dsp_stall() {
+    fn test_remote() -> RemotePlugin {
         use std::os::windows::process::CommandExt;
         let mapping = test_mapping();
         mapping
@@ -1774,7 +1815,7 @@ mod tests {
             .spawn()
             .unwrap();
         child.wait().unwrap();
-        let mut remote = RemotePlugin {
+        RemotePlugin {
             mapping,
             request_event,
             child,
@@ -1789,19 +1830,30 @@ mod tests {
             consecutive_missed_frames: 0,
             parameter_cache: Vec::new(),
             last_output_samples: [0.0; BRIDGE_MAX_CHANNELS],
-        };
+        }
+    }
+
+    // Audit characterization: no native plugin or audio device is loaded.
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn audit_timed_out_x86_control_masks_subsequent_dsp_stall() {
+        let mut remote = test_remote();
         let error = remote
             .control_command(COMMAND_OPEN_EDITOR, "audit")
             .unwrap_err();
         assert!(error.contains("timed out"));
         assert_eq!(
             remote.mapping.get().command.load(Ordering::Acquire),
-            COMMAND_NONE
+            COMMAND_OPEN_EDITOR
         );
         assert_eq!(
             remote.mapping.get().command_status.load(Ordering::Acquire),
-            COMMAND_FAILED
+            COMMAND_TIMED_OUT
         );
+        assert!(remote
+            .control_command(COMMAND_SAVE_STATE, "retry")
+            .unwrap_err()
+            .contains("already in progress"));
         let mut midi = VecDeque::new();
         let mut outputs = vec![vec![0.0; 512]; 2];
         for _ in 0..500 {
@@ -1809,6 +1861,111 @@ mod tests {
         }
         assert!(!remote.realtime_health().2);
         assert!(mapping_error(remote.mapping.get()).contains("5000 ms"));
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn terminal_or_orphaned_control_status_does_not_mask_dsp_stall() {
+        for (command, status) in [
+            (COMMAND_SAVE_STATE, COMMAND_FAILED),
+            (COMMAND_OPEN_EDITOR, COMMAND_OK),
+            (COMMAND_NONE, COMMAND_PENDING),
+        ] {
+            let mut remote = test_remote();
+            remote
+                .mapping
+                .get()
+                .command
+                .store(command, Ordering::Release);
+            remote
+                .mapping
+                .get()
+                .command_status
+                .store(status, Ordering::Release);
+            let mut midi = VecDeque::new();
+            let mut outputs = vec![vec![0.0; 512]; 2];
+            for _ in 0..500 {
+                remote.process(&mut midi, &[], &mut outputs, 512, None);
+            }
+            assert!(
+                !remote.realtime_health().2,
+                "command={command}, status={status}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn pending_internal_save_has_a_bounded_dsp_grace_period() {
+        let mut remote = test_remote();
+        assert!(begin_control_command(
+            remote.mapping.get(),
+            COMMAND_SAVE_STATE
+        ));
+        let mut midi = VecDeque::new();
+        let mut outputs = vec![vec![0.0; 512]; 2];
+        for _ in 0..500 {
+            remote.process(&mut midi, &[], &mut outputs, 512, None);
+        }
+        assert!(remote.realtime_health().2);
+        for _ in 0..1000 {
+            remote.process(&mut midi, &[], &mut outputs, 512, None);
+        }
+        assert!(!remote.realtime_health().2);
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn late_capture_completion_cannot_acknowledge_a_replacement_command() {
+        let mut mapping = test_mapping();
+        let shared = mapping.get_mut();
+        assert!(begin_control_command(shared, COMMAND_SAVE_STATE));
+        // The native call returns after the caller's deadline. Keep ownership
+        // until the DSP iteration ends, and never publish a successful reply.
+        shared
+            .command_status
+            .store(COMMAND_TIMED_OUT, Ordering::Release);
+        assert!(!begin_control_command(shared, COMMAND_OPEN_EDITOR));
+        finish_control_command(shared, COMMAND_OK);
+        assert_eq!(
+            shared.command_status.load(Ordering::Acquire),
+            COMMAND_TIMED_OUT
+        );
+        assert!(!begin_control_command(shared, COMMAND_OPEN_EDITOR));
+        service_dsp_cycle(
+            shared,
+            512,
+            |_, _, _, _| Ok(()),
+            || panic!("expired capture must not run again"),
+        )
+        .unwrap();
+        assert_eq!(shared.command.load(Ordering::Acquire), COMMAND_NONE);
+        assert_eq!(
+            shared.command_status.load(Ordering::Acquire),
+            COMMAND_TIMED_OUT
+        );
+        assert!(begin_control_command(shared, COMMAND_OPEN_EDITOR));
+        assert_eq!(
+            shared.command_status.load(Ordering::Acquire),
+            COMMAND_PENDING
+        );
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn late_completed_dsp_blocks_still_prove_worker_progress() {
+        let mut remote = test_remote();
+        remote.next_sequence = 10;
+        let mut midi = VecDeque::new();
+        let mut outputs = vec![vec![0.0; 512]; 2];
+        for _ in 0..500 {
+            let slot = &remote.mapping.get().slots[0];
+            slot.sequence.store(1, Ordering::Relaxed);
+            slot.frames.store(512, Ordering::Relaxed);
+            slot.state.store(SLOT_READY, Ordering::Release);
+            remote.process(&mut midi, &[], &mut outputs, 512, None);
+        }
+        assert!(remote.realtime_health().2);
     }
 
     #[test]
@@ -1904,10 +2061,8 @@ mod tests {
             shared.command_status.load(Ordering::Acquire),
             COMMAND_FAILED
         );
-        assert_eq!(
-            shared.slots[0].state.load(Ordering::Acquire),
-            SLOT_REQUESTED
-        );
+        assert_eq!(shared.slots[0].state.load(Ordering::Acquire), SLOT_EMPTY);
+        assert_eq!(shared.server_status.load(Ordering::Acquire), SERVER_FAILED);
     }
 
     #[test]
