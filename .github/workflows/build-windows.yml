@@ -15,15 +15,22 @@ on:
         type: boolean
 
 concurrency:
-  group: oscmidi-windows-${{ github.ref }}
-  cancel-in-progress: true
+  group: oscmidi-windows-${{ github.ref }}-${{ inputs.publish_release && 'publish' || 'build' }}
+  cancel-in-progress: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
+  validation:
+    name: Validate before packaging
+    uses: ./.github/workflows/validate.yml
+
   build-windows:
     name: Build Windows executable
+    needs: validation
+    permissions:
+      contents: write
     runs-on: windows-latest
     timeout-minutes: 90
 
@@ -39,7 +46,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
         with:
-          fetch-depth: 0
+          fetch-depth: 1
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
@@ -54,95 +61,56 @@ jobs:
           toolchain: 1.90.0
           targets: x86_64-pc-windows-msvc, i686-pc-windows-msvc
 
-      - name: Cache Rust dependencies
-        uses: actions/cache@v6
-        with:
-          path: |
-            .cargo-target
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-          key: rust-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}
-          restore-keys: |
-            rust-${{ runner.os }}-${{ runner.arch }}-
-
-      - name: Install frontend dependencies
-        run: npm ci --no-fund --no-audit
-
-      - name: Validate frontend before packaging
-        shell: pwsh
-        run: |
-          $PSNativeCommandUseErrorActionPreference = $true
-          npm run lint
-          npm test
-
-      - name: Validate Rust before packaging
-        shell: pwsh
-        env:
-          TAURI_CONFIG: '{"bundle":{"externalBin":[]}}'
-        run: |
-          $PSNativeCommandUseErrorActionPreference = $true
-          cargo fmt --manifest-path src-tauri/Cargo.toml --package osc-midi-bridge -- --check
-          cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
-          cargo test --manifest-path src-tauri/Cargo.toml --all-targets --all-features
-          cargo fmt --manifest-path tools/diagnostics/Cargo.toml --package oscmidi-diagnostics -- --check
-          cargo clippy --manifest-path tools/diagnostics/Cargo.toml --target-dir tools/diagnostics/target --all-targets -- -D warnings
-
-      - name: Validate application version
+      - name: Validate release publication policy
         id: release
         shell: pwsh
         env:
           REQUEST_PUBLISH: ${{ inputs.publish_release }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          $PSNativeCommandUseErrorActionPreference = $true
-          $packageVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          $packageLock = Get-Content package-lock.json -Raw | ConvertFrom-Json -AsHashtable
-          $packageLockVersion = $packageLock['version']
-          $packageLockRootVersion = $packageLock['packages']['']['version']
-          $tauriVersion = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
-          $cargoMetadata = cargo metadata `
-            --manifest-path src-tauri/Cargo.toml `
-            --format-version 1 `
-            --no-deps | ConvertFrom-Json
-          $cargoVersion = $cargoMetadata.packages[0].version
-          $diagnosticsMetadata = cargo metadata `
-            --manifest-path tools/diagnostics/Cargo.toml `
-            --format-version 1 `
-            --no-deps | ConvertFrom-Json
-          $diagnosticsVersion = $diagnosticsMetadata.packages[0].version
-
-          $versions = @(
-            $packageVersion,
-            $packageLockVersion,
-            $packageLockRootVersion,
-            $tauriVersion,
-            $cargoVersion,
-            $diagnosticsVersion
-          ) | Sort-Object -Unique
-          if ($versions.Count -ne 1) {
-            throw "Version mismatch: package.json=$packageVersion, package-lock.json=$packageLockVersion/$packageLockRootVersion, tauri.conf.json=$tauriVersion, app Cargo.toml=$cargoVersion, diagnostics Cargo.toml=$diagnosticsVersion"
-          }
-
-          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne "v$packageVersion") {
-            throw "Release tag $env:GITHUB_REF_NAME does not match application version v$packageVersion"
-          }
-
-          $isMainPush = $env:GITHUB_EVENT_NAME -eq 'push' -and $env:GITHUB_REF -eq 'refs/heads/main'
-          $isVersionTagPush = $env:GITHUB_EVENT_NAME -eq 'push' -and $env:GITHUB_REF -like 'refs/tags/v*'
+          $ErrorActionPreference = 'Stop'
+          ./scripts/validate.ps1 -Scope Version
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $tag = "v$version"
+          $isVersionTagPush = $env:GITHUB_EVENT_NAME -eq 'push' -and $env:GITHUB_REF_TYPE -eq 'tag'
           $isManualPublish = $env:GITHUB_EVENT_NAME -eq 'workflow_dispatch' -and $env:REQUEST_PUBLISH -eq 'true'
-          $publish = $isMainPush -or $isVersionTagPush -or $isManualPublish
-          $publishText = $publish.ToString().ToLowerInvariant()
+          $publish = $isVersionTagPush -or $isManualPublish
+          if ($publish) {
+            $tags = @(gh api "repos/$env:GITHUB_REPOSITORY/releases" --paginate --jq '.[].tag_name')
+            if ($LASTEXITCODE -ne 0) { throw 'Could not check existing releases; publication refused.' }
+            if ($tags -contains $tag) { throw "Release $tag already exists. Bump the version to publish new packages." }
+            $remoteTags = @(git ls-remote --tags origin "refs/tags/$tag" "refs/tags/$tag^{}")
+            if ($LASTEXITCODE -ne 0) { throw 'Could not check remote version tag.' }
+            if ($remoteTags.Count -gt 0) {
+              $dereferenced = @($remoteTags | Where-Object { $_ -match '\^\{\}$' })
+              $tagCommit = (($dereferenced + $remoteTags)[0] -split '\s+')[0]
+              if ($tagCommit -ne $env:GITHUB_SHA) { throw "Tag $tag refers to another commit. Bump the version." }
+            }
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "publish=$($publish.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
 
-          "version=$packageVersion" >> $env:GITHUB_OUTPUT
-          "tag=v$packageVersion" >> $env:GITHUB_OUTPUT
-          "publish=$publishText" >> $env:GITHUB_OUTPUT
-          Write-Host "Validated OSCMidi version $packageVersion (publish=$publishText)"
+      - name: Restore Rust caches
+        id: rust-cache
+        uses: ./.github/actions/restore-rust-cache
+        with:
+          stage: release
+
+      - name: Install frontend dependencies
+        run: npm ci --no-fund --no-audit --prefer-offline
+
+      - name: Validate publication and cache behavior
+        shell: pwsh
+        run: ./scripts/test-ci-workflows.ps1
 
       - name: Remove stale bundle outputs
         shell: pwsh
         run: |
-          Remove-Item '.cargo-target/release/bundle' -Recurse -Force -ErrorAction SilentlyContinue
-          Remove-Item '.cargo-target/release/wix' -Recurse -Force -ErrorAction SilentlyContinue
+          $repositoryRoot = $env:GITHUB_WORKSPACE
+          . ./scripts/build-support.ps1
+          Remove-GeneratedDirectory '.cargo-target/release/bundle'
+          Remove-GeneratedDirectory '.cargo-target/release/wix'
 
       - name: Resolve release signing mode
         id: signing
@@ -213,7 +181,7 @@ jobs:
             } | ConvertTo-Json -Depth 5 -Compress
             $env:TAURI_CONFIG = $override
           }
-          npm run tauri:build -- --bundles msi --ci
+          npm run tauri:build -- --bundles msi --ci -- --locked --timings
 
       - name: Verify release Authenticode signatures
         if: steps.signing.outputs.enabled == 'true'
@@ -277,7 +245,7 @@ jobs:
             workflowRunId = $env:GITHUB_RUN_ID
             workflowRunAttempt = [int]$env:GITHUB_RUN_ATTEMPT
             builtAtUtc = (Get-Date).ToUniversalTime().ToString('o')
-            mutableReleaseAssets = $true
+            mutableReleaseAssets = $false
             authenticodeSigned = '${{ steps.signing.outputs.enabled }}' -eq 'true'
           } | ConvertTo-Json -Depth 3
           [System.IO.File]::WriteAllText(
@@ -309,6 +277,40 @@ jobs:
           name: OSCMidi-windows-${{ steps.release.outputs.version }}-${{ github.run_id }}
           path: artifacts
           if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+      - name: Save dependency downloads
+        if: github.ref == 'refs/heads/main' && steps.rust-cache.outputs.dependency-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: ${{ steps.rust-cache.outputs.dependency-key }}
+
+      - name: Save exact pinned VST3 SDK
+        if: github.ref == 'refs/heads/main' && steps.rust-cache.outputs.sdk-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: vendor/rack/rack-sys/external/vst3sdk
+          key: ${{ steps.rust-cache.outputs.sdk-key }}
+
+      - name: Remove packaging intermediates from compilation cache
+        shell: pwsh
+        run: |
+          $repositoryRoot = $env:GITHUB_WORKSPACE
+          . ./scripts/build-support.ps1
+          Remove-GeneratedDirectory '.cargo-target/release/bundle'
+          Remove-GeneratedDirectory '.cargo-target/release/wix'
+
+      - name: Save release compilation snapshot
+        if: github.ref == 'refs/heads/main' && steps.rust-cache.outputs.build-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ steps.rust-cache.outputs.build-paths }}
+          key: ${{ steps.rust-cache.outputs.build-key }}
 
       - name: Ensure version tag exists
         if: steps.release.outputs.publish == 'true'
@@ -319,11 +321,17 @@ jobs:
         run: |
           git ls-remote --exit-code --tags origin "refs/tags/$env:RELEASE_TAG" *> $null
           if ($LASTEXITCODE -eq 0) {
-            Write-Host "Keeping existing immutable tag $env:RELEASE_TAG"
+            $remote = @(git ls-remote --tags origin "refs/tags/$env:RELEASE_TAG" "refs/tags/$env:RELEASE_TAG^{}")
+            if ($LASTEXITCODE -ne 0) { throw 'Could not verify remote tag.' }
+            $peeled = @($remote | Where-Object { $_ -match '\^\{\}$' })
+            if ((($peeled + $remote)[0] -split '\s+')[0] -ne $env:GITHUB_SHA) {
+              throw 'The version tag points to another commit; publication refused.'
+            }
+            Write-Host "Verified immutable tag $env:RELEASE_TAG"
           } elseif ($LASTEXITCODE -eq 2) {
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git tag --annotate --force $env:RELEASE_TAG $env:GITHUB_SHA `
+            git tag --annotate $env:RELEASE_TAG $env:GITHUB_SHA `
               --message "OSCMidi $env:RELEASE_TAG"
             git push origin "refs/tags/$env:RELEASE_TAG"
             if ($LASTEXITCODE -ne 0) {
@@ -356,16 +364,12 @@ jobs:
             $buildInfo.FullName
           )
 
-          gh release view $tag --repo $repository *> $null
-          if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag @assets --repo $repository --clobber
-          } else {
-            gh release create $tag @assets `
-              --repo $repository `
-              --verify-tag `
-              --generate-notes `
-              --title "OSCMidi $tag"
-          }
+          # Never replace assets. A concurrent publication makes this fail safely.
+          gh release create $tag @assets `
+            --repo $repository `
+            --verify-tag `
+            --generate-notes `
+            --title "OSCMidi $tag"
 
           if ($LASTEXITCODE -ne 0) {
             throw "Failed to publish GitHub Release $tag"

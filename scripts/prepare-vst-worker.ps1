@@ -86,10 +86,13 @@ try {
         $cargoArgs = @(
             'build',
             '--manifest-path', $manifestPath,
-            '--target', $target.Triple,
             '--bin', 'vst-host-worker',
-            '--features', 'vst-worker-binary'
+            '--features', 'vst-worker-binary',
+            '--locked',
+            '--timings'
         )
+        # Native x64 uses the same dependency cache/layout as the desktop app.
+        if ($target.Triple -ne $hostTriple) { $cargoArgs += @('--target', $target.Triple) }
         if ($Profile -eq 'release') {
             $cargoArgs += '--release'
         }
@@ -98,7 +101,8 @@ try {
             throw "Building vst-host-worker for $($target.Triple) failed with exit code $LASTEXITCODE."
         }
 
-        $source = Join-Path $metadata.target_directory "$($target.Triple)\$Profile\vst-host-worker.exe"
+        $relativeOutput = if ($target.Triple -eq $hostTriple) { "$Profile\vst-host-worker.exe" } else { "$($target.Triple)\$Profile\vst-host-worker.exe" }
+        $source = Join-Path $metadata.target_directory $relativeOutput
         if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
             throw "The worker build completed but $source was not produced."
         }

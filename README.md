@@ -190,7 +190,17 @@ Run the complete local build from the repository root:
 build_windows.bat
 ```
 
-The script validates the toolchain, installs clean frontend dependencies, runs frontend and Rust checks, builds the worker, application and MSI, exports the deliverables, then removes generated dependencies and compilation caches. Progress and command output remain visible throughout the build.
+The script validates the toolchain, prepares frontend dependencies, runs the shared frontend, Rust, diagnostics, vendored VST/RTP-MIDI and native audio checks, builds both workers, the application and MSI, and exports the deliverables. It preserves dependency and compilation caches after success or failure. An unchanged dependency installation is reused only when its manifests, lockfile, local npm configuration and Node/npm versions match and `npm ls` reports a valid dependency tree. Progress and command output remain visible throughout the build.
+
+```bat
+build_windows.bat -Clean
+build_windows.bat -ReinstallDependencies
+build_windows_no_log.bat
+```
+
+`-Clean` removes generated build directories before running the same complete validation and packaging pipeline. `-ReinstallDependencies` forces `npm ci` while keeping Rust caches. The no-log launcher runs the same pipeline without writing a build log to disk. Normal builds keep their ten most recent logs; Cargo compilation timing reports are retained in `.cargo-target/cargo-timings/`. Release optimization settings are identical in every mode.
+
+On Windows, the frontend build still runs Vite on every invocation, then preserves file and directory timestamps only when every output path and SHA-256 content hash is identical. Any changed, added, removed or renamed asset keeps the rebuilt tree's new timestamps so Cargo regenerates its embedded asset map. CI release snapshots include `dist` for the same reason. Frontend tests are restricted to `src` so archived working copies in `artifacts` are not tested again.
 
 Successful outputs are preserved in `artifacts\`:
 
@@ -205,23 +215,24 @@ Successful outputs are preserved in `artifacts\`:
 
 Run `artifacts\portable\OSCMidi.exe` directly, install the MSI, or copy/extract the complete portable folder. `OSCMidi.exe` requires both architecture-specific VST workers beside it and must never be copied alone.
 
-Before installing dependencies and during cleanup, the build stops Node processes that have a native `.node` module loaded from this repository's `node_modules`. This releases Windows file locks left by development servers, including servers whose command line uses a relative path. Each stopped process is logged; processes without a matching loaded module are left running. Run `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-build-windows-processes.ps1` to check this process selection.
+Before reinstalling dependencies or performing an explicit clean, the build stops Node processes that have a native `.node` module loaded from this repository's `node_modules`. This releases Windows file locks left by development servers, including servers whose command line uses a relative path. Each stopped process is logged; processes without a matching loaded module are left running. Run `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-build-windows-processes.ps1` to check this process selection.
 
-The cleanup runs after both successful and failed builds. It removes `node_modules`, Rust target directories, generated VST dependencies, staged sidecars and frontend output. Before deleting a generated directory, the script refuses to continue if Git reports any tracked file inside it. Deliverables, current and legacy logs, diagnostic reports and developer-managed Python environments are preserved. The next invocation is consequently a full clean build.
+Explicit cleanup removes `node_modules`, Rust target directories, staged sidecars and frontend output. It refuses paths outside the repository, directory links and any directory containing Git-tracked files. Deliverables, logs, diagnostic reports, the pinned VST3 SDK checkout and developer-managed Python environments are preserved. Stale MSI/WiX outputs are removed before every packaging run so an old installer cannot be exported as a new build. `scripts/test-build-support.ps1` exercises dependency invalidation, failed installs and cleanup safeguards using temporary repositories.
 
 ## Automated releases
 
-[Validate](.github/workflows/validate.yml) checks every pull request: frontend lint, tests, production build and npm audit on Linux with Node 20.19, 22.12 and 24; Rust dependency auditing on Linux; and the complete Windows Rust workspace validation. Pull requests restore the trusted `main` Rust cache without writing branch-specific multi-gigabyte caches.
+[Validate](.github/workflows/validate.yml) checks every pull request: frontend lint, tests, production build and npm audit on Linux with Node 20.19, 22.12 and 24; Rust dependency auditing on Linux; and the complete Windows Rust validation. It is also called by the packaging workflow. Local builds and CI execute `scripts/validate.ps1` for the same frontend and Rust checks. The application and diagnostics share `.cargo-target`; the native x64 worker shares the application's target layout.
 
-[Build Windows App](.github/workflows/build-windows.yml) is reserved for pushes to `main`, version tags and manual dispatch. It runs frontend checks and Rust validation before building both worker architectures, the Tauri application, the MSI and the portable archive. PowerShell validation stops at the first failed native command.
+[Build Windows App](.github/workflows/build-windows.yml) runs on pushes to `main`, version tags and manual dispatch. Packaging waits for every job in the reusable validation workflow, including dependency audits. PowerShell validation stops at the first failed native command. Dependency downloads and the pinned VST3 SDK are cached separately from validation and release compilation snapshots. Compilation keys include the compiler, runner image, manifests, build configuration and source inputs; restore prefixes reuse compatible previous snapshots. Only `main` writes these caches; pull requests restore trusted snapshots without writing branch-specific multi-gigabyte caches.
 
-On a successful push to `main`, the workflow reads the common version from `package.json`, `package-lock.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml` and `tools/diagnostics/Cargo.toml`:
+Every build checks the common version in `package.json`, `package-lock.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml` and `tools/diagnostics/Cargo.toml`:
 
-- If `v<version>` does not exist, the workflow creates the annotated tag and creates the GitHub Release.
-- If the tag and release already exist, the tag remains immutable while the MSI, portable ZIP, checksums and `BUILDINFO.json` are replaced with packages built from the new commit.
-- `BUILDINFO.json` records the exact commit SHA, so same-version maintenance builds remain traceable even though the version tag is not moved.
+- Pushes to `main` upload CI artifacts without creating tags or publishing releases.
+- A push of `v<version>`, or a manual run with `publish_release` selected, publishes a new release after all checks pass. Manual publication creates the annotated tag if necessary.
+- An existing release is never overwritten. A tag pointing to another commit is rejected; bump the version for a new release.
+- `BUILDINFO.json` records the exact commit SHA and workflow run. CI artifacts are retained for 14 days.
 
-When the repository secrets `WINDOWS_CERTIFICATE`, `WINDOWS_CERTIFICATE_PASSWORD` and `WINDOWS_TIMESTAMP_URL` are all present, the workflow verifies the Authenticode signature of the application, both VST workers and the MSI before changing a release. If all three are absent, publication continues unsigned and emits a warning; a partial signing configuration is rejected. A manual workflow run publishes only when its `publish_release` option is selected; otherwise it performs a normal unsigned validation build.
+When the repository secrets `WINDOWS_CERTIFICATE`, `WINDOWS_CERTIFICATE_PASSWORD` and `WINDOWS_TIMESTAMP_URL` are all present, the workflow verifies the Authenticode signature of the application, both VST workers and the MSI before creating a release. If all three are absent, publication continues unsigned and emits a warning; a partial signing configuration is rejected. A manual workflow run publishes only when its `publish_release` option is selected; otherwise it performs a normal unsigned validation build. Main builds do not cancel tag or manual publication runs.
 
 ## Project layout
 

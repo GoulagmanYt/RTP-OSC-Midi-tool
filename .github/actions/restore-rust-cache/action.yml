@@ -1,0 +1,85 @@
+name: Restore Rust build caches
+description: Separate dependency downloads from source-keyed compilation snapshots
+inputs:
+  stage:
+    description: validation or release
+    required: true
+outputs:
+  dependency-key:
+    value: ${{ steps.keys.outputs.dependency-key }}
+    description: Dependency cache key
+  dependency-hit:
+    value: ${{ steps.dependencies.outputs.cache-hit }}
+    description: Exact dependency cache hit
+  build-key:
+    value: ${{ steps.keys.outputs.build-key }}
+    description: Compilation snapshot key
+  build-hit:
+    value: ${{ steps.build.outputs.cache-hit }}
+    description: Exact compilation snapshot hit
+  build-paths:
+    value: ${{ steps.keys.outputs.build-paths }}
+    description: Compilation directories for this stage
+  sdk-key:
+    value: vst3sdk-v1-${{ hashFiles('vendor/rack/build.rs') }}
+    description: Exact pinned SDK cache key
+  sdk-hit:
+    value: ${{ steps.sdk.outputs.cache-hit }}
+    description: Exact pinned SDK cache hit
+runs:
+  using: composite
+  steps:
+    - name: Compute compiler and source cache keys
+      id: keys
+      shell: pwsh
+      env:
+        CACHE_STAGE: ${{ inputs.stage }}
+        CACHE_PLATFORM: ${{ runner.os }}-${{ runner.arch }}
+        CONFIG_HASH: ${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml', '**/Cargo.toml', '**/Cargo.lock', '**/build.rs', '**/CMakeLists.txt') }}
+        SOURCE_HASH: ${{ hashFiles('package.json', 'package-lock.json', '*.config.*', 'tsconfig*.json', '.env*', 'index.html', 'public/**', 'src/**', 'src-tauri/src/**', 'src-tauri/icons/**', 'src-tauri/capabilities/**', 'src-tauri/tauri.conf.json', 'vendor/**', 'ASIOSDK/**', 'tools/diagnostics/src/**', 'scripts/**', '.github/actions/restore-rust-cache/action.yml') }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        if ($env:CACHE_STAGE -notin 'validation', 'release') { throw 'Invalid cache stage.' }
+        $compiler = (& rustc -vV) -join "`n"
+        if ($LASTEXITCODE -ne 0) { throw 'Could not fingerprint Rust compiler.' }
+        $bytes = [Text.Encoding]::UTF8.GetBytes("$compiler/$env:ImageOS/$env:ImageVersion/$env:CONFIG_HASH")
+        $compilerHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).Substring(0, 20)
+        $prefix = "rust-v3-$env:CACHE_STAGE-$env:CACHE_PLATFORM-$compilerHash-"
+        "dependency-key=rust-downloads-v3-$env:CACHE_PLATFORM-$env:CONFIG_HASH" >> $env:GITHUB_OUTPUT
+        "build-key=$prefix$env:SOURCE_HASH" >> $env:GITHUB_OUTPUT
+        "build-prefix=$prefix" >> $env:GITHUB_OUTPUT
+        $paths = if ($env:CACHE_STAGE -eq 'validation') {
+          @('.cargo-target/debug', '.cargo-target/realtime-tests')
+        } else {
+          @('.cargo-target/release', '.cargo-target/i686-pc-windows-msvc/release', 'dist')
+        }
+        'build-paths<<CACHE_PATHS' >> $env:GITHUB_OUTPUT
+        $paths >> $env:GITHUB_OUTPUT
+        'CACHE_PATHS' >> $env:GITHUB_OUTPUT
+
+    - name: Restore dependency downloads
+      id: dependencies
+      uses: actions/cache/restore@v6
+      with:
+        path: |
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+          ~/.cargo/git/db
+        key: ${{ steps.keys.outputs.dependency-key }}
+        restore-keys: rust-downloads-v3-${{ runner.os }}-${{ runner.arch }}-
+
+    # Never restore an older SDK: build.rs rejects a checkout at another commit.
+    - name: Restore exact pinned VST3 SDK
+      id: sdk
+      uses: actions/cache/restore@v6
+      with:
+        path: vendor/rack/rack-sys/external/vst3sdk
+        key: vst3sdk-v1-${{ hashFiles('vendor/rack/build.rs') }}
+
+    - name: Restore compilation snapshot
+      id: build
+      uses: actions/cache/restore@v6
+      with:
+        path: ${{ steps.keys.outputs.build-paths }}
+        key: ${{ steps.keys.outputs.build-key }}
+        restore-keys: ${{ steps.keys.outputs.build-prefix }}
