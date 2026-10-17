@@ -241,6 +241,18 @@ function Stop-WorkspaceCargoProcesses {
     }
 }
 
+function Stop-WorkspaceAppProcesses {
+    $processes = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.Name -in 'OSCMidi.exe', 'vst-host-worker-x64.exe', 'vst-host-worker-x86.exe' -and
+            ($_.ExecutablePath -like "$repositoryRoot*" -or $_.CommandLine -like "*$repositoryRoot*")
+        })
+    if ($processes.Count -gt 0) {
+        Stop-Process -Id $processes.ProcessId -Force -ErrorAction SilentlyContinue
+        Write-BuildLog "Stopped $($processes.Count) workspace application process(es)." Yellow
+    }
+}
+
 function Get-PeSubsystem {
     param([Parameter(Mandatory)][string]$Path)
 
@@ -325,6 +337,7 @@ function Get-Sha256Hash {
 }
 
 function Export-BuildArtifacts {
+    Stop-WorkspaceAppProcesses
     $version = (Get-Content (Join-Path $repositoryRoot 'package.json') -Raw | ConvertFrom-Json).version
     $application = Get-Item (Join-Path $cargoTargetDirectory 'release\OSCMidi.exe') -ErrorAction Stop
     $installers = @(
@@ -490,6 +503,7 @@ try {
         Write-BuildLog 'Explicit clean build requested; removing generated caches before validation.' Yellow
         Stop-WorkspaceNodeProcesses
         Stop-WorkspaceCargoProcesses
+        Stop-WorkspaceAppProcesses
         @('.cargo-target', 'src-tauri\target', 'tools\diagnostics\target', 'node_modules', 'src-tauri\binaries', 'dist') |
             ForEach-Object { Remove-GeneratedDirectory $_ }
     }

@@ -397,16 +397,20 @@ pub(super) fn apply_audio_driver_thread_priority(
         if refresh {
             let mut tuning = configure_audio_thread();
             tuning.stream = std::sync::Arc::downgrade(telemetry);
-            store_bool(&telemetry.mmcss_enabled, tuning.enabled);
-            store_bool(&telemetry.mmcss_owned, tuning.registration.is_some());
-            telemetry.mmcss_critical.store(
-                tuning
-                    .critical
-                    .map_or(0, |critical| if critical { 2 } else { 1 }),
-                Ordering::Relaxed,
-            );
             *slot = Some(tuning);
         }
+        let tuning = slot.as_mut().expect("audio thread tuning initialized");
+        if tuning.stream.as_ptr() != std::sync::Arc::as_ptr(telemetry) {
+            tuning.stream = std::sync::Arc::downgrade(telemetry);
+        }
+        store_bool(&telemetry.mmcss_enabled, tuning.enabled);
+        store_bool(&telemetry.mmcss_owned, tuning.registration.is_some());
+        telemetry.mmcss_critical.store(
+            tuning
+                .critical
+                .map_or(0, |critical| if critical { 2 } else { 1 }),
+            Ordering::Relaxed,
+        );
     });
 }
 
@@ -1016,6 +1020,27 @@ mod tests {
             super::apply_audio_thread_priority(&mut replacement);
             assert_eq!(
                 super::load_bool(&replacement.telemetry.mmcss_owned),
+                Some(true)
+            );
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn reused_driver_thread_publishes_owned_registration_for_a_new_stream() {
+        std::thread::spawn(|| {
+            let mut first = callback_state();
+            super::apply_audio_thread_priority(&mut first);
+            assert_eq!(super::load_bool(&first.telemetry.mmcss_owned), Some(true));
+            assert_eq!(super::load_bool(&first.telemetry.mmcss_enabled), Some(true));
+
+            let mut second = callback_state();
+            super::apply_audio_thread_priority(&mut second);
+            assert_eq!(super::load_bool(&second.telemetry.mmcss_owned), Some(true));
+            assert_eq!(
+                super::load_bool(&second.telemetry.mmcss_enabled),
                 Some(true)
             );
         })

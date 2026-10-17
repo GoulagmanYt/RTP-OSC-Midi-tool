@@ -46,6 +46,7 @@ const RTP_PENDING_CAPACITY: usize = 4_096;
 /// le thread de log périodique.
 static DROPPED_MIDI_COUNT: AtomicU64 = AtomicU64::new(0);
 static RTP_LOG_SAMPLE_LAST_MS: AtomicU64 = AtomicU64::new(0);
+static RTP_LOSS_LOG_SAMPLE_LAST_MS: AtomicU64 = AtomicU64::new(0);
 
 /// Retourne le nombre de messages MIDI RTP abandonnés (canal plein).
 pub(crate) fn record_rtp_drop() {
@@ -306,7 +307,7 @@ impl RtpServer {
                     if log_rtp
                         && logs_enabled()
                         && crate::logger::should_log_debug()
-                        && should_sample_rtp_log()
+                        && should_sample_rtp_log(&RTP_LOG_SAMPLE_LAST_MS)
                     {
                         let sampled_logger = rtp_logger.clone();
                         let sampled_bytes = bytes.clone();
@@ -444,7 +445,7 @@ impl RtpServer {
                             &loss_faults,
                         );
                     }
-                    if should_sample_rtp_log() {
+                    if should_sample_rtp_log(&RTP_LOSS_LOG_SAMPLE_LAST_MS) {
                         let logger = loss_logger.clone();
                         async_runtime::spawn(async move {
                             logger.warn(format!(
@@ -785,15 +786,15 @@ fn dispatch_scheduled_frame(sink: &arc_swap::ArcSwapOption<Sender<MidiFrame>>, f
     }
 }
 
-fn should_sample_rtp_log() -> bool {
+fn should_sample_rtp_log(slot: &AtomicU64) -> bool {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()
         .min(u64::MAX as u128) as u64;
-    let last = RTP_LOG_SAMPLE_LAST_MS.load(Ordering::Relaxed);
+    let last = slot.load(Ordering::Relaxed);
     now.saturating_sub(last) >= 1_000
-        && RTP_LOG_SAMPLE_LAST_MS
+        && slot
             .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
             .is_ok()
 }
@@ -812,6 +813,17 @@ impl crate::midi_queue::Priority for TimedRtpFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rtp_midi_and_loss_logs_have_independent_rate_limiters() {
+        let midi_slot = AtomicU64::new(0);
+        let loss_slot = AtomicU64::new(0);
+
+        assert!(should_sample_rtp_log(&midi_slot));
+        assert!(!should_sample_rtp_log(&midi_slot));
+        assert!(should_sample_rtp_log(&loss_slot));
+        assert!(!should_sample_rtp_log(&loss_slot));
+    }
 
     #[test]
     fn scheduler_drains_more_than_one_due_batch_without_another_packet() {
