@@ -616,6 +616,13 @@ impl RemotePlugin {
                     .take(slot.event_count.load(Ordering::Relaxed) as usize)
                 {
                     if event.ingress_qpc != 0 && event.consumed_qpc != 0 {
+                        #[cfg(feature = "latency-diagnostics")]
+                        crate::latency_trace::record(
+                            crate::latency_trace::Stage::DspDequeued,
+                            &event.data,
+                            event.ingress_qpc,
+                            event.consumed_qpc,
+                        );
                         telemetry.record_midi_delivery_at(
                             event.ingress_qpc,
                             event.worker_qpc,

@@ -272,6 +272,10 @@ impl AudioEngine {
             return self.worker.snapshot().metrics;
         }
         let mut metrics = WorkerMetrics {
+            #[cfg(feature = "latency-diagnostics")]
+            diagnostic_trace: Vec::new(),
+            #[cfg(feature = "latency-diagnostics")]
+            diagnostic_trace_dropped: crate::latency_trace::dropped(),
             midi_transport_failed: self.midi_transport_failed.load(Ordering::Acquire),
             midi_io_threads: crate::realtime::thread_snapshot(),
             game_mode: self.game_mode.load(Ordering::Acquire),

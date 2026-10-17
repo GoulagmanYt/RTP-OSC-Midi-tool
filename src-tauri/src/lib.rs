@@ -6,6 +6,8 @@ pub mod audio;
 pub mod bridge;
 pub mod config;
 pub mod error;
+#[cfg(feature = "latency-diagnostics")]
+pub mod latency_trace;
 pub mod logger;
 pub mod midi;
 #[doc(hidden)]

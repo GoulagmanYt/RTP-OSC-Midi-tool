@@ -185,6 +185,21 @@ pub(super) fn submit_pending_vst3_midi_at(
     }
     if !state.midi_events.is_empty() {
         let result = send(&state.midi_events);
+        #[cfg(feature = "latency-diagnostics")]
+        if result.is_ok() {
+            for (packet, event) in state
+                .pending_midi
+                .iter()
+                .filter(|packet| midi_to_rack_event(packet.data).is_some())
+                .zip(state.midi_events.iter())
+            {
+                crate::latency_trace::record_sample_offset(
+                    &packet.data[..usize::from(packet.len)],
+                    packet.ingress_qpc,
+                    event.sample_offset,
+                );
+            }
+        }
         state.midi_events.clear();
         result?;
     }

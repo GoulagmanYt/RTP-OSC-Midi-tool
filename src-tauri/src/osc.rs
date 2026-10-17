@@ -56,6 +56,7 @@ impl OscClient {
         socket
             .set_nonblocking(true)
             .map_err(|e| format!("socket write timeout: {e}"))?;
+        let _ = socket2::SockRef::from(&socket).set_send_buffer_size(512 * 1024);
         Ok(Self { socket, target })
     }
 

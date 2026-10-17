@@ -37,6 +37,12 @@ pub struct WorkerAudioStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkerMetrics {
+    #[cfg(feature = "latency-diagnostics")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostic_trace: Vec<crate::latency_trace::MidiTrace>,
+    #[cfg(feature = "latency-diagnostics")]
+    #[serde(default)]
+    pub diagnostic_trace_dropped: u64,
     #[serde(default)]
     pub render_ahead_samples: u32,
     #[serde(default)]

@@ -623,12 +623,19 @@ impl MidiPort {
             return;
         }
         let now = Instant::now();
-        let local_ticks = current_timestamp(self.start_time).get();
+        // Use one coherent clock sample. A second Instant::now() after a CPU
+        // preemption would corrupt the reconstructed phase by that whole gap.
+        let local_ticks =
+            (now.duration_since(self.start_time).as_micros() / 100).min(u64::MAX as u128) as u64;
         let [t0, t1, t2] = packet.timestamps.map(|value| value.get());
         match packet.count {
             1 if local_ticks >= t0 && local_ticks - t0 <= 100_000 => {
                 let midpoint = now - std::time::Duration::from_micros((local_ticks - t0) * 50);
-                participant.synchronize(t1, midpoint);
+                participant.synchronize(
+                    t1,
+                    midpoint,
+                    std::time::Duration::from_micros((local_ticks - t0) * 100),
+                );
             }
             2 if t2 >= t0
                 && t2 - t0 <= 100_000
@@ -636,7 +643,11 @@ impl MidiPort {
                 && local_ticks - t1 <= 100_000 =>
             {
                 let local = now - std::time::Duration::from_micros((local_ticks - t1) * 100);
-                participant.synchronize(t0 + (t2 - t0) / 2, local);
+                participant.synchronize(
+                    t0 + (t2 - t0) / 2,
+                    local,
+                    std::time::Duration::from_micros((t2 - t0) * 100),
+                );
             }
             0 => {}
             _ => return,

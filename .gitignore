@@ -9,6 +9,7 @@ tools/diagnostics/target
 vendor/rack/rack-sys/external
 reports
 docs/superpowers/
+docs/audio-cpu-resilience.md
 artifacts/
 src-tauri/binaries/*.exe
 .vscode/

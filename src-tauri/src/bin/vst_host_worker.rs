@@ -364,14 +364,29 @@ mod windows_worker {
             let mut sequence = 0u64;
             loop {
                 tick.tick().await;
+                // Reserve before draining: health reads and a full control
+                // queue must not silently consume per-note diagnostics.
+                #[cfg(feature = "latency-diagnostics")]
+                let heartbeat_permit = match heartbeat_tx.try_reserve() {
+                    Ok(permit) => permit,
+                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => continue,
+                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
+                };
                 sequence = sequence.wrapping_add(1);
                 let mut metrics = health_audio.realtime_metrics();
+                #[cfg(feature = "latency-diagnostics")]
+                {
+                    metrics.diagnostic_trace = osc_midi_bridge::latency_trace::drain();
+                }
                 metrics.limiter_enabled = Some(health_limiter.load(Ordering::Acquire));
                 let message = ControlMessage::Heartbeat {
                     sequence,
                     monotonic_qpc: monotonic_qpc(),
                     metrics,
                 };
+                #[cfg(feature = "latency-diagnostics")]
+                heartbeat_permit.send(message);
+                #[cfg(not(feature = "latency-diagnostics"))]
                 match heartbeat_tx.try_send(message) {
                     Ok(()) | Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {}
                     Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
@@ -640,6 +655,10 @@ mod windows_worker {
 
 #[cfg(target_os = "windows")]
 fn main() {
+    #[cfg(feature = "latency-diagnostics")]
+    if std::env::var_os("OSCMIDI_LATENCY_TRACE").is_some() {
+        osc_midi_bridge::latency_trace::start();
+    }
     let _timer_guard = osc_midi_bridge::audio::windows_tuning::enable_high_resolution_timer();
     let _tuning_diagnostics =
         osc_midi_bridge::audio::windows_tuning::start_audio_tuning_diagnostics();

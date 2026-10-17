@@ -484,6 +484,50 @@ fn spawn_midi_thru_worker(
                     if midi_out.is_none() {
                         *actual_midi_out.lock() = None;
                     }
+                    for _ in 1..PROCESSING_BATCH_LIMIT {
+                        if stop.load(Ordering::Relaxed)
+                            || midi_reset_generation() != cached_generation
+                            || rx.recovery().generation() != route_generation
+                        {
+                            break;
+                        }
+                        let Ok(envelope) = rx.try_recv() else {
+                            break;
+                        };
+                        match generation_action(
+                            (envelope.generation, envelope.route_generation),
+                            (cached_generation, route_generation),
+                            (midi_reset_generation(), rx.recovery().generation()),
+                        ) {
+                            GenerationAction::Discard => continue,
+                            GenerationAction::Defer => {
+                                pending = Some(envelope);
+                                break;
+                            }
+                            GenerationAction::Ready => {}
+                        }
+                        let frame = envelope.frame;
+                        let deliver_external = !frame.source.starts_with("StressTest");
+                        handle_midi_frame(
+                            &snapshot,
+                            None,
+                            &mut midi_out,
+                            &logger,
+                            frame,
+                            &audio,
+                            &osc_counter,
+                            &mut sustain,
+                            &midi_event_tx,
+                            false,
+                            deliver_external,
+                            false,
+                            &mut active_notes,
+                            Some(rx.recovery()),
+                        );
+                        if midi_out.is_none() {
+                            *actual_midi_out.lock() = None;
+                        }
+                    }
                 }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break,
@@ -628,7 +672,48 @@ fn spawn_osc_worker(
                         deliver_external,
                         &mut active_notes,
                         Some(rx.recovery()),
-                    )
+                    );
+                    for _ in 1..PROCESSING_BATCH_LIMIT {
+                        if stop.load(Ordering::Relaxed)
+                            || midi_reset_generation() != cached_generation
+                            || rx.recovery().generation() != route_generation
+                        {
+                            break;
+                        }
+                        let Ok(envelope) = rx.try_recv() else {
+                            break;
+                        };
+                        match generation_action(
+                            (envelope.generation, envelope.route_generation),
+                            (cached_generation, route_generation),
+                            (midi_reset_generation(), rx.recovery().generation()),
+                        ) {
+                            GenerationAction::Discard => continue,
+                            GenerationAction::Defer => {
+                                pending = Some(envelope);
+                                break;
+                            }
+                            GenerationAction::Ready => {}
+                        }
+                        let frame = envelope.frame;
+                        let deliver_external = !frame.source.starts_with("StressTest");
+                        handle_midi_frame(
+                            &snapshot,
+                            osc_client.as_ref().filter(|_| !reset_pending),
+                            &mut no_midi_out,
+                            &logger,
+                            frame,
+                            &audio,
+                            &osc_counter,
+                            &mut sustain,
+                            &midi_event_tx,
+                            false,
+                            false,
+                            deliver_external,
+                            &mut active_notes,
+                            Some(rx.recovery()),
+                        );
+                    }
                 }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break,

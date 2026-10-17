@@ -1102,6 +1102,11 @@ async fn midi_writer<W: tokio::io::AsyncWrite + Unpin>(
             frame = async { if let Some(frame) = saved.take() { Some(frame) } else { midi.recv().await } } => {
                 let Some(mut frame) = frame else { break; };
                 frame.pipe_qpc = monotonic_qpc();
+                #[cfg(feature = "latency-diagnostics")]
+                crate::latency_trace::record(
+                    crate::latency_trace::Stage::PipeWriteStarted,
+                    frame.bytes(), frame.monotonic_qpc, frame.pipe_qpc,
+                );
                 if frame.generation < generation { tokio::task::yield_now().await; continue; }
                 if frame.generation > generation || inner.midi_generation.load(Ordering::Acquire) != generation {
                     saved = Some(frame); continue;
@@ -1116,6 +1121,11 @@ async fn midi_writer<W: tokio::io::AsyncWrite + Unpin>(
                     if frame.generation < generation { continue; }
                     if frame.generation > generation { saved = Some(frame); break; }
                     frame.pipe_qpc = monotonic_qpc();
+                    #[cfg(feature = "latency-diagnostics")]
+                    crate::latency_trace::record(
+                        crate::latency_trace::Stage::PipeWriteStarted,
+                        frame.bytes(), frame.monotonic_qpc, frame.pipe_qpc,
+                    );
                     batch[count * width..(count + 1) * width].copy_from_slice(&frame.encode());
                     count += 1;
                 }
@@ -1132,7 +1142,9 @@ async fn midi_writer<W: tokio::io::AsyncWrite + Unpin>(
                         break;
                     }
                 }
-                tokio::task::yield_now().await;
+                if consumed >= 256 {
+                    tokio::task::yield_now().await;
+                }
             }
         }
     }
@@ -1297,6 +1309,8 @@ async fn run_session(runtime: SessionRuntime) {
             },
             event = event_rx.recv() => match event {
                 Some(Ok(ControlMessage::Heartbeat { metrics, .. })) => {
+                    #[cfg(feature = "latency-diagnostics")]
+                    crate::latency_trace::import(&metrics.diagnostic_trace);
                     let mut guard = inner.status.lock();
                     let now = Instant::now();
                     guard.last_heartbeat = Some(now);

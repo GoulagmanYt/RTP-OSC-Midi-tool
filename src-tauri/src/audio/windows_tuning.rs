@@ -193,13 +193,14 @@ pub(crate) struct MmcssRegistration {
 /// Call only on dedicated workers, and keep the guard on that thread until exit.
 #[cfg(target_os = "windows")]
 pub(crate) fn prioritize_midi_thread() -> Option<MmcssRegistration> {
-    use windows::Win32::System::Threading::AVRT_PRIORITY_HIGH;
+    use windows::Win32::System::Threading::{
+        AVRT_PRIORITY_CRITICAL, THREAD_PRIORITY_TIME_CRITICAL,
+    };
 
     unsafe {
         let mut task_index = 0;
         let mut profile = "Pro Audio";
-        let mut high = false;
-        let mut fallback = false;
+        let mut critical = false;
         let registration = match AvSetMmThreadCharacteristicsW(w!("Pro Audio"), &mut task_index)
             .or_else(|pro_audio_error| {
                 profile = "Audio";
@@ -207,9 +208,9 @@ pub(crate) fn prioritize_midi_thread() -> Option<MmcssRegistration> {
                     .map_err(|audio_error| (pro_audio_error, audio_error))
             }) {
             Ok(handle) => {
-                high = AvSetMmThreadPriority(handle, AVRT_PRIORITY_HIGH).is_ok();
-                if !high {
-                    background_log("warn", "Failed to raise MIDI MMCSS priority");
+                critical = AvSetMmThreadPriority(handle, AVRT_PRIORITY_CRITICAL).is_ok();
+                if !critical {
+                    background_log("warn", "Failed to raise MIDI MMCSS priority to CRITICAL");
                 }
                 Some(MmcssRegistration {
                     handle,
@@ -226,15 +227,28 @@ pub(crate) fn prioritize_midi_thread() -> Option<MmcssRegistration> {
                         "MIDI MMCSS unavailable; using thread priority fallback",
                     );
                     profile = "unavailable";
-                    fallback =
-                        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST).is_ok();
-                    if !fallback {
-                        background_log("warn", "Failed to raise MIDI worker priority");
-                    }
                 }
                 None
             }
         };
+
+        // Request a high native base priority as well as MMCSS registration.
+        // MMCSS still controls the effective scheduling priority and can lower
+        // it when its CPU quota is exhausted; this is not a scheduling guarantee.
+        let fallback = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL).is_ok();
+        if !fallback {
+            background_log(
+                "warn",
+                "Failed to raise MIDI worker native priority to TIME_CRITICAL",
+            );
+        }
+        if SetThreadPriorityBoost(GetCurrentThread(), false).is_err() {
+            background_log(
+                "warn",
+                "Failed to enable MIDI thread dynamic priority boost",
+            );
+        }
+
         let throttle = THREAD_POWER_THROTTLING_STATE {
             Version: THREAD_POWER_THROTTLING_CURRENT_VERSION,
             ControlMask: THREAD_POWER_THROTTLING_EXECUTION_SPEED,
@@ -250,7 +264,7 @@ pub(crate) fn prioritize_midi_thread() -> Option<MmcssRegistration> {
         {
             background_log("warn", "Failed to disable MIDI thread power throttling");
         }
-        crate::realtime::record_thread(profile, high, fallback);
+        crate::realtime::record_thread(profile, critical, fallback);
         registration
     }
 }
@@ -264,11 +278,11 @@ pub(crate) fn prioritize_midi_thread() -> Option<()> {
 /// Call only on dedicated DSP workers, and keep the guard on that thread until exit.
 #[cfg(target_os = "windows")]
 pub(crate) fn prioritize_dsp_thread() -> Option<MmcssRegistration> {
+    use windows::Win32::System::Threading::THREAD_PRIORITY_TIME_CRITICAL;
     unsafe {
         let mut task_index = 0;
         let mut profile = "Pro Audio";
         let mut critical = false;
-        let mut fallback = false;
         let registration = match AvSetMmThreadCharacteristicsW(w!("Pro Audio"), &mut task_index)
             .or_else(|pro_audio_error| {
                 profile = "Audio";
@@ -295,15 +309,21 @@ pub(crate) fn prioritize_dsp_thread() -> Option<MmcssRegistration> {
                         "DSP MMCSS unavailable; using thread priority fallback",
                     );
                     profile = "unavailable";
-                    fallback =
-                        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST).is_ok();
-                    if !fallback {
-                        background_log("warn", "Failed to raise DSP worker priority");
-                    }
                 }
                 None
             }
         };
+        let fallback = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL).is_ok();
+        if !fallback {
+            background_log(
+                "warn",
+                "Failed to raise DSP worker native priority to TIME_CRITICAL",
+            );
+        }
+        if SetThreadPriorityBoost(GetCurrentThread(), false).is_err() {
+            background_log("warn", "Failed to enable DSP thread dynamic priority boost");
+        }
+
         let throttle = THREAD_POWER_THROTTLING_STATE {
             Version: THREAD_POWER_THROTTLING_CURRENT_VERSION,
             ControlMask: THREAD_POWER_THROTTLING_EXECUTION_SPEED,
@@ -574,10 +594,14 @@ pub fn apply_process_priority(logger: &FrontendLogger) {
         return;
     }
     unsafe {
-        if SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS).is_err() {
-            logger.warn("Failed to raise process priority class to ABOVE_NORMAL");
+        if SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS).is_err() {
+            if SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS).is_err() {
+                logger.warn("Failed to raise process priority class to HIGH or ABOVE_NORMAL");
+            } else {
+                logger.debug("Raised process priority to ABOVE_NORMAL (HIGH rejected)");
+            }
         } else {
-            logger.debug("Raised process priority to ABOVE_NORMAL");
+            logger.debug("Raised process priority to HIGH");
         }
         let throttle = PROCESS_POWER_THROTTLING_STATE {
             Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
@@ -609,7 +633,9 @@ pub fn reapply_process_priority_on_focus_loss() {
         return;
     }
     unsafe {
-        if SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS).is_err() {
+        if SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS).is_err()
+            && SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS).is_err()
+        {
             background_log("warn", "Failed to set process priority policy");
         }
 
@@ -1024,7 +1050,7 @@ mod tests {
         reapply_process_priority_on_focus_loss();
         assert_eq!(
             unsafe { GetPriorityClass(GetCurrentProcess()) },
-            ABOVE_NORMAL_PRIORITY_CLASS.0
+            HIGH_PRIORITY_CLASS.0
         );
         apply_worker_process_priority();
         assert_worker_policy();

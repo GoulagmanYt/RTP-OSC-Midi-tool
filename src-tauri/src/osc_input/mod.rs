@@ -98,13 +98,38 @@ async fn receive(
             pending.clear();
             generation = current;
         }
+
+        // Drain any pending events that are already due:
+        let now = Instant::now();
+        for _ in 0..256 {
+            if pending.peek().is_none_or(|event| event.0.deadline > now) {
+                break;
+            }
+            let event = pending.pop().unwrap().0;
+            if event.generation != midi_reset_generation() {
+                continue;
+            }
+            let frame = MidiFrame {
+                generation: event.generation,
+                ingress_qpc: event.ingress_qpc,
+                data: smallvec::SmallVec::from_slice(&event.data[..usize::from(event.len)]),
+                source: source.clone(),
+            };
+            let _ = try_enqueue_midi_frame(&sink, frame);
+            if event.generation != midi_reset_generation() {
+                pending.clear();
+                break;
+            }
+        }
+
         let due = pending.peek().map(|event| event.0.deadline);
         tokio::select! {
             biased;
             _ = &mut stop => break,
             _ = async { if let Some(due) = due { tokio::time::sleep_until(due.into()).await; } }, if due.is_some() => {
+                let now = Instant::now();
                 for _ in 0..256 {
-                    if pending.peek().is_none_or(|event| event.0.deadline > Instant::now()) { break; }
+                    if pending.peek().is_none_or(|event| event.0.deadline > now) { break; }
                     let event = pending.pop().unwrap().0;
                     if event.generation != midi_reset_generation() { continue; }
                     let frame = MidiFrame { generation: event.generation, ingress_qpc: event.ingress_qpc, data: smallvec::SmallVec::from_slice(&event.data[..usize::from(event.len)]), source: source.clone() };
@@ -144,8 +169,18 @@ async fn receive(
                         if critical { request_critical_midi_reset(); pending.clear(); break; }
                         continue;
                     }
-                    event.order = order; order = order.wrapping_add(1);
-                    pending.push(Reverse(event));
+
+                    // Direct zero-latency fast-path for immediate events:
+                    if pending.is_empty() && event.deadline <= now {
+                        let _ = try_enqueue_midi_frame(&sink, candidate);
+                        if event.generation != midi_reset_generation() {
+                            pending.clear();
+                            break;
+                        }
+                    } else {
+                        event.order = order; order = order.wrapping_add(1);
+                        pending.push(Reverse(event));
+                    }
                     if (index + 1) % 256 == 0 { tokio::task::yield_now().await; }
                 }
             }
@@ -164,6 +199,47 @@ mod tests {
             addr: format!("/avatar/parameters/{index}"),
             args: vec![OscType::Int(1)],
         })
+    }
+    #[test]
+    fn future_bundle_drains_all_due_batches_without_a_followup_datagram() {
+        let _guard = crate::bridge::pipeline::TEST_PIPELINE_LOCK.lock().unwrap();
+        let probe = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let addr = probe.local_addr().unwrap();
+        drop(probe);
+        let config = OscConfig {
+            input_enabled: true,
+            listen_port: addr.port(),
+            ..OscConfig::default()
+        };
+        let (tx, rx) = crate::midi_queue::bounded(1024);
+        let server = OscInputServer::start(&config, tx).unwrap().unwrap();
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let future = (SystemTime::now() + Duration::from_millis(100))
+            .duration_since(UNIX_EPOCH)
+            .unwrap();
+        let seconds = future.as_secs().wrapping_add(2_208_988_800) as u32;
+        let fraction = ((u128::from(future.subsec_nanos()) << 32) / 1_000_000_000) as u32;
+        let bundle = OscPacket::Bundle(OscBundle {
+            timetag: (seconds, fraction).into(),
+            content: vec![note(1); 600],
+        });
+        sender
+            .send_to(&rosc::encoder::encode(&bundle).unwrap(), addr)
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_millis(600);
+        let mut count = 0;
+        while count < 600
+            && rx
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .is_ok()
+        {
+            count += 1;
+        }
+        server.stop();
+        assert_eq!(
+            count, 600,
+            "due OSC events must not wait for the next UDP datagram"
+        );
     }
     #[test]
     fn malformed_datagram_is_counted_without_resetting_a_healthy_input() {

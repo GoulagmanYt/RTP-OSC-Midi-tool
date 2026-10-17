@@ -297,6 +297,13 @@ impl AudioTelemetry {
     }
 
     pub(super) fn record_midi_delivery(&self, packet: MidiPacket) {
+        #[cfg(feature = "latency-diagnostics")]
+        crate::latency_trace::record(
+            crate::latency_trace::Stage::DspDequeued,
+            &packet.data[..usize::from(packet.len)],
+            packet.ingress_qpc,
+            crate::vst_worker::protocol::monotonic_qpc(),
+        );
         self.record_midi_delivery_at(
             packet.ingress_qpc,
             packet.worker_qpc,

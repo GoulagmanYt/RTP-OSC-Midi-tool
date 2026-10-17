@@ -240,6 +240,13 @@ impl AudioEngine {
     }
 
     pub fn deliver_midi_wire(&self, frame: crate::vst_worker::MidiWireFrame) {
+        #[cfg(feature = "latency-diagnostics")]
+        crate::latency_trace::record(
+            crate::latency_trace::Stage::WorkerReceived,
+            frame.bytes(),
+            frame.monotonic_qpc,
+            crate::vst_worker::protocol::monotonic_qpc(),
+        );
         if frame.pipe_qpc != 0 {
             if let Some(ingress) = self.midi_tx.load().as_ref() {
                 ingress.telemetry.pipe_wait_max_us.fetch_max(

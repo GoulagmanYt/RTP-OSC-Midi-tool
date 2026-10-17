@@ -351,6 +351,13 @@ pub(super) fn handle_midi_frame(
     // Compteur entrée pipeline (stress test metrics)
     if deliver_audio {
         PIPELINE_IN_COUNT.fetch_add(1, Ordering::Relaxed);
+        #[cfg(feature = "latency-diagnostics")]
+        crate::latency_trace::record(
+            crate::latency_trace::Stage::Routing,
+            frame.data.as_slice(),
+            frame.ingress_qpc,
+            crate::vst_worker::protocol::monotonic_qpc(),
+        );
     }
 
     if !accepts_channel(config.channel_filter, &frame.data) {
@@ -477,6 +484,13 @@ pub(super) fn handle_midi_frame(
                 }
             }
             result?;
+            #[cfg(feature = "latency-diagnostics")]
+            crate::latency_trace::record(
+                crate::latency_trace::Stage::OscSent,
+                frame.data.as_slice(),
+                frame.ingress_qpc,
+                crate::vst_worker::protocol::monotonic_qpc(),
+            );
             osc_counter.fetch_add(1, Ordering::Relaxed);
             if config.log_osc && logs_enabled() {
                 let parameter = index
