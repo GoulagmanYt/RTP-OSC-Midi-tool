@@ -2,8 +2,13 @@
 param(
     [switch]$NoLog,
     [switch]$Clean,
-    [switch]$ReinstallDependencies
+    [switch]$ReinstallDependencies,
+    [switch]$LatencyDiagnostics
 )
+
+if ($LatencyDiagnostics -or $env:OSCMIDI_ENABLE_LATENCY_DIAGNOSTICS -eq '1') {
+    $env:OSCMIDI_ENABLE_LATENCY_DIAGNOSTICS = '1'
+}
 
 $ErrorActionPreference = 'Stop'
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
@@ -527,7 +532,12 @@ try {
     Remove-GeneratedDirectory '.cargo-target\release\wix'
 
     Show-BuildStage 5 75 'Building the release and MSI installer'
-    Invoke-BuildCommand $npm @('run', 'tauri:build', '--', '--bundles', 'msi', '--ci', '--', '--locked', '--timings')
+    $tauriBuildArgs = @('run', 'tauri:build', '--', '--bundles', 'msi', '--ci', '--', '--locked', '--timings')
+    if ($env:OSCMIDI_ENABLE_LATENCY_DIAGNOSTICS -eq '1') {
+        $tauriBuildArgs += @('--features', 'latency-diagnostics')
+        Write-BuildLog 'Building release and MSI installer with latency diagnostics enabled.' Yellow
+    }
+    Invoke-BuildCommand $npm $tauriBuildArgs
 
     Show-BuildStage 6 90 'Verifying and exporting artifacts'
     Export-BuildArtifacts

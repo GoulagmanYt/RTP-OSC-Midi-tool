@@ -21,6 +21,8 @@ fn main() {
     let _tuning_diagnostics =
         osc_midi_bridge::audio::windows_tuning::start_audio_tuning_diagnostics();
     osc_midi_bridge::audio::windows_tuning::reapply_process_priority_on_focus_loss();
+    #[cfg(feature = "latency-diagnostics")]
+    let _latency_trace = osc_midi_bridge::latency_trace::start_file_recorder();
     std::panic::set_hook(Box::new(|info| {
         let msg = match info.payload().downcast_ref::<&str>() {
             Some(s) => *s,

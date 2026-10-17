@@ -379,7 +379,7 @@ pub fn monotonic_qpc() -> u64 {
 }
 
 #[cfg(target_os = "windows")]
-fn qpc_frequency() -> u64 {
+pub fn qpc_frequency() -> u64 {
     use windows::Win32::System::Performance::QueryPerformanceFrequency;
     static FREQUENCY: OnceLock<u64> = OnceLock::new();
     *FREQUENCY.get_or_init(|| {
@@ -399,7 +399,7 @@ pub fn monotonic_qpc() -> u64 {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn qpc_frequency() -> u64 {
+pub fn qpc_frequency() -> u64 {
     1_000_000_000
 }
 

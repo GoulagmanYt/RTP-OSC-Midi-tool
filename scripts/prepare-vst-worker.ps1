@@ -83,11 +83,16 @@ $previousTauriConfig = $env:TAURI_CONFIG
 try {
     $env:TAURI_CONFIG = '{"bundle":{"externalBin":[]}}'
     foreach ($target in $targets) {
+        $workerFeatures = if ($env:OSCMIDI_ENABLE_LATENCY_DIAGNOSTICS -eq '1') {
+            'vst-worker-binary,latency-diagnostics'
+        } else {
+            'vst-worker-binary'
+        }
         $cargoArgs = @(
             'build',
             '--manifest-path', $manifestPath,
             '--bin', 'vst-host-worker',
-            '--features', 'vst-worker-binary',
+            '--features', $workerFeatures,
             '--locked',
             '--timings'
         )
