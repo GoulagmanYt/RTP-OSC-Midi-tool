@@ -995,6 +995,8 @@ fn spawn_worker(credentials: &SessionCredentials) -> Result<WorkerProcess, Strin
     } else {
         command.stdout(Stdio::null()).stderr(Stdio::null());
     }
+    #[cfg(feature = "latency-diagnostics")]
+    command.env("OSCMIDI_LATENCY_TRACE", "1");
     let child = command
         .spawn()
         .map_err(|error| format!("Failed to launch VST worker: {error}"))?;

@@ -656,9 +656,7 @@ mod windows_worker {
 #[cfg(target_os = "windows")]
 fn main() {
     #[cfg(feature = "latency-diagnostics")]
-    if std::env::var_os("OSCMIDI_LATENCY_TRACE").is_some() {
-        osc_midi_bridge::latency_trace::start();
-    }
+    osc_midi_bridge::latency_trace::start();
     let _timer_guard = osc_midi_bridge::audio::windows_tuning::enable_high_resolution_timer();
     let _tuning_diagnostics =
         osc_midi_bridge::audio::windows_tuning::start_audio_tuning_diagnostics();
