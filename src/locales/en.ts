@@ -266,7 +266,7 @@ const en: TranslationTree = {
       renderDirect: "Direct (no prepared block)",
       renderOne: "1 prepared block",
       renderTwo: "2 prepared blocks",
-      renderAheadHint: "Adds about {latency} ms of latency to absorb brief processing delays.",
+      renderAheadHint: "Adds about {{latency}} ms of latency to absorb brief processing delays.",
       dspPriority: "Audio processing priority",
       dspMmcss: "MMCSS Pro Audio",
       dspTimeCritical: "Time critical (HIGH process)",
