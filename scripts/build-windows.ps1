@@ -2,9 +2,33 @@
 param(
     [switch]$NoLog,
     [switch]$Clean,
+    [Alias('Cleanup', 'PostClean', 'CleanupAfter', 'CleanIntermediate')]
+    [switch]$CleanAfter,
+    [Alias('CleanWorkspace')]
+    [switch]$CleanOnly,
     [switch]$ReinstallDependencies,
-    [switch]$LatencyDiagnostics
+    [switch]$LatencyDiagnostics,
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [string[]]$RemainingArguments
 )
+
+if ($RemainingArguments) {
+    foreach ($arg in $RemainingArguments) {
+        if ($arg -match '^(?:-+|/+)?clean(?:up)?(?:after)?$') {
+            $CleanAfter = $true
+        }
+        elseif ($arg -match '^(?:-+|/+)?cleanonly$') {
+            $CleanOnly = $true
+        }
+        elseif ($arg -match '^(?:-+|/+)?clean$') {
+            $Clean = $true
+        }
+    }
+}
+
+if ($env:OSCMIDI_CLEAN_AFTER -eq '1' -or $env:OSCMIDI_CLEANUP -eq '1') {
+    $CleanAfter = $true
+}
 
 if ($LatencyDiagnostics -or $env:OSCMIDI_ENABLE_LATENCY_DIAGNOSTICS -eq '1') {
     $env:OSCMIDI_ENABLE_LATENCY_DIAGNOSTICS = '1'
@@ -449,6 +473,25 @@ $env:CARGO_TARGET_DIR = $cargoTargetDirectory
 $env:CARGO_INCREMENTAL = '0'
 if ($buildLogWriter) { $buildLogWriter.WriteLine("OSCMidi build started at $(Get-Date -Format 'u')") }
 
+if ($CleanOnly) {
+    Write-Host ''
+    Write-Host 'OSCMidi - Workspace Cleanup' -ForegroundColor Cyan
+    Write-Host 'Cleaning compiled libraries, build targets and intermediate caches...' -ForegroundColor Gray
+    Clear-BuildCaches -IncludeNodeModules:$Clean -BeforeClean {
+        Stop-WorkspaceNodeProcesses
+        Stop-WorkspaceCargoProcesses
+        Stop-WorkspaceAppProcesses
+    }
+    Write-Host '[OK] Workspace cleanup completed successfully. Deliverables in artifacts\ are preserved.' -ForegroundColor Green
+    if ($buildLogWriter) {
+        $buildLogWriter.Dispose()
+        if ($temporaryLog -and (Test-Path -LiteralPath $temporaryLog)) {
+            Remove-Item -LiteralPath $temporaryLog -Force -ErrorAction SilentlyContinue
+        }
+    }
+    exit 0
+}
+
 try {
     Show-BuildStage 1 5 'Checking prerequisites'
     Import-VisualStudioEnvironment
@@ -508,11 +551,11 @@ try {
 
     if ($Clean) {
         Write-BuildLog 'Explicit clean build requested; removing generated caches before validation.' Yellow
-        Stop-WorkspaceNodeProcesses
-        Stop-WorkspaceCargoProcesses
-        Stop-WorkspaceAppProcesses
-        @('.cargo-target', 'src-tauri\target', 'tools\diagnostics\target', 'node_modules', 'src-tauri\binaries', 'dist') |
-            ForEach-Object { Remove-GeneratedDirectory $_ }
+        Clear-BuildCaches -IncludeNodeModules -BeforeClean {
+            Stop-WorkspaceNodeProcesses
+            Stop-WorkspaceCargoProcesses
+            Stop-WorkspaceAppProcesses
+        }
     }
 
     Show-BuildStage 2 15 'Preparing frontend dependencies'
@@ -543,6 +586,17 @@ try {
     Export-BuildArtifacts
     $buildSucceeded = $true
     $exitCode = 0
+
+    if ($CleanAfter) {
+        Show-BuildStage 6 95 'Cleaning up intermediate build caches'
+        Write-BuildLog 'Post-build cleanup requested (-CleanAfter); removing intermediate compiled libraries and build caches to free disk space.' Yellow
+        Clear-BuildCaches -BeforeClean {
+            Stop-WorkspaceNodeProcesses
+            Stop-WorkspaceCargoProcesses
+            Stop-WorkspaceAppProcesses
+        }
+        Write-BuildLog 'Intermediate compiled libraries and caches cleaned successfully. Release deliverables preserved in artifacts\.' Green
+    }
 }
 catch {
     Write-BuildLog "FAILED: $($_.Exception.Message)" Red
@@ -550,7 +604,12 @@ catch {
 }
 finally {
     Show-BuildStage 7 96 'Finalizing build logs'
-    Write-BuildLog 'Compilation caches and frontend dependencies preserved for the next build.' DarkGray
+    if ($CleanAfter) {
+        Write-BuildLog 'Intermediate compiled libraries cleaned up to save disk space; release deliverables preserved in artifacts\.' Green
+    }
+    else {
+        Write-BuildLog 'Compilation caches and frontend dependencies preserved for the next build.' DarkGray
+    }
 
     $totalStopwatch.Stop()
     $status = if ($buildSucceeded -and $exitCode -eq 0) { 'OK' } else { 'FAIL' }

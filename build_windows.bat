@@ -16,6 +16,14 @@ if defined OSCMIDI_BUILD_NO_LOG (
   set "OSCMIDI_BUILD_SUBTITLE=Reusable build caches - detailed build log enabled"
 )
 
+for %%A in (%*) do (
+  if /i "%%~A"=="-CleanAfter" set "OSCMIDI_BUILD_SUBTITLE=Clean intermediate caches after export - detailed build log enabled"
+  if /i "%%~A"=="-Cleanup" set "OSCMIDI_BUILD_SUBTITLE=Clean intermediate caches after export - detailed build log enabled"
+  if /i "%%~A"=="cleanup" set "OSCMIDI_BUILD_SUBTITLE=Clean intermediate caches after export - detailed build log enabled"
+  if /i "%%~A"=="-CleanOnly" set "OSCMIDI_BUILD_SUBTITLE=Clean workspace - remove build caches and compiled libraries"
+  if /i "%%~A"=="cleanonly" set "OSCMIDI_BUILD_SUBTITLE=Clean workspace - remove build caches and compiled libraries"
+)
+
 set "POWERSHELL_EXE=pwsh.exe"
 where pwsh.exe >nul 2>nul || set "POWERSHELL_EXE=powershell.exe"
 
@@ -34,7 +42,7 @@ set "BUILD_EXIT_CODE=%ERRORLEVEL%"
 :build_finished
 echo.
 if "%BUILD_EXIT_CODE%"=="0" (
-  "%POWERSHELL_EXE%" -NoLogo -NoProfile -Command "Write-Host '[OK] Build completed successfully.' -ForegroundColor Green; Write-Host '     Artifacts: %~dp0artifacts' -ForegroundColor Cyan"
+  "%POWERSHELL_EXE%" -NoLogo -NoProfile -Command "Write-Host '[OK] Operation completed successfully.' -ForegroundColor Green; if (Test-Path -LiteralPath '%~dp0artifacts') { Write-Host '     Artifacts: %~dp0artifacts' -ForegroundColor Cyan }"
 ) else (
   "%POWERSHELL_EXE%" -NoLogo -NoProfile -Command "Write-Host '[FAIL] Build exited with code %BUILD_EXIT_CODE%.' -ForegroundColor Red; $log = Get-ChildItem -LiteralPath '%~dp0artifacts\logs' -Filter 'build-*.log' -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1; if ($env:OSCMIDI_BUILD_NO_LOG -eq '1') { Write-Host '       Persistent logging was disabled by build_windows_no_log.bat.' -ForegroundColor Yellow } elseif ($log) { Write-Host ('       Log: ' + $log.FullName) -ForegroundColor Yellow } else { Write-Host '       No log was created; check the PowerShell launch error above.' -ForegroundColor Yellow }"
 )

@@ -63,6 +63,30 @@ try {
     # Remove only the link; never recursively delete through a fixture junction.
     [IO.Directory]::Delete((Join-Path $repositoryRoot 'linked-cache'))
 
+    # Untrack the fixture file so .cargo-target can be tested for full cleanup.
+    Invoke-CheckedCommand git @('-C', $repositoryRoot, 'rm', '-f', '--', '.cargo-target/tracked.txt')
+    if (Test-Path -LiteralPath (Join-Path $repositoryRoot '.cargo-target')) {
+        Remove-Item -LiteralPath (Join-Path $repositoryRoot '.cargo-target') -Recurse -Force
+    }
+
+    # Verify Clear-BuildCaches cleans all intermediate directories and handles node_modules appropriately.
+    New-Item -ItemType Directory -Force -Path (Join-Path $repositoryRoot '.cargo-target') | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $repositoryRoot 'src-tauri/target') | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $repositoryRoot 'tools/diagnostics/target') | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $repositoryRoot 'tools/latency_bench/target') | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $repositoryRoot 'src-tauri/binaries') | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $repositoryRoot 'dist') | Out-Null
+    Clear-BuildCaches
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $repositoryRoot '.cargo-target'))) 'Clear-BuildCaches must remove .cargo-target.'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $repositoryRoot 'src-tauri/target'))) 'Clear-BuildCaches must remove src-tauri/target.'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $repositoryRoot 'tools/diagnostics/target'))) 'Clear-BuildCaches must remove tools/diagnostics/target.'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $repositoryRoot 'tools/latency_bench/target'))) 'Clear-BuildCaches must remove tools/latency_bench/target.'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $repositoryRoot 'src-tauri/binaries'))) 'Clear-BuildCaches must remove src-tauri/binaries.'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $repositoryRoot 'dist'))) 'Clear-BuildCaches must remove dist.'
+    Assert-True (Test-Path -LiteralPath (Join-Path $repositoryRoot 'node_modules')) 'Clear-BuildCaches without -IncludeNodeModules must preserve node_modules.'
+    Clear-BuildCaches -IncludeNodeModules
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $repositoryRoot 'node_modules'))) 'Clear-BuildCaches -IncludeNodeModules must remove node_modules.'
+
     $failed = $false
     try { Invoke-CheckedCommand $env:ComSpec @('/d', '/c', 'exit 7') } catch { $failed = $true }
     Assert-True $failed 'A failing native command must throw.'

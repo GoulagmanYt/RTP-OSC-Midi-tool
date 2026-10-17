@@ -172,3 +172,30 @@ function Remove-GeneratedDirectory {
         }
     }
 }
+
+function Clear-BuildCaches {
+    param(
+        [switch]$IncludeNodeModules,
+        [scriptblock]$BeforeClean = {}
+    )
+
+    & $BeforeClean
+
+    $targetDirs = @(
+        '.cargo-target',
+        'src-tauri\target',
+        'src-tauri\.cargo-target',
+        'tools\diagnostics\target',
+        'tools\latency_bench\target',
+        'src-tauri\binaries',
+        'dist'
+    )
+    if ($IncludeNodeModules) {
+        $targetDirs += 'node_modules'
+    }
+
+    foreach ($dir in $targetDirs) {
+        Remove-GeneratedDirectory $dir
+    }
+}
+

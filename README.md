@@ -194,11 +194,13 @@ The script validates the toolchain, prepares frontend dependencies, runs the sha
 
 ```bat
 build_windows.bat -Clean
+build_windows.bat -CleanAfter
+build_windows.bat -CleanOnly
 build_windows.bat -ReinstallDependencies
 build_windows_no_log.bat
 ```
 
-`-Clean` removes generated build directories before running the same complete validation and packaging pipeline. `-ReinstallDependencies` forces `npm ci` while keeping Rust caches. The no-log launcher runs the same pipeline without writing a build log to disk. Normal builds keep their ten most recent logs; Cargo compilation timing reports are retained in `.cargo-target/cargo-timings/`. Release optimization settings are identical in every mode.
+`-Clean` removes generated build directories before running the same complete validation and packaging pipeline. `-CleanAfter` (or `-Cleanup`) runs the full build and packaging pipeline, exports the deliverables to `artifacts\`, and then cleans up all intermediate compiled libraries and build targets (`.cargo-target`, `tools\*\target`, etc.) to free disk space (~30+ GB). `-CleanOnly` (or `clean.bat` / `npm run clean`) immediately removes workspace compilation caches and intermediate build outputs without rebuilding. `-ReinstallDependencies` forces `npm ci` while keeping Rust caches. The no-log launcher runs the same pipeline without writing a build log to disk. Normal builds keep their ten most recent logs; Cargo compilation timing reports are retained in `.cargo-target/cargo-timings/`. Release optimization settings are identical in every mode.
 
 On Windows, the frontend build still runs Vite on every invocation, then preserves file and directory timestamps only when every output path and SHA-256 content hash is identical. Any changed, added, removed or renamed asset keeps the rebuilt tree's new timestamps so Cargo regenerates its embedded asset map. CI release snapshots include `dist` for the same reason. Frontend tests are restricted to `src` so archived working copies in `artifacts` are not tested again.
 
