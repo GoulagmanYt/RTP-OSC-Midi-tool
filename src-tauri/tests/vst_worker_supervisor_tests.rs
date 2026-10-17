@@ -47,6 +47,8 @@ fn fixture_settings() -> AudioSettings {
         device: Some("fixture".into()),
         device_id: None,
         sample_rate: 48_000,
+        render_ahead_blocks: 1,
+        dsp_thread_priority: Default::default(),
         buffer_size: 512,
         gain_db: 0.0,
         limiter_enabled: false,

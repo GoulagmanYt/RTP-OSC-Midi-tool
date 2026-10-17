@@ -188,6 +188,8 @@ export function useAudioPageController() {
         "device",
         "sampleRate",
         "bufferSize",
+        "renderAheadBlocks",
+        "dspThreadPriority",
         "vstPluginId",
         "vstPath",
       ];

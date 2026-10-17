@@ -228,8 +228,9 @@ static bool string_to_uid(const char* str, VST3::UID& uid) {
 // Memory stream implementation for state serialization
 class MemoryStream : public IBStream {
 public:
-    MemoryStream() : ref_count_(1), position_(0) {}
-    MemoryStream(const uint8_t* data, size_t size) : ref_count_(1), position_(0) {
+    MemoryStream() : position_(0) { FUNKNOWN_CTOR }
+    MemoryStream(const uint8_t* data, size_t size) : position_(0) {
+        FUNKNOWN_CTOR
         buffer_.assign(data, data + size);
     }
 
@@ -330,7 +331,6 @@ public:
     void clear() { buffer_.clear(); position_ = 0; }
 
 private:
-    uint32 ref_count_;  // Non-atomic - IMPLEMENT_REFCOUNT macro handles thread-safety
     std::vector<uint8_t> buffer_;
     int32 position_;
 };
@@ -350,7 +350,7 @@ struct RackVST3Plugin;
 class RackVST3ComponentHandler : public IComponentHandler, public IComponentHandler2,
                                  public IComponentHandlerBusActivation, public IUnitHandler {
 public:
-    explicit RackVST3ComponentHandler(RackVST3Plugin* plugin) : ref_count_(1), plugin_(plugin) {}
+    explicit RackVST3ComponentHandler(RackVST3Plugin* plugin) : plugin_(plugin) { FUNKNOWN_CTOR }
 
     DECLARE_FUNKNOWN_METHODS
 
@@ -370,7 +370,6 @@ public:
         ProgramListID /*listId*/, int32 /*programIndex*/) override;
 
 private:
-    uint32 ref_count_;
     RackVST3Plugin* plugin_;
 };
 
@@ -390,7 +389,7 @@ tresult PLUGIN_API RackVST3ComponentHandler::queryInterface(const TUID _iid, voi
 class RackVST3PlugFrame : public IPlugFrame {
 public:
     RackVST3PlugFrame(HWND host_window, HWND container_window)
-    : ref_count_(1), host_window_(host_window), container_window_(container_window) {}
+    : host_window_(host_window), container_window_(container_window) { FUNKNOWN_CTOR }
 
     DECLARE_FUNKNOWN_METHODS
 
@@ -441,7 +440,6 @@ public:
     }
 
 private:
-    uint32 ref_count_;
     HWND host_window_;
     HWND container_window_;
 };

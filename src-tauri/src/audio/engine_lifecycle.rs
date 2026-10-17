@@ -490,6 +490,11 @@ impl AudioEngine {
         vst_fallback: Option<PathBuf>,
         logger: FrontendLogger,
     ) -> Result<(), AudioError> {
+        if settings.render_ahead_blocks > 2 {
+            return Err(AudioError::Message(
+                "renderAheadBlocks must be 0, 1 or 2".into(),
+            ));
+        }
         let _control = self.control_gate.lock();
         self.wait_for_maintenance_completion()?;
         let Some(_lifecycle_guard) = self.lifecycle_gate.try_lock() else {
@@ -531,6 +536,11 @@ impl AudioEngine {
         vst_fallback: Option<PathBuf>,
         logger: FrontendLogger,
     ) -> Result<(), AudioError> {
+        if settings.render_ahead_blocks > 2 {
+            return Err(AudioError::Message(
+                "renderAheadBlocks must be 0, 1 or 2".into(),
+            ));
+        }
         let _control = self.control_gate.lock();
         self.wait_for_maintenance_completion()?;
         let Some(_lifecycle_guard) = self.lifecycle_gate.try_lock() else {
@@ -823,6 +833,8 @@ impl AudioEngine {
                 prefer_low_latency,
                 &vst_probe,
                 &settings.vst_eq,
+                settings.render_ahead_blocks,
+                settings.dsp_thread_priority,
             ) {
                 Ok(res) => {
                     let (
@@ -835,6 +847,7 @@ impl AudioEngine {
                         plugin_latency_samples,
                         parameter_tx,
                         parameter_cache,
+                        renderer,
                     ) = res;
                     stream_opt = Some((
                         stream,
@@ -846,6 +859,7 @@ impl AudioEngine {
                         plugin_latency_samples,
                         parameter_tx,
                         parameter_cache,
+                        renderer,
                     ));
                     logger.debug(format!(
                         "Audio stream built on '{}' ({}) and waiting for VST state restoration",
@@ -900,6 +914,7 @@ impl AudioEngine {
             plugin_latency_samples,
             parameter_tx,
             parameter_cache,
+            renderer,
         ) = stream_opt.ok_or_else(|| {
             let final_err = last_err.unwrap_or_else(|| {
                 AudioError::Message("All audio backends failed to initialise.".into())
@@ -942,19 +957,9 @@ impl AudioEngine {
         #[cfg(not(all(target_os = "windows", target_pointer_width = "64")))]
         let is_x86_bridge = false;
         telemetry.audio_lock_miss_count.store(0, Ordering::Relaxed);
-        stream.play().map_err(|error| {
-            AudioError::Message(format!(
-                "Failed to start stream on '{}': {}",
-                active_device, error
-            ))
-        })?;
-        logger.info(format!(
-            "Audio stream started on '{}' ({}) after VST state restoration",
-            active_device, active_backend
-        ));
-
         let runtime = AudioRuntime {
             _stream: stream,
+            renderer,
             _process_tuning: process_tuning,
             _device: active_device_handle,
             plugin: plugin.clone(),
@@ -976,6 +981,25 @@ impl AudioEngine {
             vst_class_uid: vst_probe.class_uid.clone(),
             vst_plugin: vst_probe.clone(),
         };
+
+        // Retain the complete runtime if native processing stalls during priming.
+        // The existing quiescence timeout/supervisor may terminate an isolated worker;
+        // dropping the thread or plugin here could wait forever or free active native code.
+        let prime_result = runtime
+            .renderer
+            .as_ref()
+            .map_or(Ok(()), |renderer| renderer.prime(stream_buffer_size));
+        if let Err(error) = prime_result {
+            self.health_telemetry.store(Some(runtime.telemetry.clone()));
+            *self.runtime.lock() = Some(runtime);
+            self.lifecycle_state
+                .store(AudioLifecycleState::Faulted as u8, Ordering::Release);
+            return Err(error);
+        }
+        runtime._stream.play().map_err(|error| {
+            AudioError::Message(format!("Failed to start audio stream: {error}"))
+        })?;
+        logger.info("Audio stream started after state restoration and render priming".to_string());
 
         self.health_telemetry.store(Some(runtime.telemetry.clone()));
         *self.last_vst.lock() = Some(vst_path);

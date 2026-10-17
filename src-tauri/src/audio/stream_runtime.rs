@@ -38,6 +38,7 @@ pub(super) type BuiltStream = (
     u32,
     Sender<ParameterCommand>,
     Arc<Mutex<Vec<VstParameter>>>,
+    Option<super::render_ahead::DspWorkerGuard>,
 );
 
 #[allow(clippy::too_many_arguments)]
@@ -55,6 +56,8 @@ pub(super) fn build_stream(
     prefer_low_latency: bool,
     vst_probe: &VstPluginEntry,
     vst_eq: &VstEqSettings,
+    render_ahead_blocks: u32,
+    priority: super::runtime_state::DspThreadPriority,
 ) -> Result<BuiltStream, AudioError> {
     let supported: Vec<_> = device
         .supported_output_configs()
@@ -140,119 +143,161 @@ pub(super) fn build_stream(
     let plugin = Arc::new(Mutex::new(loaded_plugin.backend));
     let (parameter_tx, parameter_rx) = crossbeam_channel::bounded(PARAMETER_COMMAND_CAPACITY);
 
-    let try_build_stream =
-        |cfg: &StreamConfig| -> Result<(Stream, Producer<MidiPacket>), AudioError> {
-            let (midi_tx, midi_rx) = RingBuffer::new(MIDI_RING_CAPACITY);
+    let try_build_stream = |cfg: &StreamConfig| -> Result<
+        (
+            Stream,
+            Producer<MidiPacket>,
+            Option<super::render_ahead::DspWorkerGuard>,
+        ),
+        AudioError,
+    > {
+        let (midi_tx, midi_rx) = RingBuffer::new(MIDI_RING_CAPACITY);
 
-            let stream = match desired.sample_format() {
-                SampleFormat::F32 => build_output_stream_for_sample::<f32>(
-                    device,
-                    cfg,
-                    channels,
-                    plugin_inputs,
-                    plugin_outputs,
-                    Arc::clone(&controls),
-                    Arc::clone(&telemetry),
-                    midi_rx,
-                    plugin.clone(),
-                    emergency_reset_requested.clone(),
-                    actual_sample_rate,
-                    plugin_max_block_size as usize,
-                    device_name,
-                    parameter_rx.clone(),
-                )?,
-                SampleFormat::I16 => build_output_stream_for_sample::<i16>(
-                    device,
-                    cfg,
-                    channels,
-                    plugin_inputs,
-                    plugin_outputs,
-                    Arc::clone(&controls),
-                    Arc::clone(&telemetry),
-                    midi_rx,
-                    plugin.clone(),
-                    emergency_reset_requested.clone(),
-                    actual_sample_rate,
-                    plugin_max_block_size as usize,
-                    device_name,
-                    parameter_rx.clone(),
-                )?,
-                SampleFormat::U16 => build_output_stream_for_sample::<u16>(
-                    device,
-                    cfg,
-                    channels,
-                    plugin_inputs,
-                    plugin_outputs,
-                    Arc::clone(&controls),
-                    Arc::clone(&telemetry),
-                    midi_rx,
-                    plugin.clone(),
-                    emergency_reset_requested.clone(),
-                    actual_sample_rate,
-                    plugin_max_block_size as usize,
-                    device_name,
-                    parameter_rx.clone(),
-                )?,
-                SampleFormat::F64 => build_output_stream_for_sample::<f64>(
-                    device,
-                    cfg,
-                    channels,
-                    plugin_inputs,
-                    plugin_outputs,
-                    Arc::clone(&controls),
-                    Arc::clone(&telemetry),
-                    midi_rx,
-                    plugin.clone(),
-                    emergency_reset_requested.clone(),
-                    actual_sample_rate,
-                    plugin_max_block_size as usize,
-                    device_name,
-                    parameter_rx.clone(),
-                )?,
-                SampleFormat::I24 => build_output_stream_for_sample::<I24>(
-                    device,
-                    cfg,
-                    channels,
-                    plugin_inputs,
-                    plugin_outputs,
-                    Arc::clone(&controls),
-                    Arc::clone(&telemetry),
-                    midi_rx,
-                    plugin.clone(),
-                    emergency_reset_requested.clone(),
-                    actual_sample_rate,
-                    plugin_max_block_size as usize,
-                    device_name,
-                    parameter_rx.clone(),
-                )?,
-                SampleFormat::I32 => build_output_stream_for_sample::<i32>(
-                    device,
-                    cfg,
-                    channels,
-                    plugin_inputs,
-                    plugin_outputs,
-                    Arc::clone(&controls),
-                    Arc::clone(&telemetry),
-                    midi_rx,
-                    plugin.clone(),
-                    emergency_reset_requested.clone(),
-                    actual_sample_rate,
-                    plugin_max_block_size as usize,
-                    device_name,
-                    parameter_rx.clone(),
-                )?,
-                other => {
-                    return Err(AudioError::Message(format!(
-                        "Unsupported sample format: {other:?}"
-                    )))
-                }
-            };
-
-            Ok((stream, midi_tx))
+        let stream = match desired.sample_format() {
+            SampleFormat::F32 => build_output_stream_for_sample::<f32>(
+                device,
+                cfg,
+                channels,
+                plugin_inputs,
+                plugin_outputs,
+                Arc::clone(&controls),
+                Arc::clone(&telemetry),
+                midi_rx,
+                plugin.clone(),
+                emergency_reset_requested.clone(),
+                actual_sample_rate,
+                plugin_max_block_size as usize,
+                device_name,
+                parameter_rx.clone(),
+                render_ahead_blocks,
+                priority,
+                match cfg.buffer_size {
+                    BufferSize::Fixed(frames) => frames as usize,
+                    BufferSize::Default => target_buffer_size as usize,
+                },
+            )?,
+            SampleFormat::I16 => build_output_stream_for_sample::<i16>(
+                device,
+                cfg,
+                channels,
+                plugin_inputs,
+                plugin_outputs,
+                Arc::clone(&controls),
+                Arc::clone(&telemetry),
+                midi_rx,
+                plugin.clone(),
+                emergency_reset_requested.clone(),
+                actual_sample_rate,
+                plugin_max_block_size as usize,
+                device_name,
+                parameter_rx.clone(),
+                render_ahead_blocks,
+                priority,
+                match cfg.buffer_size {
+                    BufferSize::Fixed(frames) => frames as usize,
+                    BufferSize::Default => target_buffer_size as usize,
+                },
+            )?,
+            SampleFormat::U16 => build_output_stream_for_sample::<u16>(
+                device,
+                cfg,
+                channels,
+                plugin_inputs,
+                plugin_outputs,
+                Arc::clone(&controls),
+                Arc::clone(&telemetry),
+                midi_rx,
+                plugin.clone(),
+                emergency_reset_requested.clone(),
+                actual_sample_rate,
+                plugin_max_block_size as usize,
+                device_name,
+                parameter_rx.clone(),
+                render_ahead_blocks,
+                priority,
+                match cfg.buffer_size {
+                    BufferSize::Fixed(frames) => frames as usize,
+                    BufferSize::Default => target_buffer_size as usize,
+                },
+            )?,
+            SampleFormat::F64 => build_output_stream_for_sample::<f64>(
+                device,
+                cfg,
+                channels,
+                plugin_inputs,
+                plugin_outputs,
+                Arc::clone(&controls),
+                Arc::clone(&telemetry),
+                midi_rx,
+                plugin.clone(),
+                emergency_reset_requested.clone(),
+                actual_sample_rate,
+                plugin_max_block_size as usize,
+                device_name,
+                parameter_rx.clone(),
+                render_ahead_blocks,
+                priority,
+                match cfg.buffer_size {
+                    BufferSize::Fixed(frames) => frames as usize,
+                    BufferSize::Default => target_buffer_size as usize,
+                },
+            )?,
+            SampleFormat::I24 => build_output_stream_for_sample::<I24>(
+                device,
+                cfg,
+                channels,
+                plugin_inputs,
+                plugin_outputs,
+                Arc::clone(&controls),
+                Arc::clone(&telemetry),
+                midi_rx,
+                plugin.clone(),
+                emergency_reset_requested.clone(),
+                actual_sample_rate,
+                plugin_max_block_size as usize,
+                device_name,
+                parameter_rx.clone(),
+                render_ahead_blocks,
+                priority,
+                match cfg.buffer_size {
+                    BufferSize::Fixed(frames) => frames as usize,
+                    BufferSize::Default => target_buffer_size as usize,
+                },
+            )?,
+            SampleFormat::I32 => build_output_stream_for_sample::<i32>(
+                device,
+                cfg,
+                channels,
+                plugin_inputs,
+                plugin_outputs,
+                Arc::clone(&controls),
+                Arc::clone(&telemetry),
+                midi_rx,
+                plugin.clone(),
+                emergency_reset_requested.clone(),
+                actual_sample_rate,
+                plugin_max_block_size as usize,
+                device_name,
+                parameter_rx.clone(),
+                render_ahead_blocks,
+                priority,
+                match cfg.buffer_size {
+                    BufferSize::Fixed(frames) => frames as usize,
+                    BufferSize::Default => target_buffer_size as usize,
+                },
+            )?,
+            other => {
+                return Err(AudioError::Message(format!(
+                    "Unsupported sample format: {other:?}"
+                )))
+            }
         };
 
+        Ok((stream.0, midi_tx, stream.1))
+    };
+
     match try_build_stream(&config) {
-        Ok((stream, midi_tx)) => {
+        Ok((stream, midi_tx, renderer)) => {
             let negotiated_buffer = stream.buffer_size().ok().or(Some(target_buffer_size));
             Ok((
                 stream,
@@ -264,6 +309,7 @@ pub(super) fn build_stream(
                 plugin_latency_samples,
                 parameter_tx.clone(),
                 parameter_cache.clone(),
+                renderer,
             ))
         }
         Err(primary_err) => {
@@ -281,7 +327,7 @@ pub(super) fn build_stream(
                     ));
                     let mut fallback_cfg = config;
                     fallback_cfg.buffer_size = BufferSize::Fixed(fallback);
-                    if let Ok((stream, midi_tx)) = try_build_stream(&fallback_cfg) {
+                    if let Ok((stream, midi_tx, renderer)) = try_build_stream(&fallback_cfg) {
                         let negotiated_buffer = stream.buffer_size().ok().or(Some(fallback));
                         return Ok((
                             stream,
@@ -293,6 +339,7 @@ pub(super) fn build_stream(
                             plugin_latency_samples,
                             parameter_tx.clone(),
                             parameter_cache.clone(),
+                            renderer,
                         ));
                     }
                 }
@@ -303,7 +350,7 @@ pub(super) fn build_stream(
                 "Fixed buffer negotiation failed on '{}'; retrying with the backend default: {}",
                 device_name, primary_err
             ));
-            if let Ok((stream, midi_tx)) = try_build_stream(&default_cfg) {
+            if let Ok((stream, midi_tx, renderer)) = try_build_stream(&default_cfg) {
                 let negotiated_buffer = stream.buffer_size().ok();
                 return Ok((
                     stream,
@@ -315,6 +362,7 @@ pub(super) fn build_stream(
                     plugin_latency_samples,
                     parameter_tx,
                     parameter_cache,
+                    renderer,
                 ));
             }
             if super::engine::requires_vst3_destructor_quarantine(

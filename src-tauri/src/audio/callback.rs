@@ -47,8 +47,11 @@ pub(super) fn build_output_stream_for_sample<T: Sample + SizedSample + FromSampl
     max_frames: usize,
     device_name: &str,
     parameter_rx: Receiver<ParameterCommand>,
-) -> Result<Stream, AudioError> {
-    let mut state = AudioCallbackState::new(
+    render_ahead_blocks: u32,
+    priority: super::runtime_state::DspThreadPriority,
+    initial_frames: usize,
+) -> Result<(Stream, Option<super::render_ahead::DspWorkerGuard>), AudioError> {
+    let state = AudioCallbackState::new(
         midi_rx,
         plugin_inputs,
         plugin_outputs,
@@ -60,13 +63,48 @@ pub(super) fn build_output_stream_for_sample<T: Sample + SizedSample + FromSampl
         sample_rate,
         parameter_rx,
     );
+    let mut state = Some(state);
+    let (mut output, renderer) = if render_ahead_blocks > 0 {
+        let (producer, output, control) = super::render_ahead::channel(
+            initial_frames,
+            channels,
+            max_frames,
+            sample_rate,
+            render_ahead_blocks,
+            telemetry.clone(),
+            emergency_reset_requested.clone(),
+        )?;
+        let render_plugin = plugin.clone();
+        let mut state = state.take().expect("renderer state");
+        let worker = super::render_ahead::DspWorkerGuard::spawn(
+            producer,
+            control,
+            move |samples, request| {
+                state.render_source_end_us = Some(request.source_end_us);
+                render_audio_block(samples, channels, &mut state, &render_plugin)
+                    .then_some(state.midi_generation)
+            },
+            priority,
+        )?;
+        (Some(output), Some(worker))
+    } else {
+        (None, None)
+    };
     let error_telemetry = Arc::clone(&telemetry);
     let error_reset = Arc::clone(&emergency_reset_requested);
     device
         .build_output_stream(
             *cfg,
             move |data: &mut [T], info: &OutputCallbackInfo| {
-                audio_callback(data, channels, &mut state, &plugin, info)
+                let started = Instant::now();
+                record_driver_callback(&telemetry, info, data.len() / channels, sample_rate);
+                if let Some(output) = output.as_mut() {
+                    output.copy_into(data, super::runtime_state::monotonic_us());
+                    finish_driver_timing(&telemetry, data.len() / channels, sample_rate, started);
+                } else if let Some(state) = state.as_mut() {
+                    apply_audio_thread_priority(state);
+                    render_audio_block(data, channels, state, &plugin);
+                }
             },
             move |err| match err.kind() {
                 ErrorKind::Xrun => {
@@ -96,6 +134,7 @@ pub(super) fn build_output_stream_for_sample<T: Sample + SizedSample + FromSampl
             },
             None,
         )
+        .map(|stream| (stream, renderer))
         .map_err(|e| {
             AudioError::Message(format!(
                 "Failed to build output stream on '{}': {}",
@@ -123,28 +162,31 @@ fn stream_error_code(kind: ErrorKind) -> u32 {
     }
 }
 
-fn audio_callback<T: Sample + FromSample<f32>>(
-    data: &mut [T],
-    device_channels: usize,
-    state: &mut AudioCallbackState,
-    plugin: &Arc<Mutex<PluginBackend>>,
+fn record_driver_callback(
+    telemetry: &AudioTelemetry,
     info: &OutputCallbackInfo,
+    frames: usize,
+    sample_rate: u32,
 ) {
-    let callback_started = Instant::now();
     let now = crate::vst_worker::protocol::monotonic_qpc();
-    let previous = state
-        .telemetry
-        .callback_last_qpc
-        .swap(now, Ordering::Relaxed);
-    state
-        .telemetry
-        .callback_count
-        .fetch_add(1, Ordering::Relaxed);
+    let previous = telemetry.callback_last_qpc.swap(now, Ordering::Relaxed);
+    telemetry.callback_count.fetch_add(1, Ordering::Relaxed);
     if previous != 0 {
-        state.telemetry.callback_interval_max_us.fetch_max(
+        telemetry.callback_interval_max_us.fetch_max(
             crate::vst_worker::protocol::qpc_elapsed_us(previous, now),
             Ordering::Relaxed,
         );
+    }
+    telemetry
+        .block_size_frames
+        .store(frames as u32, Ordering::Relaxed);
+    if previous != 0
+        && frames > 0
+        && sample_rate > 0
+        && crate::vst_worker::protocol::qpc_elapsed_us(previous, now)
+            > frames as u64 * 2_000_000 / u64::from(sample_rate)
+    {
+        telemetry.callback_gap_count.fetch_add(1, Ordering::Relaxed);
     }
     let timestamp = info.timestamp();
     let backend_latency = timestamp
@@ -152,10 +194,18 @@ fn audio_callback<T: Sample + FromSample<f32>>(
         .checked_duration_since(timestamp.callback)
         .map(|duration| duration.as_micros().min(u64::MAX as u128) as u64)
         .unwrap_or(0);
-    state
-        .telemetry
+    telemetry
         .backend_latency_us
         .store(backend_latency, Ordering::Relaxed);
+}
+
+fn render_audio_block<T: Sample + FromSample<f32>>(
+    data: &mut [T],
+    device_channels: usize,
+    state: &mut AudioCallbackState,
+    plugin: &Arc<Mutex<PluginBackend>>,
+) -> bool {
+    let callback_started = Instant::now();
     let silence = T::from_sample(0.0f32);
     if device_channels == 0 {
         state
@@ -167,7 +217,7 @@ fn audio_callback<T: Sample + FromSample<f32>>(
             .meter_right
             .store(0.0f32.to_bits(), Ordering::Relaxed);
         finish_callback_timing(state, 0, callback_started);
-        return;
+        return true;
     }
 
     let frames = data.len() / device_channels;
@@ -181,7 +231,7 @@ fn audio_callback<T: Sample + FromSample<f32>>(
             .meter_right
             .store(0.0f32.to_bits(), Ordering::Relaxed);
         finish_callback_timing(state, 0, callback_started);
-        return;
+        return true;
     }
 
     let telemetry = Arc::clone(&state.telemetry);
@@ -198,10 +248,8 @@ fn audio_callback<T: Sample + FromSample<f32>>(
             .meter_right
             .store(0.0f32.to_bits(), Ordering::Relaxed);
         finish_callback_timing(state, frames, callback_started);
-        return;
+        return false;
     };
-    // The registration stays on this native thread between buffers.
-    apply_audio_thread_priority(state);
     if !state.prepare(frames) {
         state.telemetry.xruns.fetch_add(1, Ordering::Relaxed);
         data.fill(silence);
@@ -216,7 +264,7 @@ fn audio_callback<T: Sample + FromSample<f32>>(
             .meter_right
             .store(0.0f32.to_bits(), Ordering::Relaxed);
         finish_callback_timing(state, frames, callback_started);
-        return;
+        return true;
     }
     state.drain_midi();
 
@@ -229,9 +277,20 @@ fn audio_callback<T: Sample + FromSample<f32>>(
                 .fetch_add(1, Ordering::Relaxed);
             replay_output_or_silence(data, device_channels, silence, state);
             finish_callback_timing(state, frames, callback_started);
-            return;
+            return true;
         }
     };
+
+    #[cfg(all(target_os = "windows", target_pointer_width = "64"))]
+    if state.render_source_end_us.is_some() && !state.needs_emergency_reset {
+        if let PluginBackend::Remote { instance } = &*plugin {
+            if !instance.buffered_output_ready() {
+                // Retain this outer request and all MIDI/parameter commands.
+                // Advancing the bridge here would discard the unfinished result.
+                return false;
+            }
+        }
+    }
 
     if state.needs_emergency_reset {
         send_reset_messages(&mut plugin);
@@ -248,10 +307,7 @@ fn audio_callback<T: Sample + FromSample<f32>>(
             }));
             if state.last_frames != frames {
                 // instance.set_block_size(frames as i64); // Removed to prevent VST reset during playback
-                state
-                    .telemetry
-                    .block_size_frames
-                    .store(frames as u32, Ordering::Relaxed);
+
                 state.last_frames = frames;
             }
 
@@ -283,7 +339,7 @@ fn audio_callback<T: Sample + FromSample<f32>>(
                 state.record_error();
                 replay_output_or_silence(data, device_channels, silence, state);
                 finish_callback_timing(state, frames, callback_started);
-                return;
+                return true;
             }
         }
         PluginBackend::Vst3 {
@@ -305,10 +361,6 @@ fn audio_callback<T: Sample + FromSample<f32>>(
                 }
             }
             if state.last_frames != frames {
-                state
-                    .telemetry
-                    .block_size_frames
-                    .store(frames as u32, Ordering::Relaxed);
                 state.last_frames = frames;
             }
 
@@ -336,7 +388,7 @@ fn audio_callback<T: Sample + FromSample<f32>>(
                     state.record_error();
                     replay_output_or_silence(data, device_channels, silence, state);
                     finish_callback_timing(state, frames, callback_started);
-                    return;
+                    return true;
                 }
             }
         }
@@ -344,10 +396,6 @@ fn audio_callback<T: Sample + FromSample<f32>>(
         PluginBackend::Remote { instance } => {
             state.drain_parameter_commands_limit(instance.parameter_capacity());
             if state.last_frames != frames {
-                state
-                    .telemetry
-                    .block_size_frames
-                    .store(frames as u32, Ordering::Relaxed);
                 state.last_frames = frames;
             }
             let dsp_started = Instant::now();
@@ -375,11 +423,12 @@ fn audio_callback<T: Sample + FromSample<f32>>(
                 frames,
                 Some(&state.telemetry),
                 state.midi_rx.peek().ok().map(|packet| packet.timestamp_us),
+                state.render_source_end_us,
             ) {
                 state.telemetry.xruns.fetch_add(1, Ordering::Relaxed);
                 replay_output_or_silence(data, device_channels, silence, state);
                 finish_callback_timing(state, frames, callback_started);
-                return;
+                return true;
             }
             record_dsp_timing(&state.telemetry, dsp_started);
         }
@@ -412,7 +461,7 @@ fn audio_callback<T: Sample + FromSample<f32>>(
             .meter_right
             .store(0.0f32.to_bits(), Ordering::Relaxed);
         finish_callback_timing(state, frames, callback_started);
-        return;
+        return true;
     }
 
     let gain_linear = f32::from_bits(state.controls.gain_bits.load(Ordering::Relaxed));
@@ -484,6 +533,7 @@ fn audio_callback<T: Sample + FromSample<f32>>(
         .store(peak_r.min(1.0).to_bits(), Ordering::Relaxed);
     state.recovering_from_silence = false;
     finish_callback_timing(state, frames, callback_started);
+    true
 }
 
 fn record_dsp_timing(telemetry: &AudioTelemetry, started: Instant) {
@@ -498,28 +548,35 @@ fn record_dsp_timing(telemetry: &AudioTelemetry, started: Instant) {
 }
 
 fn finish_callback_timing(state: &AudioCallbackState, frames: usize, started: Instant) {
+    if state.render_source_end_us.is_none() {
+        finish_driver_timing(&state.telemetry, frames, state.sample_rate, started);
+    }
+}
+
+fn finish_driver_timing(
+    telemetry: &AudioTelemetry,
+    frames: usize,
+    sample_rate: u32,
+    started: Instant,
+) {
     let elapsed_us = started.elapsed().as_micros().min(u32::MAX as u128) as u32;
-    state
-        .telemetry
+    telemetry
         .callback_last_us
         .store(elapsed_us, Ordering::Relaxed);
 
-    atomic_max(&state.telemetry.callback_max_us, elapsed_us);
+    atomic_max(&telemetry.callback_max_us, elapsed_us);
 
-    if frames > 0 && state.sample_rate > 0 {
-        let budget_us = ((frames as u64) * 1_000_000u64 / state.sample_rate as u64) as u32;
+    if frames > 0 && sample_rate > 0 {
+        let budget_us = ((frames as u64) * 1_000_000u64 / sample_rate as u64) as u32;
         if budget_us > 0 && elapsed_us > budget_us {
-            state
-                .telemetry
+            telemetry
                 .callback_over_budget_count
                 .fetch_add(1, Ordering::Relaxed);
-            state
-                .telemetry
+            telemetry
                 .consecutive_deadline_misses
                 .fetch_add(1, Ordering::Relaxed);
         } else {
-            state
-                .telemetry
+            telemetry
                 .consecutive_deadline_misses
                 .store(0, Ordering::Relaxed);
         }

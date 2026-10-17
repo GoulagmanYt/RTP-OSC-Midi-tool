@@ -458,6 +458,43 @@ fn configure_audio_thread() -> AudioThreadTuning {
     }
 }
 
+/// Only the application-owned render thread may select a non-MMCSS policy.
+#[cfg(target_os = "windows")]
+pub(super) fn prioritize_render_thread(
+    priority: super::runtime_state::DspThreadPriority,
+    telemetry: &super::runtime_state::AudioTelemetry,
+) -> Option<MmcssRegistration> {
+    if priority == super::runtime_state::DspThreadPriority::TimeCritical {
+        use windows::Win32::System::Threading::THREAD_PRIORITY_TIME_CRITICAL;
+        let applied = unsafe {
+            SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS).is_ok()
+                && SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL).is_ok()
+        };
+        if applied {
+            store_bool(&telemetry.mmcss_enabled, false);
+            store_bool(&telemetry.mmcss_owned, false);
+            crate::realtime::record_thread("timeCritical", false, false);
+            return None;
+        }
+        background_log("warn", "TIME_CRITICAL DSP policy failed; using MMCSS");
+    }
+    let tuning = configure_audio_thread();
+    store_bool(&telemetry.mmcss_enabled, tuning.enabled);
+    store_bool(&telemetry.mmcss_owned, tuning.registration.is_some());
+    if let Some(critical) = tuning.critical {
+        store_bool(&telemetry.mmcss_critical, critical);
+    }
+    tuning.registration
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(super) fn prioritize_render_thread(
+    _: super::runtime_state::DspThreadPriority,
+    _: &super::runtime_state::AudioTelemetry,
+) -> Option<()> {
+    None
+}
+
 #[cfg(not(target_os = "windows"))]
 pub(super) fn apply_audio_thread_priority(_state: &mut AudioCallbackState) {}
 
@@ -1026,7 +1063,49 @@ mod tests {
         assert!(source.contains(&above_normal));
         assert!(source.contains(&highest));
         assert!(source.contains(&thread_boost));
-        assert!(!source.contains(&time_critical));
+        let fallback = source
+            .split("fn configure_audio_thread()")
+            .nth(1)
+            .unwrap()
+            .split("fn prioritize_render_thread(")
+            .next()
+            .unwrap();
+        assert!(!fallback.contains(&time_critical));
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn owned_renderer_can_select_time_critical_without_mmcss() {
+        if isolated(
+            "audio::windows_tuning::tests::owned_renderer_can_select_time_critical_without_mmcss",
+        ) {
+            return;
+        }
+        use windows::Win32::System::Threading::{
+            GetPriorityClass, GetThreadPriority, THREAD_PRIORITY_TIME_CRITICAL,
+        };
+        std::thread::spawn(|| {
+            let telemetry = super::super::runtime_state::AudioTelemetry::new();
+            let guard = super::prioritize_render_thread(
+                super::super::runtime_state::DspThreadPriority::TimeCritical,
+                &telemetry,
+            );
+            assert!(guard.is_none());
+            assert_eq!(super::load_bool(&telemetry.mmcss_enabled), Some(false));
+            assert_eq!(super::load_bool(&telemetry.mmcss_owned), Some(false));
+            unsafe {
+                assert_eq!(
+                    GetPriorityClass(super::GetCurrentProcess()),
+                    super::HIGH_PRIORITY_CLASS.0
+                );
+                assert_eq!(
+                    GetThreadPriority(super::GetCurrentThread()),
+                    THREAD_PRIORITY_TIME_CRITICAL.0
+                );
+            }
+        })
+        .join()
+        .unwrap();
     }
 
     #[test]

@@ -37,6 +37,22 @@ pub struct WorkerAudioStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkerMetrics {
+    #[serde(default)]
+    pub render_ahead_samples: u32,
+    #[serde(default)]
+    pub render_queue_frames: u64,
+    #[serde(default)]
+    pub render_underflows: u64,
+    #[serde(default)]
+    pub render_missing_frames: u64,
+    #[serde(default)]
+    pub render_reset_silence_frames: u64,
+    #[serde(default)]
+    pub render_block_max_us: u32,
+    #[serde(default)]
+    pub render_over_budget: u64,
+    #[serde(default)]
+    pub callback_gap_count: u64,
     /// Applied worker state. Older workers omit it, preserving the Ready value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limiter_enabled: Option<bool>,

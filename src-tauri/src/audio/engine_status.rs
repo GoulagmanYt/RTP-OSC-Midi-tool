@@ -218,6 +218,27 @@ impl AudioEngine {
     }
 
     pub fn stream_fault_reason(&self) -> Option<String> {
+        if let Some(telemetry) = self.health_telemetry.load().as_ref() {
+            if telemetry.render_running.load(Ordering::Acquire)
+                && !telemetry.callback_gate.is_closed()
+            {
+                let now = crate::vst_worker::protocol::monotonic_qpc();
+                let busy = telemetry.render_busy_since_qpc.load(Ordering::Acquire);
+                let completed = telemetry.render_last_completed_qpc.load(Ordering::Acquire);
+                let stalled = if busy != 0 {
+                    busy
+                } else if telemetry.render_queue_frames.load(Ordering::Acquire) == 0 {
+                    completed
+                } else {
+                    0
+                };
+                if stalled != 0
+                    && crate::vst_worker::protocol::qpc_elapsed_us(stalled, now) > 5_000_000
+                {
+                    return Some("audio DSP renderer made no progress for 5 seconds".into());
+                }
+            }
+        }
         let code = self
             .health_telemetry
             .load()
@@ -236,6 +257,8 @@ impl AudioEngine {
             9 => "audio operation unsupported",
             10 => "invalid audio stream configuration",
             11 => "unclassified audio stream failure",
+            12 => "audio device route changed",
+            14 => "audio render buffer ownership failure",
             super::runtime_state::OVERSIZED_CALLBACK_ERROR => {
                 "audio callback exceeded the preallocated frame capacity"
             }
@@ -311,8 +334,9 @@ impl AudioEngine {
                 } else {
                     status.stream_buffer_size as f32 / status.sample_rate as f32 * 1000.0
                 };
-                let plugin_ms = (status.bridge_latency_samples + status.plugin_latency_samples)
-                    as f32
+                let plugin_ms = (status.bridge_latency_samples
+                    + status.plugin_latency_samples
+                    + snapshot.metrics.render_ahead_samples) as f32
                     / status.sample_rate as f32
                     * 1000.0;
                 Some(backend_ms + plugin_ms)
@@ -332,7 +356,14 @@ impl AudioEngine {
                     }
                     frames as f32 / r.sample_rate as f32 * 1000.0
                 };
-                Some(backend_ms + r.plugin_latency_samples as f32 / r.sample_rate as f32 * 1000.0)
+                Some(
+                    backend_ms
+                        + (r.plugin_latency_samples
+                            + r.telemetry.render_ahead_samples.load(Ordering::Relaxed))
+                            as f32
+                            / r.sample_rate as f32
+                            * 1000.0,
+                )
             }
         })
     }
@@ -741,6 +772,53 @@ impl AudioEngine {
 
 #[cfg(all(test, target_os = "windows"))]
 mod control_tests {
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn dsp_stall_is_detected_even_when_driver_callbacks_continue() {
+        use super::super::runtime_state::AudioTelemetry;
+        use std::sync::{atomic::Ordering, Arc};
+        let audio = super::AudioEngine::new();
+        let telemetry = Arc::new(AudioTelemetry::new());
+        let now = crate::vst_worker::protocol::monotonic_qpc();
+        let stale = crate::vst_worker::protocol::qpc_at(
+            std::time::Instant::now() - std::time::Duration::from_secs(6),
+        );
+        telemetry.render_running.store(true, Ordering::Release);
+        telemetry.callback_last_qpc.store(now, Ordering::Release);
+        telemetry
+            .render_last_completed_qpc
+            .store(now, Ordering::Release);
+        telemetry
+            .render_busy_since_qpc
+            .store(stale, Ordering::Release);
+        audio.health_telemetry.store(Some(telemetry.clone()));
+        assert!(audio
+            .stream_fault_reason()
+            .unwrap()
+            .contains("DSP renderer"));
+        assert!(telemetry
+            .callback_gate
+            .close_and_wait(std::time::Duration::ZERO));
+        assert!(
+            audio.stream_fault_reason().is_none(),
+            "explicit maintenance is excluded"
+        );
+        telemetry.callback_gate.reopen();
+        telemetry.render_busy_since_qpc.store(0, Ordering::Release);
+        assert!(audio.stream_fault_reason().is_none());
+        telemetry
+            .render_last_completed_qpc
+            .store(stale, Ordering::Release);
+        assert!(
+            audio.stream_fault_reason().is_some(),
+            "empty queue cannot hide a dead renderer"
+        );
+        telemetry.render_queue_frames.store(512, Ordering::Release);
+        assert!(
+            audio.stream_fault_reason().is_none(),
+            "a full queue may legitimately park the renderer"
+        );
+    }
     use super::*;
 
     #[test]

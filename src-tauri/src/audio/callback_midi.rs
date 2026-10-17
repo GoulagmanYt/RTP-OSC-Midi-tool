@@ -75,7 +75,10 @@ pub(super) fn process_pending_vst2_midi(
     state: &mut AudioCallbackState,
     instance: &mut PluginInstance,
 ) {
-    prepare_pending_vst2_midi(state, monotonic_us());
+    prepare_pending_vst2_midi(
+        state,
+        state.render_source_end_us.unwrap_or_else(monotonic_us),
+    );
     if state.vst2_event_batch.num_events > 0 {
         // VST2 Events declares two pointers; the preallocated batch has room
         // for every event, as required by the C flexible-array ABI.
@@ -142,7 +145,12 @@ pub(super) fn submit_pending_vst3_midi(
     available: usize,
     send: impl FnOnce(&[RackMidiEvent]) -> Result<(), rack::Error>,
 ) -> Result<(), rack::Error> {
-    submit_pending_vst3_midi_at(state, available, monotonic_us(), send)
+    submit_pending_vst3_midi_at(
+        state,
+        available,
+        state.render_source_end_us.unwrap_or_else(monotonic_us),
+        send,
+    )
 }
 
 pub(super) fn submit_pending_vst3_midi_at(

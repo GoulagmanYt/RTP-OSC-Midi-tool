@@ -298,6 +298,16 @@ impl AudioEngine {
             metrics.x86_worker_alive = t.x86_alive.load(Ordering::Relaxed);
             metrics.callback_count = t.callback_count.load(Ordering::Relaxed);
             metrics.callback_interval_max_us = t.callback_interval_max_us.load(Ordering::Relaxed);
+            metrics.render_ahead_samples = t.render_ahead_samples.load(Ordering::Relaxed);
+            metrics.render_queue_frames = t.render_queue_frames.load(Ordering::Relaxed);
+            metrics.render_underflows = t.render_underflows.load(Ordering::Relaxed);
+            metrics.render_missing_frames = t.render_missing_frames.load(Ordering::Relaxed);
+            metrics.render_reset_silence_frames =
+                t.render_reset_silence_frames.load(Ordering::Relaxed);
+            metrics.render_block_max_us = t.render_block_max_us.load(Ordering::Relaxed);
+            metrics.render_over_budget = t.render_over_budget.load(Ordering::Relaxed);
+            metrics.callback_gap_count = t.callback_gap_count.load(Ordering::Relaxed);
+
             let tri_state = |cell: &std::sync::atomic::AtomicU8| match cell.load(Ordering::Relaxed)
             {
                 1 => Some(false),

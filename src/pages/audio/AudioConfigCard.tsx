@@ -244,6 +244,37 @@ export function AudioConfigCard({
           </div>
         </div>
 
+        <div className="grid gap-4 md:grid-cols-2">
+          <div className="space-y-2">
+            <Label htmlFor="audio-render-ahead">{t("audio.renderAhead")}</Label>
+            <Select value={String(config?.audio.renderAheadBlocks ?? 1)} disabled={!config || audioReloading}
+              onValueChange={(value) => { void onUpdateAudioConfig({ renderAheadBlocks: Number(value) }); }}>
+              <SelectTrigger id="audio-render-ahead"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="0">{t("audio.renderDirect")}</SelectItem>
+                <SelectItem value="1">{t("audio.renderOne")}</SelectItem>
+                <SelectItem value="2">{t("audio.renderTwo")}</SelectItem>
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">{t("audio.renderAheadHint", {
+              latency: (((config?.audio.renderAheadBlocks ?? 1) * (activeBufferSize || config?.audio.bufferSize || 512) * 1000) / (activeSampleRate || config?.audio.sampleRate || 48000)).toFixed(2),
+            })}</p>
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="audio-dsp-priority">{t("audio.dspPriority")}</Label>
+            <Select value={config?.audio.dspThreadPriority ?? "mmcss"}
+              disabled={!config || audioReloading || config.audio.renderAheadBlocks === 0}
+              onValueChange={(value: "mmcss" | "timeCritical") => { void onUpdateAudioConfig({ dspThreadPriority: value }); }}>
+              <SelectTrigger id="audio-dsp-priority"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="mmcss">{t("audio.dspMmcss")}</SelectItem>
+                <SelectItem value="timeCritical">{t("audio.dspTimeCritical")}</SelectItem>
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">{t("audio.dspPriorityHint")}</p>
+          </div>
+        </div>
+
         <div className="flex items-center justify-between">
           <Label htmlFor="audio-limiter" className="flex flex-col gap-1">
             <span>{t("audio.limiter")}</span>
@@ -268,6 +299,7 @@ export function AudioConfigCard({
           <div className="text-xs text-muted-foreground">
             {t("audio.deliveryLatency")}: p99 {(status.realtime.worker.midiDeliveryP99Us / 1000).toFixed(2)} ms / max {(status.realtime.worker.midiDeliveryMaxUs / 1000).toFixed(2)} ms
             <br />{t("audio.callbackInterval")}: {(status.realtime.worker.callbackIntervalMaxUs / 1000).toFixed(2)} ms
+            <br />{t("audio.renderUnderflows")}: {status.realtime.worker.renderUnderflows ?? 0} / {t("audio.driverGaps")}: {status.realtime.worker.callbackGapCount ?? 0}
           </div>
         )}
 

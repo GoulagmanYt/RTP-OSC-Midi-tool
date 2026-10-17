@@ -372,6 +372,25 @@ mod tests {
     }
 
     #[test]
+    fn panic_epoch_clears_native_fallback_audio() {
+        for flag_only in [false, true] {
+            let (_, rx) = RingBuffer::new(8);
+            let reset = Arc::new(AtomicBool::new(false));
+            let mut state = callback_test_state(rx, reset.clone());
+            state.last_output.fill(0.75);
+            if flag_only {
+                reset.store(true, Ordering::Release);
+            } else {
+                state.telemetry.midi_generation.store(1, Ordering::Release);
+            }
+            state.drain_midi();
+            let mut data = [1.0f32; 16];
+            super::super::callback::replay_last_output_or_silence(&mut data, 2, 0.0, &mut state);
+            assert_eq!(data, [0.0; 16]);
+        }
+    }
+
+    #[test]
     fn realtime_critical_overflow_accounts_for_every_discarded_message() {
         let (_, rx) = RingBuffer::new(8);
         let mut state = callback_test_state(rx, Arc::new(AtomicBool::new(false)));

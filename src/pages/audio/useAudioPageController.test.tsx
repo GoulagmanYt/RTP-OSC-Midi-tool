@@ -136,6 +136,18 @@ describe("audio configuration transactions", () => {
     expect(mocks.updateConfig).toHaveBeenLastCalledWith({ audio: currentConfig().audio });
   });
 
+  it.each([{ renderAheadBlocks: 2 }, { dspThreadPriority: "timeCritical" as const }])(
+    "persists and reloads a renderer setting: %j", async (patch) => {
+      const { result } = renderHook(() => useAudioPageController());
+      let accepted: boolean | undefined;
+      await act(async () => { accepted = await result.current.updateAudioConfig(patch); });
+      expect(accepted).toBe(true);
+      expect(mocks.updateConfig).toHaveBeenCalledWith({ audio: patch });
+      expect(mocks.saveConfig.mock.calls[0][0].audio).toMatchObject(patch);
+      expect(mocks.reloadVst).toHaveBeenCalledOnce();
+    }
+  );
+
   it("keeps an accepted change when refreshing status fails", async () => {
     mocks.refreshStatus.mockRejectedValueOnce(new Error("status unavailable"));
     vi.spyOn(console, "error").mockImplementation(() => undefined);

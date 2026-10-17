@@ -57,6 +57,30 @@ use crate::types::VstParameter;
 
 pub(super) const MAX_PLUGIN_CHANNELS: usize = 256;
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum DspThreadPriority {
+    #[default]
+    Mmcss,
+    TimeCritical,
+}
+
+pub(crate) fn default_render_ahead_blocks() -> u32 {
+    1
+}
+
+pub(crate) fn deserialize_render_ahead_blocks<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<u32, D::Error> {
+    let blocks = u32::deserialize(deserializer)?;
+    if blocks > 2 {
+        return Err(serde::de::Error::custom(
+            "renderAheadBlocks must be 0, 1 or 2",
+        ));
+    }
+    Ok(blocks)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioSettings {
@@ -69,6 +93,13 @@ pub struct AudioSettings {
     pub device_id: Option<String>,
     pub sample_rate: u32,
     pub buffer_size: u32,
+    #[serde(
+        default = "default_render_ahead_blocks",
+        deserialize_with = "deserialize_render_ahead_blocks"
+    )]
+    pub render_ahead_blocks: u32,
+    #[serde(default)]
+    pub dsp_thread_priority: DspThreadPriority,
     pub gain_db: f32,
     #[serde(default)]
     pub limiter_enabled: bool,
@@ -88,6 +119,8 @@ impl Default for AudioSettings {
             device_id: None,
             sample_rate: 48_000,
             buffer_size: 512,
+            render_ahead_blocks: default_render_ahead_blocks(),
+            dsp_thread_priority: DspThreadPriority::default(),
             game_mode: true,
             gain_db: 0.0,
             limiter_enabled: false,
@@ -150,6 +183,17 @@ pub(super) struct AudioControls {
 
 #[repr(align(64))]
 pub(super) struct AudioTelemetry {
+    pub(super) render_underflows: AtomicU64,
+    pub(super) render_missing_frames: AtomicU64,
+    pub(super) render_reset_silence_frames: AtomicU64,
+    pub(super) render_queue_frames: AtomicU64,
+    pub(super) render_ahead_samples: AtomicU32,
+    pub(super) render_running: AtomicBool,
+    pub(super) render_busy_since_qpc: AtomicU64,
+    pub(super) render_last_completed_qpc: AtomicU64,
+    pub(super) render_block_max_us: AtomicU32,
+    pub(super) render_over_budget: AtomicU64,
+    pub(super) callback_gap_count: AtomicU64,
     pub(super) callback_gate: super::callback_gate::CallbackGate,
     pub(super) mmcss_enabled: AtomicU8,
     pub(super) mmcss_owned: AtomicU8,
@@ -198,6 +242,17 @@ pub(super) const DSP_HISTOGRAM_BUCKET_US: u32 = 250;
 impl AudioTelemetry {
     pub(super) fn new() -> Self {
         Self {
+            render_underflows: AtomicU64::new(0),
+            render_missing_frames: AtomicU64::new(0),
+            render_reset_silence_frames: AtomicU64::new(0),
+            render_queue_frames: AtomicU64::new(0),
+            render_ahead_samples: AtomicU32::new(0),
+            render_running: AtomicBool::new(false),
+            render_busy_since_qpc: AtomicU64::new(0),
+            render_last_completed_qpc: AtomicU64::new(0),
+            render_block_max_us: AtomicU32::new(0),
+            render_over_budget: AtomicU64::new(0),
+            callback_gap_count: AtomicU64::new(0),
             mmcss_enabled: AtomicU8::new(0),
             mmcss_owned: AtomicU8::new(0),
             mmcss_critical: AtomicU8::new(0),
@@ -310,6 +365,7 @@ impl AudioTelemetry {
 
 pub(super) struct AudioRuntime {
     pub(super) _stream: Stream,
+    pub(super) renderer: Option<super::render_ahead::DspWorkerGuard>,
     pub(super) _process_tuning: super::windows_tuning::AudioProcessTuning,
     // Keep the CPAL device (and therefore the ASIO driver) alive for the whole
     // runtime. Hot VST reloads can transfer this handle to the next runtime
@@ -461,6 +517,7 @@ impl MidiPacket {
 }
 
 pub(super) struct AudioCallbackState {
+    pub(super) render_source_end_us: Option<u64>,
     pub(super) midi_generation: u64,
     pub(super) midi_rx: Consumer<MidiPacket>,
     pub(super) pending_midi: VecDeque<MidiPacket>,
@@ -522,6 +579,7 @@ impl AudioCallbackState {
 
         Self {
             midi_generation: 0,
+            render_source_end_us: None,
             midi_rx,
             pending_midi: VecDeque::with_capacity(MAX_PENDING_MIDI),
             midi_playback: super::midi_playback::MidiPlaybackClock::default(),
@@ -607,6 +665,8 @@ impl AudioCallbackState {
             self.needs_emergency_reset = true;
             self.pending_midi.clear();
             self.midi_playback.reset();
+            self.last_output.fill(0.0);
+            self.recovering_from_silence = true;
         }
         self.observe_midi_generation();
         let now_us = monotonic_us();
@@ -651,6 +711,8 @@ impl AudioCallbackState {
             self.midi_generation = generation;
             self.pending_midi.clear();
             self.midi_playback.reset();
+            self.last_output.fill(0.0);
+            self.recovering_from_silence = true;
             self.needs_emergency_reset = true;
         }
     }

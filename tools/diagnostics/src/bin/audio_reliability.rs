@@ -1,6 +1,6 @@
 //! Exercise the production isolated worker against a selected installed ASIO/VST rig.
 use osc_midi_bridge::{
-    audio::AudioSettings,
+    audio::{AudioSettings, DspThreadPriority},
     config::ConfigStore,
     vst_worker::{VstWorkerState, VstWorkerSupervisor},
 };
@@ -46,6 +46,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _timer_resolution = TimerResolution::request();
     let mut args = std::env::args().skip(1);
     let mut buffer = None;
+    let mut render_ahead_blocks = 1;
+    let mut dsp_thread_priority = DspThreadPriority::Mmcss;
     let mut events_per_second = None;
     let mut exercise_game_mode = false;
     let mut game_mode = true;
@@ -65,6 +67,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--events-per-second" => events_per_second = Some(value.parse::<u32>()?),
             "--game-mode" => game_mode = value.parse()?,
             "--exercise-game-mode" => exercise_game_mode = value.parse()?,
+            "--render-ahead-blocks" => render_ahead_blocks = value.parse()?,
+            "--dsp-priority" => {
+                dsp_thread_priority = match value.as_str() {
+                    "mmcss" => DspThreadPriority::Mmcss,
+                    "timeCritical" => DspThreadPriority::TimeCritical,
+                    _ => return Err("Invalid DSP priority".into()),
+                }
+            }
             "--buffer" => buffer = Some(value.parse::<u32>()?),
             "--notes" => notes = value.parse()?,
             "--duration-seconds" => duration_seconds = value.parse()?,
@@ -99,6 +109,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = ConfigStore::new().load();
     let settings = AudioSettings {
         game_mode,
+        render_ahead_blocks,
+        dsp_thread_priority,
         backend: Some("ASIO".into()),
         device_id: Some(format!("asio:{device}")),
         device: Some(device),
@@ -291,7 +303,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "workerRestarts": final_snapshot.restarts, "workerExit": final_snapshot.last_exit,
         "failure": failure, "stopError": stop.as_ref().err(), "stopMs": stop_ms,
         "elapsedMs": started.elapsed().as_millis(),
-        "deliveryPassed": delivery_passed, "timingPassed": max_xruns == 0 && max_over_budget == 0,
+        "deliveryPassed": delivery_passed, "timingPassed": max_xruns == 0 && max_over_budget == 0 && final_snapshot.metrics.render_underflows == 0 && final_snapshot.metrics.callback_gap_count == 0,
         "maxXruns": max_xruns, "maxCallbackOverBudgetCount": max_over_budget,
         "supervisorMidiDrops": final_snapshot.midi_drops,
         "audioSignalObserved": peak > 0.00001,
@@ -301,6 +313,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::write(&report, serde_json::to_vec_pretty(&result)?)?;
     println!("Report: {}", report.display());
     if !delivery_passed
+        || final_snapshot.metrics.render_underflows > 0
+        || final_snapshot.metrics.callback_gap_count > 0
         || !delivery_timing_passed
         || max_xruns != 0
         || max_over_budget != 0

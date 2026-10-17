@@ -262,6 +262,18 @@ const fr: TranslationTree = {
       vstInternalOutput: "VST (Interne)",
     },
     audio: {
+      renderAhead: "Marge de sécurité audio",
+      renderDirect: "Direct (aucun bloc préparé)",
+      renderOne: "1 bloc d’avance",
+      renderTwo: "2 blocs d’avance",
+      renderAheadHint: "Ajoute environ {latency} ms de latence pour absorber les retards de calcul brefs.",
+      dspPriority: "Priorité du traitement audio",
+      dspMmcss: "MMCSS Pro Audio",
+      dspTimeCritical: "Temps critique (processus HIGH)",
+      dspPriorityHint: "Concerne le moteur dédié. Le pilote ASIO et le DSP x86 imbriqué conservent leur propre ordonnancement.",
+      renderUnderflows: "Buffers audio vides",
+      driverGaps: "Callbacks du pilote en retard",
+
       gameMode: "Mode jeu",
       gameModeHint: "Les sauvegardes natives et changements d’éditeur attendent la désactivation du mode jeu. Les notes et commandes sonores restent disponibles.",
       maintenance: "Maintenance audio en cours",

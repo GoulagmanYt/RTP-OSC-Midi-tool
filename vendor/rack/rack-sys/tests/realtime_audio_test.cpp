@@ -73,6 +73,27 @@ static int render(RackVST3Plugin& plugin, const RackVST3MidiEvent* events, uint3
 }
 
 int main(int argc, char** argv) {
+    if (argc == 2 && std::strcmp(argv[1], "host-refcounts") == 0) {
+        auto verify = [](auto* object) {
+            require(object->addRef() == 2, "host reference count must start at one regardless of heap contents");
+            require(object->release() == 1, "temporary reference must preserve the host owner");
+            require(object->release() == 0, "final owner must destroy the object");
+        };
+        auto poisoned = [](size_t size) {
+            void* storage = ::operator new(size);
+            std::memset(storage, 0xA5, size);
+            return storage;
+        };
+        verify(new (poisoned(sizeof(MemoryStream))) MemoryStream());
+        const uint8_t state[]{1, 2, 3};
+        verify(new (poisoned(sizeof(MemoryStream))) MemoryStream(state, sizeof(state)));
+        verify(new (poisoned(sizeof(RackVST3ComponentHandler))) RackVST3ComponentHandler(nullptr));
+#if SMTG_OS_WINDOWS
+        verify(new (poisoned(sizeof(RackVST3PlugFrame))) RackVST3PlugFrame(nullptr, nullptr));
+#endif
+        std::puts("PASS");
+        return 0;
+    }
     require(argc == 2, "select panic, allocations or parameters");
     NoteProcessor processor;
     auto plugin = std::make_unique<RackVST3Plugin>();

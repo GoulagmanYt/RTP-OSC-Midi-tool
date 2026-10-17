@@ -12,6 +12,9 @@ pub(super) struct CallbackGate(AtomicUsize);
 pub(super) struct CallbackAdmission<'a>(&'a CallbackGate);
 
 impl CallbackGate {
+    pub(super) fn is_closed(&self) -> bool {
+        self.0.load(Ordering::Acquire) & CLOSED != 0
+    }
     pub(super) fn try_enter(&self) -> Option<CallbackAdmission<'_>> {
         let mut state = self.0.load(Ordering::Acquire);
         loop {

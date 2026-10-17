@@ -237,6 +237,13 @@ pub struct AudioConfig {
     pub device_id: Option<String>,
     pub sample_rate: u32,
     pub buffer_size: u32,
+    #[serde(
+        default = "crate::audio::default_render_ahead_blocks",
+        deserialize_with = "crate::audio::deserialize_render_ahead_blocks"
+    )]
+    pub render_ahead_blocks: u32,
+    #[serde(default)]
+    pub dsp_thread_priority: crate::audio::DspThreadPriority,
     pub gain_db: f32,
     pub limiter_enabled: bool,
     #[serde(default)]
@@ -257,6 +264,8 @@ impl Default for AudioConfig {
             device_id: None,
             sample_rate: 48_000,
             buffer_size: 512,
+            render_ahead_blocks: crate::audio::default_render_ahead_blocks(),
+            dsp_thread_priority: crate::audio::DspThreadPriority::default(),
             game_mode: true,
             gain_db: 0.0,
             limiter_enabled: false,
@@ -639,6 +648,24 @@ mod tests {
         let explicit: super::AudioConfig = serde_json::from_value(legacy).unwrap();
         assert!(!explicit.game_mode);
         assert_eq!(explicit.buffer_size, 256);
+    }
+
+    #[test]
+    fn legacy_audio_config_defaults_to_one_prepared_block_and_mmcss() {
+        let mut legacy = serde_json::to_value(super::AudioConfig::default()).unwrap();
+        legacy.as_object_mut().unwrap().remove("renderAheadBlocks");
+        legacy.as_object_mut().unwrap().remove("dspThreadPriority");
+        let config: super::AudioConfig = serde_json::from_value(legacy).unwrap();
+        let value = serde_json::to_value(config).unwrap();
+        assert_eq!(value["renderAheadBlocks"], 1);
+        assert_eq!(value["dspThreadPriority"], "mmcss");
+    }
+
+    #[test]
+    fn audio_config_rejects_unbounded_render_ahead() {
+        let mut value = serde_json::to_value(super::AudioConfig::default()).unwrap();
+        value["renderAheadBlocks"] = 3.into();
+        assert!(serde_json::from_value::<super::AudioConfig>(value).is_err());
     }
 
     use super::*;

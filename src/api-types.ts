@@ -82,6 +82,8 @@ export type AudioConfig = {
   deviceId?: string | null;
   sampleRate: number;
   bufferSize: number;
+  renderAheadBlocks?: number;
+  dspThreadPriority?: "mmcss" | "timeCritical";
   gainDb: number;
   limiterEnabled: boolean;
   vstPluginId?: string | null;
@@ -360,6 +362,8 @@ export type RealtimeDiagnostics = {
     gameMode: boolean; maintenance: boolean; deferredSave: boolean; deferredEditor: boolean | null; editorOpen?: boolean;
     midiTransportFailed?: boolean; pipeWaitMaxUs?: number; audioWaitMaxUs?: number;
     callbackCount: number; callbackIntervalMaxUs: number;
+    renderAheadSamples?: number; renderQueueFrames?: number; renderUnderflows?: number;
+    renderMissingFrames?: number; renderResetSilenceFrames?: number; renderBlockMaxUs?: number; renderOverBudget?: number; callbackGapCount?: number;
     audioMmcssOwned?: boolean | null; audioMmcssCritical?: boolean | null;
     midiDeliveryMaxUs: number; midiDeliveryP99Us: number;
     midiIoThreads?: Array<{ name: string; mmcssProfile: string; highPriority: boolean; fallbackApplied: boolean }>;
