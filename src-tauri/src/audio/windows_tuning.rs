@@ -382,7 +382,9 @@ thread_local! {
 }
 
 #[cfg(target_os = "windows")]
-pub(super) fn apply_audio_thread_priority(state: &mut AudioCallbackState) {
+pub(super) fn apply_audio_driver_thread_priority(
+    telemetry: &std::sync::Arc<super::runtime_state::AudioTelemetry>,
+) {
     AUDIO_THREAD_TUNING.with(|slot| {
         let mut slot = slot.borrow_mut();
         // Drivers may release their registration and reuse this native thread
@@ -390,23 +392,34 @@ pub(super) fn apply_audio_thread_priority(state: &mut AudioCallbackState) {
         // A Weak retains the allocation identity without retaining old telemetry.
         let refresh = slot.as_ref().is_none_or(|tuning| {
             tuning.registration.is_none()
-                && tuning.stream.as_ptr() != std::sync::Arc::as_ptr(&state.telemetry)
+                && tuning.stream.as_ptr() != std::sync::Arc::as_ptr(telemetry)
         });
         if refresh {
             let mut tuning = configure_audio_thread();
-            tuning.stream = std::sync::Arc::downgrade(&state.telemetry);
+            tuning.stream = std::sync::Arc::downgrade(telemetry);
+            store_bool(&telemetry.mmcss_enabled, tuning.enabled);
+            store_bool(&telemetry.mmcss_owned, tuning.registration.is_some());
+            telemetry.mmcss_critical.store(
+                tuning
+                    .critical
+                    .map_or(0, |critical| if critical { 2 } else { 1 }),
+                Ordering::Relaxed,
+            );
             *slot = Some(tuning);
         }
-        let tuning = slot.as_ref().expect("audio thread tuning initialized");
-        store_bool(&state.telemetry.mmcss_enabled, tuning.enabled);
-        store_bool(&state.telemetry.mmcss_owned, tuning.registration.is_some());
-        state.telemetry.mmcss_critical.store(
-            tuning
-                .critical
-                .map_or(0, |critical| if critical { 2 } else { 1 }),
-            Ordering::Relaxed,
-        );
     });
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(super) fn apply_audio_driver_thread_priority(
+    _telemetry: &std::sync::Arc<super::runtime_state::AudioTelemetry>,
+) {
+}
+
+#[cfg(target_os = "windows")]
+#[allow(dead_code)]
+pub(super) fn apply_audio_thread_priority(state: &mut AudioCallbackState) {
+    apply_audio_driver_thread_priority(&state.telemetry);
 }
 
 #[cfg(target_os = "windows")]
@@ -647,14 +660,15 @@ pub fn reapply_process_priority_on_focus_loss() {
                 | PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION,
             StateMask: 0,
         };
-        if SetProcessInformation(
+        let process_power_ok = SetProcessInformation(
             GetCurrentProcess(),
             ProcessPowerThrottling,
             &throttle as *const _ as *const std::ffi::c_void,
             std::mem::size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
         )
-        .is_err()
-        {
+        .is_ok();
+        store_bool(&AUDIO_POWER_THROTTLING_DISABLED, process_power_ok);
+        if !process_power_ok {
             background_log("warn", "Failed to disable process power throttling");
         }
     }
@@ -711,6 +725,27 @@ pub fn apply_worker_process_priority() {
 
 #[cfg(not(target_os = "windows"))]
 pub fn apply_worker_process_priority() {}
+
+#[cfg(target_os = "windows")]
+pub fn disable_process_power_throttling() {
+    unsafe {
+        let throttle = PROCESS_POWER_THROTTLING_STATE {
+            Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+            ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED
+                | PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION,
+            StateMask: 0,
+        };
+        let _ = SetProcessInformation(
+            GetCurrentProcess(),
+            ProcessPowerThrottling,
+            &throttle as *const _ as *const std::ffi::c_void,
+            std::mem::size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
+        );
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn disable_process_power_throttling() {}
 
 #[cfg(not(target_os = "windows"))]
 pub(super) struct AudioProcessTuning;

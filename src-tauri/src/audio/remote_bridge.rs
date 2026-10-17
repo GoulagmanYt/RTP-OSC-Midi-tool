@@ -439,7 +439,9 @@ impl RemotePlugin {
         #[cfg(target_os = "windows")]
         {
             use std::os::windows::process::CommandExt;
-            command.creation_flags(0x0800_0000);
+            command.creation_flags(
+                0x0800_0000 | windows::Win32::System::Threading::HIGH_PRIORITY_CLASS.0,
+            );
         }
         let mut child = command
             .spawn()
@@ -1243,6 +1245,10 @@ fn pump_remote_editor(current: &mut Option<RemoteEditor>) {
 }
 
 fn run_dsp_server(args: DspArgs, logger: FrontendLogger) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        super::windows_tuning::apply_worker_process_priority();
+    }
     let mut mapping = Mapping::open(&args.mapping_name, args.token)?;
     let event_wide = wide(&args.event_name);
     let request_event = unsafe {

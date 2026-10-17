@@ -23,7 +23,7 @@ use super::{
         atomic_max, AudioCallbackState, AudioControls, AudioError, AudioTelemetry, MidiPacket,
         ParameterCommand, PluginBackend, DSP_HISTOGRAM_BUCKETS, DSP_HISTOGRAM_BUCKET_US,
     },
-    windows_tuning::apply_audio_thread_priority,
+    windows_tuning::apply_audio_driver_thread_priority,
 };
 
 #[cfg(test)]
@@ -97,12 +97,12 @@ pub(super) fn build_output_stream_for_sample<T: Sample + SizedSample + FromSampl
             *cfg,
             move |data: &mut [T], info: &OutputCallbackInfo| {
                 let started = Instant::now();
+                apply_audio_driver_thread_priority(&telemetry);
                 record_driver_callback(&telemetry, info, data.len() / channels, sample_rate);
                 if let Some(output) = output.as_mut() {
                     output.copy_into(data, super::runtime_state::monotonic_us());
                     finish_driver_timing(&telemetry, data.len() / channels, sample_rate, started);
                 } else if let Some(state) = state.as_mut() {
-                    apply_audio_thread_priority(state);
                     render_audio_block(data, channels, state, &plugin);
                 }
             },

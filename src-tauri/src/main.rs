@@ -131,6 +131,7 @@ fn run_app() -> Result<(), Box<dyn std::error::Error>> {
                 window.set_always_on_top(false)?;
                 window.set_resizable(true)?;
                 window.set_title("")?;
+                osc_midi_bridge::audio::windows_tuning::reapply_process_priority_on_focus_loss();
             }
             // UI readiness is telemetry only and must not prevent startup if no listener exists yet.
             window
