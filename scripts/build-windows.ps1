@@ -242,10 +242,12 @@ function Stop-WorkspaceCargoProcesses {
 }
 
 function Stop-WorkspaceAppProcesses {
+    $root = $repositoryRoot.TrimEnd('\') + '\'
+    $pattern = [WildcardPattern]::Escape($root) + '*'
     $processes = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
         Where-Object {
             $_.Name -in 'OSCMidi.exe', 'vst-host-worker-x64.exe', 'vst-host-worker-x86.exe' -and
-            ($_.ExecutablePath -like "$repositoryRoot*" -or $_.CommandLine -like "*$repositoryRoot*")
+            ($_.ExecutablePath -like $pattern)
         })
     if ($processes.Count -gt 0) {
         Stop-Process -Id $processes.ProcessId -Force -ErrorAction SilentlyContinue
