@@ -735,13 +735,12 @@ async fn run_rtp_scheduler_core(
                     if event.critical { request_critical_midi_reset(); }
                     continue;
                 }
-                if pending.is_empty() && event.deadline <= Instant::now() {
-                    dispatch_scheduled_frame(&sink, event.frame);
-                } else {
-                    event.order = order;
-                    order = order.wrapping_add(1);
-                    pending.push(event);
-                }
+                // Admit even due events through the next scheduler turn: a
+                // peer loss can arrive while recv() sleeps, and its recovery
+                // reset must precede notes stamped with the new source epoch.
+                event.order = order;
+                order = order.wrapping_add(1);
+                pending.push(event);
                 for _ in 1..256 {
                     let Ok(mut event) = receiver.try_recv() else { break; };
                     if event.generation != midi_reset_generation() || source_frame_is_stale(&event, &cutoffs) { continue; }
@@ -752,13 +751,9 @@ async fn run_rtp_scheduler_core(
                         if event.critical { request_critical_midi_reset(); }
                         continue;
                     }
-                    if pending.is_empty() && event.deadline <= Instant::now() {
-                        dispatch_scheduled_frame(&sink, event.frame);
-                    } else {
-                        event.order = order;
-                        order = order.wrapping_add(1);
-                        pending.push(event);
-                    }
+                    event.order = order;
+                    order = order.wrapping_add(1);
+                    pending.push(event);
                 }
             }
             _ = tokio::time::sleep_until(tokio::time::Instant::from_std(wake)) => {}
@@ -878,6 +873,56 @@ mod tests {
                 assert_eq!(
                     received, 600,
                     "overdue MIDI must drain without waiting for new input"
+                );
+            });
+    }
+
+    #[test]
+    fn scheduler_resets_before_delivering_post_fault_due_note() {
+        let _guard = crate::bridge::pipeline::TEST_PIPELINE_LOCK.lock().unwrap();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let (tx, receiver) = crate::midi_queue::async_channel(16);
+                let (output, notes) = crate::midi_queue::bounded(16);
+                let sink = Arc::new(arc_swap::ArcSwapOption::from(Some(Arc::new(output))));
+                let recovery = Arc::new(SourceRecovery::default());
+                let scheduler =
+                    tokio::spawn(run_rtp_scheduler_core(receiver, sink, recovery.clone()));
+                // Let the scheduler enter its empty-queue receive before the
+                // loss callback and the subsequent MIDI callback run together.
+                tokio::task::yield_now().await;
+                let source: Arc<str> = Arc::from("RTP:test");
+                recovery.request(source.clone());
+                tx.try_send(TimedRtpFrame {
+                    source_epoch: recovery.epoch(&source),
+                    critical: false,
+                    frame: MidiFrame::copy_realtime(&[0x90, 60, 100], source).unwrap(),
+                    deadline: Instant::now(),
+                    generation: midi_reset_generation(),
+                    order: 0,
+                })
+                .unwrap_or_else(|_| panic!("test queue full"));
+                let delivered = tokio::task::spawn_blocking(move || {
+                    let first = notes.recv_timeout(Duration::from_millis(200));
+                    let second = notes.recv_timeout(Duration::from_millis(200));
+                    (first, second)
+                })
+                .await
+                .unwrap();
+                scheduler.abort();
+                let _ = scheduler.await;
+                drop(tx);
+                assert_eq!(
+                    delivered.0.expect("peer recovery reset").data.as_slice(),
+                    [0xFF],
+                    "recovery must precede fresh notes so its reset cannot silence them"
+                );
+                assert_eq!(
+                    delivered.1.expect("post-fault note").data.as_slice(),
+                    [0x90, 60, 100]
                 );
             });
     }
