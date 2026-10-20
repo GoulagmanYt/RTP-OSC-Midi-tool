@@ -49,3 +49,13 @@ it("blocks an invalid edited configuration even when the previous one was valid"
   expect(mocks.start).not.toHaveBeenCalled();
   expect(mocks.toastError).toHaveBeenCalledWith("toasts.bridge.preflightBlocked");
 });
+
+it("does not start the bridge when preflight itself fails", async () => {
+  const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+  mocks.preflight.mockRejectedValueOnce(new Error("MIDI enumeration failed"));
+  const { result } = mount();
+  await act(async () => { await result.current.toggleBridge(); });
+  errorLog.mockRestore();
+  expect(mocks.start).not.toHaveBeenCalled();
+  expect(mocks.toastError).toHaveBeenCalledWith("toasts.bridge.preflightFailed");
+});

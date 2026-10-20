@@ -100,8 +100,8 @@ export function useBridgeActions({
       }
 
       const report = await runPreflight();
+      if (!report) return;
       if (
-        report &&
         (!report.midiInOk || !report.midiOutOk || !report.audioBackendOk || !report.rtpPortOk)
       ) {
         toast.error(t("toasts.bridge.preflightBlocked"));

@@ -98,6 +98,7 @@ enum SessionCommand {
 }
 
 struct ActiveSession {
+    generation: u64,
     task: tauri::async_runtime::JoinHandle<()>,
     commands: mpsc::Sender<SessionCommand>,
 }
@@ -298,6 +299,7 @@ impl VstWorkerSupervisor {
         }
 
         *self.inner.session.lock() = Some(ActiveSession {
+            generation,
             task: pending_task.0.take().expect("connected session task"),
             commands: command_tx,
         });
@@ -558,6 +560,7 @@ impl VstWorkerSupervisor {
     }
 
     pub async fn set_game_mode(&self, enabled: bool) -> Result<(), String> {
+        let _lifecycle = self.control_lifecycle().await?;
         self.expect_ack(ControlMessage::SetGameMode {
             request_id: self.next_request_id(),
             enabled,
@@ -575,6 +578,7 @@ impl VstWorkerSupervisor {
     }
 
     pub async fn open_editor(&self) -> Result<(), String> {
+        let _lifecycle = self.control_lifecycle().await?;
         self.expect_ack(ControlMessage::OpenEditor {
             request_id: self.next_request_id(),
         })
@@ -585,6 +589,7 @@ impl VstWorkerSupervisor {
     }
 
     pub async fn close_editor(&self) -> Result<(), String> {
+        let _lifecycle = self.control_lifecycle().await?;
         self.expect_ack(ControlMessage::CloseEditor {
             request_id: self.next_request_id(),
         })
@@ -595,6 +600,7 @@ impl VstWorkerSupervisor {
     }
 
     pub async fn set_parameter(&self, index: usize, value: f32) -> Result<(), String> {
+        let _lifecycle = self.control_lifecycle().await?;
         self.expect_ack(ControlMessage::SetParameter {
             request_id: self.next_request_id(),
             index,
@@ -705,20 +711,36 @@ impl VstWorkerSupervisor {
         }
     }
 
+    // Keep response publication in the same lifecycle as admission. Load already
+    // owns this gate, so request_with_timeout itself must not acquire it.
+    async fn control_lifecycle(&self) -> Result<tokio::sync::MutexGuard<'_, ()>, String> {
+        let generation = self.inner.lifecycle_generation.load(Ordering::Acquire);
+        let guard = tokio::time::timeout(COMMAND_TIMEOUT, self.inner.lifecycle.lock())
+            .await
+            .map_err(|_| "VST worker lifecycle operation timed out".to_string())?;
+        if generation != self.inner.lifecycle_generation.load(Ordering::Acquire) {
+            return Err("VST worker command superseded by a lifecycle change".into());
+        }
+        Ok(guard)
+    }
+
     async fn request_with_timeout(
         &self,
         message: ControlMessage,
         timeout: Duration,
     ) -> Result<ControlMessage, String> {
-        let commands = self
+        let (commands, generation) = self
             .inner
             .session
             .lock()
             .as_ref()
-            .map(|session| session.commands.clone())
+            .map(|session| (session.commands.clone(), session.generation))
             .ok_or_else(|| "VST worker is not connected".to_string())?;
+        if generation != self.inner.lifecycle_generation.load(Ordering::Acquire) {
+            return Err("VST worker command superseded by a lifecycle change".into());
+        }
         let (response_tx, response_rx) = oneshot::channel();
-        tokio::time::timeout(timeout, async {
+        let response = tokio::time::timeout(timeout, async {
             commands
                 .send(SessionCommand::Request {
                     message,
@@ -731,15 +753,20 @@ impl VstWorkerSupervisor {
                 .map_err(|_| "VST worker response channel closed".to_string())?
         })
         .await
-        .map_err(|_| "VST worker command timed out".to_string())?
+        .map_err(|_| "VST worker command timed out".to_string())?;
+        if generation != self.inner.lifecycle_generation.load(Ordering::Acquire) {
+            return Err("VST worker command superseded by a lifecycle change".into());
+        }
+        response
     }
 
     fn try_notify(&self, message: ControlMessage) -> bool {
         self.inner.session.lock().as_ref().is_some_and(|session| {
-            session
-                .commands
-                .try_send(SessionCommand::Notify(message))
-                .is_ok()
+            session.generation == self.inner.lifecycle_generation.load(Ordering::Acquire)
+                && session
+                    .commands
+                    .try_send(SessionCommand::Notify(message))
+                    .is_ok()
         })
     }
 
@@ -1439,6 +1466,166 @@ fn set_session_fault(inner: &Arc<SupervisorInner>, error: String) {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn command_started_during_stop_cannot_adopt_the_old_session() {
+        use std::{future::Future, task::Poll};
+        let supervisor = VstWorkerSupervisor::new();
+        *supervisor.inner.last_load.lock() = Some((
+            AudioSettings {
+                game_mode: false,
+                ..Default::default()
+            },
+            None,
+        ));
+        supervisor.set_state(VstWorkerState::Ready);
+        let (commands, mut rx) = mpsc::channel(8);
+        let (delayed_tx, mut delayed_rx) = oneshot::channel();
+        let task = tauri::async_runtime::spawn(async move {
+            let mut delayed_tx = Some(delayed_tx);
+            while let Some(command) = rx.recv().await {
+                match command {
+                    SessionCommand::Request {
+                        message: ControlMessage::SetGameMode { request_id, .. },
+                        response,
+                    } => {
+                        let _ = delayed_tx.take().unwrap().send((request_id, response));
+                    }
+                    SessionCommand::Request {
+                        message: ControlMessage::Stop { request_id },
+                        response,
+                    } => {
+                        let _ = response.send(Ok(ControlMessage::Stopped { request_id }));
+                    }
+                    SessionCommand::Shutdown => break,
+                    _ => panic!("unexpected fixture command"),
+                }
+            }
+        });
+        *supervisor.inner.session.lock() = Some(ActiveSession {
+            generation: 0,
+            commands,
+            task,
+        });
+        let gate = supervisor.inner.lifecycle.lock().await;
+        let stopping_supervisor = supervisor.clone();
+        let stopping = tokio::spawn(async move { stopping_supervisor.stop().await });
+        while supervisor
+            .inner
+            .lifecycle_generation
+            .load(Ordering::Acquire)
+            == 0
+        {
+            tokio::task::yield_now().await;
+        }
+        let mut pending = Box::pin(supervisor.set_game_mode(true));
+        // Poll admission once before letting Stop acquire the lifecycle gate.
+        let immediate = std::future::poll_fn(|cx| {
+            Poll::Ready(match pending.as_mut().poll(cx) {
+                Poll::Ready(result) => Some(result),
+                Poll::Pending => None,
+            })
+        })
+        .await;
+        drop(gate);
+        stopping.await.unwrap().unwrap();
+        if let Ok((request_id, response)) = delayed_rx.try_recv() {
+            response
+                .send(Ok(ControlMessage::Ack { request_id }))
+                .unwrap();
+        }
+        let result = match immediate {
+            Some(result) => result,
+            None => pending.await,
+        };
+        assert!(
+            result.is_err(),
+            "the stopped worker must not accept a command from the next lifecycle"
+        );
+        assert!(!supervisor.snapshot().metrics.game_mode);
+        assert!(
+            !supervisor
+                .inner
+                .last_load
+                .lock()
+                .as_ref()
+                .unwrap()
+                .0
+                .game_mode
+        );
+    }
+
+    #[tokio::test]
+    async fn a_late_command_ack_cannot_publish_state_after_stop_is_requested() {
+        let supervisor = VstWorkerSupervisor::new();
+        let settings = AudioSettings {
+            game_mode: false,
+            ..Default::default()
+        };
+        *supervisor.inner.last_load.lock() = Some((settings, None));
+        supervisor.set_state(VstWorkerState::Ready);
+        let (commands, mut rx) = mpsc::channel(8);
+        let (delayed_tx, delayed_rx) = oneshot::channel();
+        let task = tauri::async_runtime::spawn(async move {
+            let mut delayed_tx = Some(delayed_tx);
+            while let Some(command) = rx.recv().await {
+                match command {
+                    SessionCommand::Request {
+                        message: ControlMessage::SetGameMode { request_id, .. },
+                        response,
+                    } => {
+                        let _ = delayed_tx.take().unwrap().send((request_id, response));
+                    }
+                    SessionCommand::Request {
+                        message: ControlMessage::Stop { request_id },
+                        response,
+                    } => {
+                        let _ = response.send(Ok(ControlMessage::Stopped { request_id }));
+                    }
+                    SessionCommand::Shutdown => break,
+                    _ => panic!("unexpected fixture command"),
+                }
+            }
+        });
+        *supervisor.inner.session.lock() = Some(ActiveSession {
+            generation: 0,
+            commands,
+            task,
+        });
+        let pending_supervisor = supervisor.clone();
+        let pending = tokio::spawn(async move { pending_supervisor.set_game_mode(true).await });
+        let (request_id, response) = delayed_rx.await.unwrap();
+        let stopping_supervisor = supervisor.clone();
+        let stopping = tokio::spawn(async move { stopping_supervisor.stop().await });
+        while supervisor
+            .inner
+            .lifecycle_generation
+            .load(Ordering::Acquire)
+            == 0
+        {
+            tokio::task::yield_now().await;
+        }
+        response
+            .send(Ok(ControlMessage::Ack { request_id }))
+            .unwrap();
+        let result = pending.await.unwrap();
+        stopping.await.unwrap().unwrap();
+        assert!(
+            result.is_err(),
+            "an acknowledgement from the stopped session must be obsolete"
+        );
+        assert!(!supervisor.snapshot().metrics.game_mode);
+        assert!(
+            !supervisor
+                .inner
+                .last_load
+                .lock()
+                .as_ref()
+                .unwrap()
+                .0
+                .game_mode
+        );
+    }
+
     #[test]
     fn ping_release_stays_on_its_original_worker_route_and_epoch() {
         let supervisor = VstWorkerSupervisor::new();
@@ -1530,7 +1717,11 @@ mod tests {
         *supervisor.inner.last_load.lock() = Some((AudioSettings::default(), None));
         let (commands, mut rx) = mpsc::channel(1);
         let task = tauri::async_runtime::spawn(std::future::pending());
-        *supervisor.inner.session.lock() = Some(ActiveSession { commands, task });
+        *supervisor.inner.session.lock() = Some(ActiveSession {
+            generation: 0,
+            commands,
+            task,
+        });
         assert!(supervisor.try_set_gain(-60.0));
         assert!(!supervisor.try_set_gain(-12.0));
         assert_eq!(
@@ -1565,7 +1756,11 @@ mod tests {
             .try_send(SessionCommand::Notify(ControlMessage::Ping { sequence: 1 }))
             .unwrap();
         let task = tauri::async_runtime::spawn(std::future::pending());
-        *supervisor.inner.session.lock() = Some(ActiveSession { commands, task });
+        *supervisor.inner.session.lock() = Some(ActiveSession {
+            generation: 0,
+            commands,
+            task,
+        });
         let error = tokio::time::timeout(
             Duration::from_secs(2),
             supervisor.request_with_timeout(
@@ -1659,7 +1854,11 @@ mod tests {
             started_tx.send(()).unwrap();
             std::future::pending::<()>().await;
         });
-        *supervisor.inner.session.lock() = Some(ActiveSession { commands, task });
+        *supervisor.inner.session.lock() = Some(ActiveSession {
+            generation: 0,
+            commands,
+            task,
+        });
         started_rx.await.unwrap();
         drop(supervisor);
         assert!(matches!(
@@ -1686,7 +1885,11 @@ mod tests {
             received_tx.send(()).unwrap();
             std::future::pending::<()>().await;
         });
-        *supervisor.inner.session.lock() = Some(ActiveSession { commands, task });
+        *supervisor.inner.session.lock() = Some(ActiveSession {
+            generation: 0,
+            commands,
+            task,
+        });
         let stopping = supervisor.clone();
         let stop = tokio::spawn(async move { stopping.stop().await });
         tokio::time::timeout(Duration::from_secs(2), received_rx)
@@ -1726,7 +1929,11 @@ mod tests {
             ack_tx.send(()).unwrap();
             task_release.notified().await;
         });
-        *supervisor.inner.session.lock() = Some(ActiveSession { commands: tx, task });
+        *supervisor.inner.session.lock() = Some(ActiveSession {
+            generation: 0,
+            commands: tx,
+            task,
+        });
         let stopping = supervisor.clone();
         let mut stop = tokio::spawn(async move { stopping.stop().await });
         ack_rx.await.unwrap();

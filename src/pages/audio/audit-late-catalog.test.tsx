@@ -45,6 +45,27 @@ beforeEach(() => {
 });
 afterEach(() => vi.restoreAllMocks());
 
+it("does not open the old native parameter catalog while a replacement is loading", async () => {
+  let finishSave!: () => void;
+  mocks.saveConfig.mockImplementationOnce((config: AppConfig) => new Promise<void>((resolve) => {
+    mocks.config = config;
+    finishSave = resolve;
+  }));
+  mocks.listParameters.mockResolvedValueOnce([oldParameter]);
+  const { result, rerender } = renderHook(() => useAudioPageController());
+  await waitFor(() => expect(result.current.vstPlugins).toHaveLength(1));
+  let selection!: Promise<void>;
+  await act(async () => { selection = result.current.handleSelectVst("B"); });
+  rerender();
+  expect(result.current.config?.audio.vstPluginId).toBe("B");
+  expect(mocks.activePlugin).toBe("A");
+  await act(async () => { await result.current.handleOpenVstParameters(); });
+  const openedDuringReplacement = result.current.vstParameterDialogOpen;
+  await act(async () => { finishSave(); await selection; });
+  expect(openedDuringReplacement).toBe(false);
+  expect(result.current.vstParams).toEqual([]);
+});
+
 it("audit B15: a catalog from A reopens during switching to B and sends A's index to B", async () => {
   let finish!: (parameters: VstParameter[]) => void;
   let finishSave!: () => void;

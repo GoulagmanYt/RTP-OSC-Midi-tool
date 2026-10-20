@@ -160,12 +160,14 @@ export function useAudioPageController() {
   }, []);
 
   const canOpenSelectedVstUi =
+    !audioReloading &&
     Boolean(config?.audio.enabled) &&
     bridgeRunning &&
     Boolean(selectedVstPlugin?.supported) &&
     Boolean(selectedVstPlugin?.hasEditor);
 
   const canOpenVstParameterFallback =
+    !audioReloading &&
     Boolean(config?.audio.enabled) &&
     bridgeRunning &&
     Boolean(selectedVstPlugin?.supported);
@@ -396,6 +398,7 @@ export function useAudioPageController() {
   };
 
   const handleOpenVstParameters = async () => {
+    if (audioReloadInFlight.current) return;
     const requestedPluginId = config?.audio.vstPluginId ?? config?.audio.vstPath ?? null;
     const requestId = ++parameterRequestId.current;
     try {

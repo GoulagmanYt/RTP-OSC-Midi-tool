@@ -11,6 +11,40 @@ use std::time::Duration;
 static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[test]
+fn reliable_server_rejects_malformed_midi_before_preparing_any_playback() {
+    let _guard = test_guard();
+    for invalid in [
+        vec![0x90, 60],
+        vec![0x90, 128, 100],
+        vec![0xF0, 1],
+        vec![0x40, 60, 100],
+    ] {
+        let (tx, rx) = bounded(256);
+        let server = ReliablePlaybackServer::start("127.0.0.1:0", tx).unwrap();
+        let mut stream = connect(&server, Duration::from_secs(2));
+        send_frame(
+            &mut stream,
+            json!({
+                "type": "prepare", "version": 1, "sessionId": "invalid-midi",
+                "song": "invalid.mid", "total": 2, "events": [
+                    {"seq": 0, "dueUs": 0, "data": [0x90, 60, 100]},
+                    {"seq": 1, "dueUs": 1000, "data": invalid}
+                ]
+            }),
+        );
+        let reply = recv_frame(&mut stream);
+        let played = rx.try_recv().is_ok();
+        server.stop();
+        assert_eq!(
+            reply["type"], "error",
+            "malformed event was accepted: {invalid:?}"
+        );
+        assert_eq!(reply["sessionId"], "invalid-midi");
+        assert!(!played);
+    }
+}
+
+#[test]
 fn reliable_server_stops_and_releases_an_ipv6_listener() {
     let _guard = test_guard();
     let (tx, _rx) = bounded(256);

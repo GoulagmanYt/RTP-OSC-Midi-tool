@@ -49,8 +49,12 @@ function interpolate(template: string, vars?: Record<string, string | number>) {
 
 function detectLanguage(): Language {
   if (typeof window === "undefined") return "fr";
-  const stored = window.localStorage.getItem(STORAGE_KEY);
-  if (stored === "en" || stored === "fr") return stored;
+  try {
+    const stored = window.localStorage.getItem(STORAGE_KEY);
+    if (stored === "en" || stored === "fr") return stored;
+  } catch {
+    // The browser language remains usable when persisted preferences are unavailable.
+  }
   const browser = window.navigator?.language?.toLowerCase() ?? "";
   if (browser.startsWith("fr")) return "fr";
   return "en";

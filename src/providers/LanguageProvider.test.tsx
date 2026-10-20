@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { AppConfig } from "../api-types";
 import { BridgeProvider, useBridge } from "./BridgeProvider";
 import { LanguageProvider, useI18n } from "./LanguageProvider";
@@ -33,6 +33,23 @@ beforeEach(() => {
   mocks.startBridge.mockResolvedValue({ running: true });
   mocks.saveConfig.mockResolvedValue(true);
 });
+
+afterEach(() => vi.restoreAllMocks());
+
+it.each([["fr-FR", "fr:Anglais"], ["en-US", "en:English"]])(
+  "renders with browser language %s when stored preferences cannot be read", async (browserLanguage, expected) => {
+    vi.spyOn(window.localStorage, "getItem").mockImplementation(() => {
+      throw new DOMException("Storage unavailable", "SecurityError");
+    });
+    vi.spyOn(window.navigator, "language", "get").mockReturnValue(browserLanguage);
+    function LanguageProbe() {
+      const { language, t } = useI18n();
+      return <output>{language}:{t("language.english")}</output>;
+    }
+    render(<LanguageProvider><LanguageProbe /></LanguageProvider>);
+    await waitFor(() => expect(screen.getByRole("status").textContent).toBe(expected));
+  }
+);
 
 it("keeps the bridge and unsaved edits mounted while loading and switching language catalogs", async () => {
   render(<LanguageProvider><BridgeProvider><Controls /></BridgeProvider></LanguageProvider>);

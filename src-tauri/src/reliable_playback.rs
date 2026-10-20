@@ -425,7 +425,7 @@ fn validate_prepare(
     session_id: String,
     song: String,
     total: usize,
-    events: Vec<ReliablePlaybackEvent>,
+    mut events: Vec<ReliablePlaybackEvent>,
 ) -> Result<PreparedSession, (Option<String>, String)> {
     if version != PROTOCOL_VERSION {
         return Err((
@@ -440,7 +440,7 @@ fn validate_prepare(
         ));
     }
     let mut previous_due = 0u64;
-    for (idx, event) in events.iter().enumerate() {
+    for (idx, event) in events.iter_mut().enumerate() {
         if event.seq != idx as u64 {
             return Err((
                 Some(session_id),
@@ -472,6 +472,12 @@ fn validate_prepare(
             return Err((
                 Some(session_id),
                 format!("MIDI data too large at seq {}", event.seq),
+            ));
+        }
+        if !crate::midi::normalize_message(&mut event.data) {
+            return Err((
+                Some(session_id),
+                format!("invalid MIDI message at seq {}", event.seq),
             ));
         }
         previous_due = event.due_us;

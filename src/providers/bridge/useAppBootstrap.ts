@@ -40,6 +40,7 @@ export function useAppBootstrap({
           refreshLists(),
           config.audio.backend ? refreshAudioDevices(config.audio.backend) : Promise.resolve(),
         ]);
+        if (cancelled) return;
 
         try {
           const report = await api.preflightCheck();
@@ -50,6 +51,7 @@ export function useAppBootstrap({
           console.warn("Preflight check failed at init", error);
         }
 
+        if (cancelled) return;
         if (config.ui.autoStart) {
           try {
             const status = await api.startBridge(config);
