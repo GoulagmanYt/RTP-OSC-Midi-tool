@@ -285,7 +285,7 @@ impl OscOutputState {
                     source.notes[channel] = 0;
                     source.sustain[channel] = false;
                 }
-                123 => source.notes[channel] = 0,
+                123..=127 => source.notes[channel] = 0,
                 121 => source.sustain[channel] = false,
                 _ => {}
             }
@@ -912,7 +912,7 @@ mod tests {
 
     #[test]
     fn osc_channel_mode_releases_preserve_other_held_notes() {
-        for controller in [120, 123] {
+        for controller in [120, 123, 124, 125, 126, 127] {
             let mut state = OscOutputState::default();
             let mut sent = Vec::new();
             observe_osc(&mut state, "a", &[0x90, 60, 100], &mut sent);

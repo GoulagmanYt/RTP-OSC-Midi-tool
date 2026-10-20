@@ -683,11 +683,35 @@ async fn run_rtp_scheduler(
     logger.debug("RTP-MIDI timestamp scheduler stopped");
 }
 
+/// Session termination queues peer resets immediately before aborting the
+/// scheduler. Flush them on cancellation as well as normal completion, after
+/// scheduled note delivery has stopped.
+struct PendingPeerResets<'a> {
+    recovery: &'a SourceRecovery,
+    sink: &'a arc_swap::ArcSwapOption<Sender<MidiFrame>>,
+}
+
+impl Drop for PendingPeerResets<'_> {
+    fn drop(&mut self) {
+        let pending = std::mem::take(&mut self.recovery.state.lock().pending);
+        for (source, _) in pending {
+            dispatch_scheduled_frame(
+                self.sink,
+                MidiFrame::copy_realtime(&[0xFF], source).expect("inline reset"),
+            );
+        }
+    }
+}
+
 async fn run_rtp_scheduler_core(
     mut receiver: crate::midi_queue::AsyncReceiver<TimedRtpFrame>,
     sink: Arc<arc_swap::ArcSwapOption<Sender<MidiFrame>>>,
     source_faults: Arc<SourceRecovery>,
 ) {
+    let _pending_resets = PendingPeerResets {
+        recovery: &source_faults,
+        sink: &sink,
+    };
     let mut cutoffs = HashMap::<Arc<str>, u64>::new();
     let mut pending = BinaryHeap::<TimedRtpFrame>::with_capacity(RTP_PENDING_CAPACITY);
     let mut order = 0u64;
@@ -808,6 +832,59 @@ impl crate::midi_queue::Priority for TimedRtpFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scheduler_shutdown_delivers_peer_releases_queued_by_session_termination() {
+        let _guard = crate::bridge::pipeline::TEST_PIPELINE_LOCK.lock().unwrap();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let (tx, receiver) = crate::midi_queue::async_channel(16);
+                let (output, notes) = crate::midi_queue::bounded(16);
+                let sink = Arc::new(arc_swap::ArcSwapOption::from(Some(Arc::new(output))));
+                let recovery = Arc::new(SourceRecovery::default());
+                let source: Arc<str> = Arc::from("RTP:test#ssrc_00000001");
+                let generation = midi_reset_generation();
+                let scheduler =
+                    tokio::spawn(run_rtp_scheduler_core(receiver, sink, recovery.clone()));
+                tx.try_send(TimedRtpFrame {
+                    source_epoch: 0,
+                    critical: false,
+                    frame: MidiFrame::copy_realtime(&[0x90, 60, 100], source.clone()).unwrap(),
+                    deadline: Instant::now(),
+                    generation,
+                    order: 0,
+                })
+                .unwrap_or_else(|_| panic!("test queue full"));
+                let first = tokio::task::spawn_blocking(move || {
+                    let first = notes.recv_timeout(Duration::from_secs(1)).unwrap();
+                    (first, notes)
+                })
+                .await
+                .unwrap();
+                let (first, notes) = first;
+                assert_eq!(first.data.as_slice(), [0x90, 60, 100]);
+                let mut held = crate::midi::SourceMidiState::default();
+                held.observe(&first);
+
+                // stop_gracefully() emits ParticipantLeft, then the server aborts
+                // this task without allowing another scheduler iteration.
+                recovery.request(source.clone());
+                scheduler.abort();
+                let _ = scheduler.await;
+                let reset = notes
+                    .try_recv()
+                    .expect("termination must deliver the final peer reset");
+                assert_eq!(reset.source, source);
+                assert_eq!(reset.data.as_slice(), [0xFF]);
+                assert_eq!(held.release_source(&reset.source), [[0x80, 60, 0]]);
+                assert_eq!(midi_reset_generation(), generation);
+                assert!(notes.try_recv().is_err());
+                drop(tx);
+            });
+    }
 
     #[test]
     fn rtp_midi_and_loss_logs_have_independent_rate_limiters() {
