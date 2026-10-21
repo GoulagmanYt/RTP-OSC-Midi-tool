@@ -364,6 +364,7 @@ pub(super) struct RemotePlugin {
     pending_parameter_changes: Vec<super::runtime_state::ParameterCommand>,
     parameter_sequences: [u64; BRIDGE_SLOTS],
     consecutive_missed_frames: u64,
+    buffered_wait_started: Option<Instant>,
     parameter_cache: Vec<crate::types::VstParameter>,
     last_output_samples: [f32; BRIDGE_MAX_CHANNELS],
 }
@@ -379,6 +380,8 @@ impl RemotePlugin {
         max_block_size: usize,
         probe: &VstPluginEntry,
     ) -> Result<Self, String> {
+        use std::os::windows::io::{FromRawHandle, IntoRawHandle, OwnedHandle};
+
         if max_block_size > BRIDGE_MAX_FRAMES {
             return Err(format!(
                 "x86 bridge supports blocks up to {BRIDGE_MAX_FRAMES} frames, requested {max_block_size}"
@@ -400,6 +403,9 @@ impl RemotePlugin {
             )
         }
         .map_err(|error| format!("CreateEventW failed: {error}"))?;
+        // Keep ownership across every fallible startup step. Transfer it to
+        // RemotePlugin only once the child is ready and its metadata is valid.
+        let request_event = unsafe { OwnedHandle::from_raw_handle(request_event.0) };
 
         let current = std::env::current_exe()
             .map_err(|error| format!("Cannot resolve x64 worker path: {error}"))?;
@@ -410,7 +416,6 @@ impl RemotePlugin {
             .map(PathBuf::from)
             .unwrap_or_else(|| directory.join("vst-host-worker-x86.exe"));
         if !worker.is_file() {
-            let _ = unsafe { CloseHandle(request_event) };
             return Err(format!("VST x86 worker not found at {}", worker.display()));
         }
 
@@ -455,13 +460,11 @@ impl RemotePlugin {
                     let reason = mapping_error(mapping.get());
                     let _ = child.kill();
                     let _ = child.wait();
-                    let _ = unsafe { CloseHandle(request_event) };
                     return Err(reason);
                 }
                 _ => {}
             }
             if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
-                let _ = unsafe { CloseHandle(request_event) };
                 return Err(format!(
                     "VST x86 DSP worker exited during startup: {status}"
                 ));
@@ -469,7 +472,6 @@ impl RemotePlugin {
             if Instant::now() >= deadline {
                 let _ = child.kill();
                 let _ = child.wait();
-                let _ = unsafe { CloseHandle(request_event) };
                 return Err("VST x86 DSP worker timed out during startup".to_string());
             }
             std::thread::sleep(Duration::from_millis(10));
@@ -501,14 +503,13 @@ impl RemotePlugin {
         if output_channels == 0 || output_channels > BRIDGE_MAX_CHANNELS {
             let _ = child.kill();
             let _ = child.wait();
-            let _ = unsafe { CloseHandle(request_event) };
             return Err(format!(
                 "Unsupported x86 plugin output count: {output_channels}"
             ));
         }
         Ok(Self {
             mapping,
-            request_event,
+            request_event: HANDLE(request_event.into_raw_handle()),
             child,
             next_sequence: 1,
             min_output_sequence: 0,
@@ -521,6 +522,7 @@ impl RemotePlugin {
             pending_parameter_changes: Vec::with_capacity(BRIDGE_MAX_PARAMETER_CHANGES),
             parameter_sequences: [0; BRIDGE_SLOTS],
             consecutive_missed_frames: 0,
+            buffered_wait_started: None,
             parameter_cache,
             last_output_samples: [0.0; BRIDGE_MAX_CHANNELS],
         })
@@ -548,15 +550,42 @@ impl RemotePlugin {
 
     /// The outer renderer may refill multiple prepared blocks back-to-back.
     /// Keep the bridge sequence intact until its previous result can be consumed.
-    pub(super) fn buffered_output_ready(&self) -> bool {
+    pub(super) fn buffered_output_ready(&mut self) -> bool {
         let shared = self.mapping.get();
-        self.next_sequence == 1
+        let ready = self.next_sequence == 1
             || self.panic_pending
             || shared.server_status.load(Ordering::Acquire) != SERVER_READY
             || shared.slots.iter().any(|slot| {
                 slot.state.load(Ordering::Acquire) == SLOT_READY
                     && slot.sequence.load(Ordering::Acquire) == self.next_sequence.saturating_sub(1)
-            })
+            });
+        if ready {
+            self.buffered_wait_started = None;
+            return true;
+        }
+        // Buffered rendering does not call process again until a result is
+        // ready. Its stall deadline must therefore advance here in wall time,
+        // independently of the audio-frame counter in process.
+        let started = self.buffered_wait_started.get_or_insert_with(Instant::now);
+        let command = shared.command.load(Ordering::Acquire);
+        let control_busy = command != COMMAND_NONE
+            && command != COMMAND_RESERVED
+            && shared.command_status.load(Ordering::Acquire) == COMMAND_PENDING;
+        let budget_ms = BRIDGE_STALL_BUDGET_MS
+            + if control_busy {
+                BRIDGE_CONTROL_BUDGET_MS
+            } else {
+                0
+            };
+        if started.elapsed() >= Duration::from_millis(budget_ms) {
+            set_mapping_error(
+                self.mapping.get_mut(),
+                "x86 DSP bridge produced no completed block for 5000 ms",
+            );
+            // Let the renderer publish the failed health state to supervision.
+            return true;
+        }
+        false
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -825,6 +854,8 @@ impl RemotePlugin {
         if !begin_control_command(shared, command) {
             return Err(format!("x86 {operation} command already in progress"));
         }
+        // Native maintenance pauses rendering and is bounded by its own timer.
+        self.buffered_wait_started = None;
         let _ = unsafe { SetEvent(self.request_event) };
         let deadline = Instant::now() + Duration::from_millis(BRIDGE_CONTROL_BUDGET_MS);
         loop {
@@ -1800,6 +1831,62 @@ mod tests {
 
     #[test]
     #[cfg(target_pointer_width = "64")]
+    fn failed_x86_spawn_releases_request_event() {
+        const CHILD_FLAG: &str = "OSCMIDI_TEST_FAILED_X86_SPAWN";
+        // Isolate environment changes and handle accounting from parallel tests.
+        if std::env::var_os(CHILD_FLAG).is_none() {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "audio::remote_bridge::tests::failed_x86_spawn_releases_request_event",
+                    "--nocapture",
+                ])
+                .env(CHILD_FLAG, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::env::set_var("OSCMIDI_VST_WORKER_X86_PATH", file.path());
+        let probe = runtime_plugin_reference(Path::new("fixture.dll"), "fixture".into(), None);
+        let handles = || {
+            let mut count = 0;
+            unsafe {
+                windows::Win32::System::Threading::GetProcessHandleCount(
+                    windows::Win32::System::Threading::GetCurrentProcess(),
+                    &mut count,
+                )
+                .unwrap();
+            }
+            count
+        };
+        // Windows initializes process-launch resources on the first attempt.
+        assert!(RemotePlugin::spawn(Path::new("fixture.dll"), 48_000, 512, &probe).is_err());
+        let before = handles();
+        for _ in 0..32 {
+            let error = RemotePlugin::spawn(Path::new("fixture.dll"), 48_000, 512, &probe)
+                .err()
+                .expect("an empty executable must fail to spawn");
+            assert!(
+                error.contains("Failed to launch VST x86 DSP worker"),
+                "{error}"
+            );
+        }
+        let after = handles();
+        assert!(
+            after <= before + 2,
+            "failed x86 spawns leaked handles: {before} -> {after}"
+        );
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
     fn bridged_midi_preserves_release_retrigger_order_in_one_sample_timeline() {
         let mut midi = VecDeque::new();
         let messages = [
@@ -1875,6 +1962,7 @@ mod tests {
             pending_parameter_changes: Vec::with_capacity(BRIDGE_MAX_PARAMETER_CHANGES),
             parameter_sequences: [0; BRIDGE_SLOTS],
             consecutive_missed_frames: 0,
+            buffered_wait_started: None,
             parameter_cache: Vec::new(),
             last_output_samples: [0.0; BRIDGE_MAX_CHANNELS],
         }
@@ -1918,6 +2006,72 @@ mod tests {
             None
         ));
         assert_eq!(outputs[0][511], 0.25);
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn buffered_render_stall_expires_without_another_process_call() {
+        let mut remote = test_remote();
+        let mut outputs = vec![vec![0.0; 512]; 2];
+        assert!(remote.process(
+            &mut VecDeque::new(),
+            &[],
+            &mut outputs,
+            512,
+            None,
+            None,
+            None
+        ));
+        assert!(!remote.buffered_output_ready());
+        std::thread::sleep(Duration::from_millis(5_100));
+        assert!(
+            remote.buffered_output_ready(),
+            "stalled x86 wait never returned to health publication"
+        );
+        assert!(
+            !remote.realtime_health().2,
+            "stalled x86 worker remained healthy"
+        );
+        assert!(mapping_error(remote.mapping.get()).contains("5000 ms"));
+        assert_eq!(remote.next_sequence, 2);
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn buffered_render_control_grace_is_bounded_and_ends_on_timeout() {
+        for timed_out in [false, true] {
+            let mut remote = test_remote();
+            let mut outputs = vec![vec![0.0; 512]; 2];
+            remote.process(
+                &mut VecDeque::new(),
+                &[],
+                &mut outputs,
+                512,
+                None,
+                None,
+                None,
+            );
+            assert!(begin_control_command(
+                remote.mapping.get(),
+                COMMAND_SAVE_STATE
+            ));
+            remote.buffered_wait_started = Some(Instant::now() - Duration::from_millis(5_100));
+            assert!(
+                !remote.buffered_output_ready(),
+                "pending maintenance lost its grace period"
+            );
+            if timed_out {
+                remote
+                    .mapping
+                    .get()
+                    .command_status
+                    .store(COMMAND_TIMED_OUT, Ordering::Release);
+            } else {
+                remote.buffered_wait_started = Some(Instant::now() - Duration::from_millis(15_100));
+            }
+            assert!(remote.buffered_output_ready());
+            assert!(!remote.realtime_health().2);
+        }
     }
 
     #[test]

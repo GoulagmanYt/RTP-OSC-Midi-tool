@@ -1121,7 +1121,14 @@ async fn midi_writer<W: tokio::io::AsyncWrite + Unpin>(
                 &[0xFF],
             )
             .expect("one-byte MIDI reset");
-            if write_midi_frame(&mut pipe, reset).await.is_err() {
+            if !matches!(
+                tokio::time::timeout(
+                    Duration::from_millis(500),
+                    write_midi_frame(&mut pipe, reset),
+                )
+                .await,
+                Ok(Ok(()))
+            ) {
                 break;
             }
         }
@@ -1772,6 +1779,22 @@ mod tests {
         .expect("admission wait escaped the command deadline")
         .unwrap_err();
         assert!(error.contains("command timed out"));
+    }
+
+    #[tokio::test]
+    async fn stalled_emergency_reset_expires_and_marks_midi_transport_failed() {
+        let supervisor = VstWorkerSupervisor::new();
+        let (writer, _reader) = tokio::io::duplex(1);
+        let (_tx, rx) = crate::midi_queue::async_channel(8);
+        supervisor.request_emergency_reset();
+        let mut task = tokio::spawn(midi_writer(writer, rx, supervisor.inner.clone(), 0));
+        let result = tokio::time::timeout(Duration::from_secs(2), &mut task).await;
+        task.abort();
+        assert!(
+            result.is_ok(),
+            "emergency MIDI reset escaped the write deadline"
+        );
+        assert!(supervisor.snapshot().midi_transport_failed);
     }
 
     #[tokio::test]

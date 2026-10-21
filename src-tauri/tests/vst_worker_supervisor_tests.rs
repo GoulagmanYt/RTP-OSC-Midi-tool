@@ -179,6 +179,52 @@ async fn isolated_worker_survives_midi_and_contains_process_crashes() {
     recovered.stop().await.unwrap();
     std::env::remove_var("OSCMIDI_VST_FIXTURE_EXPECT_SETTINGS");
 
+    std::env::set_var("OSCMIDI_VST_FIXTURE_MODE", "slow-command");
+    let interrupted = VstWorkerSupervisor::new();
+    interrupted.start(fixture_settings(), None).await.unwrap();
+    let save = interrupted.save_state();
+    tokio::pin!(save);
+    // A FIFO barrier proves SaveState was admitted before Stop.
+    tokio::select! {
+        biased;
+        result = &mut save => panic!("SaveState completed before the barrier: {result:?}"),
+        result = interrupted.list_parameters() => { result.unwrap(); },
+    }
+    tokio::time::timeout(Duration::from_secs(2), interrupted.stop())
+        .await
+        .expect("Stop blocked behind a delayed response")
+        .unwrap();
+    assert!(save.await.is_err());
+    assert_eq!(interrupted.snapshot().state, VstWorkerState::Disabled);
+    std::env::set_var("OSCMIDI_VST_FIXTURE_MODE", "ready");
+    interrupted.start(fixture_settings(), None).await.unwrap();
+    interrupted.list_parameters().await.unwrap();
+    interrupted.stop().await.unwrap();
+
+    std::env::set_var("OSCMIDI_VST_FIXTURE_MODE", "truncated-response");
+    let truncated = VstWorkerSupervisor::new();
+    truncated.start(fixture_settings(), None).await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), truncated.save_state())
+            .await
+            .expect("truncated response left a pending command")
+            .is_err()
+    );
+    truncated.stop().await.ok();
+    assert!(!truncated.is_ready());
+
+    for mode in ["wrong-token", "wrong-abi"] {
+        std::env::set_var("OSCMIDI_VST_FIXTURE_MODE", mode);
+        let rejected = VstWorkerSupervisor::new();
+        let error = rejected.start(fixture_settings(), None).await.unwrap_err();
+        assert!(
+            error.contains("authentication/protocol mismatch"),
+            "{mode}: {error}"
+        );
+        assert_eq!(rejected.snapshot().state, VstWorkerState::Faulted);
+        rejected.stop().await.ok();
+    }
+
     for mode in ["silence-two-seconds", "slow-command"] {
         std::env::set_var("OSCMIDI_VST_FIXTURE_MODE", mode);
         let healthy = VstWorkerSupervisor::new();

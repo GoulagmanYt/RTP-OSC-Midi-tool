@@ -283,7 +283,7 @@ fn render_audio_block<T: Sample + SizedSample + FromSample<f32>>(
 
     #[cfg(all(target_os = "windows", target_pointer_width = "64"))]
     if state.render_source_end_us.is_some() && !state.needs_emergency_reset {
-        if let PluginBackend::Remote { instance } = &*plugin {
+        if let PluginBackend::Remote { instance } = &mut *plugin {
             if !instance.buffered_output_ready() {
                 // Retain this outer request and all MIDI/parameter commands.
                 // Advancing the bridge here would discard the unfinished result.
