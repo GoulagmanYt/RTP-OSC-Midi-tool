@@ -18,7 +18,7 @@ use vst::{buffer::AudioBuffer, plugin::Plugin};
 use super::callback_render::replay_last_output_or_silence as replay_output_or_silence;
 use super::{
     callback_midi::{process_pending_vst2_midi, process_pending_vst3_midi, send_reset_messages},
-    callback_render::{output_sample, process_vst3_plugin},
+    callback_render::{device_sample, output_sample, process_vst3_plugin},
     runtime_state::{
         atomic_max, AudioCallbackState, AudioControls, AudioError, AudioTelemetry, MidiPacket,
         ParameterCommand, PluginBackend, DSP_HISTOGRAM_BUCKETS, DSP_HISTOGRAM_BUCKET_US,
@@ -199,7 +199,7 @@ fn record_driver_callback(
         .store(backend_latency, Ordering::Relaxed);
 }
 
-fn render_audio_block<T: Sample + FromSample<f32>>(
+fn render_audio_block<T: Sample + SizedSample + FromSample<f32>>(
     data: &mut [T],
     device_channels: usize,
     state: &mut AudioCallbackState,
@@ -497,10 +497,10 @@ fn render_audio_block<T: Sample + FromSample<f32>>(
         peak_l = peak_l.max(l.abs());
         peak_r = peak_r.max(r.abs());
         let base = frame_idx * device_channels;
-        frame[0] = T::from_sample(l);
+        frame[0] = device_sample(l);
         state.last_output[base] = l;
         if device_channels >= 2 {
-            frame[1] = T::from_sample(r);
+            frame[1] = device_sample(r);
             state.last_output[base + 1] = r;
             for (ch, frame_sample) in frame.iter_mut().enumerate().take(device_channels).skip(2) {
                 *frame_sample = silence;

@@ -1,7 +1,7 @@
 //! Preallocated audio exchange between the app-owned DSP and driver threads.
 
 use super::runtime_state::{AudioError, AudioTelemetry};
-use cpal::{FromSample, Sample};
+use cpal::{FromSample, Sample, SizedSample};
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering},
@@ -302,7 +302,7 @@ impl AudioOutput {
         }
     }
 
-    pub(super) fn copy_into<T: Sample + FromSample<f32>>(
+    pub(super) fn copy_into<T: Sample + SizedSample + FromSample<f32>>(
         &mut self,
         data: &mut [T],
         now_us: u64,
@@ -319,10 +319,17 @@ impl AudioOutput {
             return 0;
         };
         if total > shared.max_frames {
-            shared
+            if shared
                 .telemetry
                 .stream_fatal_error
-                .store(13, Ordering::Release);
+                .compare_exchange(0, 13, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                shared
+                    .telemetry
+                    .stream_recovery_requests
+                    .fetch_add(1, Ordering::Relaxed);
+            }
             shared.emergency.store(true, Ordering::Release);
             return total;
         }
@@ -332,6 +339,12 @@ impl AudioOutput {
         let generation = shared.telemetry.midi_generation.load(Ordering::Acquire);
         let resetting = generation != self.generation || shared.emergency.load(Ordering::Acquire);
         self.generation = generation;
+        if resetting {
+            // A fully consumed block can leave history even when ready is empty.
+            // Panic invalidates that fallback as well as queued/partial blocks.
+            self.last.fill(0.0);
+            self.recovering = true;
+        }
         shared.frames.store(total, Ordering::Release);
         shared
             .telemetry
@@ -376,7 +389,8 @@ impl AudioOutput {
                 };
                 for channel in 0..channels {
                     let sample = block.samples[(self.offset + frame) * channels + channel] * gain;
-                    data[(written + frame) * channels + channel] = T::from_sample(sample);
+                    data[(written + frame) * channels + channel] =
+                        super::callback_render::device_sample(sample);
                     self.last[channel] = sample;
                 }
             }
@@ -396,7 +410,7 @@ impl AudioOutput {
                 let gain = 1.0 - (frame + 1) as f32 / missing as f32;
                 for channel in 0..channels {
                     data[(written + frame) * channels + channel] =
-                        T::from_sample(self.last[channel] * gain);
+                        super::callback_render::device_sample(self.last[channel] * gain);
                 }
             }
             self.last.fill(0.0);
@@ -691,6 +705,81 @@ mod tests {
                 .telemetry
                 .render_underflows
                 .load(Ordering::Relaxed),
+            1
+        );
+    }
+
+    #[test]
+    fn reset_with_an_empty_ready_queue_never_replays_previous_generation() {
+        for emergency in [false, true] {
+            let (mut producer, mut output, control) = endpoints(1);
+            control.prime_at(100_000);
+            assert!(producer.render_next_at(100_000, |samples, _| {
+                samples.fill(0.8);
+                Some(0)
+            }));
+            control.activate();
+            let mut data = [0.0f32; 4];
+            output.copy_into(&mut data, 104_000);
+            assert_eq!(data, [0.8; 4]);
+            if emergency {
+                control.shared.emergency.store(true, Ordering::Release);
+            } else {
+                control
+                    .shared
+                    .telemetry
+                    .midi_generation
+                    .store(1, Ordering::Release);
+            }
+            // The renderer has not produced another block. Even the fallback
+            // ramp must discard the old generation immediately on panic.
+            assert_eq!(output.copy_into(&mut data, 108_000), 4);
+            assert_eq!(data, [0.0; 4]);
+            assert_eq!(output.copy_into(&mut data, 112_000), 4);
+            assert_eq!(data, [0.0; 4]);
+        }
+    }
+
+    #[test]
+    fn integer_device_output_saturates_unlimited_plugin_samples() {
+        let (mut producer, mut output, control) = endpoints(1);
+        control.prime_at(100_000);
+        assert!(producer.render_next_at(100_000, |samples, _| {
+            // These are valid floating output values with the limiter off.
+            samples.copy_from_slice(&[2.0, -2.0, 1.0, 0.5]);
+            Some(0)
+        }));
+        control.activate();
+        let mut data = [cpal::I24::new(0).unwrap(); 4];
+        output.copy_into(&mut data, 104_000);
+        assert_eq!(
+            data.map(|sample| sample.inner()),
+            [8_388_607, -8_388_608, 8_388_607, 4_194_304]
+        );
+    }
+
+    #[test]
+    fn oversized_driver_callback_requests_recovery_once_and_preserves_first_fault() {
+        let (_producer, mut output, control) = endpoints(1);
+        control.activate();
+        let telemetry = &control.shared.telemetry;
+        for _ in 0..2 {
+            let mut data = [1.0f32; 9];
+            assert_eq!(output.copy_into(&mut data, 100_000), 9);
+            assert_eq!(data, [0.0; 9]);
+        }
+        assert_eq!(telemetry.stream_fatal_error.load(Ordering::Acquire), 13);
+        assert_eq!(
+            telemetry.stream_recovery_requests.load(Ordering::Relaxed),
+            1
+        );
+        assert!(control.shared.emergency.load(Ordering::Acquire));
+
+        telemetry.stream_fatal_error.store(2, Ordering::Release);
+        output.copy_into(&mut [0.0f32; 9], 104_000);
+        assert_eq!(telemetry.stream_fatal_error.load(Ordering::Acquire), 2);
+        assert_eq!(
+            telemetry.stream_recovery_requests.load(Ordering::Relaxed),
             1
         );
     }

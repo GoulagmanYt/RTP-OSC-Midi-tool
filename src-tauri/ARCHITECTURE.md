@@ -58,7 +58,7 @@ src/
 - The VST3 processor lifecycle is mirrored on shutdown, native component and
   controller state are authoritative, and normalized parameters are retained
   only as a recovery fallback.
-- CPAL is pinned to `0.18.1`. WASAPI uses shared low-latency mode; ASIO buffer
+- CPAL is pinned to `0.18.2`. WASAPI uses shared low-latency mode; ASIO buffer
   requests are preferences validated by the driver, and the active stream's
   actual buffer size and callback-to-playback latency are reported separately.
 - A CPAL xrun increments telemetry without rebuilding. Device loss, ASIO reset,

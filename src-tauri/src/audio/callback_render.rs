@@ -2,13 +2,13 @@
 
 use std::sync::atomic::Ordering;
 
-use cpal::{FromSample, Sample};
+use cpal::{FromSample, Sample, SizedSample};
 use rack::PluginInstance as _;
 use smallvec::SmallVec;
 
 use super::runtime_state::{AudioCallbackState, MAX_PLUGIN_CHANNELS};
 
-pub(super) fn replay_last_output_or_silence<T: Sample + FromSample<f32>>(
+pub(super) fn replay_last_output_or_silence<T: Sample + SizedSample + FromSample<f32>>(
     data: &mut [T],
     device_channels: usize,
     silence: T,
@@ -39,7 +39,7 @@ pub(super) fn replay_last_output_or_silence<T: Sample + FromSample<f32>>(
             0.0
         };
         let sample = state.last_output.get(idx).copied().unwrap_or(0.0) * ramp;
-        *slot = T::from_sample(sample);
+        *slot = device_sample(sample);
         match idx % device_channels {
             0 => peak_l = peak_l.max(sample.abs()),
             1 => peak_r = peak_r.max(sample.abs()),
@@ -122,9 +122,42 @@ pub(super) fn output_sample(sample: f32, gain: f32, limiter: bool) -> f32 {
     }
 }
 
+pub(super) fn device_sample<T: SizedSample + FromSample<f32>>(sample: f32) -> T {
+    let sample = if sample.is_finite() { sample } else { 0.0 };
+    // dasp's integer conversions require -1 <= sample < 1. In particular,
+    // I24::from_sample does not saturate and can construct an invalid value.
+    // Floating devices retain their headroom when the limiter is disabled.
+    let sample = if T::FORMAT.is_float() {
+        sample
+    } else {
+        sample.clamp(-1.0, f32::from_bits(1.0f32.to_bits() - 1))
+    };
+    T::from_sample(sample)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::output_sample;
+    use super::{device_sample, output_sample};
+
+    #[test]
+    fn device_conversion_preserves_float_headroom_and_bounds_integer_pcm() {
+        for sample in [-2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0] {
+            assert_eq!(device_sample::<f32>(sample), sample);
+            assert_eq!(device_sample::<f64>(sample), f64::from(sample));
+        }
+        assert_eq!(device_sample::<i16>(2.0), i16::MAX);
+        assert_eq!(device_sample::<i16>(-2.0), i16::MIN);
+        assert_eq!(device_sample::<u16>(2.0), u16::MAX);
+        assert_eq!(device_sample::<u16>(-2.0), u16::MIN);
+        assert_eq!(device_sample::<u16>(0.0), 32_768);
+        assert_eq!(device_sample::<i32>(-2.0), i32::MIN);
+        assert!(device_sample::<i32>(2.0) > 2_147_483_000);
+        for sample in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert_eq!(device_sample::<f32>(sample), 0.0);
+            assert_eq!(device_sample::<u16>(sample), 32_768);
+            assert_eq!(device_sample::<cpal::I24>(sample).inner(), 0);
+        }
+    }
 
     #[test]
     fn output_gain_cannot_send_nonfinite_samples_to_the_device() {

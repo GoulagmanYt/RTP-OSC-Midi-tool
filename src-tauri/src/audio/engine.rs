@@ -1283,6 +1283,20 @@ mod tests {
     }
 
     #[test]
+    fn integer_fallback_saturates_audio_saved_with_the_limiter_disabled() {
+        let (_, rx) = RingBuffer::new(8);
+        let mut state = callback_test_state(rx, Arc::new(AtomicBool::new(false)));
+        state.last_output[..4].copy_from_slice(&[2.0, -2.0, 0.5, -0.5]);
+        let silence = cpal::I24::new(0).unwrap();
+        let mut data = [silence; 4];
+        replay_last_output_or_silence(&mut data, 2, silence, &mut state);
+        assert_eq!(
+            data.map(|sample| sample.inner()),
+            [8_388_607, -8_388_608, 0, 0]
+        );
+    }
+
+    #[test]
     fn replay_last_output_falls_back_to_silence_without_history() {
         let (_tx, rx) = RingBuffer::new(8);
         let mut state = callback_test_state(rx, Arc::new(AtomicBool::new(false)));
