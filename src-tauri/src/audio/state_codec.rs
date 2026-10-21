@@ -1224,4 +1224,62 @@ mod tests {
         let assignments = resolve_vst3_parameter_assignments(&current, &legacy_params, true);
         assert_eq!(assignments, vec![(0, 0.2), (1, 0.8)]);
     }
+
+    #[test]
+    fn parameter_fallback_follows_ids_and_filters_read_only_or_nonfinite_values() {
+        let metadata = |index, id, flags, name: &str| {
+            (
+                index,
+                rack::plugin_info::ParameterInfo {
+                    index,
+                    id,
+                    flags,
+                    step_count: 0,
+                    unit_id: 0,
+                    name: name.into(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.0,
+                    unit: String::new(),
+                },
+            )
+        };
+        let current = [
+            metadata(0, 12, 0, "Gain"),
+            metadata(1, 34, VST3_PARAMETER_IS_READ_ONLY, "Meter"),
+            metadata(2, 56, 0, "Pan"),
+        ];
+        let saved = [
+            StateParameter {
+                id: 56,
+                index: 0,
+                name: "Pan".into(),
+                value: 1.5,
+                ..Default::default()
+            },
+            StateParameter {
+                id: 12,
+                index: 2,
+                name: "Gain".into(),
+                value: -0.2,
+                ..Default::default()
+            },
+            StateParameter {
+                id: 34,
+                index: 1,
+                value: 0.6,
+                ..Default::default()
+            },
+            StateParameter {
+                id: 12,
+                index: 0,
+                value: f32::NAN,
+                ..Default::default()
+            },
+        ];
+        assert_eq!(
+            resolve_vst3_parameter_assignments(&current, &saved, false),
+            [(2, 1.0), (0, 0.0)]
+        );
+    }
 }

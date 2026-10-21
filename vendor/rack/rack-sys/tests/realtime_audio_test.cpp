@@ -16,6 +16,8 @@ static void require(bool condition, const char* message) {
     if (!condition) { std::fprintf(stderr, "FAIL: %s\n", message); std::exit(1); }
 }
 
+#include "vst3_state_fixture.h"
+
 class NoteProcessor final : public IAudioProcessor {
 public:
     std::array<int, 16 * 128> notes{};
@@ -73,6 +75,13 @@ static int render(RackVST3Plugin& plugin, const RackVST3MidiEvent* events, uint3
 }
 
 int main(int argc, char** argv) {
+    if (argc == 2 && std::strcmp(argv[1], "native-state-streams") == 0) {
+        test_native_state_streams(false, false);
+        test_native_state_streams(true, false);
+        test_native_state_streams(false, true);
+        test_native_state_streams(true, true);
+        return 0;
+    }
     if (argc == 2 && std::strcmp(argv[1], "host-refcounts") == 0) {
         auto verify = [](auto* object) {
             require(object->addRef() == 2, "host reference count must start at one regardless of heap contents");

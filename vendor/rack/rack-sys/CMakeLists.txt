@@ -234,6 +234,7 @@ if(BUILD_REALTIME_TESTS AND HAVE_VST3_SDK)
     add_test(NAME realtime_parameters COMMAND rack_realtime_audio_test parameters)
     add_test(NAME realtime_parameter_capacity COMMAND rack_realtime_audio_test parameter-capacity)
     add_test(NAME host_reference_counts COMMAND rack_realtime_audio_test host-refcounts)
+    add_test(NAME native_state_streams COMMAND rack_realtime_audio_test native-state-streams)
 endif()
 
 option(BUILD_TESTS "Build test executables" OFF)

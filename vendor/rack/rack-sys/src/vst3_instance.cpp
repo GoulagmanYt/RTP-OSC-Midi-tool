@@ -1833,123 +1833,62 @@ int rack_vst3_plugin_load_preset(RackVST3Plugin* plugin, int32_t preset_number) 
         : RACK_VST3_ERROR_GENERIC;
 }
 
-int rack_vst3_plugin_get_state_size(RackVST3Plugin* plugin) {
-    if (!plugin || !plugin->component) {
-        return 0;
-    }
-
-    std::lock_guard<std::mutex> state_lock(plugin->state_mutex);
-    rack_vst3_drain_audio_parameters(plugin);
-
-    // VST3 doesn't provide a query method for state size
-    // We need to actually serialize the state to determine the size
-    // This is done once for buffer allocation - worth the cost for accuracy
-
-    // Create temporary memory stream for size calculation
-    IPtr<MemoryStream> stream(new MemoryStream(), false);
-
-    // Reserve space for component state size marker
-    uint32_t size_marker_placeholder = 0;
-    stream->write(&size_marker_placeholder, sizeof(size_marker_placeholder), nullptr);
-
-    // Record position before component state
-    int64 component_start_pos = 0;
-    stream->tell(&component_start_pos);
-
-    // Get component state
-    tresult result = plugin->component->getState(stream);
-    if (result != kResultOk) {
-        return RACK_VST3_ERROR_NOT_SUPPORTED;
-    }
-
-    // Record position after component state
-    int64 component_end_pos = 0;
-    stream->tell(&component_end_pos);
-
-    // Get controller state if separate controller
-    if (plugin->controller && plugin->separate_controller) {
-        result = plugin->controller->getState(stream);
-        if (result != kResultOk && result != kResultFalse && result != kNotImplemented) {
-            // Controller state failed - return component state size only
-            return static_cast<int>(stream->getSize());
-        }
-    }
-
-    if (component_end_pos <= component_start_pos && stream->getSize() <= sizeof(uint32_t)) {
-        return RACK_VST3_ERROR_NOT_SUPPORTED;
-    }
-
-    // Return actual state size
-    // This avoids the retry pattern - user gets correct size on first call
-    return static_cast<int>(stream->getSize());
-}
-
-int rack_vst3_plugin_get_state(RackVST3Plugin* plugin, uint8_t* data, size_t* size) {
-    if (!plugin || !data || !size || !plugin->component) {
-        return RACK_VST3_ERROR_INVALID_PARAM;
-    }
-
-    std::lock_guard<std::mutex> state_lock(plugin->state_mutex);
-    rack_vst3_drain_audio_parameters(plugin);
-
-    if (*size == 0) {
-        return RACK_VST3_ERROR_INVALID_PARAM;
-    }
-
-    // Create memory stream for state serialization
-    // IPtr ensures automatic cleanup on ALL code paths (success, error, buffer size check failure)
-    IPtr<MemoryStream> stream(new MemoryStream(), false);
-
-    // Reserve space for component state size marker (write it later)
-    uint32_t size_marker_placeholder = 0;
-    stream->write(&size_marker_placeholder, sizeof(size_marker_placeholder), nullptr);
-
-    // Record position before component state
-    int64 component_start_pos = 0;
-    stream->tell(&component_start_pos);
-
-    // Get component state
-    tresult result = plugin->component->getState(stream);
-    if (result != kResultOk) {
-        return (result == kResultFalse || result == kNotImplemented)
+// Each plugin callback owns a zero-based stream: seek(0) must never reach
+// the host envelope or the other component's state.
+static int rack_vst3_serialize_state(RackVST3Plugin* plugin, std::vector<uint8_t>& data) {
+    IPtr<MemoryStream> component(new MemoryStream(), false);
+    const tresult component_result = plugin->component->getState(component);
+    if (component_result != kResultOk) {
+        return (component_result == kResultFalse || component_result == kNotImplemented)
             ? RACK_VST3_ERROR_NOT_SUPPORTED
             : RACK_VST3_ERROR_GENERIC;
     }
 
-    // Record position after component state (= size of component state)
-    int64 component_end_pos = 0;
-    stream->tell(&component_end_pos);
-    uint32_t component_state_size = static_cast<uint32_t>(component_end_pos - component_start_pos);
-
-    // Write component state size marker at the beginning
-    stream->seek(0, IBStream::kIBSeekSet, nullptr);
-    stream->write(&component_state_size, sizeof(component_state_size), nullptr);
-
-    // Seek back to end to append controller state
-    stream->seek(component_end_pos, IBStream::kIBSeekSet, nullptr);
-
-    // Get controller state if separate controller
+    IPtr<MemoryStream> controller(new MemoryStream(), false);
     if (plugin->controller && plugin->separate_controller) {
-        result = plugin->controller->getState(stream);
+        const tresult result = plugin->controller->getState(controller);
         if (result != kResultOk && result != kResultFalse && result != kNotImplemented) {
             return RACK_VST3_ERROR_GENERIC;
         }
     }
-
-    // Copy to output buffer
-    // Note: MemoryStream grows dynamically - no fixed limit, can't overflow
-    // get_state_size() returns the actual size, so this should match
-    // However, we still check in case the state changed between calls
-    size_t state_size = stream->getSize();
-    if (state_size > *size) {
-        *size = state_size;  // Return required size for caller to retry
-        return RACK_VST3_ERROR_INVALID_PARAM;
+    if (component->getSize() == 0 && controller->getSize() == 0) {
+        return RACK_VST3_ERROR_NOT_SUPPORTED;
     }
 
-    memcpy(data, stream->getData().data(), state_size);
-    *size = state_size;
-    // IPtr automatically releases stream on scope exit
+    const uint32_t component_size = static_cast<uint32_t>(component->getSize());
+    data.resize(sizeof(component_size));
+    memcpy(data.data(), &component_size, sizeof(component_size));
+    data.insert(data.end(), component->getData().begin(), component->getData().end());
+    data.insert(data.end(), controller->getData().begin(), controller->getData().end());
+    return RACK_VST3_OK;
+}
 
+int rack_vst3_plugin_get_state_size(RackVST3Plugin* plugin) {
+    if (!plugin || !plugin->component) {
+        return 0;
+    }
+    std::lock_guard<std::mutex> state_lock(plugin->state_mutex);
+    rack_vst3_drain_audio_parameters(plugin);
+    std::vector<uint8_t> data;
+    const int result = rack_vst3_serialize_state(plugin, data);
+    return result == RACK_VST3_OK ? static_cast<int>(data.size()) : result;
+}
+
+int rack_vst3_plugin_get_state(RackVST3Plugin* plugin, uint8_t* data, size_t* size) {
+    if (!plugin || !data || !size || *size == 0 || !plugin->component) {
+        return RACK_VST3_ERROR_INVALID_PARAM;
+    }
+    std::lock_guard<std::mutex> state_lock(plugin->state_mutex);
+    rack_vst3_drain_audio_parameters(plugin);
+    std::vector<uint8_t> state;
+    const int result = rack_vst3_serialize_state(plugin, state);
+    if (result != RACK_VST3_OK) return result;
+    if (state.size() > *size) {
+        *size = state.size();
+        return RACK_VST3_ERROR_INVALID_PARAM;
+    }
+    memcpy(data, state.data(), state.size());
+    *size = state.size();
     return RACK_VST3_OK;
 }
 

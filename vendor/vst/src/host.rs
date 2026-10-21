@@ -355,12 +355,13 @@ impl Drop for PluginInstance {
         if self.is_editor_active.swap(false, Ordering::AcqRel) {
             self.dispatch(plugin::OpCode::EditorClose, 0, 0, ptr::null_mut(), 0.0);
         }
+        // effClose may destroy AEffect. Capture our host owner first, retain it
+        // for callbacks during shutdown, and never touch the effect afterwards.
+        let host = unsafe { (*self.params.get_effect()).reserved1 };
         self.dispatch(plugin::OpCode::Shutdown, 0, 0, ptr::null_mut(), 0.0);
         unsafe {
-            let effect = self.params.get_effect();
-            if !effect.is_null() && (*effect).reserved1 != 0 {
-                (self.host_dropper)((*effect).reserved1);
-                (*effect).reserved1 = 0;
+            if host != 0 {
+                (self.host_dropper)(host);
             }
         }
     }
@@ -1083,6 +1084,162 @@ extern "C" fn callback_wrapper<T: Host>(
 #[cfg(test)]
 mod tests {
     use crate::host::HostBuffer;
+
+    #[cfg(windows)]
+    #[test]
+    fn shutdown_releases_host_even_when_plugin_invalidates_aeffect_storage() {
+        use super::*;
+
+        struct TestHost;
+        impl Host for TestHost {
+            fn get_sample_rate(&self) -> isize {
+                48_000
+            }
+        }
+        struct TestPlugin;
+        impl Plugin for TestPlugin {
+            fn new(_: HostCallback) -> Self {
+                Self
+            }
+            fn get_info(&self) -> Info {
+                Info::default()
+            }
+        }
+        extern "C" fn version_callback(_: *mut AEffect, _: i32, _: i32, _: isize, _: *mut c_void, _: f32) -> isize {
+            2400
+        }
+        extern "C" fn dispatcher(
+            effect: *mut AEffect,
+            opcode: i32,
+            index: i32,
+            value: isize,
+            ptr: *mut c_void,
+            opt: f32,
+        ) -> isize {
+            if opcode == i32::from(plugin::OpCode::Shutdown) {
+                // Keep the allocation readable for a deterministic regression:
+                // real effClose implementations may free it entirely.
+                unsafe {
+                    (*effect).reserved2 =
+                        callback_wrapper::<TestHost>(effect, OpCode::GetSampleRate.into(), 0, 0, ptr::null_mut(), 0.0);
+                    (*effect).reserved1 = 0;
+                }
+                0
+            } else {
+                interfaces::dispatch(effect, opcode, index, value, ptr, opt)
+            }
+        }
+
+        let host = Arc::new(Mutex::new(TestHost));
+        let effect = crate::main::<TestPlugin>(version_callback);
+        unsafe {
+            (*effect).dispatcher = dispatcher;
+            (*effect).reserved1 = Box::into_raw(Box::new(host.clone())) as isize;
+        }
+        let library = libloading::os::windows::Library::this().unwrap();
+        let instance = PluginInstance::new(effect, Arc::new(library.into()), drop_host::<TestHost>);
+        drop(instance);
+        let close_callback_id = unsafe { (*effect).reserved2 };
+        interfaces::dispatch(effect, plugin::OpCode::Shutdown.into(), 0, 0, ptr::null_mut(), 0.0);
+        assert_eq!(close_callback_id, 48_000, "host must stay available during effClose");
+        assert_eq!(
+            Arc::strong_count(&host),
+            1,
+            "effClose must release the captured host without rereading AEffect"
+        );
+    }
+
+    #[test]
+    fn shell_current_id_callback_returns_selected_class() {
+        use super::*;
+        struct ShellHost;
+        impl Host for ShellHost {
+            fn get_plugin_id(&self) -> i32 {
+                0x8765_4321u32 as i32
+            }
+        }
+        let mut host = ShellHost;
+        assert_eq!(
+            interfaces::host_dispatch(
+                &mut host,
+                ptr::null_mut(),
+                OpCode::CurrentId.into(),
+                0,
+                0,
+                ptr::null_mut(),
+                0.0
+            ),
+            0x8765_4321u32 as i32 as isize
+        );
+    }
+
+    #[test]
+    fn native_chunk_restore_reports_plugin_acceptance() {
+        use super::*;
+        use std::sync::atomic::AtomicUsize;
+
+        #[derive(Default)]
+        struct ChunkParameters(AtomicUsize);
+        impl PluginParameters for ChunkParameters {
+            fn get_parameter(&self, _: i32) -> f32 {
+                self.0.load(Ordering::Relaxed) as f32
+            }
+            fn load_bank_data(&self, data: &[u8]) -> bool {
+                if data != b"bank" {
+                    return false;
+                }
+                self.0.store(1, Ordering::Relaxed);
+                true
+            }
+            fn load_preset_data(&self, data: &[u8]) -> bool {
+                if data != b"preset" {
+                    return false;
+                }
+                self.0.store(2, Ordering::Relaxed);
+                true
+            }
+        }
+        struct ChunkPlugin(Arc<ChunkParameters>);
+        impl Plugin for ChunkPlugin {
+            fn new(_: HostCallback) -> Self {
+                Self(Arc::default())
+            }
+            fn get_info(&self) -> Info {
+                Info {
+                    parameters: 1,
+                    preset_chunks: true,
+                    ..Info::default()
+                }
+            }
+            fn get_parameter_object(&mut self) -> Arc<dyn PluginParameters> {
+                self.0.clone()
+            }
+        }
+        extern "C" fn callback(_: *mut AEffect, _: i32, _: i32, _: isize, _: *mut c_void, _: f32) -> isize {
+            2400
+        }
+        let effect = crate::main::<ChunkPlugin>(callback);
+        let parameters = PluginParametersInstance {
+            effect: UnsafeCell::new(effect),
+        };
+        let bank_accepted = parameters.load_bank_data(b"bank");
+        let bank_value = parameters.get_parameter(0);
+        let preset_accepted = parameters.load_preset_data(b"preset");
+        let preset_value = parameters.get_parameter(0);
+        let invalid_accepted = parameters.load_preset_data(b"invalid");
+        interfaces::dispatch(effect, plugin::OpCode::Shutdown.into(), 0, 0, ptr::null_mut(), 0.0);
+        assert_eq!(bank_value, 1.0);
+        assert_eq!(preset_value, 2.0);
+        assert!(
+            bank_accepted,
+            "a successfully loaded native bank must not trigger parameter fallback"
+        );
+        assert!(
+            preset_accepted,
+            "a successfully loaded native preset must not trigger parameter fallback"
+        );
+        assert!(!invalid_accepted);
+    }
 
     #[test]
     fn host_buffer() {

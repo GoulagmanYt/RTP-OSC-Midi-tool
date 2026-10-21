@@ -194,11 +194,11 @@ pub extern "C" fn dispatch(
         Ok(OpCode::SetData) => {
             let chunks = unsafe { slice::from_raw_parts(ptr as *mut u8, value as usize) };
 
-            if index == 0 {
-                params.load_bank_data(chunks);
+            return if index == 0 {
+                params.load_bank_data(chunks) as isize
             } else {
-                params.load_preset_data(chunks);
-            }
+                params.load_preset_data(chunks) as isize
+            };
         }
 
         Ok(OpCode::ProcessEvents) => {
@@ -315,6 +315,7 @@ pub fn host_dispatch(
     let opcode = OpCode::try_from(opcode);
     match opcode {
         Ok(OpCode::Version) => return 2400,
+        Ok(OpCode::CurrentId) => return host.get_plugin_id() as isize,
         Ok(OpCode::Automate) => host.automate(index, opt),
         Ok(OpCode::BeginEdit) => host.begin_edit(index),
         Ok(OpCode::EndEdit) => host.end_edit(index),

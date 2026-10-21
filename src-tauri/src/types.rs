@@ -267,7 +267,7 @@ pub struct VstPluginEntry {
     pub host_abi_version: u32,
 }
 
-pub const VST_HOST_ABI_VERSION: u32 = 13;
+pub const VST_HOST_ABI_VERSION: u32 = 14;
 
 fn default_vst_host_abi_version() -> u32 {
     VST_HOST_ABI_VERSION
