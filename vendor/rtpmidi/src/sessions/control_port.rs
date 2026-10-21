@@ -168,7 +168,7 @@ impl ControlPort {
             token = invitation.initiator_token.get(),
             "Received session invitation"
         );
-        if src.port() == u16::MAX {
+        if src.port() == u16::MAX || ctx.invitation_is_retired(src, invitation.initiator_token) {
             return;
         }
         let pending = ctx.pending_invitations.lock().await;

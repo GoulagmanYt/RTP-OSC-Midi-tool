@@ -127,12 +127,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let session = RtpMidiSession::start(args.port, &args.name, ssrc, InviteResponder::Accept)
         .await
         .map_err(|e| format!("Failed to start RTP session on {}: {}", args.port, e))?;
+    let bound_port = session.local_addr()?.port();
 
     println!(
         "RTP probe listening: name='{}' ports={}/{} duration={}s idle_timeout={}s",
         args.name,
-        args.port,
-        args.port + 1,
+        bound_port,
+        bound_port + 1,
         args.duration.as_secs(),
         args.idle_timeout.as_secs()
     );

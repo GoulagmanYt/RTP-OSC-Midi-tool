@@ -253,11 +253,7 @@ pub(crate) fn select_advertised_addresses(interfaces: &[LocalInterfaceAddress]) 
 }
 
 fn is_usable_advertised_ipv4(ip: Ipv4Addr) -> bool {
-    !(ip.is_loopback()
-        || ip.is_link_local()
-        || ip.is_multicast()
-        || ip.is_broadcast()
-        || ip.is_unspecified())
+    !(ip.is_loopback() || ip.is_multicast() || ip.is_broadcast() || ip.is_unspecified())
 }
 
 pub(crate) fn advertised_host_name(session_name: &str, _machine_hostname: &str) -> String {
@@ -297,11 +293,27 @@ mod tests {
     }
 
     #[test]
-    fn advertised_addresses_exclude_loopback_link_local_and_ipv6() {
+    fn direct_link_ipv4_is_advertised_alongside_another_interface() {
+        assert_eq!(
+            select_advertised_addresses(&[
+                iface("Ethernet direct", [169, 254, 10, 20]),
+                iface("Wi-Fi", [192, 168, 1, 10]),
+            ]),
+            vec![
+                IpAddr::V4(Ipv4Addr::new(169, 254, 10, 20)),
+                IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)),
+            ]
+        );
+    }
+
+    #[test]
+    fn advertised_addresses_exclude_loopback_multicast_unspecified_broadcast_and_ipv6() {
         let addresses = select_advertised_addresses(&[
             iface("Loopback", [127, 0, 0, 1]),
             iface("Ethernet", [10, 86, 12, 47]),
-            iface("Wi-Fi", [169, 254, 10, 20]),
+            iface("Unspecified", [0, 0, 0, 0]),
+            iface("Multicast", [224, 0, 0, 251]),
+            iface("Broadcast", [255, 255, 255, 255]),
             LocalInterfaceAddress {
                 name: "IPv6".to_string(),
                 ip: "::1".parse().expect("ipv6"),
