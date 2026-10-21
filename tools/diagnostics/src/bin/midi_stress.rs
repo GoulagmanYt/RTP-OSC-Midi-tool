@@ -214,11 +214,9 @@ async fn local_mode(
     });
 
     let Some(port) = port else {
-        println!(
-            "Port '{}' non trouvé. Assurez-vous qu'OSCMidi est lancé.",
-            port_name
+        return Err(
+            format!("Port '{port_name}' non trouvé. Assurez-vous qu'OSCMidi est lancé.").into(),
         );
-        return Ok(());
     };
 
     let mut conn_out = midi_out
@@ -230,28 +228,29 @@ async fn local_mode(
     let interval = Duration::from_nanos(1_000_000_000 / rate.max(1) as u64);
 
     let mut next_tick = start;
-    let mut sent = 0;
     let mut prev_sent = 0;
     let mut last_print = Instant::now();
 
-    while start.elapsed() < duration_d {
-        // Envoi NoteOn
-        let _ = conn_out.send(&[0x90, 60, 100]);
-        sent += 1;
+    let sent = send_local_stream(
+        |bytes| conn_out.send(bytes),
+        |sent| {
+            if sent > 0 {
+                next_tick += interval;
+            }
+            let now = Instant::now();
+            if now < next_tick {
+                // Busy wait for nanosecond precision on high rates
+                while Instant::now() < next_tick {}
+            }
 
-        next_tick += interval;
-        let now = Instant::now();
-        if now < next_tick {
-            // Busy wait for nanosecond precision on high rates
-            while Instant::now() < next_tick {}
-        }
-
-        if last_print.elapsed() >= Duration::from_secs(1) {
-            println!("Sent {} LOCAL msgs in the last second", sent - prev_sent);
-            prev_sent = sent;
-            last_print = Instant::now();
-        }
-    }
+            if last_print.elapsed() >= Duration::from_secs(1) {
+                println!("Sent {} LOCAL msgs in the last second", sent - prev_sent);
+                prev_sent = sent;
+                last_print = Instant::now();
+            }
+            start.elapsed() < duration_d
+        },
+    )?;
 
     println!(
         "FINAL: Injected {} LOCAL messages in {}s (Avg: {}/s)",
@@ -263,9 +262,93 @@ async fn local_mode(
     Ok(())
 }
 
+fn send_local_stream<E>(
+    mut send: impl FnMut(&[u8]) -> Result<(), E>,
+    mut keep_running: impl FnMut(usize) -> bool,
+) -> Result<usize, E> {
+    let mut sent = 0;
+    while keep_running(sent) {
+        let bytes = if sent % 2 == 0 {
+            [0x90, 60, 100]
+        } else {
+            [0x80, 60, 0]
+        };
+        if let Err(error) = send(&bytes) {
+            // The failed call may have reached the driver. Attempt recovery,
+            // but preserve the original error and never count a failed send.
+            let _ = send(&[0x80, 60, 0]);
+            return Err(error);
+        }
+        sent += 1;
+    }
+    send(&[0x80, 60, 0])?;
+    Ok(sent)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_stream_alternates_and_releases_after_odd_or_even_message_counts() {
+        for count in [1, 2, 3, 4] {
+            let mut messages = Vec::new();
+            let sent = send_local_stream(
+                |bytes| {
+                    messages.push(bytes.to_vec());
+                    Ok::<_, ()>(())
+                },
+                |sent| sent < count,
+            )
+            .unwrap();
+            assert_eq!(sent, count);
+            assert_eq!(messages.len(), count + 1);
+            for (index, bytes) in messages[..count].iter().enumerate() {
+                assert_eq!(
+                    bytes.as_slice(),
+                    if index % 2 == 0 {
+                        &[0x90, 60, 100]
+                    } else {
+                        &[0x80, 60, 0]
+                    }
+                );
+            }
+            assert_eq!(messages.last().unwrap(), &[0x80, 60, 0]);
+        }
+    }
+
+    #[test]
+    fn local_stream_reports_send_failure_and_attempts_final_release() {
+        let mut messages = Vec::new();
+        let result = send_local_stream(
+            |bytes| {
+                messages.push(bytes.to_vec());
+                if messages.len() == 2 {
+                    Err("driver disconnected")
+                } else {
+                    Ok(())
+                }
+            },
+            |sent| sent < 3,
+        );
+        assert_eq!(result, Err("driver disconnected"));
+        assert_eq!(messages.last().unwrap(), &[0x80, 60, 0]);
+    }
+
+    #[test]
+    fn local_stream_reports_final_release_failure() {
+        assert_eq!(
+            send_local_stream(|_| Err("release failed"), |_| false),
+            Err("release failed")
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_local_port_is_an_error() {
+        assert!(local_mode("__OSCMidi_missing_regression_port__", 1, 1)
+            .await
+            .is_err());
+    }
     #[test]
     fn missing_option_values_return_errors_instead_of_panicking() {
         for flag in ["--rate", "--duration", "--target", "--port-name"] {

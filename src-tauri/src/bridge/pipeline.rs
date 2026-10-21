@@ -281,11 +281,7 @@ impl OscOutputState {
             source.sustain[channel] = sustain.pressed;
         } else if status & 0xF0 == 0xB0 && frame.data.len() == 3 {
             match frame.data[1] {
-                120 => {
-                    source.notes[channel] = 0;
-                    source.sustain[channel] = false;
-                }
-                123..=127 => source.notes[channel] = 0,
+                120 | 123..=127 => source.notes[channel] = 0,
                 121 => source.sustain[channel] = false,
                 _ => {}
             }
@@ -648,6 +644,7 @@ pub fn try_enqueue_midi_frame(
                     }
                     Err(TrySendError::Disconnected(frame)) => {
                         tx.record_abandoned(&frame);
+                        PIPELINE_DROPPED_COUNT.fetch_add(1, Ordering::Relaxed);
                         request_critical_midi_reset();
                         Err(EnqueueError::Disconnected)
                     }
@@ -660,6 +657,7 @@ pub fn try_enqueue_midi_frame(
         }
         Err(TrySendError::Disconnected(frame)) => {
             tx.record_abandoned(&frame);
+            PIPELINE_DROPPED_COUNT.fetch_add(1, Ordering::Relaxed);
             if is_critical_release_message(frame.data.as_slice()) {
                 request_critical_midi_reset();
             }
@@ -727,6 +725,7 @@ mod tests {
 
     #[test]
     fn global_channel_filter_applies_at_admission_and_preserves_system_messages() {
+        let _guard = TEST_PIPELINE_LOCK.lock().unwrap();
         let mut config = Config::default();
         config.midi.channel_filter = Some(1);
         let (tx, rx) = bounded(32);
@@ -755,6 +754,86 @@ mod tests {
             );
             assert_eq!(rx.recv().unwrap().data.as_slice(), data);
         }
+    }
+
+    #[test]
+    fn routing_boundaries_and_mappings_preserve_all_sixteen_channels() {
+        let _guard = TEST_PIPELINE_LOCK.lock().unwrap();
+        let (tx, rx) = bounded(2);
+        let mut config = remapped_sustain_config();
+        for channel in 0..16 {
+            config.midi.channel_filter = Some(channel + 1);
+            config.midi.routing_profiles[0].channel_filter = Some(channel + 1);
+            config.midi.routing_profiles[0].note_min = Some(21);
+            config.midi.routing_profiles[0].note_max = Some(108);
+            prepare_input_routing(&tx, &config);
+            for pitch in [0, 20, 21, 60, 108, 109, 127] {
+                for (status, velocity, normalized) in
+                    [(0x90, 100, 0x90), (0x80, 0, 0x80), (0x90, 0, 0x80)]
+                {
+                    let outcome =
+                        try_enqueue_midi_frame(&tx, frame(&[status | channel, pitch, velocity]))
+                            .unwrap();
+                    if (21..=108).contains(&pitch) {
+                        assert_eq!(outcome, EnqueueOutcome::Enqueued);
+                        assert_eq!(
+                            rx.recv().unwrap().data.as_slice(),
+                            &[normalized | channel, pitch, velocity]
+                        );
+                    } else {
+                        assert_eq!(outcome, EnqueueOutcome::Filtered);
+                        assert!(rx.try_recv().is_err());
+                    }
+                }
+            }
+            for (input, expected) in [
+                (vec![0xB0 | channel, 7, 0], vec![0xB0 | channel, 64, 0]),
+                (vec![0xC0 | channel, 1], vec![0xC0 | channel, 2]),
+            ] {
+                assert_eq!(
+                    try_enqueue_midi_frame(&tx, frame(&input)).unwrap(),
+                    EnqueueOutcome::Enqueued
+                );
+                assert_eq!(rx.recv().unwrap().data.as_slice(), expected);
+            }
+        }
+        let queue = tx.recovery().snapshot();
+        assert_eq!(queue.depth, 0);
+        assert_eq!(queue.critical_drops + queue.noncritical_drops, 0);
+        assert_eq!(queue.critical_rejections + queue.noncritical_rejections, 0);
+    }
+
+    #[test]
+    fn supported_system_messages_bypass_channel_and_profile_filters_unchanged() {
+        let _guard = TEST_PIPELINE_LOCK.lock().unwrap();
+        let mut config = remapped_sustain_config();
+        config.midi.channel_filter = Some(16);
+        config.midi.routing_profiles[0].channel_filter = Some(16);
+        let (tx, rx) = bounded(2);
+        prepare_input_routing(&tx, &config);
+        let before = pipeline_metrics_snapshot();
+        for bytes in [
+            &[0xF1, 1][..],
+            &[0xF2, 1, 2],
+            &[0xF3, 1],
+            &[0xF6],
+            &[0xF8],
+            &[0xFA],
+            &[0xFB],
+            &[0xFC],
+            &[0xFE],
+            &[0xFF],
+            &[0xF0, 1, 2, 0xF7],
+        ] {
+            assert_eq!(
+                try_enqueue_midi_frame(&tx, frame(bytes)).unwrap(),
+                EnqueueOutcome::Enqueued
+            );
+            assert_eq!(rx.recv().unwrap().data.as_slice(), bytes);
+        }
+        let after = pipeline_metrics_snapshot();
+        assert_eq!(after.messages_filtered, before.messages_filtered);
+        assert_eq!(after.messages_dropped, before.messages_dropped);
     }
 
     #[test]
@@ -826,6 +905,43 @@ mod tests {
         assert_eq!(sent, vec![(None, true)]);
         observe_osc(&mut state, "b", &[0xB0, 121, 0], &mut sent);
         assert_eq!(sent, vec![(None, true), (None, false)]);
+    }
+
+    #[test]
+    fn osc_all_sound_off_preserves_sustain_for_subsequent_notes() {
+        let mut state = OscOutputState::default();
+        let mut sent = Vec::new();
+        observe_osc(&mut state, "a", &[0xB2, 64, 127], &mut sent);
+        observe_osc(&mut state, "a", &[0x92, 60, 100], &mut sent);
+        observe_osc(&mut state, "a", &[0xB2, 120, 0], &mut sent);
+        assert_eq!(sent, [(None, true), (Some(40), true), (Some(40), false)]);
+        observe_osc(&mut state, "a", &[0x92, 62, 100], &mut sent);
+        observe_osc(&mut state, "a", &[0x92, 62, 0], &mut sent);
+        assert!(state.sent_sustain);
+        observe_osc(&mut state, "a", &[0xB2, 64, 0], &mut sent);
+        assert_eq!(sent.last(), Some(&(None, false)));
+        assert!(state.sources.is_empty());
+    }
+
+    #[test]
+    fn disconnected_input_counts_each_abandoned_message_once() {
+        let _guard = TEST_PIPELINE_LOCK.lock().unwrap();
+        for bytes in [&[0x90, 60, 100][..], &[0x80, 60, 0], &[0xB0, 64, 0]] {
+            let (tx, rx) = bounded(2);
+            drop(rx);
+            let before = pipeline_metrics_snapshot();
+            assert_eq!(
+                try_enqueue_midi_frame(&tx, frame(bytes)),
+                Err(EnqueueError::Disconnected)
+            );
+            assert_eq!(
+                pipeline_metrics_snapshot().messages_dropped - before.messages_dropped,
+                1
+            );
+            let queue = tx.recovery().snapshot();
+            assert_eq!(queue.critical_drops + queue.noncritical_drops, 1);
+            assert_eq!(queue.critical_rejections + queue.noncritical_rejections, 1);
+        }
     }
 
     #[test]

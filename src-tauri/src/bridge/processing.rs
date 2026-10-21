@@ -909,6 +909,7 @@ mod recovery_tests {
 
     #[test]
     fn fanout_reserve_and_recovery_classify_prepared_sustain_release() {
+        let _guard = crate::bridge::pipeline::TEST_PIPELINE_LOCK.lock().unwrap();
         let (tx, rx) = bounded(8);
         for _ in 0..7 {
             send_fanout(&tx, note(0x90, 0, 60), 0, true);
