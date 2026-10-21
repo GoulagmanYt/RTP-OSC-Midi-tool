@@ -78,6 +78,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn time_and_frame_boundaries_saturate_without_wrapping() {
+        let mut near_origin = MidiBlockTiming::new(480, 48_000, 5);
+        assert_eq!(near_origin.offset(0), 0);
+        assert_eq!(near_origin.offset(5), 479);
+        assert!(!near_origin.contains(6));
+
+        let mut near_limit = MidiBlockTiming::new(480, 48_000, u64::MAX);
+        assert_eq!(near_limit.offset(u64::MAX - 5_000), 240);
+        assert_eq!(near_limit.offset(u64::MAX), 479);
+
+        let mut oversized = MidiBlockTiming::new(usize::MAX, 0, u64::MAX);
+        assert!(oversized.contains(u64::MAX));
+        assert!(u64::from(oversized.offset(u64::MAX)) < oversized.frames);
+        assert_eq!(MidiBlockTiming::new(0, 0, 0).offset(u64::MAX), 0);
+    }
+
+    #[test]
     fn late_note_retains_duration_and_clock_catches_up() {
         let mut clock = MidiPlaybackClock::default();
         let mut rendered = Vec::new();

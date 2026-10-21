@@ -35,7 +35,7 @@ src/
 |-- vst_worker/             # IPC protocol and process supervision
 |-- bin/vst_host_worker.rs  # Isolated production worker
 |-- plugin_probe*.rs        # Timed, isolated plug-in probing
-|-- reliable_playback.rs    # Deterministic recovery fixtures
+|-- reliable_playback.rs    # Framed TCP playback protocol and MIDI scheduling
 |-- rtp*.rs                 # RTP-MIDI server and discovery
 |-- tauri/commands.rs       # Public frontend command boundary
 |-- config.rs               # Versioned YAML configuration
@@ -67,6 +67,33 @@ src/
   rebuild the complete stream safely.
 - The 1 ms Windows timer request is scoped to the audio runtime and paired with
   `timeEndPeriod`; MMCSS registration remains scoped to the callback thread.
+
+## Reliable MIDI playback
+
+The bridge listens on TCP port 5056. Each connection owns one session: a
+big-endian u32 length prefixes each JSON frame, `Prepare` validates the complete
+event list, then matching `Start` or `Stop` commands control that session.
+A second `Prepare` on the same connection is rejected and cancels playback;
+preparing a replacement requires a new connection. Other connections retain
+their own protocol state but share MIDI destinations and channel-wide resets.
+Disconnecting before `Start` admits no MIDI events.
+
+Frames are limited to 16 MiB, individual MIDI messages to 1024 bytes, and active
+connections to eight. The initial frame has a 10-second deadline; socket reads
+and writes have 250 ms timeouts. Partial reads retain their progress. Events
+must have contiguous zero-based sequence numbers and nondecreasing `dueUs`
+within 24 hours. Start delays are clamped to 60 seconds, and deadline additions
+are checked. Source timestamps preserve scheduled deadlines, including late
+events and equal-deadline chords, through the worker queues.
+
+`received` and `messages_in` count validated events. The v1 reply's `processed`
+and `messages_out` count successful admissions to the bridge input queue;
+filtered events are excluded and queue losses increment `dropped`. `completed`
+does not acknowledge worker consumption or audible rendering. Stop joins the
+scheduler before enqueueing pedal releases (CC64/66/69) and All Notes Off on all
+channels. These destination controls bypass input remapping while retaining
+bounded priority admission and overflow recovery. `stopped` acknowledges this
+cancellation and reset admission attempt, not consumption by a MIDI device.
 
 ## Game Mode
 

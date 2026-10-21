@@ -629,6 +629,15 @@ pub fn try_enqueue_midi_frame(
         PIPELINE_FILTERED_COUNT.fetch_add(1, Ordering::Relaxed);
         return Ok(EnqueueOutcome::Filtered);
     }
+    enqueue_prepared_midi_frame(tx, frame)
+}
+
+/// Admit normalized destination messages, including recovery controls that must
+/// not be filtered or remapped by the source's input profile a second time.
+pub(crate) fn enqueue_prepared_midi_frame(
+    tx: &Sender<MidiFrame>,
+    frame: MidiFrame,
+) -> Result<EnqueueOutcome, EnqueueError> {
     match tx.try_send_retryable(frame) {
         Ok(()) => Ok(EnqueueOutcome::Enqueued),
         Err(TrySendError::Full(frame)) => {
@@ -1003,7 +1012,7 @@ mod tests {
                 );
             }
             drop(stream);
-            for _ in 0..32 {
+            for _ in 0..64 {
                 state.observe(&rx.recv_timeout(Duration::from_secs(2)).unwrap());
             }
             state
