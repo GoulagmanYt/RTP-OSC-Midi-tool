@@ -45,4 +45,5 @@ it("audit: navigating away must not discard the user's last parameter change", a
   unmount();
   await act(async ()=>{for(const callback of frames.values()) callback(0);});
   expect(mocks.setParameter).toHaveBeenCalledWith(7,0.9);
+  expect(mocks.setParameter).toHaveBeenCalledTimes(1);
 });

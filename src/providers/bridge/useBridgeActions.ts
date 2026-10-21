@@ -1,4 +1,4 @@
-import { useCallback, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import { toast } from "sonner";
 import * as api from "../../api";
@@ -10,6 +10,7 @@ type BridgeActionsOptions = {
   status: api.RuntimeStatus | null;
   setConfig: Dispatch<SetStateAction<api.AppConfig | null>>;
   setStatus: Dispatch<SetStateAction<api.RuntimeStatus | null>>;
+  beginStatusUpdate?: () => (status: api.RuntimeStatus) => void;
   setPreflight: Dispatch<SetStateAction<api.PreflightReport | null>>;
   setMetrics?: Dispatch<SetStateAction<api.RuntimeMetrics | null>>;
   refreshStatus: () => Promise<void>;
@@ -23,6 +24,7 @@ export function useBridgeActions({
   status,
   setConfig,
   setStatus,
+  beginStatusUpdate,
   setPreflight,
   setMetrics,
   refreshStatus,
@@ -31,6 +33,23 @@ export function useBridgeActions({
   t,
 }: BridgeActionsOptions) {
   const toggleInProgress = useRef(false);
+  const mounted = useRef(true);
+  const preflightRequestId = useRef(0);
+  const reloadRequestId = useRef(0);
+
+  useEffect(() => {
+    preflightRequestId.current += 1;
+    reloadRequestId.current += 1;
+  }, [config]);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      preflightRequestId.current += 1;
+      reloadRequestId.current += 1;
+    };
+  }, []);
 
   const updateConfig = useCallback(
     async (patch: api.DeepPartial<api.AppConfig>) => {
@@ -50,8 +69,10 @@ export function useBridgeActions({
   );
 
   const reloadConfig = useCallback(async (accepted?: api.AppConfig) => {
+    const requestId = ++reloadRequestId.current;
     try {
       const fresh = accepted ?? await api.getConfig();
+      if (!mounted.current || requestId !== reloadRequestId.current) return;
       setConfig(fresh);
       await Promise.all([
         refreshStatus(),
@@ -67,11 +88,14 @@ export function useBridgeActions({
     if (!config) {
       return null;
     }
+    const requestId = ++preflightRequestId.current;
     try {
       const report = await api.preflightCheck(config);
+      if (!mounted.current || requestId !== preflightRequestId.current) return null;
       setPreflight(report);
       return report;
     } catch (error) {
+      if (!mounted.current || requestId !== preflightRequestId.current) return null;
       console.error("Preflight check failed", error);
       toast.error(t("toasts.bridge.preflightFailed"));
       return null;
@@ -109,8 +133,9 @@ export function useBridgeActions({
       }
 
       setStatus((previous) => (previous ? { ...previous, running: true, lastError: null } : previous));
-      const nextStatus = await api.startBridge(config);
-      setStatus(nextStatus);
+      const acceptStatus = beginStatusUpdate?.() ?? setStatus;
+      acceptStatus(await api.startBridge(config));
+      await refreshStatus();
     } catch (error) {
       console.error("Failed to toggle bridge", error);
       const message = getErrorMessage(error);
@@ -119,7 +144,7 @@ export function useBridgeActions({
     } finally {
       toggleInProgress.current = false;
     }
-  }, [config, refreshStatus, runPreflight, setMetrics, setStatus, status, t]);
+  }, [beginStatusUpdate, config, refreshStatus, runPreflight, setMetrics, setStatus, status, t]);
 
   return {
     updateConfig,
