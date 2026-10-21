@@ -18,7 +18,7 @@ use crate::{
 mod tests;
 
 #[::tauri::command]
-pub fn get_config(app: AppHandle, state: State<AppState>) -> Config {
+pub fn get_config(app: AppHandle, state: State<AppState>) -> Result<Config, CommandError> {
     services::get_config(&app, state.inner())
 }
 

@@ -68,6 +68,51 @@ pub(crate) fn write_atomically(path: &Path, data: &[u8]) -> std::io::Result<()> 
 mod tests {
     use super::write_atomically;
 
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn failed_replacement_keeps_the_last_valid_file_and_allows_retry() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("config.yaml");
+        write_atomically(&target, b"version: 4\nvalue: previous").unwrap();
+        // Allow reading/writing but deny DELETE, as a reader holding the file can do.
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(3)
+            .open(&target)
+            .unwrap();
+        assert!(write_atomically(&target, b"version: 4\nvalue: next").is_err());
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            b"version: 4\nvalue: previous"
+        );
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+        drop(held);
+        write_atomically(&target, b"version: 4\nvalue: next").unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"version: 4\nvalue: next");
+    }
+
+    #[test]
+    fn an_abandoned_partial_write_does_not_replace_the_last_valid_configuration() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("config.yaml");
+        let store = crate::config::ConfigStore::with_path(target);
+        let mut previous = crate::config::Config::default();
+        previous.osc.listen_port = 9100;
+        store.save(&previous).unwrap();
+        // State left by termination before the atomic replacement.
+        std::fs::write(
+            directory.path().join(".config.yaml.abandoned.tmp"),
+            b"version: 4\naudio: [",
+        )
+        .unwrap();
+        assert_eq!(store.load(), previous);
+        let mut next = previous;
+        next.osc.listen_port = 9200;
+        store.save(&next).unwrap();
+        assert_eq!(store.load(), next);
+    }
+
     #[test]
     fn replaces_existing_content_without_leaving_a_temp_file() {
         let directory = tempfile::tempdir().expect("temporary directory");
