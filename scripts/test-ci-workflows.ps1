@@ -3,7 +3,7 @@ $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $previousLocation = Get-Location
 $fixture = Join-Path ([IO.Path]::GetTempPath()) "oscmidi-ci-tests-$([guid]::NewGuid().ToString('N'))"
 New-Item -ItemType Directory -Path $fixture | Out-Null
-$environmentNames = @('GITHUB_OUTPUT', 'GITHUB_EVENT_NAME', 'GITHUB_REF_TYPE', 'GITHUB_REF_NAME', 'GITHUB_SHA', 'GITHUB_REPOSITORY', 'REQUEST_PUBLISH', 'CACHE_STAGE', 'CACHE_PLATFORM', 'CONFIG_HASH', 'SOURCE_HASH', 'OSCMIDI_TEST_OUTPUT', 'WINDOWS_CERTIFICATE_THUMBPRINT', 'WINDOWS_TIMESTAMP_URL')
+$environmentNames = @('GITHUB_OUTPUT', 'GITHUB_EVENT_NAME', 'GITHUB_REF_TYPE', 'GITHUB_REF_NAME', 'GITHUB_SHA', 'GITHUB_REPOSITORY', 'REQUEST_PUBLISH', 'CACHE_STAGE', 'CACHE_PLATFORM', 'CONFIG_HASH', 'SOURCE_HASH', 'SDK_HASH', 'OSCMIDI_TEST_OUTPUT', 'WINDOWS_CERTIFICATE_THUMBPRINT', 'WINDOWS_TIMESTAMP_URL')
 $previousEnvironment = @{}
 foreach ($name in $environmentNames) { $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process') }
 
@@ -65,8 +65,10 @@ try {
     $env:GITHUB_OUTPUT = Join-Path $fixture 'keys.txt'
     $env:CACHE_PLATFORM = 'Windows-X64'; $env:CACHE_STAGE = 'validation'
     $env:CONFIG_HASH = 'fixture-config'; $env:SOURCE_HASH = 'source-one'
+    $env:SDK_HASH = 'fixture-sdk'
     & $keys
     $first = Get-Content $env:GITHUB_OUTPUT
+    Assert-True ($first -contains 'sdk-key=vst3sdk-v1-fixture-sdk') 'The cache step must emit the pinned SDK key for composite outputs, where hashFiles is unavailable.'
     Assert-True ($first -contains '.cargo-target/debug') 'Validation must cache the shared diagnostics/application target.'
     Clear-Content $env:GITHUB_OUTPUT
     $env:SOURCE_HASH = 'source-two'

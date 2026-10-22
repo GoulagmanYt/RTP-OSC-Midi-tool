@@ -21,7 +21,7 @@ outputs:
     value: ${{ steps.keys.outputs.build-paths }}
     description: Compilation directories for this stage
   sdk-key:
-    value: vst3sdk-v1-${{ hashFiles('vendor/rack/build.rs') }}
+    value: ${{ steps.keys.outputs.sdk-key }}
     description: Exact pinned SDK cache key
   sdk-hit:
     value: ${{ steps.sdk.outputs.cache-hit }}
@@ -35,6 +35,7 @@ runs:
       env:
         CACHE_STAGE: ${{ inputs.stage }}
         CACHE_PLATFORM: ${{ runner.os }}-${{ runner.arch }}
+        SDK_HASH: ${{ hashFiles('vendor/rack/build.rs') }}
         CONFIG_HASH: ${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml', '**/Cargo.toml', '**/Cargo.lock', '**/build.rs', '**/CMakeLists.txt') }}
         SOURCE_HASH: ${{ hashFiles('package.json', 'package-lock.json', '*.config.*', 'tsconfig*.json', '.env*', 'index.html', 'public/**', 'src/**', 'src-tauri/src/**', 'src-tauri/icons/**', 'src-tauri/capabilities/**', 'src-tauri/tauri.conf.json', 'vendor/**', 'ASIOSDK/**', 'tools/diagnostics/src/**', 'scripts/**', '.github/actions/restore-rust-cache/action.yml') }}
       run: |
@@ -46,6 +47,7 @@ runs:
         $compilerHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).Substring(0, 20)
         $prefix = "rust-v3-$env:CACHE_STAGE-$env:CACHE_PLATFORM-$compilerHash-"
         "dependency-key=rust-downloads-v3-$env:CACHE_PLATFORM-$env:CONFIG_HASH" >> $env:GITHUB_OUTPUT
+        "sdk-key=vst3sdk-v1-$env:SDK_HASH" >> $env:GITHUB_OUTPUT
         "build-key=$prefix$env:SOURCE_HASH" >> $env:GITHUB_OUTPUT
         "build-prefix=$prefix" >> $env:GITHUB_OUTPUT
         $paths = if ($env:CACHE_STAGE -eq 'validation') {
@@ -74,7 +76,7 @@ runs:
       uses: actions/cache/restore@v6
       with:
         path: vendor/rack/rack-sys/external/vst3sdk
-        key: vst3sdk-v1-${{ hashFiles('vendor/rack/build.rs') }}
+        key: ${{ steps.keys.outputs.sdk-key }}
 
     - name: Restore compilation snapshot
       id: build
