@@ -6,11 +6,19 @@ param(
     [switch]$CleanAfter,
     [Alias('CleanWorkspace')]
     [switch]$CleanOnly,
+    [switch]$FullClean,
     [switch]$ReinstallDependencies,
     [switch]$LatencyDiagnostics,
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$RemainingArguments
 )
+
+if ($FullClean) {
+    $CleanOnly = $true
+    $Clean = $true
+    # Full cleanup removes artifacts, including the usual build log directory.
+    $NoLog = $true
+}
 
 if ($RemainingArguments) {
     foreach ($arg in $RemainingArguments) {
@@ -477,12 +485,13 @@ if ($CleanOnly) {
     Write-Host ''
     Write-Host 'OSCMidi - Workspace Cleanup' -ForegroundColor Cyan
     Write-Host 'Cleaning compiled libraries, build targets and intermediate caches...' -ForegroundColor Gray
-    Clear-BuildCaches -IncludeNodeModules:$Clean -BeforeClean {
+    Clear-BuildCaches -IncludeNodeModules:$Clean -IncludeOutputs:$FullClean -BeforeClean {
         Stop-WorkspaceNodeProcesses
         Stop-WorkspaceCargoProcesses
         Stop-WorkspaceAppProcesses
     }
-    Write-Host '[OK] Workspace cleanup completed successfully. Deliverables in artifacts\ are preserved.' -ForegroundColor Green
+    $cleanupMessage = if ($FullClean) { '[OK] Full workspace cleanup completed. Sources, Git, SDKs and developer environments are preserved.' } else { '[OK] Workspace cleanup completed successfully. Deliverables in artifacts\ are preserved.' }
+    Write-Host $cleanupMessage -ForegroundColor Green
     if ($buildLogWriter) {
         $buildLogWriter.Dispose()
         if ($temporaryLog -and (Test-Path -LiteralPath $temporaryLog)) {

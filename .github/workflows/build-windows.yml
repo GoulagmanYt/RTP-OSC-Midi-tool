@@ -187,6 +187,18 @@ jobs:
         if: steps.signing.outputs.enabled == 'true'
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
+          # Tauri restores the unsigned main executable after creating the MSI.
+          # Sign that restored file too: it is the application used by the ZIP.
+          $certificate = Get-Item "Cert:\CurrentUser\My\$env:WINDOWS_CERTIFICATE_THUMBPRINT" -ErrorAction Stop
+          $portableSignature = Set-AuthenticodeSignature `
+            -FilePath '.cargo-target/release/OSCMidi.exe' `
+            -Certificate $certificate `
+            -HashAlgorithm SHA256 `
+            -TimestampServer $env:WINDOWS_TIMESTAMP_URL
+          if ($portableSignature.Status -ne 'Valid') {
+            throw "Portable application signing failed: $($portableSignature.Status)"
+          }
           $files = @(
             Get-Item '.cargo-target/release/OSCMidi.exe' -ErrorAction Stop
             Get-Item 'src-tauri/binaries/vst-host-worker-x64-x86_64-pc-windows-msvc.exe' -ErrorAction Stop

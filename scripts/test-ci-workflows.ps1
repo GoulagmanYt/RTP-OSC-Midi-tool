@@ -3,7 +3,7 @@ $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $previousLocation = Get-Location
 $fixture = Join-Path ([IO.Path]::GetTempPath()) "oscmidi-ci-tests-$([guid]::NewGuid().ToString('N'))"
 New-Item -ItemType Directory -Path $fixture | Out-Null
-$environmentNames = @('GITHUB_OUTPUT', 'GITHUB_EVENT_NAME', 'GITHUB_REF_TYPE', 'GITHUB_REF_NAME', 'GITHUB_SHA', 'GITHUB_REPOSITORY', 'REQUEST_PUBLISH', 'CACHE_STAGE', 'CACHE_PLATFORM', 'CONFIG_HASH', 'SOURCE_HASH', 'OSCMIDI_TEST_OUTPUT')
+$environmentNames = @('GITHUB_OUTPUT', 'GITHUB_EVENT_NAME', 'GITHUB_REF_TYPE', 'GITHUB_REF_NAME', 'GITHUB_SHA', 'GITHUB_REPOSITORY', 'REQUEST_PUBLISH', 'CACHE_STAGE', 'CACHE_PLATFORM', 'CONFIG_HASH', 'SOURCE_HASH', 'OSCMIDI_TEST_OUTPUT', 'WINDOWS_CERTIFICATE_THUMBPRINT', 'WINDOWS_TIMESTAMP_URL')
 $previousEnvironment = @{}
 foreach ($name in $environmentNames) { $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process') }
 
@@ -80,12 +80,57 @@ try {
     $release = Get-Content $env:GITHUB_OUTPUT
     Assert-True ($release -contains '.cargo-target/release') 'Release must cache the native x64 build.'
     Assert-True ($release -contains '.cargo-target/i686-pc-windows-msvc/release') 'Release must cache the x86 worker.'
+
+    # Tauri restores the unsigned main exe after bundling the signed MSI.
+    # Exercise the actual workflow step; replace only certificate/signing APIs.
+    $verifySignatures = Get-YamlScript '.github/workflows/build-windows.yml' 'Verify release Authenticode signatures'
+    $signingRoot = Join-Path $fixture 'signing'
+    foreach ($directory in @('.cargo-target/release/bundle/msi', 'src-tauri/binaries')) {
+        New-Item -ItemType Directory -Force -Path (Join-Path $signingRoot $directory) | Out-Null
+    }
+    $portableExe = Join-Path $signingRoot '.cargo-target/release/OSCMidi.exe'
+    Set-Content -LiteralPath $portableExe -Value 'unsigned'
+    foreach ($file in @('src-tauri/binaries/vst-host-worker-x64-x86_64-pc-windows-msvc.exe', 'src-tauri/binaries/vst-host-worker-x86-x86_64-pc-windows-msvc.exe', '.cargo-target/release/bundle/msi/fixture.msi')) {
+        Set-Content -LiteralPath (Join-Path $signingRoot $file) -Value 'signed'
+    }
+    $env:WINDOWS_CERTIFICATE_THUMBPRINT = 'fixture'
+    $env:WINDOWS_TIMESTAMP_URL = 'https://timestamp.fixture'
+    & {
+        function Get-Item {
+            param($Path, $LiteralPath, $ErrorAction)
+            if ($Path -eq 'Cert:\CurrentUser\My\fixture') { return [PSCustomObject]@{ Thumbprint = 'fixture' } }
+            if ($LiteralPath) { Microsoft.PowerShell.Management\Get-Item -LiteralPath $LiteralPath -ErrorAction Stop }
+            else { Microsoft.PowerShell.Management\Get-Item -Path $Path -ErrorAction Stop }
+        }
+        function Set-AuthenticodeSignature {
+            param($FilePath, $Certificate, $HashAlgorithm, $TimestampServer)
+            if ($Certificate.Thumbprint -ne 'fixture' -or $HashAlgorithm -ne 'SHA256' -or $TimestampServer -ne 'https://timestamp.fixture') { throw 'Incorrect portable signing configuration.' }
+            if ($script:signingFailure) { return [PSCustomObject]@{ Status = 'NotSigned' } }
+            Set-Content -LiteralPath $FilePath -Value 'signed'
+            return [PSCustomObject]@{ Status = 'Valid' }
+        }
+        function Get-AuthenticodeSignature {
+            param($LiteralPath)
+            $status = if ((Get-Content -LiteralPath $LiteralPath -Raw).Trim() -eq 'signed') { 'Valid' } else { 'NotSigned' }
+            return [PSCustomObject]@{ Status = $status }
+        }
+        Set-Location $signingRoot
+        $script:signingFailure = $false
+        & $verifySignatures
+        Assert-True ((Get-Content -LiteralPath $portableExe -Raw).Trim() -eq 'signed') 'The portable executable restored by Tauri must be signed before verification and collection.'
+        Set-Content -LiteralPath $portableExe -Value 'unsigned'
+        $script:signingFailure = $true
+        $failed = $false
+        try { & $verifySignatures } catch { $failed = $true }
+        Assert-True $failed 'A portable signing failure must block publication.'
+    }
+    Set-Location $repositoryRoot
     # A real Vite build exercises Node -> PowerShell 5 -> Node argument passing.
     $env:OSCMIDI_TEST_OUTPUT = Join-Path $fixture 'output with spaces'
     & node -e 'const {spawnSync}=require("node:child_process"),p=require("node:path"); const r=spawnSync(process.execPath,["scripts/build-frontend.mjs","--outDir",process.env.OSCMIDI_TEST_OUTPUT+p.sep,"--mode","production"],{stdio:"inherit"}); process.exit(r.status??1);'
     if ($LASTEXITCODE -ne 0) { throw 'Frontend argument forwarding failed.' }
     Assert-True (Test-Path -LiteralPath (Join-Path $env:OSCMIDI_TEST_OUTPUT 'index.html')) 'Frontend output arguments must preserve paths with spaces and trailing separators.'
-    Write-Host 'PASS: publication gating, immutable assets/tags, lookup failure, and source-keyed cache behavior.'
+    Write-Host 'PASS: publication gating, immutable assets/tags, lookup failure, portable signing and source-keyed cache behavior.'
 }
 finally {
     foreach ($name in $environmentNames) { [Environment]::SetEnvironmentVariable($name, $previousEnvironment[$name], 'Process') }

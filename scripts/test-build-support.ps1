@@ -36,6 +36,33 @@ try {
     Assert-True $failed 'An invalid lockfile must stop dependency preparation.'
     Assert-True (-not (Test-Path -LiteralPath $stampPath)) 'A failed install must not leave a valid stamp.'
 
+    # Build tooling is needed even when the caller requests production packages.
+    New-Item -ItemType Directory -Path (Join-Path $repositoryRoot 'local-tool') | Out-Null
+    Set-Content -LiteralPath (Join-Path $repositoryRoot 'local-tool/package.json') -Value '{"name":"build-dev-tool","version":"1.0.0"}'
+    Invoke-CheckedCommand $npm @('pack', './local-tool', '--quiet')
+    Set-Content -LiteralPath (Join-Path $repositoryRoot 'package.json') -Value '{"name":"build-fixture","version":"1.0.0","private":true,"devDependencies":{"build-dev-tool":"file:./build-dev-tool-1.0.0.tgz"}}'
+    Invoke-CheckedCommand $npm @('install', '--package-lock-only', '--no-audit', '--no-fund')
+    $previousNodeEnv = $env:NODE_ENV
+    $previousOmit = $env:npm_config_omit
+    try {
+        $env:NODE_ENV = 'production'
+        $env:npm_config_omit = 'dev'
+        Ensure-FrontendDependencies -Npm $npm -NodeVersion 'test-node' -NpmVersion 'test-npm'
+        Assert-True (Test-Path -LiteralPath (Join-Path $repositoryRoot 'node_modules/build-dev-tool/package.json')) 'Production environments must still install frontend build tooling.'
+        $validStamp = Get-Content -LiteralPath $stampPath -Raw
+        Invoke-CheckedCommand $npm @('ci', '--omit=dev', '--no-audit', '--no-fund')
+        # Reproduce an old stamp written after an omitted development install.
+        Set-Content -LiteralPath $stampPath -Value $validStamp
+        Assert-True (-not (Test-FrontendDependencies -Npm $npm -NodeVersion 'test-node' -NpmVersion 'test-npm')) 'A stamped install missing build tooling must not be reused in production environments.'
+        Ensure-FrontendDependencies -Npm $npm -NodeVersion 'test-node' -NpmVersion 'test-npm'
+        Assert-True (Test-Path -LiteralPath (Join-Path $repositoryRoot 'node_modules/build-dev-tool/package.json')) 'An omitted development install must be repaired.'
+        Assert-True (Test-FrontendDependencies -Npm $npm -NodeVersion 'test-node' -NpmVersion 'test-npm') 'A complete install must be reusable in production environments.'
+    }
+    finally {
+        $env:NODE_ENV = $previousNodeEnv
+        $env:npm_config_omit = $previousOmit
+    }
+
     # Exercise the actual deletion safeguard in an isolated Git repository.
     function Write-BuildLog { param($Message, $Color) }
     Invoke-CheckedCommand git @('init', '--quiet', $repositoryRoot)
@@ -86,6 +113,39 @@ try {
     Assert-True (Test-Path -LiteralPath (Join-Path $repositoryRoot 'node_modules')) 'Clear-BuildCaches without -IncludeNodeModules must preserve node_modules.'
     Clear-BuildCaches -IncludeNodeModules
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $repositoryRoot 'node_modules'))) 'Clear-BuildCaches -IncludeNodeModules must remove node_modules.'
+
+    # Run the complete cleanup launcher only in a disposable repository.
+    $cleanupRoot = Join-Path $fixtureRoot 'cleanup launcher with spaces'
+    New-Item -ItemType Directory -Force -Path (Join-Path $cleanupRoot 'scripts') | Out-Null
+    $actualRoot = Split-Path -Parent $PSScriptRoot
+    foreach ($file in @('clean_all.bat', 'build_windows.bat', 'scripts/build-windows.ps1', 'scripts/build-support.ps1')) {
+        Copy-Item -LiteralPath (Join-Path $actualRoot $file) -Destination (Join-Path $cleanupRoot $file)
+    }
+    Invoke-CheckedCommand git @('init', '--quiet', $cleanupRoot)
+    $generatedDirectories = @('.cargo-target', 'src-tauri/target', 'node_modules', 'dist', 'artifacts/logs', 'reports', 'build_logs', 'src-tauri/gen/schemas', 'scripts/__pycache__', 'tools/latency_bench/__pycache__', 'tools/diagnostics/__pycache__', 'tools/diagnostics/tests/__pycache__', 'vendor/rack/target', 'vendor/rtpmidi/target', 'vendor/vst/target', 'vendor/midi-types/target')
+    $keptDirectories = @('src', '.vscode', '.playwright-cli', '.venv', 'ASIOSDK', 'vendor/rack/rack-sys/external/vst3sdk')
+    foreach ($directory in $generatedDirectories + $keptDirectories) {
+        $path = Join-Path $cleanupRoot $directory
+        New-Item -ItemType Directory -Force -Path $path | Out-Null
+        Set-Content -LiteralPath (Join-Path $path 'fixture.txt') -Value $directory
+    }
+    Invoke-CheckedCommand git @('-C', $cleanupRoot, 'add', '--', 'src/fixture.txt')
+    Invoke-CheckedCommand $env:ComSpec @('/d', '/c', ('"' + (Join-Path $cleanupRoot 'clean_all.bat') + '"'))
+    foreach ($directory in $generatedDirectories) {
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $cleanupRoot $directory))) "Full cleanup must remove $directory."
+    }
+    foreach ($directory in $keptDirectories) {
+        Assert-True (Test-Path -LiteralPath (Join-Path $cleanupRoot "$directory/fixture.txt")) "Full cleanup must preserve $directory."
+    }
+    Assert-True (Test-Path -LiteralPath (Join-Path $cleanupRoot '.git')) 'Full cleanup must preserve Git.'
+    # The launcher must fail and preserve tracked files in a generated directory.
+    New-Item -ItemType Directory -Force -Path (Join-Path $cleanupRoot '.cargo-target') | Out-Null
+    Set-Content -LiteralPath (Join-Path $cleanupRoot '.cargo-target/tracked.txt') -Value 'keep'
+    Invoke-CheckedCommand git @('-C', $cleanupRoot, 'add', '--', '.cargo-target/tracked.txt')
+    $failed = $false
+    try { Invoke-CheckedCommand $env:ComSpec @('/d', '/c', ('"' + (Join-Path $cleanupRoot 'clean_all.bat') + '"')) *> $null } catch { $failed = $true }
+    Assert-True $failed 'The cleanup launcher must propagate a refused cleanup exit code.'
+    Assert-True (Test-Path -LiteralPath (Join-Path $cleanupRoot '.cargo-target/tracked.txt')) 'Refused full cleanup must preserve tracked files.'
 
     $failed = $false
     try { Invoke-CheckedCommand $env:ComSpec @('/d', '/c', 'exit 7') } catch { $failed = $true }

@@ -76,7 +76,7 @@ function Test-FrontendDependencies {
         $stamp = Get-Content -LiteralPath $stampPath -Raw | ConvertFrom-Json
         if ($stamp.fingerprint -ne (Get-FrontendDependencyFingerprint $NodeVersion $NpmVersion)) { return $false }
         # Detect missing/invalid top-level packages even if the stamp survived.
-        & $Npm ls --depth=0 --json *> $null
+        & $Npm ls --depth=0 --include=dev --json *> $null
         return $LASTEXITCODE -eq 0
     }
     catch { return $false }
@@ -98,7 +98,7 @@ function Ensure-FrontendDependencies {
     $stampPath = Join-Path $repositoryRoot 'node_modules/.oscmidi-build-dependencies.json'
     & $BeforeInstall
     if (Test-Path -LiteralPath $stampPath) { Remove-Item -LiteralPath $stampPath -Force }
-    $installArguments = @('ci', '--no-fund', '--no-audit', '--prefer-offline')
+    $installArguments = @('ci', '--include=dev', '--no-fund', '--no-audit', '--prefer-offline')
     & $CommandRunner $Npm $installArguments
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $stampPath) | Out-Null
     @{ fingerprint = Get-FrontendDependencyFingerprint $NodeVersion $NpmVersion } |
@@ -176,6 +176,7 @@ function Remove-GeneratedDirectory {
 function Clear-BuildCaches {
     param(
         [switch]$IncludeNodeModules,
+        [switch]$IncludeOutputs,
         [scriptblock]$BeforeClean = {}
     )
 
@@ -192,6 +193,23 @@ function Clear-BuildCaches {
     )
     if ($IncludeNodeModules) {
         $targetDirs += 'node_modules'
+    }
+    if ($IncludeOutputs) {
+        $targetDirs += @(
+            'artifacts',
+            'reports',
+            'build_logs',
+            'src-tauri\gen\schemas',
+            '__pycache__',
+            'scripts\__pycache__',
+            'tools\latency_bench\__pycache__',
+            'tools\diagnostics\__pycache__',
+            'tools\diagnostics\tests\__pycache__',
+            'vendor\rack\target',
+            'vendor\rtpmidi\target',
+            'vendor\vst\target',
+            'vendor\midi-types\target'
+        )
     }
 
     foreach ($dir in $targetDirs) {

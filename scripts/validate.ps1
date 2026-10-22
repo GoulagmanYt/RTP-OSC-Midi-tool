@@ -59,6 +59,7 @@ try {
         Invoke-CheckedCommand ctest @('--test-dir', '.cargo-target/realtime-tests', '-C', 'RelWithDebInfo', '--output-on-failure')
         Invoke-CheckedCommand powershell @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'scripts/test-build-support.ps1')
         Invoke-CheckedCommand powershell @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'scripts/test-build-windows-processes.ps1')
+        Invoke-CheckedCommand powershell @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'scripts/test-prepare-vst-worker.ps1')
     }
 }
 finally {
