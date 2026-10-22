@@ -24,10 +24,10 @@ export function RtpParticipantsCard({ participants, t }: Props) {
           participants.map((participant) => (
             <div
               key={`${participant.addr}-${participant.name}`}
-              className="flex items-center justify-between rounded-md border border-slate-100 bg-white/70 px-3 py-2 dark:border-slate-800 dark:bg-slate-950/40"
+              className="flex items-center justify-between rounded-md border border-border/60 bg-card px-3 py-2"
             >
               <div className="text-sm font-medium">{participant.name}</div>
-              <code className="rounded bg-slate-200 px-1.5 py-0.5 font-mono text-xs dark:bg-slate-700">
+              <code className="rounded bg-secondary px-1.5 py-0.5 font-mono text-xs">
                 {participant.addr}
               </code>
             </div>

@@ -1,6 +1,7 @@
 import { renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { RuntimeMetrics } from "../../api";
+import { listen } from "@tauri-apps/api/event";
 import { useRuntimeEvents } from "./useRuntimeEvents";
 
 const listeners = new Map<string, (event: { payload: unknown }) => void>();
@@ -80,5 +81,28 @@ describe("useRuntimeEvents", () => {
 
     expect(toastError).toHaveBeenCalledWith("toasts.audio.dropouts:7");
     expect(setMetrics).toHaveBeenCalledTimes(2);
+  });
+
+  it("cleans up subscriptions that finish registering after unmount", async () => {
+    let finishLog!: (unlisten: () => void) => void;
+    let finishMetrics!: (unlisten: () => void) => void;
+    vi.mocked(listen)
+      .mockImplementationOnce(() => new Promise((resolve) => { finishLog = resolve; }))
+      .mockImplementationOnce(() => new Promise((resolve) => { finishMetrics = resolve; }));
+    const unlistenLog = vi.fn();
+    const unlistenMetrics = vi.fn();
+    const setMetrics = vi.fn();
+    const appendLog = vi.fn();
+    const { unmount } = renderHook(() => useRuntimeEvents({ appendLog, setMetrics, t: (key) => key }));
+    const calls = vi.mocked(listen).mock.calls.slice(-2);
+    unmount();
+    finishMetrics(unlistenMetrics);
+    finishLog(unlistenLog);
+    await waitFor(() => expect(unlistenLog).toHaveBeenCalledOnce());
+    expect(unlistenMetrics).toHaveBeenCalledOnce();
+    calls[0][1]({ event: "log:entry", id: 0, payload: { level: "error", message: "late", timestamp: "00:00:00" } });
+    calls[1][1]({ event: "runtime:metrics", id: 0, payload: metrics({ audioXruns: 10 }) });
+    expect(appendLog).not.toHaveBeenCalled();
+    expect(setMetrics).not.toHaveBeenCalled();
   });
 });

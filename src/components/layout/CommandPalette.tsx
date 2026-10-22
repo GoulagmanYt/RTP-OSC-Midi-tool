@@ -47,7 +47,7 @@ export default function CommandPalette({ open, onOpenChange }: CommandPalettePro
 
   return (
     <CommandDialog open={open} onOpenChange={onOpenChange}>
-      <CommandInput placeholder={t("command.placeholder")} />
+      <CommandInput placeholder={t("command.placeholder")} aria-label={t("command.placeholder")} />
       <CommandList>
         <CommandEmpty>{t("command.noResults")}</CommandEmpty>
         <CommandGroup heading={t("command.navigation")}>

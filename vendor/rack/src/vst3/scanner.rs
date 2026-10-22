@@ -231,6 +231,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn scan_path_never_includes_system_plugins_outside_requested_directory() {
+        let directory =
+            std::env::temp_dir().join(format!("rack-empty-vst3-scan-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let result = Vst3Scanner::new().unwrap().scan_path(&directory);
+        std::fs::remove_dir(&directory).unwrap();
+        assert!(
+            result.unwrap().is_empty(),
+            "an empty directory must return no classes"
+        );
+    }
+
+    #[test]
+    fn adding_default_paths_preserves_recursive_system_discovery() {
+        let mut discovered = Vst3Scanner::new_empty()
+            .unwrap()
+            .scan()
+            .unwrap()
+            .into_iter()
+            .map(|info| info.unique_id)
+            .collect::<Vec<_>>();
+        let mut defaults = Vst3Scanner::new()
+            .unwrap()
+            .scan()
+            .unwrap()
+            .into_iter()
+            .map(|info| info.unique_id)
+            .collect::<Vec<_>>();
+        discovered.sort();
+        discovered.dedup();
+        defaults.sort();
+        defaults.dedup();
+        assert_eq!(defaults, discovered);
+    }
+
+    #[test]
     fn test_scanner_creation() {
         let result = Vst3Scanner::new();
         assert!(result.is_ok(), "Scanner creation should succeed");

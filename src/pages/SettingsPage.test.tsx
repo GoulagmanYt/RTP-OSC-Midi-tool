@@ -33,6 +33,27 @@ beforeEach(() => {
   mocks.save.mockResolvedValue("/chosen/export");
 });
 
+it("lets people follow the system appearance", async () => {
+  vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: true })));
+  try {
+    render(<SettingsPage />);
+    fireEvent.click(screen.getByRole("radio", { name: "settings.theme.palette.system" }));
+    await waitFor(() => expect(mocks.updateConfig).toHaveBeenCalledWith({ ui: { themePalette: "system", theme: "dark" } }));
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+it.each([
+  ["settings.theme.accent.purple", "accentColor", "purple"],
+  ["settings.theme.background.white", "lightBackground", "white"],
+  ["settings.theme.background.graphite", "darkBackground", "graphite"],
+])("saves the selected appearance preference %s", async (label, field, value) => {
+  render(<SettingsPage />);
+  fireEvent.click(screen.getByRole("radio", { name: label }));
+  await waitFor(() => expect(mocks.updateConfig).toHaveBeenCalledWith({ ui: { [field]: value } }));
+});
+
 it.each(["reset", "import"])("publishes the accepted %s snapshot directly instead of querying configuration again", async (operation) => {
   const accepted = { version: 4, ui: { developerMode: false } } as AppConfig;
   mocks.resetConfigDefaults.mockResolvedValue(accepted);

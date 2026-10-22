@@ -1,6 +1,6 @@
 [package]
 name = "oscmidi-diagnostics"
-version = "2.6.1"
+version = "2.6.2"
 edition = "2021"
 description = "Developer-only diagnostics for OSCMidi"
 publish = false
@@ -25,6 +25,10 @@ path = "src/bin/midi_stress.rs"
 [[bin]]
 name = "audio_reliability"
 path = "src/bin/audio_reliability.rs"
+
+[[bin]]
+name = "audio_scenario"
+path = "src/bin/audio_scenario.rs"
 
 [[bin]]
 name = "rtp_reliability"

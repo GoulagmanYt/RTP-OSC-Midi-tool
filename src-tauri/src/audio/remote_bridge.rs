@@ -55,7 +55,8 @@ use crate::{
 };
 
 use super::{
-    callback_midi::{midi_to_rack_event, MidiBlockTiming},
+    callback_midi::midi_to_rack_event,
+    midi_playback::{MidiBlockTiming, MidiPlaybackClock},
     plugin_host::{load_plugin_backend, set_active_vst2_editor_window, VST2_RESIZE_MESSAGE},
     runtime_state::{MidiPacket, PluginBackend, Vst2EventBatch, MIDI_EVENT_BATCH_CAPACITY},
     state_codec::{load_vst_state, save_vst_state_checked},
@@ -82,7 +83,7 @@ fn merge_parameter_commands(
 }
 
 const BRIDGE_MAGIC: u32 = 0x4F53_4342;
-const BRIDGE_VERSION: u32 = 7;
+const BRIDGE_VERSION: u32 = 8;
 const BRIDGE_SLOTS: usize = 3;
 const BRIDGE_MAX_FRAMES: usize = 8192;
 const BRIDGE_MAX_CHANNELS: usize = 64;
@@ -95,6 +96,8 @@ const SLOT_READY: u32 = 2;
 const SERVER_READY: u32 = 1;
 const SERVER_FAILED: u32 = 2;
 const COMMAND_NONE: u32 = 0;
+// Reserve ownership before publishing status, for parent and worker commands.
+const COMMAND_RESERVED: u32 = u32::MAX;
 const COMMAND_OPEN_EDITOR: u32 = 1;
 const COMMAND_CLOSE_EDITOR: u32 = 2;
 const COMMAND_SAVE_STATE: u32 = 3;
@@ -102,6 +105,9 @@ const COMMAND_PREPARE_LIVE_RESTORE: u32 = 4;
 const COMMAND_PENDING: u32 = 1;
 const COMMAND_OK: u32 = 2;
 const COMMAND_FAILED: u32 = 3;
+// Only the DSP owner may release an expired command: a native call can still
+// be running after the caller's deadline and must not complete a newer request.
+const COMMAND_TIMED_OUT: u32 = 4;
 const REMOTE_EDITOR_STYLE: WINDOW_STYLE =
     WINDOW_STYLE(WS_OVERLAPPED.0 | WS_CAPTION.0 | WS_SYSMENU.0 | WS_MINIMIZEBOX.0);
 static REMOTE_EDITOR_CLOSE_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -114,9 +120,10 @@ thread_local! {
 }
 // Eight 512-frame callbacks at 48 kHz represented only ~85 ms and caused
 // healthy legacy plug-ins to be restarted after ordinary scheduling spikes.
-// Keep the callback non-blocking, but require a sustained two-second DSP stall
+// Keep the callback non-blocking, but require a sustained five-second DSP stall
 // before declaring the isolated process unhealthy.
 const BRIDGE_STALL_BUDGET_MS: u64 = 5_000;
+const BRIDGE_CONTROL_BUDGET_MS: u64 = 10_000;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -347,14 +354,17 @@ pub(super) struct RemotePlugin {
     request_event: HANDLE,
     child: Child,
     next_sequence: u64,
+    min_output_sequence: u64,
     output_channels: usize,
     input_channels: usize,
     latency_samples: u32,
     sample_rate: u32,
     panic_pending: bool,
+    midi_playback: MidiPlaybackClock,
     pending_parameter_changes: Vec<super::runtime_state::ParameterCommand>,
     parameter_sequences: [u64; BRIDGE_SLOTS],
     consecutive_missed_frames: u64,
+    buffered_wait_started: Option<Instant>,
     parameter_cache: Vec<crate::types::VstParameter>,
     last_output_samples: [f32; BRIDGE_MAX_CHANNELS],
 }
@@ -370,6 +380,8 @@ impl RemotePlugin {
         max_block_size: usize,
         probe: &VstPluginEntry,
     ) -> Result<Self, String> {
+        use std::os::windows::io::{FromRawHandle, IntoRawHandle, OwnedHandle};
+
         if max_block_size > BRIDGE_MAX_FRAMES {
             return Err(format!(
                 "x86 bridge supports blocks up to {BRIDGE_MAX_FRAMES} frames, requested {max_block_size}"
@@ -391,6 +403,9 @@ impl RemotePlugin {
             )
         }
         .map_err(|error| format!("CreateEventW failed: {error}"))?;
+        // Keep ownership across every fallible startup step. Transfer it to
+        // RemotePlugin only once the child is ready and its metadata is valid.
+        let request_event = unsafe { OwnedHandle::from_raw_handle(request_event.0) };
 
         let current = std::env::current_exe()
             .map_err(|error| format!("Cannot resolve x64 worker path: {error}"))?;
@@ -401,7 +416,6 @@ impl RemotePlugin {
             .map(PathBuf::from)
             .unwrap_or_else(|| directory.join("vst-host-worker-x86.exe"));
         if !worker.is_file() {
-            let _ = unsafe { CloseHandle(request_event) };
             return Err(format!("VST x86 worker not found at {}", worker.display()));
         }
 
@@ -430,7 +444,9 @@ impl RemotePlugin {
         #[cfg(target_os = "windows")]
         {
             use std::os::windows::process::CommandExt;
-            command.creation_flags(0x0800_0000);
+            command.creation_flags(
+                0x0800_0000 | windows::Win32::System::Threading::HIGH_PRIORITY_CLASS.0,
+            );
         }
         let mut child = command
             .spawn()
@@ -444,13 +460,11 @@ impl RemotePlugin {
                     let reason = mapping_error(mapping.get());
                     let _ = child.kill();
                     let _ = child.wait();
-                    let _ = unsafe { CloseHandle(request_event) };
                     return Err(reason);
                 }
                 _ => {}
             }
             if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
-                let _ = unsafe { CloseHandle(request_event) };
                 return Err(format!(
                     "VST x86 DSP worker exited during startup: {status}"
                 ));
@@ -458,7 +472,6 @@ impl RemotePlugin {
             if Instant::now() >= deadline {
                 let _ = child.kill();
                 let _ = child.wait();
-                let _ = unsafe { CloseHandle(request_event) };
                 return Err("VST x86 DSP worker timed out during startup".to_string());
             }
             std::thread::sleep(Duration::from_millis(10));
@@ -490,24 +503,26 @@ impl RemotePlugin {
         if output_channels == 0 || output_channels > BRIDGE_MAX_CHANNELS {
             let _ = child.kill();
             let _ = child.wait();
-            let _ = unsafe { CloseHandle(request_event) };
             return Err(format!(
                 "Unsupported x86 plugin output count: {output_channels}"
             ));
         }
         Ok(Self {
             mapping,
-            request_event,
+            request_event: HANDLE(request_event.into_raw_handle()),
             child,
             next_sequence: 1,
+            min_output_sequence: 0,
             output_channels,
             input_channels,
             latency_samples,
             sample_rate,
             panic_pending: false,
+            midi_playback: MidiPlaybackClock::default(),
             pending_parameter_changes: Vec::with_capacity(BRIDGE_MAX_PARAMETER_CHANGES),
             parameter_sequences: [0; BRIDGE_SLOTS],
             consecutive_missed_frames: 0,
+            buffered_wait_started: None,
             parameter_cache,
             last_output_samples: [0.0; BRIDGE_MAX_CHANNELS],
         })
@@ -533,6 +548,47 @@ impl RemotePlugin {
         &self.parameter_cache
     }
 
+    /// The outer renderer may refill multiple prepared blocks back-to-back.
+    /// Keep the bridge sequence intact until its previous result can be consumed.
+    pub(super) fn buffered_output_ready(&mut self) -> bool {
+        let shared = self.mapping.get();
+        let ready = self.next_sequence == 1
+            || self.panic_pending
+            || shared.server_status.load(Ordering::Acquire) != SERVER_READY
+            || shared.slots.iter().any(|slot| {
+                slot.state.load(Ordering::Acquire) == SLOT_READY
+                    && slot.sequence.load(Ordering::Acquire) == self.next_sequence.saturating_sub(1)
+            });
+        if ready {
+            self.buffered_wait_started = None;
+            return true;
+        }
+        // Buffered rendering does not call process again until a result is
+        // ready. Its stall deadline must therefore advance here in wall time,
+        // independently of the audio-frame counter in process.
+        let started = self.buffered_wait_started.get_or_insert_with(Instant::now);
+        let command = shared.command.load(Ordering::Acquire);
+        let control_busy = command != COMMAND_NONE
+            && command != COMMAND_RESERVED
+            && shared.command_status.load(Ordering::Acquire) == COMMAND_PENDING;
+        let budget_ms = BRIDGE_STALL_BUDGET_MS
+            + if control_busy {
+                BRIDGE_CONTROL_BUDGET_MS
+            } else {
+                0
+            };
+        if started.elapsed() >= Duration::from_millis(budget_ms) {
+            set_mapping_error(
+                self.mapping.get_mut(),
+                "x86 DSP bridge produced no completed block for 5000 ms",
+            );
+            // Let the renderer publish the failed health state to supervision.
+            return true;
+        }
+        false
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn process(
         &mut self,
         midi: &mut VecDeque<MidiPacket>,
@@ -540,19 +596,23 @@ impl RemotePlugin {
         outputs: &mut [Vec<f32>],
         frames: usize,
         telemetry: Option<&super::runtime_state::AudioTelemetry>,
+        next_ingress_us: Option<u64>,
+        source_end_us: Option<u64>,
     ) -> bool {
         if frames == 0 || frames > BRIDGE_MAX_FRAMES {
             return false;
         }
         merge_parameter_commands(&mut self.pending_parameter_changes, parameters);
-        let priming = self.next_sequence == 1;
+        let priming = self.next_sequence == 1 || self.panic_pending;
         let shared = self.mapping.get_mut();
         let expected_sequence = self.next_sequence.saturating_sub(1);
         let mut rendered = false;
+        let mut dsp_progress = false;
         for (slot_index, slot) in shared.slots.iter().enumerate() {
             if slot.state.load(Ordering::Acquire) != SLOT_READY {
                 continue;
             }
+            dsp_progress = true;
             if let Some(telemetry) = telemetry {
                 // DSP completion is independent of whether its audio block is
                 // still useful (late results and frame-size changes included).
@@ -561,7 +621,14 @@ impl RemotePlugin {
                     .fetch_max(self.parameter_sequences[slot_index], Ordering::Release);
             }
             let sequence = slot.sequence.load(Ordering::Acquire);
-            if sequence < expected_sequence {
+            if sequence < expected_sequence || sequence < self.min_output_sequence {
+                #[cfg(feature = "audio-diagnostics")]
+                trace_bridge(
+                    crate::audio_trace::Stage::BridgeDiscarded,
+                    sequence,
+                    frames,
+                    expected_sequence,
+                );
                 slot.state.store(SLOT_EMPTY, Ordering::Release);
                 shared.overruns.fetch_add(1, Ordering::Relaxed);
                 continue;
@@ -587,6 +654,13 @@ impl RemotePlugin {
                     .take(slot.event_count.load(Ordering::Relaxed) as usize)
                 {
                     if event.ingress_qpc != 0 && event.consumed_qpc != 0 {
+                        #[cfg(feature = "latency-diagnostics")]
+                        crate::latency_trace::record(
+                            crate::latency_trace::Stage::DspDequeued,
+                            &event.data,
+                            event.ingress_qpc,
+                            event.consumed_qpc,
+                        );
                         telemetry.record_midi_delivery_at(
                             event.ingress_qpc,
                             event.worker_qpc,
@@ -596,10 +670,24 @@ impl RemotePlugin {
                 }
             }
             slot.state.store(SLOT_EMPTY, Ordering::Release);
+            #[cfg(feature = "audio-diagnostics")]
+            trace_bridge(
+                crate::audio_trace::Stage::BridgeConsumed,
+                sequence,
+                frames,
+                0,
+            );
             rendered = true;
             break;
         }
-        if !rendered && self.next_sequence > 1 {
+        if !rendered && !priming {
+            #[cfg(feature = "audio-diagnostics")]
+            trace_bridge(
+                crate::audio_trace::Stage::BridgeMissing,
+                expected_sequence,
+                frames,
+                0,
+            );
             shared.underruns.fetch_add(1, Ordering::Relaxed);
             for (channel, output) in outputs.iter_mut().take(self.output_channels).enumerate() {
                 let start = self.last_output_samples[channel];
@@ -609,15 +697,28 @@ impl RemotePlugin {
                 }
                 self.last_output_samples[channel] = 0.0;
             }
-            let control_busy = shared.command.load(Ordering::Acquire) != COMMAND_NONE
-                || shared.command_status.load(Ordering::Acquire) == COMMAND_PENDING;
-            if control_busy {
+            let command = shared.command.load(Ordering::Acquire);
+            let control_busy = command != COMMAND_NONE
+                && command != COMMAND_RESERVED
+                && shared.command_status.load(Ordering::Acquire) == COMMAND_PENDING;
+            if dsp_progress {
                 self.consecutive_missed_frames = 0;
             } else {
                 self.consecutive_missed_frames =
                     self.consecutive_missed_frames.saturating_add(frames as u64);
             }
-            if bridge_stall_budget_exceeded(self.consecutive_missed_frames, self.sample_rate) {
+            // Internal saves have no waiting caller to expire them. Even a
+            // genuinely pending control may defer surveillance only finitely.
+            let control_grace_frames = if control_busy {
+                (self.sample_rate as u64).saturating_mul(BRIDGE_CONTROL_BUDGET_MS) / 1000
+            } else {
+                0
+            };
+            if bridge_stall_budget_exceeded(
+                self.consecutive_missed_frames
+                    .saturating_sub(control_grace_frames),
+                self.sample_rate,
+            ) {
                 set_mapping_error(
                     shared,
                     "x86 DSP bridge produced no completed block for 5000 ms",
@@ -642,15 +743,19 @@ impl RemotePlugin {
                 event_count = write_panic_events(&mut slot.events);
                 self.panic_pending = false;
             }
-            event_count = write_bridge_midi_events(
-                &mut slot.events,
-                midi,
-                event_count,
-                MidiBlockTiming::new(
-                    frames,
-                    self.sample_rate,
-                    super::runtime_state::monotonic_us(),
-                ),
+            let mut timing = self.midi_playback.begin_block(
+                frames,
+                self.sample_rate,
+                source_end_us.unwrap_or_else(super::runtime_state::monotonic_us),
+                midi.front().map(|packet| packet.timestamp_us),
+            );
+            event_count =
+                write_bridge_midi_events(&mut slot.events, midi, event_count, &mut timing);
+            self.midi_playback.commit(
+                &timing,
+                midi.front()
+                    .map(|packet| packet.timestamp_us)
+                    .or(next_ingress_us),
             );
             let parameter_count = self
                 .pending_parameter_changes
@@ -683,6 +788,13 @@ impl RemotePlugin {
                 .unwrap_or(0);
             self.pending_parameter_changes.clear();
             slot.sequence.store(self.next_sequence, Ordering::Relaxed);
+            #[cfg(feature = "audio-diagnostics")]
+            trace_bridge(
+                crate::audio_trace::Stage::BridgeRequest,
+                self.next_sequence,
+                frames,
+                event_count as u64,
+            );
             self.next_sequence = self.next_sequence.wrapping_add(1).max(1);
             slot.state.store(SLOT_REQUESTED, Ordering::Release);
             let _ = unsafe { SetEvent(self.request_event) };
@@ -694,6 +806,9 @@ impl RemotePlugin {
 
     pub(super) fn panic_all_notes(&mut self) {
         self.panic_pending = true;
+        self.min_output_sequence = self.next_sequence;
+        self.last_output_samples.fill(0.0);
+        self.midi_playback.reset();
     }
 
     pub(super) fn prepare_live_parameter_restore(
@@ -764,18 +879,13 @@ impl RemotePlugin {
 
     fn control_command(&mut self, command: u32, operation: &str) -> Result<(), String> {
         let shared = self.mapping.get();
-        if shared
-            .command
-            .compare_exchange(COMMAND_NONE, command, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
+        if !begin_control_command(shared, command) {
             return Err(format!("x86 {operation} command already in progress"));
         }
-        shared
-            .command_status
-            .store(COMMAND_PENDING, Ordering::Release);
+        // Native maintenance pauses rendering and is bounded by its own timer.
+        self.buffered_wait_started = None;
         let _ = unsafe { SetEvent(self.request_event) };
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + Duration::from_millis(BRIDGE_CONTROL_BUDGET_MS);
         loop {
             match shared.command_status.load(Ordering::Acquire) {
                 COMMAND_OK => {
@@ -789,15 +899,57 @@ impl RemotePlugin {
                 _ => {}
             }
             if Instant::now() >= deadline {
-                shared.command.store(COMMAND_NONE, Ordering::Release);
-                shared
+                // Leave ownership with the worker until it returns from any
+                // native call. Terminal status immediately resumes DSP checks.
+                if shared
                     .command_status
-                    .store(COMMAND_FAILED, Ordering::Release);
-                return Err(format!("x86 {operation} command timed out"));
+                    .compare_exchange(
+                        COMMAND_PENDING,
+                        COMMAND_TIMED_OUT,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_ok()
+                {
+                    return Err(format!("x86 {operation} command timed out"));
+                }
+                // Completion won the race with the deadline; consume it.
+                continue;
             }
             std::thread::sleep(Duration::from_millis(10));
         }
     }
+}
+
+fn begin_control_command(shared: &BridgeShared, command: u32) -> bool {
+    if shared
+        .command
+        .compare_exchange(
+            COMMAND_NONE,
+            COMMAND_RESERVED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .is_err()
+    {
+        return false;
+    }
+    shared
+        .command_status
+        .store(COMMAND_PENDING, Ordering::Relaxed);
+    shared.command.store(command, Ordering::Release);
+    true
+}
+
+fn finish_control_command(shared: &BridgeShared, status: u32) {
+    // Preserve expiration if the deadline raced a native call's completion.
+    // The DSP owner retires the command once, at the end of its iteration.
+    let _ = shared.command_status.compare_exchange(
+        COMMAND_PENDING,
+        status,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    );
 }
 
 #[cfg(target_pointer_width = "64")]
@@ -805,12 +957,16 @@ fn write_bridge_midi_events(
     events: &mut [BridgeMidiEvent; BRIDGE_MAX_MIDI],
     midi: &mut VecDeque<MidiPacket>,
     mut event_count: usize,
-    mut timing: MidiBlockTiming,
+    timing: &mut MidiBlockTiming,
 ) -> usize {
     while event_count < BRIDGE_MAX_MIDI {
-        let Some(packet) = midi.pop_front() else {
+        let Some(packet) = midi.front().copied() else {
             break;
         };
+        if !timing.contains(packet.timestamp_us) {
+            break;
+        }
+        midi.pop_front();
         events[event_count] = BridgeMidiEvent {
             ingress_qpc: packet.ingress_qpc,
             worker_qpc: packet.worker_qpc,
@@ -1148,6 +1304,10 @@ fn pump_remote_editor(current: &mut Option<RemoteEditor>) {
 }
 
 fn run_dsp_server(args: DspArgs, logger: FrontendLogger) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        super::windows_tuning::apply_worker_process_priority();
+    }
     let mut mapping = Mapping::open(&args.mapping_name, args.token)?;
     let event_wide = wide(&args.event_name);
     let request_event = unsafe {
@@ -1251,21 +1411,7 @@ fn run_dsp_server(args: DspArgs, logger: FrontendLogger) -> Result<(), String> {
         let mut internal_state_save = false;
         if REMOTE_EDITOR_CLOSE_REQUESTED.swap(false, Ordering::AcqRel) {
             mapping.get().editor_open.store(0, Ordering::Release);
-            if mapping
-                .get()
-                .command
-                .compare_exchange(
-                    COMMAND_NONE,
-                    COMMAND_SAVE_STATE,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
-                .is_ok()
-            {
-                mapping
-                    .get()
-                    .command_status
-                    .store(COMMAND_PENDING, Ordering::Release);
+            if begin_control_command(mapping.get(), COMMAND_SAVE_STATE) {
                 // Capture below, after all accepted DSP requests have run.
                 internal_state_save = true;
             } else {
@@ -1274,6 +1420,7 @@ fn run_dsp_server(args: DspArgs, logger: FrontendLogger) -> Result<(), String> {
         }
         let command = mapping.get().command.load(Ordering::Acquire);
         if command != COMMAND_NONE
+            && command != COMMAND_RESERVED
             && command != COMMAND_SAVE_STATE
             && mapping.get().command_status.load(Ordering::Acquire) == COMMAND_PENDING
         {
@@ -1315,17 +1462,11 @@ fn run_dsp_server(args: DspArgs, logger: FrontendLogger) -> Result<(), String> {
                     if command == COMMAND_CLOSE_EDITOR {
                         mapping.get().editor_open.store(0, Ordering::Release);
                     }
-                    mapping
-                        .get()
-                        .command_status
-                        .store(COMMAND_OK, Ordering::Release);
+                    finish_control_command(mapping.get(), COMMAND_OK);
                 }
                 Err(error) => {
                     set_command_error(mapping.get_mut(), &error);
-                    mapping
-                        .get()
-                        .command_status
-                        .store(COMMAND_FAILED, Ordering::Release);
+                    finish_control_command(mapping.get(), COMMAND_FAILED);
                 }
             }
         }
@@ -1334,7 +1475,16 @@ fn run_dsp_server(args: DspArgs, logger: FrontendLogger) -> Result<(), String> {
             args.max_block_size,
             |slot, frames, event_count, parameter_change_count| {
                 input_silence[..frames].fill(0.0);
-                process_local_plugin(
+                #[cfg(feature = "audio-diagnostics")]
+                let trace_start = crate::vst_worker::protocol::monotonic_qpc();
+                #[cfg(feature = "audio-diagnostics")]
+                trace_bridge(
+                    crate::audio_trace::Stage::DspBegin,
+                    slot.sequence.load(Ordering::Relaxed),
+                    frames,
+                    event_count as u64,
+                );
+                let result = process_local_plugin(
                     &mut plugin.lock(),
                     slot,
                     frames,
@@ -1347,7 +1497,31 @@ fn run_dsp_server(args: DspArgs, logger: FrontendLogger) -> Result<(), String> {
                     &mut vst2_events,
                     &mut vst2_batch,
                     &mut rack_events,
-                )
+                );
+                #[cfg(feature = "audio-diagnostics")]
+                if crate::audio_trace::enabled() {
+                    let finished = crate::vst_worker::protocol::monotonic_qpc();
+                    let peak = |channel: usize| {
+                        slot.outputs
+                            [channel * BRIDGE_MAX_FRAMES..channel * BRIDGE_MAX_FRAMES + frames]
+                            .iter()
+                            .fold(0.0f32, |a, b| a.max(b.abs()))
+                    };
+                    crate::audio_trace::record(crate::audio_trace::BlockTrace {
+                        stage: crate::audio_trace::Stage::DspEnd,
+                        qpc: finished,
+                        sequence: slot.sequence.load(Ordering::Relaxed),
+                        frames: frames as u32,
+                        detail: event_count as u64,
+                        duration_us: crate::vst_worker::protocol::qpc_elapsed_us(
+                            trace_start,
+                            finished,
+                        ),
+                        peak_l: peak(0),
+                        peak_r: peak(1),
+                    });
+                }
+                result
             },
             || save_vst_state_checked(&plugin, &selected_probe),
         );
@@ -1415,11 +1589,10 @@ fn service_dsp_cycle(
             continue;
         }
         if let Err(error) = process(slot, frames, event_count, parameter_count) {
+            slot.state.store(SLOT_EMPTY, Ordering::Release);
+            set_mapping_error(shared, &error);
             if shared.command.load(Ordering::Acquire) == COMMAND_SAVE_STATE {
-                set_command_error(shared, &error);
-                shared
-                    .command_status
-                    .store(COMMAND_FAILED, Ordering::Release);
+                finish_control_command(shared, COMMAND_FAILED);
             }
             return Err(error);
         }
@@ -1429,14 +1602,21 @@ fn service_dsp_cycle(
         && shared.command_status.load(Ordering::Acquire) == COMMAND_PENDING
     {
         match capture() {
-            Ok(()) => shared.command_status.store(COMMAND_OK, Ordering::Release),
+            Ok(()) => finish_control_command(shared, COMMAND_OK),
             Err(error) => {
                 set_command_error(shared, &error);
-                shared
-                    .command_status
-                    .store(COMMAND_FAILED, Ordering::Release);
+                finish_control_command(shared, COMMAND_FAILED);
             }
         }
+    }
+    // This iteration owns all native calls, so a command not started before
+    // expiry can now be retired safely as well.
+    let command = shared.command.load(Ordering::Acquire);
+    if command != COMMAND_NONE
+        && command != COMMAND_RESERVED
+        && shared.command_status.load(Ordering::Acquire) == COMMAND_TIMED_OUT
+    {
+        shared.command.store(COMMAND_NONE, Ordering::Release);
     }
     Ok(())
 }
@@ -1655,6 +1835,22 @@ fn process_local_plugin(
     }
 }
 
+#[cfg(feature = "audio-diagnostics")]
+fn trace_bridge(stage: crate::audio_trace::Stage, sequence: u64, frames: usize, detail: u64) {
+    if crate::audio_trace::enabled() {
+        crate::audio_trace::record(crate::audio_trace::BlockTrace {
+            stage,
+            qpc: crate::vst_worker::protocol::monotonic_qpc(),
+            sequence,
+            frames: frames as u32,
+            detail,
+            duration_us: 0,
+            peak_l: 0.0,
+            peak_r: 0.0,
+        });
+    }
+}
+
 fn set_mapping_error(shared: &mut BridgeShared, error: &str) {
     let bytes = error.as_bytes();
     let len = bytes.len().min(shared.error.len());
@@ -1712,6 +1908,62 @@ mod tests {
 
     #[test]
     #[cfg(target_pointer_width = "64")]
+    fn failed_x86_spawn_releases_request_event() {
+        const CHILD_FLAG: &str = "OSCMIDI_TEST_FAILED_X86_SPAWN";
+        // Isolate environment changes and handle accounting from parallel tests.
+        if std::env::var_os(CHILD_FLAG).is_none() {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "audio::remote_bridge::tests::failed_x86_spawn_releases_request_event",
+                    "--nocapture",
+                ])
+                .env(CHILD_FLAG, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::env::set_var("OSCMIDI_VST_WORKER_X86_PATH", file.path());
+        let probe = runtime_plugin_reference(Path::new("fixture.dll"), "fixture".into(), None);
+        let handles = || {
+            let mut count = 0;
+            unsafe {
+                windows::Win32::System::Threading::GetProcessHandleCount(
+                    windows::Win32::System::Threading::GetCurrentProcess(),
+                    &mut count,
+                )
+                .unwrap();
+            }
+            count
+        };
+        // Windows initializes process-launch resources on the first attempt.
+        assert!(RemotePlugin::spawn(Path::new("fixture.dll"), 48_000, 512, &probe).is_err());
+        let before = handles();
+        for _ in 0..32 {
+            let error = RemotePlugin::spawn(Path::new("fixture.dll"), 48_000, 512, &probe)
+                .err()
+                .expect("an empty executable must fail to spawn");
+            assert!(
+                error.contains("Failed to launch VST x86 DSP worker"),
+                "{error}"
+            );
+        }
+        let after = handles();
+        assert!(
+            after <= before + 2,
+            "failed x86 spawns leaked handles: {before} -> {after}"
+        );
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
     fn bridged_midi_preserves_release_retrigger_order_in_one_sample_timeline() {
         let mut midi = VecDeque::new();
         let messages = [
@@ -1730,7 +1982,7 @@ mod tests {
             &mut events,
             &mut midi,
             0,
-            MidiBlockTiming::new(480, 48_000, 1_010_000),
+            &mut MidiBlockTiming::new(480, 48_000, 1_010_000),
         );
         assert_eq!(count, 4);
         assert!(midi.is_empty());
@@ -1755,10 +2007,8 @@ mod tests {
         Mapping::create(&name, serial, 512, &PrivateKernelSecurity::new().unwrap()).unwrap()
     }
 
-    // Audit characterization: no native plugin or audio device is loaded.
-    #[test]
     #[cfg(target_pointer_width = "64")]
-    fn audit_timed_out_x86_control_masks_subsequent_dsp_stall() {
+    fn test_remote() -> RemotePlugin {
         use std::os::windows::process::CommandExt;
         let mapping = test_mapping();
         mapping
@@ -1774,41 +2024,292 @@ mod tests {
             .spawn()
             .unwrap();
         child.wait().unwrap();
-        let mut remote = RemotePlugin {
+        RemotePlugin {
             mapping,
             request_event,
             child,
             next_sequence: 1,
+            min_output_sequence: 0,
             output_channels: 2,
             input_channels: 0,
             latency_samples: 0,
             sample_rate: 48_000,
             panic_pending: false,
+            midi_playback: MidiPlaybackClock::default(),
             pending_parameter_changes: Vec::with_capacity(BRIDGE_MAX_PARAMETER_CHANGES),
             parameter_sequences: [0; BRIDGE_SLOTS],
             consecutive_missed_frames: 0,
+            buffered_wait_started: None,
             parameter_cache: Vec::new(),
             last_output_samples: [0.0; BRIDGE_MAX_CHANNELS],
-        };
+        }
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn panic_never_relabels_previous_sequence_audio_as_new_epoch() {
+        let mut remote = test_remote();
+        remote.next_sequence = 2;
+        let slot = &mut remote.mapping.get_mut().slots[0];
+        slot.sequence.store(1, Ordering::Relaxed);
+        slot.frames.store(512, Ordering::Relaxed);
+        slot.outputs.fill(0.75);
+        slot.state.store(SLOT_READY, Ordering::Release);
+        remote.last_output_samples.fill(0.75);
+        remote.panic_all_notes();
+        let mut outputs = vec![vec![1.0; 512]; 2];
+        assert!(remote.process(
+            &mut VecDeque::new(),
+            &[],
+            &mut outputs,
+            512,
+            None,
+            None,
+            None
+        ));
+        assert!(outputs.iter().flatten().all(|sample| *sample == 0.0));
+        // Sequence 2 contains the panic; it is safe to publish its result.
+        let slot = &mut remote.mapping.get_mut().slots[0];
+        slot.sequence.store(2, Ordering::Relaxed);
+        slot.outputs.fill(0.25);
+        slot.state.store(SLOT_READY, Ordering::Release);
+        assert!(remote.process(
+            &mut VecDeque::new(),
+            &[],
+            &mut outputs,
+            512,
+            None,
+            None,
+            None
+        ));
+        assert_eq!(outputs[0][511], 0.25);
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn buffered_render_stall_expires_without_another_process_call() {
+        let mut remote = test_remote();
+        let mut outputs = vec![vec![0.0; 512]; 2];
+        assert!(remote.process(
+            &mut VecDeque::new(),
+            &[],
+            &mut outputs,
+            512,
+            None,
+            None,
+            None
+        ));
+        assert!(!remote.buffered_output_ready());
+        std::thread::sleep(Duration::from_millis(5_100));
+        assert!(
+            remote.buffered_output_ready(),
+            "stalled x86 wait never returned to health publication"
+        );
+        assert!(
+            !remote.realtime_health().2,
+            "stalled x86 worker remained healthy"
+        );
+        assert!(mapping_error(remote.mapping.get()).contains("5000 ms"));
+        assert_eq!(remote.next_sequence, 2);
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn buffered_render_control_grace_is_bounded_and_ends_on_timeout() {
+        for timed_out in [false, true] {
+            let mut remote = test_remote();
+            let mut outputs = vec![vec![0.0; 512]; 2];
+            remote.process(
+                &mut VecDeque::new(),
+                &[],
+                &mut outputs,
+                512,
+                None,
+                None,
+                None,
+            );
+            assert!(begin_control_command(
+                remote.mapping.get(),
+                COMMAND_SAVE_STATE
+            ));
+            remote.buffered_wait_started = Some(Instant::now() - Duration::from_millis(5_100));
+            assert!(
+                !remote.buffered_output_ready(),
+                "pending maintenance lost its grace period"
+            );
+            if timed_out {
+                remote
+                    .mapping
+                    .get()
+                    .command_status
+                    .store(COMMAND_TIMED_OUT, Ordering::Release);
+            } else {
+                remote.buffered_wait_started = Some(Instant::now() - Duration::from_millis(15_100));
+            }
+            assert!(remote.buffered_output_ready());
+            assert!(!remote.realtime_health().2);
+        }
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn buffered_render_waits_for_previous_x86_result_without_advancing_sequence() {
+        let mut remote = test_remote();
+        let mut midi = VecDeque::new();
+        let mut outputs = vec![vec![0.0; 512]; 2];
+        assert!(remote.buffered_output_ready());
+        assert!(remote.process(&mut midi, &[], &mut outputs, 512, None, None, None));
+        for _ in 0..3 {
+            assert!(!remote.buffered_output_ready());
+            assert_eq!(remote.next_sequence, 2);
+        }
+        let slot = &mut remote.mapping.get_mut().slots[0];
+        slot.outputs.fill(0.5);
+        slot.state.store(SLOT_READY, Ordering::Release);
+        assert!(remote.buffered_output_ready());
+        assert!(remote.process(&mut midi, &[], &mut outputs, 512, None, None, None));
+        assert_eq!(outputs[0][511], 0.5);
+        assert_eq!(remote.next_sequence, 3);
+        remote.panic_all_notes();
+        assert!(
+            remote.buffered_output_ready(),
+            "panic must be admitted without waiting for old output"
+        );
+    }
+
+    // Audit characterization: no native plugin or audio device is loaded.
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn audit_timed_out_x86_control_masks_subsequent_dsp_stall() {
+        let mut remote = test_remote();
         let error = remote
             .control_command(COMMAND_OPEN_EDITOR, "audit")
             .unwrap_err();
         assert!(error.contains("timed out"));
         assert_eq!(
             remote.mapping.get().command.load(Ordering::Acquire),
-            COMMAND_NONE
+            COMMAND_OPEN_EDITOR
         );
         assert_eq!(
             remote.mapping.get().command_status.load(Ordering::Acquire),
-            COMMAND_FAILED
+            COMMAND_TIMED_OUT
         );
+        assert!(remote
+            .control_command(COMMAND_SAVE_STATE, "retry")
+            .unwrap_err()
+            .contains("already in progress"));
         let mut midi = VecDeque::new();
         let mut outputs = vec![vec![0.0; 512]; 2];
         for _ in 0..500 {
-            remote.process(&mut midi, &[], &mut outputs, 512, None);
+            remote.process(&mut midi, &[], &mut outputs, 512, None, None, None);
         }
         assert!(!remote.realtime_health().2);
         assert!(mapping_error(remote.mapping.get()).contains("5000 ms"));
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn terminal_or_orphaned_control_status_does_not_mask_dsp_stall() {
+        for (command, status) in [
+            (COMMAND_SAVE_STATE, COMMAND_FAILED),
+            (COMMAND_OPEN_EDITOR, COMMAND_OK),
+            (COMMAND_NONE, COMMAND_PENDING),
+        ] {
+            let mut remote = test_remote();
+            remote
+                .mapping
+                .get()
+                .command
+                .store(command, Ordering::Release);
+            remote
+                .mapping
+                .get()
+                .command_status
+                .store(status, Ordering::Release);
+            let mut midi = VecDeque::new();
+            let mut outputs = vec![vec![0.0; 512]; 2];
+            for _ in 0..500 {
+                remote.process(&mut midi, &[], &mut outputs, 512, None, None, None);
+            }
+            assert!(
+                !remote.realtime_health().2,
+                "command={command}, status={status}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn pending_internal_save_has_a_bounded_dsp_grace_period() {
+        let mut remote = test_remote();
+        assert!(begin_control_command(
+            remote.mapping.get(),
+            COMMAND_SAVE_STATE
+        ));
+        let mut midi = VecDeque::new();
+        let mut outputs = vec![vec![0.0; 512]; 2];
+        for _ in 0..500 {
+            remote.process(&mut midi, &[], &mut outputs, 512, None, None, None);
+        }
+        assert!(remote.realtime_health().2);
+        for _ in 0..1000 {
+            remote.process(&mut midi, &[], &mut outputs, 512, None, None, None);
+        }
+        assert!(!remote.realtime_health().2);
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn late_capture_completion_cannot_acknowledge_a_replacement_command() {
+        let mut mapping = test_mapping();
+        let shared = mapping.get_mut();
+        assert!(begin_control_command(shared, COMMAND_SAVE_STATE));
+        // The native call returns after the caller's deadline. Keep ownership
+        // until the DSP iteration ends, and never publish a successful reply.
+        shared
+            .command_status
+            .store(COMMAND_TIMED_OUT, Ordering::Release);
+        assert!(!begin_control_command(shared, COMMAND_OPEN_EDITOR));
+        finish_control_command(shared, COMMAND_OK);
+        assert_eq!(
+            shared.command_status.load(Ordering::Acquire),
+            COMMAND_TIMED_OUT
+        );
+        assert!(!begin_control_command(shared, COMMAND_OPEN_EDITOR));
+        service_dsp_cycle(
+            shared,
+            512,
+            |_, _, _, _| Ok(()),
+            || panic!("expired capture must not run again"),
+        )
+        .unwrap();
+        assert_eq!(shared.command.load(Ordering::Acquire), COMMAND_NONE);
+        assert_eq!(
+            shared.command_status.load(Ordering::Acquire),
+            COMMAND_TIMED_OUT
+        );
+        assert!(begin_control_command(shared, COMMAND_OPEN_EDITOR));
+        assert_eq!(
+            shared.command_status.load(Ordering::Acquire),
+            COMMAND_PENDING
+        );
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn late_completed_dsp_blocks_still_prove_worker_progress() {
+        let mut remote = test_remote();
+        remote.next_sequence = 10;
+        let mut midi = VecDeque::new();
+        let mut outputs = vec![vec![0.0; 512]; 2];
+        for _ in 0..500 {
+            let slot = &remote.mapping.get().slots[0];
+            slot.sequence.store(1, Ordering::Relaxed);
+            slot.frames.store(512, Ordering::Relaxed);
+            slot.state.store(SLOT_READY, Ordering::Release);
+            remote.process(&mut midi, &[], &mut outputs, 512, None, None, None);
+        }
+        assert!(remote.realtime_health().2);
     }
 
     #[test]
@@ -1904,10 +2405,8 @@ mod tests {
             shared.command_status.load(Ordering::Acquire),
             COMMAND_FAILED
         );
-        assert_eq!(
-            shared.slots[0].state.load(Ordering::Acquire),
-            SLOT_REQUESTED
-        );
+        assert_eq!(shared.slots[0].state.load(Ordering::Acquire), SLOT_EMPTY);
+        assert_eq!(shared.server_status.load(Ordering::Acquire), SERVER_FAILED);
     }
 
     #[test]
@@ -2039,7 +2538,7 @@ mod tests {
         let mut outputs = vec![vec![0.0f32; 512]; remote.output_channels()];
         let mut energy = 0.0f32;
         for _ in 0..32 {
-            if remote.process(&mut midi, &[], &mut outputs, 512, None) {
+            if remote.process(&mut midi, &[], &mut outputs, 512, None, None, None) {
                 energy += outputs
                     .iter()
                     .flat_map(|channel| channel.iter())
@@ -2049,7 +2548,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(12));
         }
         midi.push_back(MidiPacket::from_bytes(&[0x80, 60, 0]).expect("note off"));
-        let _ = remote.process(&mut midi, &[], &mut outputs, 512, None);
+        let _ = remote.process(&mut midi, &[], &mut outputs, 512, None, None, None);
         for sequence in 0..10_000u32 {
             let note = 36 + ((sequence / 2) % 48) as u8;
             let bytes: &[u8] = match sequence % 6 {
@@ -2063,7 +2562,7 @@ mod tests {
             midi.push_back(MidiPacket::from_bytes(bytes).expect("stress MIDI event"));
         }
         for _ in 0..24 {
-            let _ = remote.process(&mut midi, &[], &mut outputs, 512, None);
+            let _ = remote.process(&mut midi, &[], &mut outputs, 512, None, None, None);
             std::thread::sleep(Duration::from_millis(12));
         }
         assert!(
@@ -2071,7 +2570,7 @@ mod tests {
             "the x86 bridge did not drain 10,000 MIDI events"
         );
         remote.panic_all_notes();
-        let _ = remote.process(&mut midi, &[], &mut outputs, 512, None);
+        let _ = remote.process(&mut midi, &[], &mut outputs, 512, None, None, None);
         assert!(
             energy.is_finite() && energy > 0.001,
             "bridged VST rendered silence"
@@ -2085,7 +2584,7 @@ mod tests {
             "maintenance must preserve the DSP pipeline sequence"
         );
         assert!(
-            remote.process(&mut midi, &[], &mut outputs, 512, None),
+            remote.process(&mut midi, &[], &mut outputs, 512, None, None, None),
             "the completed DSP block must remain available after maintenance"
         );
         assert_eq!(remote.next_sequence, sequence_before_save + 1);

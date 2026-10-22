@@ -4,7 +4,7 @@ import { getErrorMessage } from "../../api-errors";
 
 type BootstrapOptions = {
   setConfig: (config: api.AppConfig) => void;
-  setStatus: (status: api.RuntimeStatus) => void;
+  beginStatusUpdate: () => (status: api.RuntimeStatus) => void;
   setPreflight: (report: api.PreflightReport | null) => void;
   setIsLoading: (loading: boolean) => void;
   setInitializationError: (message: string | null) => void;
@@ -15,7 +15,7 @@ type BootstrapOptions = {
 
 export function useAppBootstrap({
   setConfig,
-  setStatus,
+  beginStatusUpdate,
   setPreflight,
   setIsLoading,
   setInitializationError,
@@ -40,6 +40,7 @@ export function useAppBootstrap({
           refreshLists(),
           config.audio.backend ? refreshAudioDevices(config.audio.backend) : Promise.resolve(),
         ]);
+        if (cancelled) return;
 
         try {
           const report = await api.preflightCheck();
@@ -50,11 +51,14 @@ export function useAppBootstrap({
           console.warn("Preflight check failed at init", error);
         }
 
+        if (cancelled) return;
         if (config.ui.autoStart) {
           try {
+            const acceptStatus = beginStatusUpdate();
             const status = await api.startBridge(config);
             if (!cancelled) {
-              setStatus(status);
+              acceptStatus(status);
+              await refreshStatus();
             }
           } catch (error) {
             console.error("Auto-start bridge failed", error);
@@ -78,6 +82,7 @@ export function useAppBootstrap({
       cancelled = true;
     };
   }, [
+    beginStatusUpdate,
     refreshAudioDevices,
     refreshLists,
     refreshStatus,
@@ -85,6 +90,5 @@ export function useAppBootstrap({
     setInitializationError,
     setIsLoading,
     setPreflight,
-    setStatus,
   ]);
 }

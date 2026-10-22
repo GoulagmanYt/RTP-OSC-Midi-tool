@@ -40,9 +40,9 @@ export default function LogsPage() {
                 className={cn(
                   "break-all",
                   log.level === "error"
-                    ? "text-red-500"
+                    ? "text-destructive"
                     : log.level === "warn"
-                      ? "text-yellow-500"
+                      ? "text-warning"
                       : "text-foreground",
                 )}
               >

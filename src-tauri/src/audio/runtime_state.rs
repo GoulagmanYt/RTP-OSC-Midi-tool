@@ -4,7 +4,7 @@ use std::{
     collections::VecDeque,
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering},
         Arc, OnceLock,
     },
     time::{Duration, Instant},
@@ -57,6 +57,30 @@ use crate::types::VstParameter;
 
 pub(super) const MAX_PLUGIN_CHANNELS: usize = 256;
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum DspThreadPriority {
+    #[default]
+    Mmcss,
+    TimeCritical,
+}
+
+pub(crate) fn default_render_ahead_blocks() -> u32 {
+    1
+}
+
+pub(crate) fn deserialize_render_ahead_blocks<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<u32, D::Error> {
+    let blocks = u32::deserialize(deserializer)?;
+    if blocks > 2 {
+        return Err(serde::de::Error::custom(
+            "renderAheadBlocks must be 0, 1 or 2",
+        ));
+    }
+    Ok(blocks)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioSettings {
@@ -69,6 +93,13 @@ pub struct AudioSettings {
     pub device_id: Option<String>,
     pub sample_rate: u32,
     pub buffer_size: u32,
+    #[serde(
+        default = "default_render_ahead_blocks",
+        deserialize_with = "deserialize_render_ahead_blocks"
+    )]
+    pub render_ahead_blocks: u32,
+    #[serde(default)]
+    pub dsp_thread_priority: DspThreadPriority,
     pub gain_db: f32,
     #[serde(default)]
     pub limiter_enabled: bool,
@@ -88,6 +119,8 @@ impl Default for AudioSettings {
             device_id: None,
             sample_rate: 48_000,
             buffer_size: 512,
+            render_ahead_blocks: default_render_ahead_blocks(),
+            dsp_thread_priority: DspThreadPriority::default(),
             game_mode: true,
             gain_db: 0.0,
             limiter_enabled: false,
@@ -150,6 +183,21 @@ pub(super) struct AudioControls {
 
 #[repr(align(64))]
 pub(super) struct AudioTelemetry {
+    pub(super) render_underflows: AtomicU64,
+    pub(super) render_missing_frames: AtomicU64,
+    pub(super) render_reset_silence_frames: AtomicU64,
+    pub(super) render_queue_frames: AtomicU64,
+    pub(super) render_ahead_samples: AtomicU32,
+    pub(super) render_running: AtomicBool,
+    pub(super) render_busy_since_qpc: AtomicU64,
+    pub(super) render_last_completed_qpc: AtomicU64,
+    pub(super) render_block_max_us: AtomicU32,
+    pub(super) render_over_budget: AtomicU64,
+    pub(super) callback_gap_count: AtomicU64,
+    pub(super) callback_gate: super::callback_gate::CallbackGate,
+    pub(super) mmcss_enabled: AtomicU8,
+    pub(super) mmcss_owned: AtomicU8,
+    pub(super) mmcss_critical: AtomicU8,
     pub(super) editor_open: AtomicBool,
     pub(super) parameter_accepted_sequence: AtomicU64,
     pub(super) parameter_failed_sequence: AtomicU64,
@@ -194,6 +242,21 @@ pub(super) const DSP_HISTOGRAM_BUCKET_US: u32 = 250;
 impl AudioTelemetry {
     pub(super) fn new() -> Self {
         Self {
+            render_underflows: AtomicU64::new(0),
+            render_missing_frames: AtomicU64::new(0),
+            render_reset_silence_frames: AtomicU64::new(0),
+            render_queue_frames: AtomicU64::new(0),
+            render_ahead_samples: AtomicU32::new(0),
+            render_running: AtomicBool::new(false),
+            render_busy_since_qpc: AtomicU64::new(0),
+            render_last_completed_qpc: AtomicU64::new(0),
+            render_block_max_us: AtomicU32::new(0),
+            render_over_budget: AtomicU64::new(0),
+            callback_gap_count: AtomicU64::new(0),
+            mmcss_enabled: AtomicU8::new(0),
+            mmcss_owned: AtomicU8::new(0),
+            mmcss_critical: AtomicU8::new(0),
+            callback_gate: super::callback_gate::CallbackGate::default(),
             editor_open: AtomicBool::new(false),
             parameter_accepted_sequence: AtomicU64::new(0),
             parameter_applied_sequence: AtomicU64::new(0),
@@ -234,6 +297,13 @@ impl AudioTelemetry {
     }
 
     pub(super) fn record_midi_delivery(&self, packet: MidiPacket) {
+        #[cfg(feature = "latency-diagnostics")]
+        crate::latency_trace::record(
+            crate::latency_trace::Stage::DspDequeued,
+            &packet.data[..usize::from(packet.len)],
+            packet.ingress_qpc,
+            crate::vst_worker::protocol::monotonic_qpc(),
+        );
         self.record_midi_delivery_at(
             packet.ingress_qpc,
             packet.worker_qpc,
@@ -302,6 +372,7 @@ impl AudioTelemetry {
 
 pub(super) struct AudioRuntime {
     pub(super) _stream: Stream,
+    pub(super) renderer: Option<super::render_ahead::DspWorkerGuard>,
     pub(super) _process_tuning: super::windows_tuning::AudioProcessTuning,
     // Keep the CPAL device (and therefore the ASIO driver) alive for the whole
     // runtime. Hot VST reloads can transfer this handle to the next runtime
@@ -359,6 +430,7 @@ pub(super) const MIDI_EVENT_BATCH_CAPACITY: usize = 512;
 pub(super) const RESET_CONTROLLERS: [u8; 4] = [64, 120, 121, 123];
 pub(super) const VST_EDITOR_IDLE_TIMER_MS: u32 = 50;
 pub(super) const PARAMETER_COMMAND_CAPACITY: usize = 4096;
+pub(super) const OVERSIZED_CALLBACK_ERROR: u32 = 13;
 
 #[derive(Clone, Copy, Debug)]
 #[cfg_attr(target_pointer_width = "32", allow(dead_code))]
@@ -452,9 +524,11 @@ impl MidiPacket {
 }
 
 pub(super) struct AudioCallbackState {
+    pub(super) render_source_end_us: Option<u64>,
     pub(super) midi_generation: u64,
     pub(super) midi_rx: Consumer<MidiPacket>,
     pub(super) pending_midi: VecDeque<MidiPacket>,
+    pub(super) midi_playback: super::midi_playback::MidiPlaybackClock,
     pub(super) midi_events: Vec<RackMidiEvent>,
     pub(super) vst2_midi_events: Vec<api::MidiEvent>,
     pub(super) vst2_event_batch: Vst2EventBatch,
@@ -477,10 +551,6 @@ pub(super) struct AudioCallbackState {
     pub(super) last_frames: usize,
     pub(super) error_count: u32,
     pub(super) recovering_from_silence: bool,
-    #[cfg(target_os = "windows")]
-    pub(super) mmcss_applied: bool,
-    #[cfg(target_os = "windows")]
-    pub(super) mmcss_registration: Option<super::windows_tuning::MmcssRegistration>,
 }
 
 // SAFETY: AudioCallbackState is moved into the callback before any callback runs and
@@ -516,8 +586,10 @@ impl AudioCallbackState {
 
         Self {
             midi_generation: 0,
+            render_source_end_us: None,
             midi_rx,
             pending_midi: VecDeque::with_capacity(MAX_PENDING_MIDI),
+            midi_playback: super::midi_playback::MidiPlaybackClock::default(),
             midi_events: Vec::with_capacity(MIDI_EVENT_BATCH_CAPACITY),
             vst2_midi_events: Vec::with_capacity(MIDI_EVENT_BATCH_CAPACITY),
             vst2_event_batch: Vst2EventBatch {
@@ -544,15 +616,31 @@ impl AudioCallbackState {
             last_frames: 0,
             error_count: 0,
             recovering_from_silence: false,
-            #[cfg(target_os = "windows")]
-            mmcss_applied: false,
-            #[cfg(target_os = "windows")]
-            mmcss_registration: None,
         }
     }
 
     pub(super) fn prepare(&mut self, frames: usize) -> bool {
         if frames > self.max_frames {
+            // The advertised backend maximum has changed or was inaccurate.
+            // Keep the buffers fixed, but let the supervisor recover the stream
+            // instead of silently rejecting every subsequent oversized block.
+            if self
+                .telemetry
+                .stream_fatal_error
+                .compare_exchange(
+                    0,
+                    OVERSIZED_CALLBACK_ERROR,
+                    Ordering::AcqRel,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                self.telemetry
+                    .stream_recovery_requests
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            self.emergency_reset_requested
+                .store(true, Ordering::Release);
             return false;
         }
 
@@ -576,8 +664,16 @@ impl AudioCallbackState {
 
     pub(super) fn drain_midi(&mut self) {
         if self.emergency_reset_requested.swap(false, Ordering::AcqRel) {
+            // A standalone panic must invalidate ring entries as well as the
+            // callback backlog. Producers stamp subsequent events with the new epoch.
+            self.telemetry
+                .midi_generation
+                .fetch_add(1, Ordering::AcqRel);
             self.needs_emergency_reset = true;
             self.pending_midi.clear();
+            self.midi_playback.reset();
+            self.last_output.fill(0.0);
+            self.recovering_from_silence = true;
         }
         self.observe_midi_generation();
         let now_us = monotonic_us();
@@ -609,11 +705,21 @@ impl AudioCallbackState {
             .store(oldest_us, Ordering::Relaxed);
     }
 
+    pub(super) fn next_midi_timestamp_us(&self) -> Option<u64> {
+        self.pending_midi
+            .front()
+            .or_else(|| self.midi_rx.peek().ok())
+            .map(|packet| packet.timestamp_us)
+    }
+
     fn observe_midi_generation(&mut self) {
         let generation = self.telemetry.midi_generation.load(Ordering::Acquire);
         if generation != self.midi_generation {
             self.midi_generation = generation;
             self.pending_midi.clear();
+            self.midi_playback.reset();
+            self.last_output.fill(0.0);
+            self.recovering_from_silence = true;
             self.needs_emergency_reset = true;
         }
     }
@@ -656,12 +762,14 @@ impl AudioCallbackState {
             return;
         }
 
+        let discarded = self.pending_midi.len() as u32;
         self.pending_midi.clear();
+        self.midi_playback.reset();
         self.pending_midi.push_back(msg);
         self.needs_emergency_reset = true;
         self.telemetry
             .midi_drop_count
-            .fetch_add(1, Ordering::Relaxed);
+            .fetch_add(discarded, Ordering::Relaxed);
     }
 
     fn drop_oldest_note_on(&mut self) -> bool {

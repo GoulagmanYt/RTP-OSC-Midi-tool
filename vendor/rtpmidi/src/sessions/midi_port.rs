@@ -465,8 +465,13 @@ impl MidiPort {
             if peer.addr() == ctrl_addr && peer.initiator_token() == Some(body.initiator_token) {
                 self.send_invitation_acceptance(body.initiator_token, src)
                     .await;
+                return;
             }
-            return;
+            // A fresh two-port handshake from the same endpoint may replace
+            // a peer that restarted without BY. A colliding SSRC elsewhere may not.
+            if peer.addr() != ctrl_addr {
+                return;
+            }
         }
         let mut pending = ctx.pending_invitations.lock().await;
         let valid = pending.get(&body.initiator_token).is_some_and(|inv| {
@@ -486,12 +491,9 @@ impl MidiPort {
             sender_name,
             body.sender_ssrc,
         );
-        let mut peers = ctx.participants.lock().await;
-        if peers.len() >= 128 {
+        if ctx.register_participant(&participant).await.is_err() {
             return;
         }
-        peers.insert(body.sender_ssrc, participant.clone());
-        drop(peers);
         self.send_invitation_acceptance(body.initiator_token, src)
             .await;
         ctx.notify_joined(&participant).await;
@@ -549,12 +551,7 @@ impl MidiPort {
             &inv.name,
             ack_body.sender_ssrc,
         );
-        let mut peers = ctx.participants.lock().await;
-        if peers.len() >= 128 {
-            return Err("Participant capacity reached");
-        }
-        peers.insert(ack_body.sender_ssrc, participant.clone());
-        drop(peers);
+        ctx.register_participant(&participant).await?;
         let timestamps = [U64::new(0); 3];
         self.send_clock_sync(std::iter::once(&participant), timestamps, 0)
             .await;
@@ -623,12 +620,19 @@ impl MidiPort {
             return;
         }
         let now = Instant::now();
-        let local_ticks = current_timestamp(self.start_time).get();
+        // Use one coherent clock sample. A second Instant::now() after a CPU
+        // preemption would corrupt the reconstructed phase by that whole gap.
+        let local_ticks =
+            (now.duration_since(self.start_time).as_micros() / 100).min(u64::MAX as u128) as u64;
         let [t0, t1, t2] = packet.timestamps.map(|value| value.get());
         match packet.count {
             1 if local_ticks >= t0 && local_ticks - t0 <= 100_000 => {
                 let midpoint = now - std::time::Duration::from_micros((local_ticks - t0) * 50);
-                participant.synchronize(t1, midpoint);
+                participant.synchronize(
+                    t1,
+                    midpoint,
+                    std::time::Duration::from_micros((local_ticks - t0) * 100),
+                );
             }
             2 if t2 >= t0
                 && t2 - t0 <= 100_000
@@ -636,7 +640,11 @@ impl MidiPort {
                 && local_ticks - t1 <= 100_000 =>
             {
                 let local = now - std::time::Duration::from_micros((local_ticks - t1) * 100);
-                participant.synchronize(t0 + (t2 - t0) / 2, local);
+                participant.synchronize(
+                    t0 + (t2 - t0) / 2,
+                    local,
+                    std::time::Duration::from_micros((t2 - t0) * 100),
+                );
             }
             0 => {}
             _ => return,
@@ -725,6 +733,110 @@ impl MidiPort {
 #[cfg(test)]
 mod sequence_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn outgoing_acceptance_replaces_the_old_endpoint_without_a_duplicate_destination() {
+        let ctx = RtpMidiSession::start(
+            0,
+            "Outgoing reconnect",
+            7,
+            super::super::invite_responder::InviteResponder::Accept,
+        )
+        .await
+        .unwrap();
+        let original = Participant::new(
+            "127.0.0.1:5004".parse().unwrap(),
+            true,
+            Some(U32::new(9)),
+            c"Old peer",
+            U32::new(42),
+        );
+        ctx.participants
+            .lock()
+            .await
+            .insert(original.ssrc(), original);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        ctx.add_listener(
+            super::super::events::event_handling::ParticipantLeftEvent,
+            move |p| {
+                tx.try_send(p.ssrc().get()).unwrap();
+            },
+        )
+        .await;
+        let source = "127.0.0.1:5005".parse().unwrap();
+        ctx.pending_invitations.lock().await.insert(
+            U32::new(10),
+            super::super::rtp_midi_session::PendingInvitation {
+                addr: source,
+                token: U32::new(10),
+                name: c"New peer".to_owned(),
+                created: Instant::now(),
+                ssrc: U32::new(43),
+            },
+        );
+        let body = SessionInitiationPacketBody::new(U32::new(10), U32::new(43));
+        ctx.midi_port
+            .handle_acceptance(&body, source, &ctx)
+            .await
+            .unwrap();
+        let peers = ctx.participants().await;
+        assert_eq!(
+            peers.len(),
+            1,
+            "one endpoint must have one outgoing destination"
+        );
+        assert_eq!(peers[0].ssrc().get(), 43);
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            42,
+            "old router source must be released"
+        );
+        ctx.stop_gracefully().await;
+    }
+
+    #[tokio::test]
+    async fn outgoing_acceptance_cannot_overwrite_another_endpoints_ssrc() {
+        let ctx = RtpMidiSession::start(
+            0,
+            "SSRC collision",
+            7,
+            super::super::invite_responder::InviteResponder::Accept,
+        )
+        .await
+        .unwrap();
+        let original = Participant::new(
+            "127.0.0.1:5004".parse().unwrap(),
+            true,
+            Some(U32::new(9)),
+            c"Original",
+            U32::new(42),
+        );
+        ctx.participants
+            .lock()
+            .await
+            .insert(original.ssrc(), original.clone());
+        let source = "127.0.0.1:5011".parse().unwrap();
+        ctx.pending_invitations.lock().await.insert(
+            U32::new(10),
+            super::super::rtp_midi_session::PendingInvitation {
+                addr: source,
+                token: U32::new(10),
+                name: c"Collision".to_owned(),
+                created: Instant::now(),
+                ssrc: U32::new(42),
+            },
+        );
+        let body = SessionInitiationPacketBody::new(U32::new(10), U32::new(42));
+        assert!(
+            ctx.midi_port
+                .handle_acceptance(&body, source, &ctx)
+                .await
+                .is_err(),
+            "SSRC collision must not silently redirect an active stream"
+        );
+        assert_eq!(ctx.participants().await, [original]);
+        ctx.stop_gracefully().await;
+    }
 
     #[test]
     fn sequence_classification_handles_gap_duplicate_and_wrap() {

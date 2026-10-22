@@ -13,7 +13,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{bridge::pipeline::try_enqueue_midi_frame, midi::MidiFrame};
+use crate::{
+    bridge::pipeline::{enqueue_prepared_midi_frame, try_enqueue_midi_frame},
+    midi::MidiFrame,
+};
 
 const PROTOCOL_VERSION: u8 = 1;
 pub const DEFAULT_RELIABLE_PLAYBACK_ADDR: &str = "0.0.0.0:5056";
@@ -80,6 +83,7 @@ enum ServerFrame<'a> {
     Completed {
         #[serde(rename = "sessionId")]
         session_id: &'a str,
+        // Protocol v1 name: successful input-queue admissions, not worker delivery.
         processed: u64,
         #[serde(rename = "maxLateUs")]
         max_late_us: u64,
@@ -257,6 +261,10 @@ fn reap_finished_workers(workers: &Mutex<Vec<thread::JoinHandle<()>>>) {
 fn handle_connection(mut stream: TcpStream, tx: Sender<MidiFrame>, server_stop: Arc<AtomicBool>) {
     let _ = stream.set_nonblocking(false);
     let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
+    if let Err(err) = stream.set_write_timeout(Some(Duration::from_millis(250))) {
+        log::warn!("Reliable playback write timeout setup failed: {err}");
+        return;
+    }
     let connection_id = NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed);
     let writer = match stream.try_clone() {
         Ok(writer) => Arc::new(Mutex::new(writer)),
@@ -278,13 +286,17 @@ fn handle_connection(mut stream: TcpStream, tx: Sender<MidiFrame>, server_stop: 
             }) => match validate_prepare(version, session_id, song, total, events) {
                 Ok(prepared) => {
                     MESSAGES_IN.fetch_add(prepared.events.len() as u64, Ordering::Relaxed);
-                    let _ = send_server_frame(
+                    if send_server_frame(
                         &writer,
                         &ServerFrame::Prepared {
                             session_id: &prepared.session_id,
                             received: prepared.events.len(),
                         },
-                    );
+                    )
+                    .is_err()
+                    {
+                        return;
+                    }
                     prepared
                 }
                 Err((session_id, message)) => {
@@ -425,7 +437,7 @@ fn validate_prepare(
     session_id: String,
     song: String,
     total: usize,
-    events: Vec<ReliablePlaybackEvent>,
+    mut events: Vec<ReliablePlaybackEvent>,
 ) -> Result<PreparedSession, (Option<String>, String)> {
     if version != PROTOCOL_VERSION {
         return Err((
@@ -440,7 +452,7 @@ fn validate_prepare(
         ));
     }
     let mut previous_due = 0u64;
-    for (idx, event) in events.iter().enumerate() {
+    for (idx, event) in events.iter_mut().enumerate() {
         if event.seq != idx as u64 {
             return Err((
                 Some(session_id),
@@ -472,6 +484,12 @@ fn validate_prepare(
             return Err((
                 Some(session_id),
                 format!("MIDI data too large at seq {}", event.seq),
+            ));
+        }
+        if !crate::midi::normalize_message(&mut event.data) {
+            return Err((
+                Some(session_id),
+                format!("invalid MIDI message at seq {}", event.seq),
             ));
         }
         previous_due = event.due_us;
@@ -520,6 +538,9 @@ fn run_schedule(
         let late_us = Instant::now().saturating_duration_since(target).as_micros() as u64;
         max_late_us = max_late_us.max(late_us);
         record_max_late(max_late_us);
+        // Retain source time through routing/worker queues so the audio clock
+        // can replay late intervals. Equal deadlines share exactly one stamp.
+        let scheduled_qpc = crate::vst_worker::protocol::qpc_at(target);
 
         while index < session.events.len() && session.events[index].due_us == due_us {
             if cancel.load(Ordering::Relaxed) || server_stop.load(Ordering::Relaxed) {
@@ -528,18 +549,16 @@ fn run_schedule(
             let event = &session.events[index];
             let frame = MidiFrame {
                 generation: MidiFrame::current_generation(),
-                ingress_qpc: crate::vst_worker::protocol::monotonic_qpc(),
+                ingress_qpc: scheduled_qpc,
                 data: SmallVec::from_slice(&event.data),
                 source: Arc::clone(&source),
             };
             match try_enqueue_midi_frame(&tx, frame) {
-                Ok(
-                    crate::bridge::pipeline::EnqueueOutcome::Enqueued
-                    | crate::bridge::pipeline::EnqueueOutcome::Filtered,
-                ) => {
+                Ok(crate::bridge::pipeline::EnqueueOutcome::Enqueued) => {
                     processed += 1;
                     MESSAGES_OUT.fetch_add(1, Ordering::Relaxed);
                 }
+                Ok(crate::bridge::pipeline::EnqueueOutcome::Filtered) => {}
                 Err(crate::bridge::pipeline::EnqueueError::Disconnected) => {
                     return None;
                 }
@@ -581,13 +600,13 @@ fn wait_until(target: Instant, cancel: &AtomicBool, server_stop: &AtomicBool) {
 fn inject_all_notes_off(tx: &Sender<MidiFrame>, source: &str) {
     let source: Arc<str> = Arc::from(source.to_string());
     for channel in 0u8..16 {
-        for data in [[0xB0 | channel, 64, 0], [0xB0 | channel, 123, 0]] {
-            let _ = try_enqueue_midi_frame(
+        for controller in [64, 66, 69, 123] {
+            let _ = enqueue_prepared_midi_frame(
                 tx,
                 MidiFrame {
                     generation: MidiFrame::current_generation(),
                     ingress_qpc: crate::vst_worker::protocol::monotonic_qpc(),
-                    data: SmallVec::from_slice(&data),
+                    data: smallvec::smallvec![0xB0 | channel, controller, 0],
                     source: Arc::clone(&source),
                 },
             );
@@ -718,13 +737,178 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn late_admission_preserves_the_scheduled_midi_timeline() {
+        let _guard = crate::bridge::pipeline::TEST_PIPELINE_LOCK.lock().unwrap();
+        let (tx, rx) = crate::midi_queue::bounded(128);
+        tx.set_preparation(|frame: &mut MidiFrame| {
+            if frame.data[1] == 60 {
+                // Delay the real admission until both subsequent deadlines pass.
+                thread::sleep(Duration::from_millis(60));
+            }
+            true
+        });
+        let session = Arc::new(PreparedSession {
+            session_id: "late".into(),
+            song: "late.mid".into(),
+            events: (60..63)
+                .enumerate()
+                .map(|(index, note)| ReliablePlaybackEvent {
+                    seq: index as u64,
+                    due_us: index as u64 * 10_000,
+                    data: smallvec::smallvec![0x90, note, 100],
+                })
+                .collect(),
+        });
+        let result = run_schedule(
+            session,
+            0,
+            tx,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+        assert_eq!(result.processed, 3);
+        let frames: Vec<_> = rx.try_iter().collect();
+        assert_eq!(frames.len(), 3);
+        assert_eq!(
+            frames.iter().map(|frame| frame.data[1]).collect::<Vec<_>>(),
+            [60, 61, 62]
+        );
+        let spacing = crate::vst_worker::protocol::qpc_elapsed_us(
+            frames[1].ingress_qpc,
+            frames[2].ingress_qpc,
+        );
+        assert!(
+            (5_000..15_000).contains(&spacing),
+            "10 ms source interval collapsed to {spacing} us"
+        );
+    }
+
+    #[test]
+    fn connection_shutdown_is_bounded_under_tcp_backpressure() {
+        let _guard = crate::bridge::pipeline::TEST_PIPELINE_LOCK.lock().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut peer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let (stream, _) = listener.accept().unwrap();
+        socket2::SockRef::from(&stream)
+            .set_send_buffer_size(0)
+            .unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let (tx, _rx) = crate::midi_queue::bounded(128);
+        let (finished_tx, finished_rx) = std::sync::mpsc::sync_channel(1);
+        let connection = thread::spawn({
+            let stop = stop.clone();
+            move || {
+                handle_connection(stream, tx, stop);
+                finished_tx.send(()).unwrap();
+            }
+        });
+        let data = serde_json::to_vec(&json!({
+            "type": "prepare", "version": 1, "sessionId": "s".repeat(8 * 1024 * 1024),
+            "song": "blocked.mid", "total": 0, "events": []
+        }))
+        .unwrap();
+        peer.write_all(&(data.len() as u32).to_be_bytes()).unwrap();
+        peer.write_all(&data).unwrap();
+        peer.read_exact(&mut [0; 4]).unwrap();
+        stop.store(true, Ordering::Relaxed);
+        let result = finished_rx.recv_timeout(Duration::from_secs(2));
+        peer.shutdown(std::net::Shutdown::Both).unwrap();
+        connection.join().unwrap();
+        assert!(
+            result.is_ok(),
+            "connection blocked on a non-reading TCP client"
+        );
+    }
+
+    #[test]
+    fn filtered_events_are_not_reported_as_queued() {
+        let _guard = crate::bridge::pipeline::TEST_PIPELINE_LOCK.lock().unwrap();
+        let (tx, rx) = crate::midi_queue::bounded(64);
+        tx.set_preparation(|_| false);
+        let session = Arc::new(PreparedSession {
+            session_id: "filtered".into(),
+            song: "filtered.mid".into(),
+            events: vec![ReliablePlaybackEvent {
+                seq: 0,
+                due_us: 0,
+                data: smallvec::smallvec![0x90, 60, 100],
+            }],
+        });
+        let before = reliable_playback_metrics_snapshot().messages_out;
+        let completion = run_schedule(
+            session,
+            0,
+            tx,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+        assert!(rx.try_recv().is_err());
+        assert_eq!(completion.processed, 0);
+        assert_eq!(completion.dropped, 0);
+        assert_eq!(reliable_playback_metrics_snapshot().messages_out, before);
+    }
+
+    #[test]
+    fn cancellation_reset_releases_all_hold_pedals() {
+        let _guard = crate::bridge::pipeline::TEST_PIPELINE_LOCK.lock().unwrap();
+        let (tx, rx) = crate::midi_queue::bounded(128);
+        let mut held = crate::midi::SourceMidiState::default();
+        for channel in 0..16 {
+            for controller in [64, 66, 69] {
+                held.observe(
+                    &MidiFrame::copy_realtime(
+                        &[0xB0 | channel, controller, 127],
+                        Arc::from("ReliablePLV:pedals.mid"),
+                    )
+                    .unwrap(),
+                );
+            }
+        }
+        inject_all_notes_off(&tx, "ReliablePLV:pedals.mid");
+        for frame in rx.try_iter() {
+            held.observe(&frame);
+        }
+        assert!(held.release_source("ReliablePLV:pedals.mid").is_empty());
+    }
+
+    #[test]
+    fn cancellation_reset_is_not_remapped_by_the_input_profile() {
+        let _guard = crate::bridge::pipeline::TEST_PIPELINE_LOCK.lock().unwrap();
+        let (tx, rx) = crate::midi_queue::bounded(128);
+        tx.set_preparation(|frame: &mut MidiFrame| {
+            if frame.data[0] & 0xF0 == 0xB0 {
+                frame.data[1] = match frame.data[1] {
+                    64 => 7,
+                    123 => 8,
+                    other => other,
+                };
+            }
+            true
+        });
+        let mut held = crate::midi::SourceMidiState::default();
+        for data in [[0x90, 60, 100], [0xB0, 64, 127]] {
+            held.observe(
+                &MidiFrame::copy_realtime(&data, Arc::from("ReliablePLV:mapped.mid")).unwrap(),
+            );
+        }
+        inject_all_notes_off(&tx, "ReliablePLV:mapped.mid");
+        for frame in rx.try_iter() {
+            held.observe(&frame);
+        }
+        assert!(held.release_source("ReliablePLV:mapped.mid").is_empty());
+    }
+
+    #[test]
     fn cancellation_during_equal_deadline_batch_stops_before_reset() {
         let _guard = crate::bridge::pipeline::TEST_PIPELINE_LOCK.lock().unwrap();
         // Pause a real admission after its cancellation check. Joining the
         // scheduler must allow that one admission to finish before reset, and
         // cancellation must prevent the remaining event in the same batch.
         for server_shutdown in [false, true] {
-            let (tx, rx) = crate::midi_queue::bounded(64);
+            let (tx, rx) = crate::midi_queue::bounded(128);
             let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
             let (resume_tx, resume_rx) = std::sync::mpsc::sync_channel(1);
             let resume_rx = Mutex::new(resume_rx);
@@ -765,7 +949,7 @@ mod tests {
             assert!(scheduler.join().unwrap().is_none());
             inject_all_notes_off(&tx, "ReliablePLV:batch.mid");
             let frames: Vec<_> = rx.try_iter().collect();
-            assert_eq!(frames.len(), 34);
+            assert_eq!(frames.len(), 66);
             assert_eq!(frames[0].data.as_slice(), &[0x90, 60, 100]);
             assert_eq!(frames[1].data.as_slice(), &[0x90, 61, 100]);
             assert!(frames[2..].iter().all(|frame| frame.data[0] & 0xF0 == 0xB0));

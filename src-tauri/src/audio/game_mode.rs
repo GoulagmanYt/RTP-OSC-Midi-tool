@@ -7,50 +7,159 @@ use crate::{
     types::{VstParameter, VstPluginEntry},
     vst_worker::WorkerMetrics,
 };
-use cpal::traits::StreamTrait;
 use parking_lot::Mutex;
 use std::{
     collections::BTreeMap,
-    sync::{atomic::Ordering, Arc},
+    sync::{
+        atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
+        Arc,
+    },
 };
 
-pub(super) struct MaintenanceGuard(AudioEngine);
+pub(super) struct MaintenanceGuard {
+    engine: AudioEngine,
+    telemetry: Option<Arc<super::runtime_state::AudioTelemetry>>,
+}
 impl Drop for MaintenanceGuard {
     fn drop(&mut self) {
-        if let Some(runtime) = self.0.runtime.lock().as_ref() {
-            if runtime._stream.play().is_err() {
-                runtime
-                    .telemetry
-                    .stream_fatal_error
-                    .store(8, Ordering::Release);
-            }
+        // This token belongs to the captured stream, never a replacement runtime.
+        if let Some(telemetry) = &self.telemetry {
+            telemetry.callback_gate.reopen();
         }
-        self.0.maintenance.store(false, Ordering::Release);
+        self.engine.maintenance.store(false, Ordering::Release);
     }
 }
 
+pub(super) fn finish_maintenance(guard: MaintenanceGuard, publish: impl FnOnce()) {
+    drop(guard);
+    publish();
+}
+
+/// Control serialization excludes other threads; generations protect same-thread reentry.
+fn flush_pending_actions(
+    save: &AtomicBool,
+    editor: &AtomicU8,
+    generations: (&AtomicU64, &AtomicU64),
+    capture: impl FnOnce() -> Result<(), AudioError>,
+    edit: impl FnOnce(u8) -> Result<(), AudioError>,
+) -> Result<(), AudioError> {
+    let mut failure = None;
+    if save.load(Ordering::Acquire) {
+        let generation = generations.0.load(Ordering::Acquire);
+        match capture() {
+            Ok(()) => {
+                if generations.0.load(Ordering::Acquire) == generation {
+                    save.store(false, Ordering::Release);
+                }
+            }
+            Err(error) => failure = Some(error),
+        }
+    }
+    let intent = editor.load(Ordering::Acquire);
+    if intent != 0 {
+        let generation = generations.1.load(Ordering::Acquire);
+        match edit(intent) {
+            Ok(()) => {
+                if generations.1.load(Ordering::Acquire) == generation {
+                    editor.store(0, Ordering::Release);
+                }
+            }
+            Err(error) => {
+                if failure.is_none() {
+                    failure = Some(error);
+                }
+            }
+        }
+    }
+    failure.map_or(Ok(()), Err)
+}
+
 impl AudioEngine {
+    fn transition_game_mode(
+        &self,
+        enabled: bool,
+        operation: impl FnOnce() -> Result<(), AudioError>,
+    ) -> Result<(), AudioError> {
+        let _control = self.control_gate.lock();
+        let generation = self
+            .game_mode_generation
+            .fetch_add(1, Ordering::AcqRel)
+            .wrapping_add(1);
+        let previous = self.game_mode.swap(enabled, Ordering::AcqRel);
+        let result = operation();
+        if result.is_err() && self.game_mode_generation.load(Ordering::Acquire) == generation {
+            self.game_mode.store(previous, Ordering::Release);
+        }
+        result
+    }
+
+    pub(super) fn apply_editor_intent(
+        &self,
+        intent: u8,
+        operation: impl FnOnce() -> Result<(), AudioError>,
+    ) -> Result<(), AudioError> {
+        let _control = self.control_gate.lock();
+        let generation = self
+            .deferred_editor_generation
+            .fetch_add(1, Ordering::AcqRel)
+            .wrapping_add(1);
+        self.deferred_editor.store(intent, Ordering::Release);
+        if self.game_mode.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let result = operation();
+        if result.is_ok() && self.deferred_editor_generation.load(Ordering::Acquire) == generation {
+            self.deferred_editor.store(0, Ordering::Release);
+        }
+        result
+    }
+
+    pub(super) fn wait_for_maintenance_completion(&self) -> Result<(), AudioError> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while self.maintenance.load(Ordering::Acquire) {
+            if std::time::Instant::now() >= deadline {
+                return Err(AudioError::Message(
+                    "Previous native VST maintenance is still executing".into(),
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        Ok(())
+    }
+
     pub(super) fn begin_maintenance(&self) -> Result<MaintenanceGuard, AudioError> {
         if self.maintenance.swap(true, Ordering::AcqRel) {
             return Err(AudioError::Message(
                 "Audio maintenance already active".into(),
             ));
         }
-        if let Some(runtime) = self.runtime.lock().as_ref() {
-            // Serialize admission with the runtime lock, but let the audio callback
-            // finish the last accepted command before pausing the stream.
-            if let Err(error) =
-                wait_for_parameters(&runtime.telemetry, std::time::Duration::from_secs(5))
-            {
+        let telemetry = self
+            .runtime
+            .lock()
+            .as_ref()
+            .map(|runtime| runtime.telemetry.clone());
+        if let Some(telemetry) = &telemetry {
+            // Taking the runtime lock above finishes any parameter admission that
+            // observed maintenance=false. Drain it before closing callback admission.
+            if let Err(error) = wait_for_parameters(telemetry, std::time::Duration::from_secs(5)) {
                 self.maintenance.store(false, Ordering::Release);
                 return Err(error);
             }
-            if let Err(error) = runtime._stream.pause() {
+            if !telemetry
+                .callback_gate
+                .close_and_wait(std::time::Duration::from_secs(5))
+            {
+                telemetry.callback_gate.reopen();
                 self.maintenance.store(false, Ordering::Release);
-                return Err(AudioError::Message(error.to_string()));
+                return Err(AudioError::Message(
+                    "Timed out waiting for audio callback quiescence".into(),
+                ));
             }
         }
-        Ok(MaintenanceGuard(self.clone()))
+        Ok(MaintenanceGuard {
+            engine: self.clone(),
+            telemetry,
+        })
     }
 
     pub fn set_game_mode(&self, enabled: bool, app: tauri::AppHandle) -> Result<(), AudioError> {
@@ -59,30 +168,101 @@ impl AudioEngine {
             return crate::tauri::utils::safe_block_on(self.worker.set_game_mode(enabled))
                 .map_err(AudioError::Message);
         }
+        let _control = self.control_gate.lock();
         if enabled == self.game_mode.load(Ordering::Acquire)
             && (enabled
                 || (!self.deferred_save.load(Ordering::Acquire)
                     && self.deferred_editor.load(Ordering::Acquire) == 0))
         {
+            self.game_mode_generation.fetch_add(1, Ordering::AcqRel);
             return Ok(());
         }
         if enabled {
-            self.close_vst_ui(app)?;
-            self.game_mode.store(true, Ordering::Release);
+            self.transition_game_mode(true, || self.close_vst_ui_now(app))?;
         } else {
-            self.game_mode.store(false, Ordering::Release);
-            if self.deferred_save.load(Ordering::Acquire) {
-                self.checkpoint_vst_state(app.clone())?;
-                self.deferred_save.store(false, Ordering::Release);
-            }
-            match self.deferred_editor.load(Ordering::Acquire) {
-                1 => self.open_vst_ui(app)?,
-                2 => self.close_vst_ui(app)?,
-                _ => {}
-            }
-            self.deferred_editor.store(0, Ordering::Release);
+            self.transition_game_mode(false, || {
+                if let Err(error) = self.flush_deferred_actions(app.clone()) {
+                    crate::logger::background_log(
+                        "warn",
+                        format!("Game Mode exited; pending VST actions will be retried: {error}"),
+                    );
+                    self.schedule_deferred_retry(app);
+                }
+                Ok(())
+            })?;
         }
         Ok(())
+    }
+
+    fn flush_deferred_actions(&self, app: tauri::AppHandle) -> Result<(), AudioError> {
+        flush_pending_actions(
+            &self.deferred_save,
+            &self.deferred_editor,
+            (
+                &self.deferred_save_generation,
+                &self.deferred_editor_generation,
+            ),
+            || self.checkpoint_vst_state(app.clone()),
+            |intent| match intent {
+                1 => self.open_vst_ui(app.clone()),
+                2 => self.close_vst_ui(app.clone()),
+                _ => Ok(()),
+            },
+        )
+    }
+
+    pub(super) fn schedule_deferred_retry(&self, app: tauri::AppHandle) {
+        if self.deferred_retry_scheduled.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let engine = self.clone();
+        tauri::async_runtime::spawn(async move {
+            let mut delay = std::time::Duration::from_millis(100);
+            loop {
+                tokio::time::sleep(delay).await;
+                let attempt = engine.clone();
+                let app = app.clone();
+                let retry = tauri::async_runtime::spawn_blocking(move || {
+                    let _control = attempt.control_gate.lock();
+                    if attempt.game_mode.load(Ordering::Acquire) || attempt.runtime.lock().is_none()
+                    {
+                        attempt
+                            .deferred_retry_scheduled
+                            .store(false, Ordering::Release);
+                        return false;
+                    }
+                    if let Err(error) = attempt.flush_deferred_actions(app) {
+                        crate::logger::background_log(
+                            "warn",
+                            format!("Deferred VST actions remain pending: {error}"),
+                        );
+                    }
+                    let pending = attempt.deferred_save.load(Ordering::Acquire)
+                        || attempt.deferred_editor.load(Ordering::Acquire) != 0;
+                    if !pending {
+                        attempt
+                            .deferred_retry_scheduled
+                            .store(false, Ordering::Release);
+                    }
+                    pending
+                })
+                .await;
+                match retry {
+                    Ok(true) => delay = (delay * 2).min(std::time::Duration::from_secs(5)),
+                    Ok(false) => break,
+                    Err(error) => {
+                        engine
+                            .deferred_retry_scheduled
+                            .store(false, Ordering::Release);
+                        crate::logger::background_log(
+                            "error",
+                            format!("Deferred VST retry task failed: {error}"),
+                        );
+                        break;
+                    }
+                }
+            }
+        });
     }
 
     /// Atomic-only snapshot: heartbeat must not touch runtime or plugin locks.
@@ -92,6 +272,10 @@ impl AudioEngine {
             return self.worker.snapshot().metrics;
         }
         let mut metrics = WorkerMetrics {
+            #[cfg(feature = "latency-diagnostics")]
+            diagnostic_trace: Vec::new(),
+            #[cfg(feature = "latency-diagnostics")]
+            diagnostic_trace_dropped: crate::latency_trace::dropped(),
             midi_transport_failed: self.midi_transport_failed.load(Ordering::Acquire),
             midi_io_threads: crate::realtime::thread_snapshot(),
             game_mode: self.game_mode.load(Ordering::Acquire),
@@ -118,6 +302,24 @@ impl AudioEngine {
             metrics.x86_worker_alive = t.x86_alive.load(Ordering::Relaxed);
             metrics.callback_count = t.callback_count.load(Ordering::Relaxed);
             metrics.callback_interval_max_us = t.callback_interval_max_us.load(Ordering::Relaxed);
+            metrics.render_ahead_samples = t.render_ahead_samples.load(Ordering::Relaxed);
+            metrics.render_queue_frames = t.render_queue_frames.load(Ordering::Relaxed);
+            metrics.render_underflows = t.render_underflows.load(Ordering::Relaxed);
+            metrics.render_missing_frames = t.render_missing_frames.load(Ordering::Relaxed);
+            metrics.render_reset_silence_frames =
+                t.render_reset_silence_frames.load(Ordering::Relaxed);
+            metrics.render_block_max_us = t.render_block_max_us.load(Ordering::Relaxed);
+            metrics.render_over_budget = t.render_over_budget.load(Ordering::Relaxed);
+            metrics.callback_gap_count = t.callback_gap_count.load(Ordering::Relaxed);
+
+            let tri_state = |cell: &std::sync::atomic::AtomicU8| match cell.load(Ordering::Relaxed)
+            {
+                1 => Some(false),
+                2 => Some(true),
+                _ => None,
+            };
+            metrics.audio_mmcss_owned = tri_state(&t.mmcss_owned);
+            metrics.audio_mmcss_critical = tri_state(&t.mmcss_critical);
             metrics.audio_peak_l = f32::from_bits(t.meter_left.load(Ordering::Relaxed));
             metrics.audio_peak_r = f32::from_bits(t.meter_right.load(Ordering::Relaxed));
             metrics.audio_xruns = t.xruns.load(Ordering::Relaxed);
@@ -336,6 +538,186 @@ pub(super) fn wait_for_parameters(
 mod tests {
     use super::super::runtime_state::AudioTelemetry;
     use super::*;
+
+    #[test]
+    fn newer_game_mode_request_wins_during_native_transition() {
+        let engine = AudioEngine::new();
+        engine.game_mode.store(false, Ordering::Release);
+        engine
+            .transition_game_mode(true, || {
+                assert!(engine.game_mode.load(Ordering::Acquire));
+                engine.transition_game_mode(false, || Ok(()))?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(!engine.game_mode.load(Ordering::Acquire));
+        assert!(engine
+            .transition_game_mode(true, || {
+                engine.transition_game_mode(true, || Ok(()))?;
+                Err(AudioError::Message("older transition failed".into()))
+            })
+            .is_err());
+        assert!(engine.game_mode.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn new_editor_request_supersedes_failed_deferred_intent() {
+        let engine = AudioEngine::new();
+        engine.game_mode.store(false, Ordering::Release);
+        engine.deferred_editor.store(1, Ordering::Release);
+        engine.apply_editor_intent(2, || Ok(())).unwrap();
+        assert_eq!(engine.deferred_editor.load(Ordering::Acquire), 0);
+        assert!(engine
+            .apply_editor_intent(1, || Err(AudioError::Message("busy".into())))
+            .is_err());
+        assert_eq!(engine.deferred_editor.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn reentrant_editor_request_is_not_erased_by_older_success() {
+        for latest in [1, 2] {
+            let engine = AudioEngine::new();
+            engine.game_mode.store(false, Ordering::Release);
+            engine
+                .apply_editor_intent(1, || {
+                    assert!(engine
+                        .apply_editor_intent(latest, || Err(AudioError::Message("busy".into())))
+                        .is_err());
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(engine.deferred_editor.load(Ordering::Acquire), latest);
+        }
+    }
+
+    #[test]
+    fn capture_completion_preserves_newer_save_request() {
+        let save = AtomicBool::new(true);
+        let editor = AtomicU8::new(0);
+        let save_generation = AtomicU64::new(1);
+        let editor_generation = AtomicU64::new(0);
+        flush_pending_actions(
+            &save,
+            &editor,
+            (&save_generation, &editor_generation),
+            || {
+                save_generation.fetch_add(1, Ordering::AcqRel);
+                save.store(true, Ordering::Release);
+                Ok(())
+            },
+            |_| panic!("no editor request"),
+        )
+        .unwrap();
+        assert!(save.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn game_mode_retains_editor_intent_without_native_access() {
+        let engine = AudioEngine::new();
+        engine
+            .apply_editor_intent(1, || panic!("Game Mode must defer native access"))
+            .unwrap();
+        engine
+            .apply_editor_intent(2, || panic!("Game Mode must defer native access"))
+            .unwrap();
+        assert_eq!(engine.deferred_editor.load(Ordering::Acquire), 2);
+    }
+
+    #[test]
+    fn failed_save_does_not_block_editor_and_is_retried() {
+        use std::sync::atomic::{AtomicBool, AtomicU8};
+        let save = AtomicBool::new(true);
+        let editor = AtomicU8::new(1);
+        let mut opened = false;
+        assert!(flush_pending_actions(
+            &save,
+            &editor,
+            (&AtomicU64::new(0), &AtomicU64::new(0)),
+            || Err(AudioError::Message("transient capture failure".into())),
+            |intent| {
+                assert_eq!(intent, 1);
+                opened = true;
+                Ok(())
+            },
+        )
+        .is_err());
+        assert!(opened);
+        assert!(save.load(Ordering::Acquire));
+        assert_eq!(editor.load(Ordering::Acquire), 0);
+        let mut captures = 0;
+        flush_pending_actions(
+            &save,
+            &editor,
+            (&AtomicU64::new(0), &AtomicU64::new(0)),
+            || {
+                captures += 1;
+                Ok(())
+            },
+            |_| panic!("successful editor action must not be repeated"),
+        )
+        .unwrap();
+        assert_eq!(captures, 1);
+        assert!(!save.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn failed_editor_retains_latest_intent_without_repeating_successful_save() {
+        use std::sync::atomic::{AtomicBool, AtomicU8};
+        let save = AtomicBool::new(true);
+        let editor = AtomicU8::new(1);
+        assert!(flush_pending_actions(
+            &save,
+            &editor,
+            (&AtomicU64::new(0), &AtomicU64::new(0)),
+            || Ok(()),
+            |_| Err(AudioError::Message("transient editor failure".into()))
+        )
+        .is_err());
+        assert!(!save.load(Ordering::Acquire));
+        assert_eq!(editor.load(Ordering::Acquire), 1);
+        editor.store(2, Ordering::Release);
+        flush_pending_actions(
+            &save,
+            &editor,
+            (&AtomicU64::new(0), &AtomicU64::new(0)),
+            || panic!("successful capture must not be repeated"),
+            |intent| {
+                assert_eq!(intent, 2);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(editor.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn maintenance_is_released_before_completion_is_published() {
+        let engine = AudioEngine::new();
+        let guard = engine.begin_maintenance().unwrap();
+        finish_maintenance(guard, || {
+            assert!(!engine.maintenance.load(Ordering::Acquire));
+            assert!(engine.begin_maintenance().is_ok());
+        });
+    }
+
+    #[test]
+    fn maintenance_only_reopens_its_captured_stream() {
+        let engine = AudioEngine::new();
+        let old = Arc::new(AudioTelemetry::new());
+        let replacement = Arc::new(AudioTelemetry::new());
+        assert!(old.callback_gate.close_and_wait(std::time::Duration::ZERO));
+        assert!(replacement
+            .callback_gate
+            .close_and_wait(std::time::Duration::ZERO));
+        engine.maintenance.store(true, Ordering::Release);
+        let guard = MaintenanceGuard {
+            engine: engine.clone(),
+            telemetry: Some(old.clone()),
+        };
+        drop(guard);
+        assert!(old.callback_gate.try_enter().is_some());
+        assert!(replacement.callback_gate.try_enter().is_none());
+    }
 
     fn parameter(index: usize) -> VstParameter {
         VstParameter {

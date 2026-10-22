@@ -8,7 +8,10 @@ use crate::{audio::AudioSettings, config::VstEqSettings, types::VstParameter};
 // Version 9 carries game-mode health and ingress timestamps.
 pub const CONTROL_PROTOCOL_VERSION: u32 = 9;
 pub const HOST_ABI_VERSION: u32 = crate::types::VST_HOST_ABI_VERSION;
-pub const MAX_CONTROL_FRAME_BYTES: usize = 1024 * 1024;
+// A normal 8,192-parameter catalogue is ~1.14 MB of JSON, exceeding 1 MiB.
+// Allow 8 MiB for longer names/units while keeping allocations on both ends
+// bounded. Unbounded third-party metadata still gets the error-reply fallback.
+pub const MAX_CONTROL_FRAME_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_MIDI_BYTES: usize = 3;
 pub const MIDI_FRAME_BYTES: usize = 8 + 8 + 8 + 1 + MAX_MIDI_BYTES;
 
@@ -34,6 +37,28 @@ pub struct WorkerAudioStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkerMetrics {
+    #[cfg(feature = "latency-diagnostics")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostic_trace: Vec<crate::latency_trace::MidiTrace>,
+    #[cfg(feature = "latency-diagnostics")]
+    #[serde(default)]
+    pub diagnostic_trace_dropped: u64,
+    #[serde(default)]
+    pub render_ahead_samples: u32,
+    #[serde(default)]
+    pub render_queue_frames: u64,
+    #[serde(default)]
+    pub render_underflows: u64,
+    #[serde(default)]
+    pub render_missing_frames: u64,
+    #[serde(default)]
+    pub render_reset_silence_frames: u64,
+    #[serde(default)]
+    pub render_block_max_us: u32,
+    #[serde(default)]
+    pub render_over_budget: u64,
+    #[serde(default)]
+    pub callback_gap_count: u64,
     /// Applied worker state. Older workers omit it, preserving the Ready value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limiter_enabled: Option<bool>,
@@ -53,6 +78,12 @@ pub struct WorkerMetrics {
     pub callback_count: u64,
     #[serde(default)]
     pub callback_interval_max_us: u64,
+    /// None until a callback publishes tuning, or when reading an older worker.
+    #[serde(default)]
+    pub audio_mmcss_owned: Option<bool>,
+    /// None for driver-owned registration: the host cannot inspect its AVRT priority.
+    #[serde(default)]
+    pub audio_mmcss_critical: Option<bool>,
     #[serde(default)]
     pub game_mode: bool,
     #[serde(default)]
@@ -348,7 +379,7 @@ pub fn monotonic_qpc() -> u64 {
 }
 
 #[cfg(target_os = "windows")]
-fn qpc_frequency() -> u64 {
+pub fn qpc_frequency() -> u64 {
     use windows::Win32::System::Performance::QueryPerformanceFrequency;
     static FREQUENCY: OnceLock<u64> = OnceLock::new();
     *FREQUENCY.get_or_init(|| {
@@ -368,7 +399,7 @@ pub fn monotonic_qpc() -> u64 {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn qpc_frequency() -> u64 {
+pub fn qpc_frequency() -> u64 {
     1_000_000_000
 }
 

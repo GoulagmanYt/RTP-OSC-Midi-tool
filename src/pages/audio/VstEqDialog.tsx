@@ -138,15 +138,17 @@ function ResponseGraph({ settings, sampleRate, label }: { settings: VstEqSetting
   const width = 720;
   const height = 180;
   const padding = { left: 38, right: 12, top: 12, bottom: 24 };
-  const frequencies = [20, 50, 100, 200, 500, 1_000, 2_000, 5_000, 10_000, 20_000];
+  const maximumFrequency = Math.max(21, Math.min(20_000, sampleRate / 2));
+  const frequencies = [20, 50, 100, 200, 500, 1_000, 2_000, 5_000, 10_000, 20_000]
+    .filter((frequency) => frequency < maximumFrequency).concat(maximumFrequency);
   const dbLines = [-18, -12, -6, 0, 6, 12, 18];
   const xForFrequency = (frequency: number) =>
     padding.left +
-    (Math.log10(frequency / 20) / Math.log10(20_000 / 20)) * (width - padding.left - padding.right);
+    (Math.log10(frequency / 20) / Math.log10(maximumFrequency / 20)) * (width - padding.left - padding.right);
   const yForDb = (db: number) =>
     padding.top + ((18 - Math.min(18, Math.max(-18, db))) / 36) * (height - padding.top - padding.bottom);
   const responsePath = Array.from({ length: 160 }, (_, index) => {
-    const frequency = 20 * Math.pow(1_000, index / 159);
+    const frequency = 20 * Math.pow(maximumFrequency / 20, index / 159);
     return `${index === 0 ? "M" : "L"}${xForFrequency(frequency).toFixed(2)},${yForDb(
       eqResponseDb(settings, frequency, sampleRate)
     ).toFixed(2)}`;

@@ -2,7 +2,8 @@ use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
-    fs,
+    fs::{self, OpenOptions},
+    io::Write,
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -237,6 +238,13 @@ pub struct AudioConfig {
     pub device_id: Option<String>,
     pub sample_rate: u32,
     pub buffer_size: u32,
+    #[serde(
+        default = "crate::audio::default_render_ahead_blocks",
+        deserialize_with = "crate::audio::deserialize_render_ahead_blocks"
+    )]
+    pub render_ahead_blocks: u32,
+    #[serde(default)]
+    pub dsp_thread_priority: crate::audio::DspThreadPriority,
     pub gain_db: f32,
     pub limiter_enabled: bool,
     #[serde(default)]
@@ -257,6 +265,8 @@ impl Default for AudioConfig {
             device_id: None,
             sample_rate: 48_000,
             buffer_size: 512,
+            render_ahead_blocks: crate::audio::default_render_ahead_blocks(),
+            dsp_thread_priority: crate::audio::DspThreadPriority::default(),
             game_mode: true,
             gain_db: 0.0,
             limiter_enabled: false,
@@ -273,6 +283,12 @@ impl Default for AudioConfig {
 pub struct UiConfig {
     pub theme: Theme,
     pub theme_palette: String,
+    #[serde(default = "default_accent_color")]
+    pub accent_color: String,
+    #[serde(default = "default_background_tone")]
+    pub light_background: String,
+    #[serde(default = "default_background_tone")]
+    pub dark_background: String,
     pub corner_radius: f32,
     pub auto_start: bool,
     pub developer_mode: bool,
@@ -283,11 +299,22 @@ impl Default for UiConfig {
         Self {
             theme: Theme::Light,
             theme_palette: "light".to_string(),
+            accent_color: default_accent_color(),
+            light_background: default_background_tone(),
+            dark_background: default_background_tone(),
             corner_radius: 12.0,
             auto_start: false,
             developer_mode: false,
         }
     }
+}
+
+fn default_accent_color() -> String {
+    "blue".to_string()
+}
+
+fn default_background_tone() -> String {
+    "default".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -329,7 +356,7 @@ impl AppConfig {
         let version = value
             .get("version")
             .and_then(serde_yaml::Value::as_u64)
-            .unwrap_or_default() as u32;
+            .unwrap_or_default();
         if matches!(version, 2 | 3) {
             if let Some(mapping) = value.as_mapping_mut() {
                 mapping.insert(
@@ -337,7 +364,7 @@ impl AppConfig {
                     serde_yaml::Value::Number(AppConfig::CURRENT_VERSION.into()),
                 );
             }
-        } else if version != AppConfig::CURRENT_VERSION {
+        } else if version != u64::from(AppConfig::CURRENT_VERSION) {
             return Err(format!(
                 "Unsupported configuration version {version}; expected {}",
                 AppConfig::CURRENT_VERSION
@@ -347,7 +374,28 @@ impl AppConfig {
         for settings in cfg.audio.vst_eq_by_plugin.values_mut() {
             *settings = settings.normalized(cfg.audio.sample_rate);
         }
+        cfg.validate()?;
         Ok(cfg)
+    }
+
+    /// Reject values that cannot be published unchanged to the UI and reloaded.
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        if self.version != Self::CURRENT_VERSION {
+            return Err(format!(
+                "Unsupported configuration version {}; expected {}",
+                self.version,
+                Self::CURRENT_VERSION
+            ));
+        }
+        if !self.audio.gain_db.is_finite() || !self.ui.corner_radius.is_finite() {
+            return Err("Audio gain and UI corner radius must be finite".into());
+        }
+        for (plugin, settings) in &self.audio.vst_eq_by_plugin {
+            if *settings != settings.normalized(self.audio.sample_rate) {
+                return Err(format!("Invalid EQ settings for {plugin}"));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -373,6 +421,7 @@ pub const VST_INTERNAL_OUTPUT_LEGACY: &str = "VST (Keyzone interne)";
 
 pub struct ConfigStore {
     path: PathBuf,
+    io: parking_lot::Mutex<()>,
 }
 
 impl ConfigStore {
@@ -397,47 +446,65 @@ impl ConfigStore {
     }
 
     pub fn with_path(path: PathBuf) -> Self {
-        let store = Self { path };
+        let store = Self {
+            path,
+            io: parking_lot::Mutex::new(()),
+        };
         store.ensure_exists();
         store
     }
 
     pub fn load(&self) -> AppConfig {
-        let raw = match fs::read_to_string(&self.path) {
+        self.load_checked().unwrap_or_else(|error| {
+            log::error!("{error}; using defaults for this session");
+            AppConfig::default()
+        })
+    }
+
+    pub fn load_checked(&self) -> Result<AppConfig, String> {
+        self.load_checked_with(|path| fs::read_to_string(path))
+    }
+
+    fn load_checked_with(
+        &self,
+        read: impl FnOnce(&PathBuf) -> std::io::Result<String>,
+    ) -> Result<AppConfig, String> {
+        // Keep a migration's read and write in one transaction so a newer save
+        // cannot commit between them and then be replaced by the old snapshot.
+        let _io = self.io.lock();
+        let raw = match read(&self.path) {
             Ok(raw) => raw,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return self.write_default();
+                let cfg = AppConfig::default();
+                self.save_locked(&cfg)?;
+                return Ok(cfg);
             }
             Err(error) => {
-                log::error!("Unable to read configuration {:?}: {error}", self.path);
-                return AppConfig::default();
+                return Err(format!(
+                    "Unable to read configuration {:?}: {error}",
+                    self.path
+                ));
             }
         };
         let raw_version = serde_yaml::from_str::<serde_yaml::Value>(&raw)
             .ok()
             .and_then(|v| v.get("version").and_then(serde_yaml::Value::as_u64))
-            .unwrap_or_default() as u32;
-        match AppConfig::parse_yaml(&raw) {
-            Ok(cfg) => {
-                if matches!(raw_version, 2 | 3) {
-                    if let Err(error) = self.save(&cfg) {
-                        log::warn!("Unable to persist migrated configuration: {error}");
-                    }
-                }
-                cfg
-            }
-            Err(error) => {
-                log::error!(
-                    "Invalid configuration preserved at {:?}: {error}; using defaults for this session",
-                    self.path
-                );
-                AppConfig::default()
-            }
+            .unwrap_or_default();
+        let cfg = AppConfig::parse_yaml(&raw).map_err(|error| {
+            format!(
+                "Invalid configuration preserved at {:?}: {error}",
+                self.path
+            )
+        })?;
+        if matches!(raw_version, 2 | 3) {
+            self.save_locked(&cfg)
+                .map_err(|error| format!("Unable to persist migrated configuration: {error}"))?;
         }
+        Ok(cfg)
     }
 
     fn backup_if_unreadable(&self) -> Result<(), String> {
-        let raw = match fs::read_to_string(&self.path) {
+        let raw = match fs::read(&self.path) {
             Ok(content) => content,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(e) => {
@@ -446,19 +513,43 @@ impl ConfigStore {
                 return Err(msg);
             }
         };
-        if AppConfig::parse_yaml(&raw).is_ok() {
+        if std::str::from_utf8(&raw)
+            .ok()
+            .is_some_and(|raw| AppConfig::parse_yaml(raw).is_ok())
+        {
             return Ok(());
         }
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let backup_path = self.path.with_extension(format!("yaml.invalid-{stamp}"));
-        fs::copy(&self.path, &backup_path).map_err(|e| {
-            let msg = format!("Failed to back up unreadable config file: {e}");
-            log::warn!("{msg}");
-            msg
-        })?;
+        let mut backup_path = self.path.with_extension(format!("yaml.invalid-{stamp}"));
+        let mut backup = loop {
+            match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&backup_path)
+            {
+                Ok(file) => break file,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::AlreadyExists
+                        && backup_path.is_file() =>
+                {
+                    backup_path = self
+                        .path
+                        .with_extension(format!("yaml.invalid-{stamp}-{}", uuid::Uuid::new_v4()));
+                }
+                Err(error) => {
+                    return Err(format!("Failed to back up unreadable config file: {error}"))
+                }
+            }
+        };
+        let written = backup.write_all(&raw).and_then(|()| backup.sync_all());
+        drop(backup);
+        if let Err(error) = written {
+            let _ = fs::remove_file(&backup_path);
+            return Err(format!("Failed to back up unreadable config file: {error}"));
+        }
         log::warn!(
             "Unreadable or invalid configuration backed up to {:?}",
             backup_path
@@ -467,13 +558,12 @@ impl ConfigStore {
     }
 
     pub fn save(&self, cfg: &AppConfig) -> Result<(), String> {
-        if cfg.version != AppConfig::CURRENT_VERSION {
-            return Err(format!(
-                "Unsupported configuration version {}; expected {}",
-                cfg.version,
-                AppConfig::CURRENT_VERSION
-            ));
-        }
+        let _io = self.io.lock();
+        self.save_locked(cfg)
+    }
+
+    fn save_locked(&self, cfg: &AppConfig) -> Result<(), String> {
+        cfg.validate()?;
         self.backup_if_unreadable()?;
         let raw = serde_yaml::to_string(cfg).map_err(|e| e.to_string())?;
         crate::atomic_file::write_atomically(&self.path, raw.as_bytes()).map_err(|e| e.to_string())
@@ -494,17 +584,6 @@ impl ConfigStore {
                 );
             }
         }
-    }
-
-    fn write_default(&self) -> AppConfig {
-        let default_cfg = AppConfig::default();
-        if let Err(error) = self.save(&default_cfg) {
-            log::error!(
-                "Unable to persist default configuration {:?}: {error}",
-                self.path
-            );
-        }
-        default_cfg
     }
 }
 
@@ -591,6 +670,217 @@ fn default_game_mode() -> bool {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn a_delayed_migration_cannot_overwrite_a_newer_successful_save() {
+        use std::sync::{mpsc, Arc};
+        use std::time::Duration;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let mut legacy = serde_yaml::to_value(super::AppConfig::default()).unwrap();
+        legacy["version"] = 3.into();
+        std::fs::write(&path, serde_yaml::to_string(&legacy).unwrap()).unwrap();
+        let store = Arc::new(super::ConfigStore::with_path(path));
+        let (read_tx, read_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let reader = {
+            let store = store.clone();
+            std::thread::spawn(move || {
+                store.load_checked_with(|path| {
+                    let raw = std::fs::read_to_string(path)?;
+                    read_tx.send(()).unwrap();
+                    release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                    Ok(raw)
+                })
+            })
+        };
+        read_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let mut next = super::AppConfig::default();
+        next.osc.listen_port = 9200;
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let writer = {
+            let store = store.clone();
+            let next = next.clone();
+            std::thread::spawn(move || {
+                started_tx.send(()).unwrap();
+                done_tx.send(store.save(&next)).unwrap();
+            })
+        };
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let premature_save = done_rx.recv_timeout(Duration::from_millis(250));
+        release_tx.send(()).unwrap();
+        reader.join().unwrap().unwrap();
+        writer.join().unwrap();
+        assert_eq!(store.load_checked().unwrap(), next);
+        assert!(matches!(
+            premature_save,
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+    }
+
+    #[test]
+    fn checked_loading_reports_corruption_instead_of_accepting_defaults() {
+        for broken in [b"version: 4\naudio: [".as_slice(), b"version: 4\nui: \xff"] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.yaml");
+            std::fs::write(&path, broken).unwrap();
+            let store = super::ConfigStore::with_path(path.clone());
+            assert!(store.load_checked().is_err());
+            assert_eq!(std::fs::read(path).unwrap(), broken);
+        }
+    }
+
+    #[test]
+    fn checked_loading_preserves_a_configuration_missing_a_required_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let mut value = serde_yaml::to_value(super::AppConfig::default()).unwrap();
+        value["midi"].as_mapping_mut().unwrap().remove("hotplug");
+        let raw = serde_yaml::to_string(&value).unwrap();
+        std::fs::write(&path, &raw).unwrap();
+        let store = super::ConfigStore::with_path(path.clone());
+        assert!(store.load_checked().is_err());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), raw);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn checked_loading_reports_a_failed_migration_and_preserves_the_legacy_file() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let mut value = serde_yaml::to_value(super::AppConfig::default()).unwrap();
+        value["version"] = 3.into();
+        value["osc"]["listenPort"] = 9100.into();
+        let raw = serde_yaml::to_string(&value).unwrap();
+        std::fs::write(&path, &raw).unwrap();
+        let store = super::ConfigStore::with_path(path.clone());
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(3)
+            .open(&path)
+            .unwrap();
+        assert!(store.load_checked().is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
+        drop(held);
+        let migrated = store.load_checked().unwrap();
+        assert_eq!(migrated.osc.listen_port, 9100);
+        assert_eq!(migrated.version, 4);
+        assert_eq!(store.load_checked().unwrap(), migrated);
+    }
+
+    #[test]
+    fn oversized_versions_are_not_migrated_or_overwritten() {
+        for version in [4_294_967_298u64, 4_294_967_299] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.yaml");
+            let mut value = serde_yaml::to_value(super::AppConfig::default()).unwrap();
+            value["version"] = version.into();
+            let raw = serde_yaml::to_string(&value).unwrap();
+            std::fs::write(&path, &raw).unwrap();
+            super::ConfigStore::with_path(path.clone()).load();
+            assert_eq!(std::fs::read_to_string(path).unwrap(), raw);
+            assert!(super::AppConfig::parse_yaml(&raw).is_err());
+        }
+    }
+
+    #[test]
+    fn saving_preserves_an_existing_invalid_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        // Cover a second boundary without relying on timing or sleeps.
+        let backups: Vec<_> = (stamp..=stamp + 2)
+            .map(|stamp| {
+                let backup = path.with_extension(format!("yaml.invalid-{stamp}"));
+                std::fs::write(&backup, "first damaged configuration").unwrap();
+                backup
+            })
+            .collect();
+        std::fs::write(&path, "second: [truncated").unwrap();
+        super::ConfigStore::with_path(path)
+            .save(&super::AppConfig::default())
+            .unwrap();
+        for backup in backups {
+            assert_eq!(
+                std::fs::read_to_string(backup).unwrap(),
+                "first damaged configuration"
+            );
+        }
+    }
+
+    #[test]
+    fn saving_archives_non_utf8_bytes_before_replacing_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let broken = b"version: 4\nui: \xff\xfe";
+        std::fs::write(&path, broken).unwrap();
+        let store = super::ConfigStore::with_path(path.clone());
+        let next = super::AppConfig::default();
+        store.save(&next).unwrap();
+        assert_eq!(store.load(), next);
+        let backup = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .find(|entry| entry.path() != path)
+            .unwrap();
+        assert_eq!(std::fs::read(backup.path()).unwrap(), broken);
+    }
+
+    #[test]
+    fn saving_rejects_eq_values_that_would_change_on_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let store = super::ConfigStore::with_path(path.clone());
+        let before = std::fs::read(&path).unwrap();
+        let mut next = super::AppConfig::default();
+        let mut eq = super::VstEqSettings::default();
+        eq.mid_peak.q = 50.0;
+        next.audio.vst_eq_by_plugin.insert("piano".into(), eq);
+        assert!(store.save(&next).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), before);
+    }
+
+    #[test]
+    fn parsing_rejects_non_finite_gain_and_corner_radius() {
+        for (section, field) in [("audio", "gainDb"), ("ui", "cornerRadius")] {
+            for non_finite in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+                let mut value = serde_yaml::to_value(super::AppConfig::default()).unwrap();
+                value[section][field] = serde_yaml::to_value(non_finite).unwrap();
+                let raw = serde_yaml::to_string(&value).unwrap();
+                assert!(
+                    super::AppConfig::parse_yaml(&raw).is_err(),
+                    "{section}.{field}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn appearance_preferences_preserve_old_configs_and_round_trip() {
+        let mut legacy = serde_json::to_value(super::UiConfig::default()).unwrap();
+        for key in ["accentColor", "lightBackground", "darkBackground"] {
+            legacy.as_object_mut().unwrap().remove(key);
+        }
+        let mut config: super::UiConfig = serde_json::from_value(legacy).unwrap();
+        assert_eq!(config.accent_color, "blue");
+        assert_eq!(config.light_background, "default");
+        assert_eq!(config.dark_background, "default");
+        config.accent_color = "purple".into();
+        config.light_background = "white".into();
+        config.dark_background = "graphite".into();
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        let restored: super::UiConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(restored, config);
+    }
+
+    #[test]
     fn legacy_audio_config_enables_game_mode_without_changing_explicit_audio_format() {
         let mut legacy = serde_json::to_value(super::AudioConfig::default()).unwrap();
         legacy.as_object_mut().unwrap().remove("gameMode");
@@ -604,6 +894,24 @@ mod tests {
         let explicit: super::AudioConfig = serde_json::from_value(legacy).unwrap();
         assert!(!explicit.game_mode);
         assert_eq!(explicit.buffer_size, 256);
+    }
+
+    #[test]
+    fn legacy_audio_config_defaults_to_one_prepared_block_and_mmcss() {
+        let mut legacy = serde_json::to_value(super::AudioConfig::default()).unwrap();
+        legacy.as_object_mut().unwrap().remove("renderAheadBlocks");
+        legacy.as_object_mut().unwrap().remove("dspThreadPriority");
+        let config: super::AudioConfig = serde_json::from_value(legacy).unwrap();
+        let value = serde_json::to_value(config).unwrap();
+        assert_eq!(value["renderAheadBlocks"], 1);
+        assert_eq!(value["dspThreadPriority"], "mmcss");
+    }
+
+    #[test]
+    fn audio_config_rejects_unbounded_render_ahead() {
+        let mut value = serde_json::to_value(super::AudioConfig::default()).unwrap();
+        value["renderAheadBlocks"] = 3.into();
+        assert!(serde_json::from_value::<super::AudioConfig>(value).is_err());
     }
 
     use super::*;
@@ -696,45 +1004,44 @@ mod tests {
     }
 
     #[test]
-    fn v2_audio_config_migrates_without_losing_legacy_vst_path() {
-        let dir = tempdir().expect("tempdir");
-        let path = dir.path().join("config.yaml");
-        let mut legacy = serde_yaml::to_string(&AppConfig::default()).expect("serialize");
-        legacy = legacy
-            .replace("version: 3", "version: 2")
-            .replace("  vstPluginId: null\n", "")
-            .replace("  vstScanPaths: []\n", "")
-            .replace("  vstPath: null", "  vstPath: C:\\Legacy\\Organ.dll");
-        std::fs::write(&path, legacy).expect("write legacy");
+    fn v2_and_v3_audio_configs_migrate_without_losing_legacy_vst_path() {
+        for version in [2, 3] {
+            let dir = tempdir().expect("tempdir");
+            let path = dir.path().join("config.yaml");
+            let mut legacy = serde_yaml::to_string(&AppConfig::default()).expect("serialize");
+            legacy = legacy
+                .replace("version: 4", &format!("version: {version}"))
+                .replace("  vstPluginId: null\n", "")
+                .replace("  vstScanPaths: []\n", "")
+                .replace("  vstPath: null", "  vstPath: C:\\Legacy\\Organ.dll");
+            std::fs::write(&path, legacy).expect("write legacy");
 
-        let migrated = ConfigStore::with_path(path).load();
-        assert_eq!(migrated.version, AppConfig::CURRENT_VERSION);
-        assert_eq!(migrated.audio.vst_plugin_id, None);
-        assert!(migrated.audio.vst_scan_paths.is_empty());
-        assert_eq!(
-            migrated.audio.vst_path.as_deref(),
-            Some("C:\\Legacy\\Organ.dll")
-        );
+            let migrated = ConfigStore::with_path(path.clone()).load();
+            assert_eq!(migrated.version, AppConfig::CURRENT_VERSION);
+            assert_eq!(migrated.audio.vst_plugin_id, None);
+            assert!(migrated.audio.vst_scan_paths.is_empty());
+            assert_eq!(
+                migrated.audio.vst_path.as_deref(),
+                Some("C:\\Legacy\\Organ.dll")
+            );
+            let persisted: AppConfig =
+                serde_yaml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            assert_eq!(persisted, migrated);
+        }
     }
 
     #[test]
     fn removed_v2_fields_are_ignored_and_removed_on_next_save() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("config.yaml");
-        let current = serde_yaml::to_string(&AppConfig::default()).expect("serialize config");
-        let legacy = current
-            .replace(
-                "audio:\n  enabled: true",
-                "audio:\n  enabled: true\n  vstWorkerEnabled: false",
-            )
-            .replace(
-                "ui:\n  theme:",
-                "ui:\n  themePreset: studio\n  accent: auto\n  alwaysOnTop: false\n  theme:",
-            )
-            .replace(
-                "logging:\n  enabled: true",
-                "logging:\n  enabled: true\n  liveLogs: false",
-            );
+        let mut value = serde_yaml::to_value(AppConfig::default()).expect("serialize config");
+        value["version"] = 2.into();
+        value["audio"]["vstWorkerEnabled"] = false.into();
+        value["ui"]["themePreset"] = "studio".into();
+        value["ui"]["accent"] = "auto".into();
+        value["ui"]["alwaysOnTop"] = false.into();
+        value["logging"]["liveLogs"] = false.into();
+        let legacy = serde_yaml::to_string(&value).unwrap();
         std::fs::write(&path, legacy).expect("write legacy config");
 
         let store = ConfigStore::with_path(path.clone());

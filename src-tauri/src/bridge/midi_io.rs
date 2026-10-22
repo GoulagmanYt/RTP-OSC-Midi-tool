@@ -126,6 +126,20 @@ pub(super) fn open_input(
             &port,
             "osc-midi-in",
             move |_timestamp, message, _| {
+                #[cfg(target_os = "windows")]
+                {
+                    thread_local! {
+                        static MIDI_IN_TUNING: std::cell::RefCell<Option<crate::audio::windows_tuning::MmcssRegistration>> = const { std::cell::RefCell::new(None) };
+                        static INITIALIZED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+                    }
+                    INITIALIZED.with(|init| {
+                        if !init.get() {
+                            let reg = crate::audio::windows_tuning::prioritize_midi_thread();
+                            MIDI_IN_TUNING.with(|slot| *slot.borrow_mut() = reg);
+                            init.set(true);
+                        }
+                    });
+                }
                 let Some(frame) = MidiFrame::copy_realtime(message, Arc::clone(&source)) else {
                     super::pipeline::record_fanout_drop();
                     super::pipeline::request_critical_midi_reset();

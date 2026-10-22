@@ -1,4 +1,4 @@
-//! Evidence that parameter catalogue stays bounded or falls back to an error reply without crashing the transport.
+//! Large catalogues round-trip; unbounded metadata falls back without corrupting the transport.
 use osc_midi_bridge::{
     audio::MAX_CACHED_PARAMETERS,
     types::VstParameter,
@@ -25,7 +25,7 @@ fn parameter(index: usize) -> VstParameter {
 }
 
 #[tokio::test]
-async fn evidence_large_parameter_catalogue_is_rejected_before_any_transport_write() {
+async fn large_parameter_catalogue_round_trips_without_truncation() {
     let mut output = Vec::new();
     let small = ControlMessage::Parameters {
         request_id: 1,
@@ -48,13 +48,20 @@ async fn evidence_large_parameter_catalogue_is_rejected_before_any_transport_wri
     assert!(!output.is_empty());
 
     output.clear();
-    let fallback = ControlMessage::Error {
-        request_id: Some(2),
-        code: "worker.frame-too-large".into(),
-        message: "Response exceeds IPC frame limit".into(),
+    let large = ControlMessage::Parameters {
+        request_id: 3,
+        parameters: (0..8192).map(parameter).collect(),
     };
-    write_control_frame(&mut output, &fallback).await.unwrap();
-    assert!(!output.is_empty());
+    let large_size = serde_json::to_vec(&large).unwrap().len();
+    assert!(
+        large_size > 1024 * 1024,
+        "fixture must exceed the old 1 MiB limit"
+    );
+    assert!(large_size <= MAX_CONTROL_FRAME_BYTES);
+    write_control_response(&mut output, &large).await.unwrap();
+    let mut input = output.as_slice();
+    assert_eq!(read_control_frame(&mut input).await.unwrap(), large);
+    assert!(input.is_empty());
 }
 
 #[tokio::test]
@@ -66,6 +73,14 @@ async fn oversized_metadata_returns_error_and_the_next_reply_still_works() {
         parameters: vec![huge],
     };
     let mut output = Vec::new();
+    let error = write_control_frame(&mut output, &response)
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(
+        output.is_empty(),
+        "oversized frames must not leave a partial header"
+    );
     write_control_response(&mut output, &response)
         .await
         .unwrap();

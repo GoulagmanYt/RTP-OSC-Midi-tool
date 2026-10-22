@@ -1,14 +1,18 @@
 import { Suspense, lazy, useEffect, useState } from "react";
-import { Outlet } from "react-router-dom";
+import { Outlet, useLocation } from "react-router-dom";
 import { Sidebar } from "./Sidebar";
 import { TopBar } from "./TopBar";
 import { useI18n } from "../../providers/LanguageProvider";
+import { pageKeys } from "./pageMeta";
 
 const CommandPalette = lazy(() => import("./CommandPalette"));
 
 export function Shell() {
   const { t } = useI18n();
+  const location = useLocation();
+  const pageKey = pageKeys[location.pathname] ?? "dashboard";
   const [open, setOpen] = useState(false);
+  const [sidebarVisible, setSidebarVisible] = useState(true);
   const [commandPaletteRequested, setCommandPaletteRequested] = useState(false);
 
   useEffect(() => {
@@ -28,23 +32,22 @@ export function Shell() {
       <a className="skip-link" href="#main-content">
         {t("common.skipToContent")}
       </a>
-      <div className="pointer-events-none absolute inset-0 overflow-hidden">
-        <div className="aurora -left-24 -top-24" />
-        <div className="aurora aurora--alt right-[-8rem] top-6" />
-        <div className="aurora aurora--muted left-28 -bottom-16" />
-        <div className="grain" />
-      </div>
-
-      <Sidebar />
-      <div className="flex-1 flex flex-col h-full overflow-hidden relative">
+      {sidebarVisible && <Sidebar />}
+      <div className="relative flex h-full min-w-0 flex-1 flex-col overflow-hidden">
         <TopBar
+          sidebarVisible={sidebarVisible}
+          onToggleSidebar={() => setSidebarVisible(visible => !visible)}
           onOpenCommand={() => {
             setCommandPaletteRequested(true);
             setOpen(true);
           }}
         />
-        <main id="main-content" className="flex-1 overflow-auto scroll-smooth page-body" tabIndex={-1}>
+        <main id="main-content" className="page-body flex-1 overflow-auto" tabIndex={-1}>
           <div className="page-content">
+            <div className="page-heading mb-7 space-y-1.5">
+              <h1 className="text-[1.75rem] font-semibold tracking-tight">{t(`topBar.${pageKey}`)}</h1>
+              <p className="text-sm leading-relaxed text-muted-foreground">{t(`pageDescriptions.${pageKey}`)}</p>
+            </div>
             <Outlet />
           </div>
         </main>

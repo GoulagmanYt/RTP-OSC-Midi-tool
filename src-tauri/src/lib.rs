@@ -3,9 +3,13 @@
 pub mod application;
 mod atomic_file;
 pub mod audio;
+#[cfg(feature = "audio-diagnostics")]
+pub mod audio_trace;
 pub mod bridge;
 pub mod config;
 pub mod error;
+#[cfg(feature = "latency-diagnostics")]
+pub mod latency_trace;
 pub mod logger;
 pub mod midi;
 #[doc(hidden)]

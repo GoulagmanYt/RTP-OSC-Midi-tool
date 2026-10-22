@@ -122,7 +122,7 @@ fn scan_vst_plugins_with_probe(
     probe: &(impl Fn(&Path, Duration, &str) -> Vec<VstPluginEntry> + Sync),
 ) -> Vec<VstPluginEntry> {
     let mut entries = Vec::new();
-    let mut seen_paths = HashSet::new();
+    let mut seen_plugins = HashSet::new();
     let mut cached_by_path: HashMap<String, Vec<VstPluginEntry>> = HashMap::new();
     for entry in cached {
         cached_by_path
@@ -135,8 +135,8 @@ fn scan_vst_plugins_with_probe(
 
     for root in unique_existing_roots(roots) {
         for path in scan_plugin_candidates(&root) {
-            let key = normalize_path(&path);
-            if seen_paths.insert(key) {
+            // Configured roots may contain different hard links to one DLL.
+            if seen_plugins.insert(plugin_probe_paths::plugin_identity(&path)) {
                 let (modified, size) = plugin_file_metadata(&path);
                 let architectures = plugin_probe_arch::available_plugin_architectures(&path);
                 let cache_key = normalize_path(&path);
@@ -149,7 +149,8 @@ fn scan_vst_plugins_with_probe(
                                     .any(|entry| &entry.architecture == architecture)
                             })
                             && variants.iter().all(|entry| {
-                                entry.file_modified_ms == modified
+                                architectures.contains(&entry.architecture)
+                                    && entry.file_modified_ms == modified
                                     && entry.file_size == size
                                     && entry.host_abi_version == VST_HOST_ABI_VERSION
                             })
@@ -799,6 +800,25 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
+    fn scan_probes_a_physical_dll_only_once_across_roots() {
+        let dir = tempdir().unwrap();
+        let first = dir.path().join("first");
+        let second = dir.path().join("second");
+        fs::create_dir(&first).unwrap();
+        fs::create_dir(&second).unwrap();
+        let dll = first.join("instrument.dll");
+        fs::write(&dll, b"MZ").unwrap();
+        fs::hard_link(&dll, second.join("alias.dll")).unwrap();
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        scan_vst_plugins_with_probe(&[first, second], &[], false, &|_, _, _| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Vec::new()
+        });
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    #[test]
     fn read_pe_machine_detects_x64() {
         let dir = tempdir().expect("temp dir");
         let file = dir.path().join("plugin.dll");
@@ -877,6 +897,75 @@ mod tests {
 
         let selected = select_vst3_plugin_info_for_path(&plugins, &bundle).expect("selected");
         assert_eq!(selected.name, "Plugin Instrument");
+    }
+
+    #[test]
+    fn vst3_selection_rejects_same_filename_in_another_directory() {
+        let plugins = vec![PluginInfo::new(
+            "Wrong instrument".into(),
+            "Vendor".into(),
+            1,
+            PluginType::Instrument,
+            PathBuf::from("C:/Other/Plugin.vst3"),
+            "wrong-class".into(),
+        )];
+        assert!(
+            select_vst3_plugin_info_for_path(&plugins, Path::new("C:/Requested/Plugin.vst3"))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn vst3_selection_rejects_bundle_name_substrings() {
+        let plugins = vec![PluginInfo::new(
+            "Wrong instrument".into(),
+            "Vendor".into(),
+            1,
+            PluginType::Instrument,
+            PathBuf::from("C:/VST3/Plugin.vst3.backup/Other.vst3"),
+            "wrong-class".into(),
+        )];
+        assert!(
+            select_vst3_plugin_info_for_path(&plugins, Path::new("C:/VST3/Plugin.vst3")).is_none()
+        );
+    }
+
+    #[test]
+    fn scan_cache_drops_removed_architecture_even_with_unchanged_fingerprint() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = dir.path().join("Dual.vst3");
+        std::fs::create_dir_all(bundle.join("Contents/x86-win")).unwrap();
+        std::fs::create_dir_all(bundle.join("Contents/x86_64-win")).unwrap();
+        let roots = [dir.path().to_path_buf()];
+        let probe = |path: &Path, _: Duration, architecture: &str| {
+            vec![instrument_entry(path, architecture, "class-a")]
+        };
+        let cached = scan_vst_plugins_with_probe(&roots, &[], false, &probe);
+        assert_eq!(cached.len(), 2);
+        std::fs::remove_dir(bundle.join("Contents/x86-win")).unwrap();
+        assert_eq!(
+            plugin_file_metadata(&bundle),
+            (cached[0].file_modified_ms, cached[0].file_size)
+        );
+        let entries = scan_vst_plugins_with_probe(&roots, &cached, false, &probe);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].architecture, "x64");
+    }
+
+    #[test]
+    fn compatibility_update_reprobes_catalogue_from_host_abi_13() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Synth.dll");
+        std::fs::write(&path, b"MZ").unwrap();
+        let mut cached = instrument_entry(&path, "unknown", "wrong-class-from-old-scan");
+        cached.host_abi_version = 13;
+        let entries = scan_vst_plugins_with_probe(
+            &[dir.path().to_path_buf()],
+            &[cached],
+            false,
+            &|path, _, architecture| vec![instrument_entry(path, architecture, "actual-class")],
+        );
+        assert_eq!(entries[0].class_uid.as_deref(), Some("actual-class"));
     }
 
     #[test]

@@ -26,6 +26,8 @@ fn test_audio_engine_lifecycle() {
         device: None,
         device_id: None,
         sample_rate: 48_000,
+        render_ahead_blocks: 1,
+        dsp_thread_priority: Default::default(),
         buffer_size: 256,
         gain_db: 0.0,
         limiter_enabled: false,

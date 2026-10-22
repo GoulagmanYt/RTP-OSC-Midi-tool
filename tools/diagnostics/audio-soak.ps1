@@ -21,7 +21,7 @@ $repository = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 if (-not $WorkerBinary) { $WorkerBinary = Join-Path $repository '.cargo-target/release/vst-host-worker.exe' }
 $workerPath = (Resolve-Path -LiteralPath $WorkerBinary).Path
 $diagnosticPath = (Resolve-Path (Join-Path $repository '.cargo-target/debug/audio_reliability.exe')).Path
-$reportDirectory = Join-Path $repository 'docs/measurements'
+$reportDirectory = Join-Path $repository 'reports/measurements'
 $reportPath = Join-Path $reportDirectory "$ReportName.json"
 $memoryPath = Join-Path $reportDirectory "$ReportName-processes.jsonl"
 New-Item -ItemType Directory -Path $reportDirectory -Force | Out-Null

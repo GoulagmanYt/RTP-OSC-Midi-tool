@@ -46,6 +46,7 @@ const RTP_PENDING_CAPACITY: usize = 4_096;
 /// le thread de log périodique.
 static DROPPED_MIDI_COUNT: AtomicU64 = AtomicU64::new(0);
 static RTP_LOG_SAMPLE_LAST_MS: AtomicU64 = AtomicU64::new(0);
+static RTP_LOSS_LOG_SAMPLE_LAST_MS: AtomicU64 = AtomicU64::new(0);
 
 /// Retourne le nombre de messages MIDI RTP abandonnés (canal plein).
 pub(crate) fn record_rtp_drop() {
@@ -306,7 +307,7 @@ impl RtpServer {
                     if log_rtp
                         && logs_enabled()
                         && crate::logger::should_log_debug()
-                        && should_sample_rtp_log()
+                        && should_sample_rtp_log(&RTP_LOG_SAMPLE_LAST_MS)
                     {
                         let sampled_logger = rtp_logger.clone();
                         let sampled_bytes = bytes.clone();
@@ -343,6 +344,16 @@ impl RtpServer {
                         order: 0,
                     };
                     let mut timed = timed;
+                    #[cfg(feature = "latency-diagnostics")]
+                    crate::latency_trace::record_rtp(
+                        timed.frame.data.as_slice(),
+                        timed.frame.ingress_qpc,
+                        event
+                            .deadline
+                            .saturating_duration_since(event.received_at)
+                            .as_micros()
+                            .min(u64::MAX as u128) as u64,
+                    );
                     timed.critical = midi_sink
                         .load()
                         .as_ref()
@@ -434,7 +445,7 @@ impl RtpServer {
                             &loss_faults,
                         );
                     }
-                    if should_sample_rtp_log() {
+                    if should_sample_rtp_log(&RTP_LOSS_LOG_SAMPLE_LAST_MS) {
                         let logger = loss_logger.clone();
                         async_runtime::spawn(async move {
                             logger.warn(format!(
@@ -663,11 +674,44 @@ fn recover_scheduled_source(
 }
 
 async fn run_rtp_scheduler(
-    mut receiver: crate::midi_queue::AsyncReceiver<TimedRtpFrame>,
+    receiver: crate::midi_queue::AsyncReceiver<TimedRtpFrame>,
     sink: Arc<arc_swap::ArcSwapOption<Sender<MidiFrame>>>,
     logger: FrontendLogger,
     source_faults: Arc<SourceRecovery>,
 ) {
+    run_rtp_scheduler_core(receiver, sink, source_faults).await;
+    logger.debug("RTP-MIDI timestamp scheduler stopped");
+}
+
+/// Session termination queues peer resets immediately before aborting the
+/// scheduler. Flush them on cancellation as well as normal completion, after
+/// scheduled note delivery has stopped.
+struct PendingPeerResets<'a> {
+    recovery: &'a SourceRecovery,
+    sink: &'a arc_swap::ArcSwapOption<Sender<MidiFrame>>,
+}
+
+impl Drop for PendingPeerResets<'_> {
+    fn drop(&mut self) {
+        let pending = std::mem::take(&mut self.recovery.state.lock().pending);
+        for (source, _) in pending {
+            dispatch_scheduled_frame(
+                self.sink,
+                MidiFrame::copy_realtime(&[0xFF], source).expect("inline reset"),
+            );
+        }
+    }
+}
+
+async fn run_rtp_scheduler_core(
+    mut receiver: crate::midi_queue::AsyncReceiver<TimedRtpFrame>,
+    sink: Arc<arc_swap::ArcSwapOption<Sender<MidiFrame>>>,
+    source_faults: Arc<SourceRecovery>,
+) {
+    let _pending_resets = PendingPeerResets {
+        recovery: &source_faults,
+        sink: &sink,
+    };
     let mut cutoffs = HashMap::<Arc<str>, u64>::new();
     let mut pending = BinaryHeap::<TimedRtpFrame>::with_capacity(RTP_PENDING_CAPACITY);
     let mut order = 0u64;
@@ -697,6 +741,9 @@ async fn run_rtp_scheduler(
         let wake = pending
             .peek()
             .map_or(now + Duration::from_millis(10), |event| {
+                // An overdue batch must yield back into the drain loop even
+                // when the source sends nothing else. The bounded idle wake
+                // also processes peer recovery requests independently of MIDI.
                 event.deadline.min(now + Duration::from_millis(10))
             });
         tokio::select! {
@@ -712,17 +759,40 @@ async fn run_rtp_scheduler(
                     if event.critical { request_critical_midi_reset(); }
                     continue;
                 }
+                // Admit even due events through the next scheduler turn: a
+                // peer loss can arrive while recv() sleeps, and its recovery
+                // reset must precede notes stamped with the new source epoch.
                 event.order = order;
                 order = order.wrapping_add(1);
                 pending.push(event);
+                for _ in 1..256 {
+                    let Ok(mut event) = receiver.try_recv() else { break; };
+                    if event.generation != midi_reset_generation() || source_frame_is_stale(&event, &cutoffs) { continue; }
+                    if event.generation != generation { pending.clear(); generation = event.generation; }
+                    let limit = if event.critical { RTP_PENDING_CAPACITY } else { RTP_PENDING_CAPACITY - crate::realtime::reserve(RTP_PENDING_CAPACITY) };
+                    if pending.len() >= limit || event.deadline > Instant::now() + RTP_MAX_SCHEDULE_AHEAD {
+                        DROPPED_MIDI_COUNT.fetch_add(1, Ordering::Relaxed);
+                        if event.critical { request_critical_midi_reset(); }
+                        continue;
+                    }
+                    event.order = order;
+                    order = order.wrapping_add(1);
+                    pending.push(event);
+                }
             }
             _ = tokio::time::sleep_until(tokio::time::Instant::from_std(wake)) => {}
         }
     }
-    logger.debug("RTP-MIDI timestamp scheduler stopped");
 }
 
 fn dispatch_scheduled_frame(sink: &arc_swap::ArcSwapOption<Sender<MidiFrame>>, frame: MidiFrame) {
+    #[cfg(feature = "latency-diagnostics")]
+    crate::latency_trace::record(
+        crate::latency_trace::Stage::RtpDispatched,
+        frame.data.as_slice(),
+        frame.ingress_qpc,
+        crate::vst_worker::protocol::monotonic_qpc(),
+    );
     let route = sink.load();
     if let Some(tx) = route.as_ref() {
         if !matches!(
@@ -735,15 +805,15 @@ fn dispatch_scheduled_frame(sink: &arc_swap::ArcSwapOption<Sender<MidiFrame>>, f
     }
 }
 
-fn should_sample_rtp_log() -> bool {
+fn should_sample_rtp_log(slot: &AtomicU64) -> bool {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()
         .min(u64::MAX as u128) as u64;
-    let last = RTP_LOG_SAMPLE_LAST_MS.load(Ordering::Relaxed);
+    let last = slot.load(Ordering::Relaxed);
     now.saturating_sub(last) >= 1_000
-        && RTP_LOG_SAMPLE_LAST_MS
+        && slot
             .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
             .is_ok()
 }
@@ -762,6 +832,208 @@ impl crate::midi_queue::Priority for TimedRtpFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scheduler_shutdown_delivers_peer_releases_queued_by_session_termination() {
+        let _guard = crate::bridge::pipeline::TEST_PIPELINE_LOCK.lock().unwrap();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let (tx, receiver) = crate::midi_queue::async_channel(16);
+                let (output, notes) = crate::midi_queue::bounded(16);
+                let sink = Arc::new(arc_swap::ArcSwapOption::from(Some(Arc::new(output))));
+                let recovery = Arc::new(SourceRecovery::default());
+                let source: Arc<str> = Arc::from("RTP:test#ssrc_00000001");
+                let generation = midi_reset_generation();
+                let scheduler =
+                    tokio::spawn(run_rtp_scheduler_core(receiver, sink, recovery.clone()));
+                tx.try_send(TimedRtpFrame {
+                    source_epoch: 0,
+                    critical: false,
+                    frame: MidiFrame::copy_realtime(&[0x90, 60, 100], source.clone()).unwrap(),
+                    deadline: Instant::now(),
+                    generation,
+                    order: 0,
+                })
+                .unwrap_or_else(|_| panic!("test queue full"));
+                let first = tokio::task::spawn_blocking(move || {
+                    let first = notes.recv_timeout(Duration::from_secs(1)).unwrap();
+                    (first, notes)
+                })
+                .await
+                .unwrap();
+                let (first, notes) = first;
+                assert_eq!(first.data.as_slice(), [0x90, 60, 100]);
+                let mut held = crate::midi::SourceMidiState::default();
+                held.observe(&first);
+
+                // stop_gracefully() emits ParticipantLeft, then the server aborts
+                // this task without allowing another scheduler iteration.
+                recovery.request(source.clone());
+                scheduler.abort();
+                let _ = scheduler.await;
+                let reset = notes
+                    .try_recv()
+                    .expect("termination must deliver the final peer reset");
+                assert_eq!(reset.source, source);
+                assert_eq!(reset.data.as_slice(), [0xFF]);
+                assert_eq!(held.release_source(&reset.source), [[0x80, 60, 0]]);
+                assert_eq!(midi_reset_generation(), generation);
+                assert!(notes.try_recv().is_err());
+                drop(tx);
+            });
+    }
+
+    #[test]
+    fn rtp_midi_and_loss_logs_have_independent_rate_limiters() {
+        let midi_slot = AtomicU64::new(0);
+        let loss_slot = AtomicU64::new(0);
+
+        assert!(should_sample_rtp_log(&midi_slot));
+        assert!(!should_sample_rtp_log(&midi_slot));
+        assert!(should_sample_rtp_log(&loss_slot));
+        assert!(!should_sample_rtp_log(&loss_slot));
+    }
+
+    #[test]
+    fn scheduler_drains_more_than_one_due_batch_without_another_packet() {
+        let _guard = crate::bridge::pipeline::TEST_PIPELINE_LOCK.lock().unwrap();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let (tx, receiver) = crate::midi_queue::async_channel(1024);
+                let (output, notes) = crate::midi_queue::bounded(1024);
+                let sink = Arc::new(arc_swap::ArcSwapOption::from(Some(Arc::new(output))));
+                let scheduler = tokio::spawn(run_rtp_scheduler_core(
+                    receiver,
+                    sink,
+                    Arc::new(SourceRecovery::default()),
+                ));
+                // Queue several batches for a single future deadline, then keep the
+                // sender alive but silent, as when a chord is followed by no new input.
+                let deadline = Instant::now() + Duration::from_millis(50);
+                for _ in 0..600 {
+                    tx.try_send(TimedRtpFrame {
+                        source_epoch: 0,
+                        critical: false,
+                        frame: MidiFrame::copy_realtime(&[0x90, 60, 100], Arc::from("RTP:test"))
+                            .unwrap(),
+                        deadline,
+                        generation: midi_reset_generation(),
+                        order: 0,
+                    })
+                    .unwrap_or_else(|_| panic!("test queue full"));
+                }
+                let received = tokio::task::spawn_blocking(move || {
+                    let deadline = Instant::now() + Duration::from_millis(500);
+                    let mut count = 0;
+                    while count < 600 {
+                        if notes
+                            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                            .is_err()
+                        {
+                            break;
+                        }
+                        count += 1;
+                    }
+                    count
+                })
+                .await
+                .unwrap();
+                scheduler.abort();
+                let _ = scheduler.await;
+                drop(tx);
+                assert_eq!(
+                    received, 600,
+                    "overdue MIDI must drain without waiting for new input"
+                );
+            });
+    }
+
+    #[test]
+    fn scheduler_resets_before_delivering_post_fault_due_note() {
+        let _guard = crate::bridge::pipeline::TEST_PIPELINE_LOCK.lock().unwrap();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let (tx, receiver) = crate::midi_queue::async_channel(16);
+                let (output, notes) = crate::midi_queue::bounded(16);
+                let sink = Arc::new(arc_swap::ArcSwapOption::from(Some(Arc::new(output))));
+                let recovery = Arc::new(SourceRecovery::default());
+                let scheduler =
+                    tokio::spawn(run_rtp_scheduler_core(receiver, sink, recovery.clone()));
+                // Let the scheduler enter its empty-queue receive before the
+                // loss callback and the subsequent MIDI callback run together.
+                tokio::task::yield_now().await;
+                let source: Arc<str> = Arc::from("RTP:test");
+                recovery.request(source.clone());
+                tx.try_send(TimedRtpFrame {
+                    source_epoch: recovery.epoch(&source),
+                    critical: false,
+                    frame: MidiFrame::copy_realtime(&[0x90, 60, 100], source).unwrap(),
+                    deadline: Instant::now(),
+                    generation: midi_reset_generation(),
+                    order: 0,
+                })
+                .unwrap_or_else(|_| panic!("test queue full"));
+                let delivered = tokio::task::spawn_blocking(move || {
+                    let first = notes.recv_timeout(Duration::from_millis(200));
+                    let second = notes.recv_timeout(Duration::from_millis(200));
+                    (first, second)
+                })
+                .await
+                .unwrap();
+                scheduler.abort();
+                let _ = scheduler.await;
+                drop(tx);
+                assert_eq!(
+                    delivered.0.expect("peer recovery reset").data.as_slice(),
+                    [0xFF],
+                    "recovery must precede fresh notes so its reset cannot silence them"
+                );
+                assert_eq!(
+                    delivered.1.expect("post-fault note").data.as_slice(),
+                    [0x90, 60, 100]
+                );
+            });
+    }
+
+    #[test]
+    fn scheduler_delivers_peer_recovery_while_input_is_idle() {
+        let _guard = crate::bridge::pipeline::TEST_PIPELINE_LOCK.lock().unwrap();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let (tx, receiver) = crate::midi_queue::async_channel(16);
+                let (output, notes) = crate::midi_queue::bounded(16);
+                let sink = Arc::new(arc_swap::ArcSwapOption::from(Some(Arc::new(output))));
+                let recovery = Arc::new(SourceRecovery::default());
+                let scheduler =
+                    tokio::spawn(run_rtp_scheduler_core(receiver, sink, recovery.clone()));
+                // First allow the scheduler to enter its idle wait.
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                recovery.request(Arc::from("RTP:test"));
+                let reset = tokio::task::spawn_blocking(move || {
+                    notes.recv_timeout(Duration::from_millis(200))
+                })
+                .await
+                .unwrap();
+                scheduler.abort();
+                let _ = scheduler.await;
+                drop(tx);
+                let reset = reset.expect("idle peer fault must release its held notes");
+                assert_eq!(reset.source.as_ref(), "RTP:test");
+                assert_eq!(reset.data.as_slice(), [0xFF]);
+            });
+    }
 
     #[test]
     fn peer_fault_recovery_discards_only_pre_fault_work_and_preserves_global_epoch() {

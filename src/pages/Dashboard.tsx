@@ -8,11 +8,12 @@ import { RTP_VIRTUAL_INPUT, VST_OUTPUT } from "../constants";
 import { DiagnosticsGrid } from "./dashboard/DiagnosticsGrid";
 import { ErrorCard } from "./dashboard/ErrorCard";
 import { OverviewGrid } from "./dashboard/OverviewGrid";
+import { SignalFlow } from "./dashboard/SignalFlow";
 import { getErrorMessage } from "../api-errors";
 
 export default function Dashboard() {
   const navigate = useNavigate();
-  const { status, config, metrics, toggleBridge, logs, preflight, runPreflight, refreshStatus } =
+  const { status, config, metrics, logs, preflight, runPreflight, refreshStatus } =
     useBridge();
   const { t } = useI18n();
   const [lastDropoutAt, setLastDropoutAt] = useState<number | null>(null);
@@ -126,6 +127,8 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-6 min-w-0">
+      {status?.lastError ? <ErrorCard error={status.lastError} t={t} /> : null}
+      <SignalFlow config={config} status={status} t={t} />
       <OverviewGrid
         audioBackend={audioBackend}
         audioDevice={audioDevice}
@@ -139,7 +142,6 @@ export default function Dashboard() {
         t={t}
         xrunCount={xrunCount}
         onNavigateLogs={() => navigate("/logs")}
-        onToggleBridge={toggleBridge}
       />
       {config?.ui.developerMode && (
         <DiagnosticsGrid
@@ -176,7 +178,6 @@ export default function Dashboard() {
           onRunPreflight={runPreflight}
         />
       )}
-      {status?.lastError ? <ErrorCard error={status.lastError} t={t} /> : null}
     </div>
   );
 }

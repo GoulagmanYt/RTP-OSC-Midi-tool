@@ -14,7 +14,7 @@ export { useBridge } from "./bridge/BridgeContext";
 
 export function BridgeProvider({ children }: { children: React.ReactNode }) {
   const [config, setConfig] = useState<api.AppConfig | null>(null);
-  const [status, setStatus] = useState<api.RuntimeStatus | null>(null);
+  const [status, setStatusSnapshot] = useState<api.RuntimeStatus | null>(null);
   const [metrics, setMetrics] = useState<api.RuntimeMetrics | null>(null);
   const [audioBackends, setAudioBackends] = useState<string[]>([]);
   const [audioDevices, setAudioDevices] = useState<api.AudioDeviceEntry[]>([]);
@@ -27,20 +27,62 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
   const { t } = useI18n();
 
   const statusRequestId = useRef(0);
+  const workerEventRevision = useRef(0);
+  const latestWorkerMetrics = useRef<api.RuntimeMetrics | null>(null);
+  const currentStatus = useRef<api.RuntimeStatus | null>(null);
   const listsRequestId = useRef(0);
   const audioDevicesRequestId = useRef(0);
 
-  const refreshStatus = useCallback(async () => {
+  const applyStatus = useCallback<React.Dispatch<React.SetStateAction<api.RuntimeStatus | null>>>((next) => {
+    const resolved = typeof next === "function" ? next(currentStatus.current) : next;
+    if (resolved === currentStatus.current) return;
+    currentStatus.current = resolved;
+    setStatusSnapshot(resolved);
+  }, []);
+
+  const setStatus = useCallback<React.Dispatch<React.SetStateAction<api.RuntimeStatus | null>>>((next) => {
+    statusRequestId.current += 1;
+    applyStatus(next);
+  }, [applyStatus]);
+
+  const receiveMetrics = useCallback((next: api.RuntimeMetrics) => {
+    const previous = latestWorkerMetrics.current;
+    const previousState = previous?.vstWorkerState ?? currentStatus.current?.vstWorkerState;
+    const previousRestarts = previous?.vstWorkerRestarts ?? currentStatus.current?.vstWorkerRestarts;
+    if (next.vstWorkerState && (next.vstWorkerState !== previousState ||
+      next.vstWorkerState !== currentStatus.current?.vstWorkerState ||
+      next.vstWorkerRestarts !== previousRestarts)) {
+      workerEventRevision.current += 1;
+    }
+    latestWorkerMetrics.current = next;
+    setMetrics(next);
+  }, []);
+
+  const beginStatusUpdate = useCallback(() => {
     const id = ++statusRequestId.current;
-    try {
-      const nextStatus = await api.getStatus();
+    const workerRevision = workerEventRevision.current;
+    const workerWasDisabled = currentStatus.current?.vstWorkerState === "disabled";
+    return (nextStatus: api.RuntimeStatus) => {
       if (id === statusRequestId.current) {
-        setStatus(nextStatus);
+        // Keep newer worker events without discarding the snapshot's routing
+        // fields. An explicit stop remains authoritative over queued metrics.
+        const worker = latestWorkerMetrics.current;
+        applyStatus(workerRevision !== workerEventRevision.current && worker?.vstWorkerState &&
+          nextStatus.vstWorkerState !== "disabled" && !(workerWasDisabled && worker.vstWorkerState === "disabled")
+          ? { ...nextStatus, audioRunning: worker.vstWorkerState === "ready", vstWorkerState: worker.vstWorkerState }
+          : nextStatus);
       }
+    };
+  }, [applyStatus]);
+
+  const refreshStatus = useCallback(async () => {
+    const acceptStatus = beginStatusUpdate();
+    try {
+      acceptStatus(await api.getStatus());
     } catch (error) {
       console.error("Failed to get status", error);
     }
-  }, []);
+  }, [beginStatusUpdate]);
 
   const refreshLists = useCallback(async () => {
     const id = ++listsRequestId.current;
@@ -74,7 +116,7 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
 
   useAppBootstrap({
     setConfig,
-    setStatus,
+    beginStatusUpdate,
     setPreflight,
     setIsLoading,
     setInitializationError,
@@ -85,8 +127,8 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
 
   useRuntimeEvents({
     appendLog,
-    setMetrics,
-    setStatus,
+    setMetrics: receiveMetrics,
+    setStatus: applyStatus,
     t,
   });
 
@@ -95,6 +137,7 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
     status,
     setConfig,
     setStatus,
+    beginStatusUpdate,
     setPreflight,
     setMetrics,
     refreshStatus,

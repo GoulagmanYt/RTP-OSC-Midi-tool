@@ -11,6 +11,156 @@ use std::sync::Arc;
 use tokio::sync::Notify;
 static INTEGRATION_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+async fn reconnect_without_bye(new_ssrc: u32) {
+    use rtpmidi::sessions::events::event_handling::ParticipantLeftEvent;
+    use tokio::{
+        net::UdpSocket,
+        time::{Duration, timeout},
+    };
+
+    let invitation = |token: u32, ssrc: u32| {
+        let mut packet = vec![255, 255, b'I', b'N', 0, 0, 0, 2];
+        packet.extend_from_slice(&token.to_be_bytes());
+        packet.extend_from_slice(&ssrc.to_be_bytes());
+        packet.extend_from_slice(b"Peer\0");
+        packet
+    };
+
+    timeout(Duration::from_secs(3), async {
+        let server = RtpMidiSession::start(0, "Reconnect", 7, InviteResponder::Accept)
+            .await
+            .unwrap();
+        let port = server.local_addr().unwrap().port();
+        let (peer_port, _) = find_consecutive_ports();
+        let control = UdpSocket::bind(("127.0.0.1", peer_port)).await.unwrap();
+        let data = UdpSocket::bind(("127.0.0.1", peer_port + 1)).await.unwrap();
+        let (joined_tx, mut joined_rx) = tokio::sync::mpsc::channel(4);
+        server
+            .add_listener(ParticipantJoinedEvent, move |p| {
+                joined_tx.try_send(p.clone()).unwrap();
+            })
+            .await;
+        let (left_tx, mut left_rx) = tokio::sync::mpsc::channel(4);
+        server
+            .add_listener(ParticipantLeftEvent, move |p| {
+                left_tx.try_send(p.clone()).unwrap();
+            })
+            .await;
+        let (midi_tx, mut midi_rx) = tokio::sync::mpsc::channel(4);
+        server
+            .add_listener(MidiMessageEvent, move |(message, _)| {
+                midi_tx.try_send(message).unwrap();
+            })
+            .await;
+        let mut buffer = [0; 128];
+        for (token, ssrc) in [(9, 42), (10, new_ssrc)] {
+            let invitation = invitation(token, ssrc);
+            control
+                .send_to(&invitation, ("127.0.0.1", port))
+                .await
+                .unwrap();
+            control.recv_from(&mut buffer).await.unwrap();
+            // Control acceptance alone must leave the active peer untouched.
+            assert_eq!(
+                server.participants().await.len(),
+                if token == 9 { 0 } else { 1 }
+            );
+            data.send_to(&invitation, ("127.0.0.1", port + 1))
+                .await
+                .unwrap();
+            timeout(Duration::from_millis(300), data.recv_from(&mut buffer))
+                .await
+                .expect(
+                    "fresh data invitation must be accepted without waiting for stale-peer expiry",
+                )
+                .unwrap();
+            assert_eq!(joined_rx.recv().await.unwrap().ssrc().get(), ssrc);
+            let peers = server.participants().await;
+            assert_eq!(
+                peers.len(),
+                1,
+                "a restarted endpoint must replace its old participant"
+            );
+            assert_eq!(peers[0].ssrc().get(), ssrc);
+            let sequence: u16 = if token == 9 { 100 } else { 0 };
+            let mut packet = vec![0x80, 0x61];
+            packet.extend_from_slice(&sequence.to_be_bytes());
+            packet.extend_from_slice(&0u32.to_be_bytes());
+            packet.extend_from_slice(&ssrc.to_be_bytes());
+            packet.extend_from_slice(&[3, 0x90, 60, 100]);
+            data.send_to(&packet, ("127.0.0.1", port + 1))
+                .await
+                .unwrap();
+            assert!(matches!(
+                midi_rx.recv().await,
+                Some(MidiMessage::NoteOn(..))
+            ));
+        }
+        assert_eq!(left_rx.recv().await.unwrap().ssrc().get(), 42);
+        assert!(left_rx.try_recv().is_err());
+        // Delayed retransmissions from the retired handshake must not roll the
+        // endpoint back to its old token (which would make its old BY valid).
+        let old_invitation = invitation(9, 42);
+        control
+            .send_to(&old_invitation, ("127.0.0.1", port))
+            .await
+            .unwrap();
+        assert!(
+            timeout(Duration::from_millis(50), control.recv_from(&mut buffer))
+                .await
+                .is_err(),
+            "retired control invitation must not reopen its handshake"
+        );
+        data.send_to(&old_invitation, ("127.0.0.1", port + 1))
+            .await
+            .unwrap();
+        assert!(
+            timeout(Duration::from_millis(50), data.recv_from(&mut buffer))
+                .await
+                .is_err(),
+            "retired data invitation must not replace the active session"
+        );
+        // A delayed BY from the old incarnation cannot terminate its replacement.
+        let mut old_bye = invitation(9, 42)[..16].to_vec();
+        old_bye[2..4].copy_from_slice(b"BY");
+        control
+            .send_to(&old_bye, ("127.0.0.1", port))
+            .await
+            .unwrap();
+        let duplicate = invitation(10, new_ssrc);
+        control
+            .send_to(&duplicate, ("127.0.0.1", port))
+            .await
+            .unwrap();
+        control.recv_from(&mut buffer).await.unwrap();
+        data.send_to(&duplicate, ("127.0.0.1", port + 1))
+            .await
+            .unwrap();
+        data.recv_from(&mut buffer).await.unwrap();
+        assert_eq!(server.participants().await.len(), 1);
+        assert!(
+            joined_rx.try_recv().is_err(),
+            "retransmission must not create another join"
+        );
+        assert!(left_rx.try_recv().is_err());
+        server.stop_gracefully().await;
+    })
+    .await
+    .expect("reconnection test timed out");
+}
+
+#[tokio::test]
+async fn reconnect_without_bye_with_same_ssrc() {
+    let _guard = INTEGRATION_LOCK.lock().await;
+    reconnect_without_bye(42).await;
+}
+
+#[tokio::test]
+async fn reconnect_without_bye_with_new_ssrc() {
+    let _guard = INTEGRATION_LOCK.lock().await;
+    reconnect_without_bye(43).await;
+}
+
 #[tokio::test]
 async fn test_two_session_inter_communication() {
     let _guard = INTEGRATION_LOCK.lock().await;

@@ -1,81 +1,46 @@
 import { NavLink } from "react-router-dom";
-import { cn } from "../../utils";
-import {
-  LayoutDashboard,
-  Cable,
-  RadioTower,
-  Globe2,
-  AudioLines,
-  ListRestart,
-  Settings,
-  CirclePlay,
-  CircleStop,
-} from "lucide-react";
+import { AudioLines, Cable, Globe2, LayoutDashboard, ListRestart, RadioTower, Settings, Waypoints } from "lucide-react";
 import { useBridge } from "../../providers/BridgeProvider";
-import { Button } from "../ui/Button";
-import { Badge } from "../ui/Badge";
 import { useI18n } from "../../providers/LanguageProvider";
 
 export function Sidebar() {
-  const { status, toggleBridge, isLoading, config } = useBridge();
+  const { config } = useBridge();
   const { t } = useI18n();
-
-  const navItems = [
-    { to: "/", label: t("nav.dashboard"), icon: LayoutDashboard },
-    { to: "/routing", label: t("nav.routingMidi"), icon: Cable },
-    { to: "/osc", label: t("nav.osc"), icon: RadioTower },
-    { to: "/rtp", label: t("nav.rtpMidi"), icon: Globe2 },
-    { to: "/audio", label: t("nav.audioVst"), icon: AudioLines },
-    ...(config?.ui.developerMode ? [{ to: "/logs", label: t("nav.logs"), icon: ListRestart }] : []),
-    { to: "/settings", label: t("nav.settings"), icon: Settings },
+  const groups = [
+    { label: "sidebar.workspace", items: [{ to: "/", label: t("nav.dashboard"), icon: LayoutDashboard }] },
+    { label: "sidebar.connections", items: [
+      { to: "/routing", label: t("nav.routingMidi"), icon: Cable },
+      { to: "/rtp", label: t("nav.rtpMidi"), icon: Globe2 },
+      { to: "/osc", label: t("nav.osc"), icon: RadioTower },
+      { to: "/audio", label: t("nav.audioVst"), icon: AudioLines },
+    ] },
+    { label: "sidebar.application", items: [
+      ...(config?.ui.developerMode ? [{ to: "/logs", label: t("nav.logs"), icon: ListRestart }] : []),
+      { to: "/settings", label: t("nav.settings"), icon: Settings },
+    ] },
   ];
 
   return (
-    <aside className="sidebar flex flex-col h-full glass-surface backdrop-blur-xl border-r">
-      <div className="p-6 pb-2">
-        <h2 className="font-semibold text-lg tracking-tight">{t("sidebar.navigation")}</h2>
+    <aside id="app-sidebar" className="sidebar navigation-material flex h-full flex-col border-r">
+      <div className="sidebar-brand flex min-h-20 shrink-0 items-center gap-3 px-5" data-tauri-drag-region>
+        <span className="app-mark grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-primary text-primary-foreground" aria-hidden="true"><Waypoints className="h-5 w-5" strokeWidth={1.75} /></span>
+        <span className="sidebar-label text-lg font-semibold tracking-tight" data-tauri-drag-region>OSCMidi</span>
       </div>
-      <nav className="flex-1 px-4 space-y-1" aria-label={t("sidebar.navigation")}>
-        {navItems.map((item) => (
-          <NavLink
-            key={item.to}
-            to={item.to}
-            className={({ isActive }) =>
-              cn(
-                "nav-pill group flex items-center gap-3 px-3 py-2 text-sm font-medium rounded-md transition-all duration-200",
-                isActive
-                  ? "bg-primary/10 text-primary border-l-4 border-primary shadow-[0_12px_40px_-24px_rgba(0,0,0,0.6)]"
-                  : "text-muted-foreground hover:bg-muted hover:text-foreground"
-              )
-            }
-          >
-            <item.icon className="w-4 h-4 transition-transform duration-200 group-hover:translate-x-0.5" />
-            {item.label}
-          </NavLink>
+      <nav className="flex-1 space-y-6 overflow-y-auto px-3 py-3" aria-label={t("sidebar.navigation")}>
+        {groups.map((group) => (
+          <div key={group.label}>
+            <p className="sidebar-heading mb-2 px-3 text-xs font-medium text-muted-foreground">{t(group.label)}</p>
+            <div className="space-y-1">
+              {group.items.map((item) => (
+                <NavLink key={item.to} to={item.to} end={item.to === "/"} className="nav-item" aria-label={item.label} title={item.label}>
+                  <item.icon className="h-[1.125rem] w-[1.125rem] shrink-0" strokeWidth={1.75} aria-hidden="true" />
+                  <span className="sidebar-label">{item.label}</span>
+                </NavLink>
+              ))}
+            </div>
+          </div>
         ))}
       </nav>
-
-      <div className="p-4 border-t glass-panel">
-        <div className="flex flex-col gap-4">
-          <div className="flex items-center justify-between" aria-live="polite">
-            <span className="text-xs font-medium text-muted-foreground">{t("common.status")}</span>
-            <Badge variant={status?.running ? "success" : "secondary"}>
-              {status?.running ? t("common.running") : t("common.stopped")}
-            </Badge>
-          </div>
-          
-          <Button 
-            variant={status?.running ? "destructive" : "default"} 
-            className="w-full justify-start gap-2"
-            onClick={toggleBridge}
-            disabled={isLoading || !config}
-            aria-busy={isLoading}
-          >
-            {status?.running ? <CircleStop className="w-4 h-4" /> : <CirclePlay className="w-4 h-4" />}
-            {status?.running ? t("actions.stopBridge") : t("actions.startBridge")}
-          </Button>
-        </div>
-      </div>
     </aside>
   );
 }

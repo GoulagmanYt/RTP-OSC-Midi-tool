@@ -18,13 +18,16 @@ use super::service_common::{
     config_error, frontend_logger, io_to_error, persist_resolved_audio_device, runtime_error,
 };
 
-pub fn get_config(app: &AppHandle, state: &AppState) -> Config {
-    let cfg = state.config_store.load();
+pub fn get_config(app: &AppHandle, state: &AppState) -> Result<Config, CommandError> {
+    let cfg = state
+        .config_store
+        .load_checked()
+        .map_err(|error| config_error("config.load-failed", error))?;
     sync_runtime_logging(&cfg, &state.dev_logging);
     set_log_all_to_file(cfg.logging.log_all_to_file);
     set_logs_enabled(cfg.logging.enabled);
     sync_rtp_discovery(&cfg, state, app);
-    cfg
+    Ok(cfg)
 }
 
 /// Commit only after the runtime accepts the configuration. Roll back runtime
@@ -37,6 +40,8 @@ fn commit_config_change(
     mut apply: impl FnMut(&Config, bool) -> Result<(), CommandError>,
     persist: impl FnOnce(&Config) -> Result<(), CommandError>,
 ) -> Result<(), CommandError> {
+    next.validate()
+        .map_err(|error| config_error("config.invalid", error))?;
     let result = apply(next, force_restart).and_then(|()| persist(next));
     if let Err(mut error) = result {
         if let Err(rollback) = apply(previous, false) {
@@ -281,6 +286,31 @@ pub fn import_config(
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    fn invalid_configuration_is_rejected_before_runtime_or_disk_changes() {
+        let previous = Config::default();
+        let mut next = previous.clone();
+        next.audio.gain_db = f32::NAN;
+        let applied = Cell::new(false);
+        let persisted = Cell::new(false);
+        let result = commit_config_change(
+            &previous,
+            &next,
+            false,
+            |_, _| {
+                applied.set(true);
+                Ok(())
+            },
+            |_| {
+                persisted.set(true);
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+        assert!(!applied.get());
+        assert!(!persisted.get());
+    }
 
     #[test]
     fn saved_gain_changes_reach_the_active_engine_and_roll_back_on_disk_failure() {

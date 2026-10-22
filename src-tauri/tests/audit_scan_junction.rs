@@ -8,7 +8,7 @@ use std::{
 };
 
 #[test]
-fn evidence_scanner_revisits_the_same_directory_through_a_junction_cycle() {
+fn scanner_returns_one_physical_dll_through_a_junction_cycle() {
     let fixture = tempfile::tempdir().unwrap();
     let root = fixture.path().canonicalize().unwrap();
     fs::write(root.join("instrument.dll"), []).unwrap();
@@ -38,7 +38,7 @@ fn evidence_scanner_revisits_the_same_directory_through_a_junction_cycle() {
 }
 
 #[test]
-fn evidence_two_junction_cycles_do_not_finish_within_the_probe_budget() {
+fn two_junction_cycles_finish_within_the_probe_budget() {
     let fixture = tempfile::tempdir().unwrap();
     let root = fixture.path().canonicalize().unwrap();
     fs::write(root.join("instrument.dll"), []).unwrap();
@@ -64,7 +64,8 @@ fn evidence_two_junction_cycles_do_not_finish_within_the_probe_budget() {
     let deadline = Instant::now() + Duration::from_secs(2);
     let mut completed = false;
     while Instant::now() < deadline {
-        if child.try_wait().unwrap().is_some() {
+        if let Some(status) = child.try_wait().unwrap() {
+            assert!(status.success(), "scan subprocess failed: {status}");
             completed = true;
             break;
         }
@@ -92,5 +93,45 @@ fn evidence_two_junction_cycles_do_not_finish_within_the_probe_budget() {
 #[ignore = "subprocess helper; requires an isolated junction fixture"]
 fn audit_cycle_scan_child() {
     let root = std::env::var_os("OSCMIDI_AUDIT_CYCLE_ROOT").expect("parent fixture");
-    osc_midi_bridge::plugin_probe::scan_plugin_candidates(std::path::Path::new(&root));
+    assert_eq!(
+        osc_midi_bridge::plugin_probe::scan_plugin_candidates(std::path::Path::new(&root)).len(),
+        1
+    );
+}
+
+#[test]
+fn scanner_deduplicates_hard_linked_dlls() {
+    let fixture = tempfile::tempdir().unwrap();
+    let original = fixture.path().join("instrument.dll");
+    fs::write(&original, []).unwrap();
+    fs::hard_link(&original, fixture.path().join("alias.dll")).unwrap();
+    assert_eq!(
+        osc_midi_bridge::plugin_probe::scan_plugin_candidates(fixture.path()).len(),
+        1
+    );
+}
+
+#[test]
+fn scanner_skips_nested_junctions_but_accepts_a_junction_root() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path().join("scan");
+    let outside = fixture.path().join("outside");
+    fs::create_dir(&root).unwrap();
+    fs::create_dir(&outside).unwrap();
+    fs::write(root.join("instrument.dll"), []).unwrap();
+    fs::write(outside.join("linked.dll"), []).unwrap();
+    let junction = root.join("alias");
+    let output = Command::new("cmd.exe")
+        .args(["/d", "/c", "mklink", "/J"])
+        .arg(&junction)
+        .arg(&outside)
+        .creation_flags(0x0800_0000)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let nested = osc_midi_bridge::plugin_probe::scan_plugin_candidates(&root);
+    let selected_root = osc_midi_bridge::plugin_probe::scan_plugin_candidates(&junction);
+    fs::remove_dir(&junction).unwrap();
+    assert_eq!(nested, vec![root.join("instrument.dll")]);
+    assert_eq!(selected_root, vec![junction.join("linked.dll")]);
 }

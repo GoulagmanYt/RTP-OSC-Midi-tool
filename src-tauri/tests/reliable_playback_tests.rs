@@ -11,6 +11,77 @@ use std::time::Duration;
 static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[test]
+fn reliable_server_shutdown_is_bounded_when_client_does_not_read_replies() {
+    let _guard = test_guard();
+    let (tx, _rx) = bounded(256);
+    let server = ReliablePlaybackServer::start("127.0.0.1:0", tx).unwrap();
+    let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
+    socket.set_recv_buffer_size(1024).unwrap();
+    socket.connect(&server.local_addr().into()).unwrap();
+    let mut stream = TcpStream::from(socket);
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    // The response echoes this identifier, exceeding the peer's receive window.
+    send_frame(
+        &mut stream,
+        json!({
+            "type": "prepare", "version": 1, "sessionId": "s".repeat(8 * 1024 * 1024),
+            "song": "blocked.mid", "total": 0, "events": []
+        }),
+    );
+    let mut header = [0; 4];
+    stream.read_exact(&mut header).unwrap();
+    let (stopped_tx, stopped_rx) = std::sync::mpsc::sync_channel(1);
+    let stopping = std::thread::spawn(move || {
+        server.stop();
+        stopped_tx.send(()).unwrap();
+    });
+    let result = stopped_rx.recv_timeout(Duration::from_secs(2));
+    // Always unblock the old implementation, so failure cannot strand a test thread.
+    stream.shutdown(std::net::Shutdown::Both).unwrap();
+    stopping.join().unwrap();
+    assert!(
+        result.is_ok(),
+        "shutdown blocked on a non-reading TCP client"
+    );
+}
+
+#[test]
+fn reliable_server_rejects_malformed_midi_before_preparing_any_playback() {
+    let _guard = test_guard();
+    for invalid in [
+        vec![0x90, 60],
+        vec![0x90, 128, 100],
+        vec![0xF0, 1],
+        vec![0x40, 60, 100],
+    ] {
+        let (tx, rx) = bounded(256);
+        let server = ReliablePlaybackServer::start("127.0.0.1:0", tx).unwrap();
+        let mut stream = connect(&server, Duration::from_secs(2));
+        send_frame(
+            &mut stream,
+            json!({
+                "type": "prepare", "version": 1, "sessionId": "invalid-midi",
+                "song": "invalid.mid", "total": 2, "events": [
+                    {"seq": 0, "dueUs": 0, "data": [0x90, 60, 100]},
+                    {"seq": 1, "dueUs": 1000, "data": invalid}
+                ]
+            }),
+        );
+        let reply = recv_frame(&mut stream);
+        let played = rx.try_recv().is_ok();
+        server.stop();
+        assert_eq!(
+            reply["type"], "error",
+            "malformed event was accepted: {invalid:?}"
+        );
+        assert_eq!(reply["sessionId"], "invalid-midi");
+        assert!(!played);
+    }
+}
+
+#[test]
 fn reliable_server_stops_and_releases_an_ipv6_listener() {
     let _guard = test_guard();
     let (tx, _rx) = bounded(256);
@@ -51,6 +122,298 @@ fn connect(server: &ReliablePlaybackServer, read_timeout: Duration) -> TcpStream
         .set_read_timeout(Some(read_timeout))
         .expect("set read timeout");
     stream
+}
+
+fn prepare_frame(session: &str, events: serde_json::Value) -> serde_json::Value {
+    json!({
+        "type": "prepare", "version": 1, "sessionId": session, "song": "edge.mid",
+        "total": events.as_array().unwrap().len(), "events": events
+    })
+}
+
+fn encoded_frame(payload: serde_json::Value) -> Vec<u8> {
+    let data = serde_json::to_vec(&payload).unwrap();
+    let mut frame = (data.len() as u32).to_be_bytes().to_vec();
+    frame.extend(data);
+    frame
+}
+
+#[test]
+fn reliable_server_handles_fragmented_prepare_and_concatenated_commands() {
+    let _guard = test_guard();
+    let (tx, rx) = bounded(256);
+    let server = ReliablePlaybackServer::start("127.0.0.1:0", tx).unwrap();
+    let mut stream = connect(&server, Duration::from_secs(3));
+    let prepare = encoded_frame(prepare_frame(
+        "fragmented",
+        json!([
+            {"seq": 0, "dueUs": 0, "data": [0x90, 60, 100]},
+            {"seq": 1, "dueUs": 60_000_000, "data": [0x80, 60, 0]}
+        ]),
+    ));
+    stream.write_all(&prepare[..2]).unwrap();
+    // Cross the server's 250 ms socket timeout in both header and payload.
+    std::thread::sleep(Duration::from_millis(300));
+    stream.write_all(&prepare[2..12]).unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    stream.write_all(&prepare[12..]).unwrap();
+    assert_eq!(recv_frame(&mut stream)["type"], "prepared");
+    let mut commands = encoded_frame(json!({
+        "type": "start", "sessionId": "fragmented", "startDelayMs": 60_000
+    }));
+    commands.extend(encoded_frame(
+        json!({"type": "stop", "sessionId": "fragmented"}),
+    ));
+    stream.write_all(&commands).unwrap();
+    assert_eq!(recv_frame(&mut stream)["type"], "stopped");
+    assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+    let frames: Vec<_> = rx.try_iter().collect();
+    assert_eq!(frames.len(), 64);
+    assert!(frames.iter().all(|frame| frame.data[0] & 0xF0 == 0xB0));
+    server.stop();
+}
+
+#[test]
+fn reliable_server_rejects_invalid_timestamps_and_unsorted_events_atomically() {
+    let _guard = test_guard();
+    for invalid in [
+        json!(-1),
+        json!(0.5),
+        json!("1000"),
+        json!(86_400_000_001u64),
+        json!(u64::MAX),
+    ] {
+        let (tx, rx) = bounded(256);
+        let server = ReliablePlaybackServer::start("127.0.0.1:0", tx).unwrap();
+        let mut stream = connect(&server, Duration::from_secs(2));
+        send_frame(
+            &mut stream,
+            prepare_frame(
+                "invalid-time",
+                json!([
+                    {"seq": 0, "dueUs": 0, "data": [0x90, 60, 100]},
+                    {"seq": 1, "dueUs": invalid, "data": [0x80, 60, 0]}
+                ]),
+            ),
+        );
+        assert_eq!(recv_frame(&mut stream)["type"], "error", "dueUs={invalid}");
+        assert!(rx.try_recv().is_err());
+        server.stop();
+    }
+    let (tx, rx) = bounded(256);
+    let server = ReliablePlaybackServer::start("127.0.0.1:0", tx).unwrap();
+    let mut stream = connect(&server, Duration::from_secs(2));
+    send_frame(
+        &mut stream,
+        prepare_frame(
+            "unsorted",
+            json!([
+                {"seq": 0, "dueUs": 1000, "data": [0x90, 60, 100]},
+                {"seq": 1, "dueUs": 0, "data": [0x80, 60, 0]}
+            ]),
+        ),
+    );
+    assert!(recv_frame(&mut stream)["message"]
+        .as_str()
+        .unwrap()
+        .contains("sorted"));
+    assert!(rx.try_recv().is_err());
+    server.stop();
+}
+
+#[test]
+fn reliable_server_rejects_zero_and_oversized_frames_without_reading_a_payload() {
+    let _guard = test_guard();
+    for size in [0u32, 16 * 1024 * 1024 + 1, u32::MAX] {
+        let (tx, rx) = bounded(256);
+        let server = ReliablePlaybackServer::start("127.0.0.1:0", tx).unwrap();
+        let mut stream = connect(&server, Duration::from_secs(2));
+        stream.write_all(&size.to_be_bytes()).unwrap();
+        assert_eq!(recv_frame(&mut stream)["type"], "error");
+        assert!(rx.try_recv().is_err());
+        server.stop();
+    }
+}
+
+#[test]
+fn reliable_server_enforces_midi_message_size_boundary() {
+    let _guard = test_guard();
+    for size in [1024, 1025] {
+        let (tx, rx) = bounded(256);
+        let server = ReliablePlaybackServer::start("127.0.0.1:0", tx).unwrap();
+        let mut stream = connect(&server, Duration::from_secs(2));
+        let mut data = vec![1u8; size];
+        data[0] = 0xF0;
+        data[size - 1] = 0xF7;
+        send_frame(
+            &mut stream,
+            prepare_frame(
+                "sysex-size",
+                json!([
+                    {"seq": 0, "dueUs": 0, "data": data}
+                ]),
+            ),
+        );
+        let reply = recv_frame(&mut stream);
+        if size == 1024 {
+            assert_eq!(reply["type"], "prepared");
+        } else {
+            assert_eq!(reply["type"], "error");
+            assert!(reply["message"].as_str().unwrap().contains("too large"));
+        }
+        assert!(rx.try_recv().is_err());
+        server.stop();
+    }
+}
+
+#[test]
+fn reliable_server_bounds_connections_and_releases_a_disconnected_permit() {
+    let _guard = test_guard();
+    let (tx, _rx) = bounded(256);
+    let server = ReliablePlaybackServer::start("127.0.0.1:0", tx).unwrap();
+    let mut connections = Vec::new();
+    for index in 0..8 {
+        let mut stream = connect(&server, Duration::from_secs(2));
+        send_frame(
+            &mut stream,
+            prepare_frame(&format!("connection-{index}"), json!([])),
+        );
+        assert_eq!(recv_frame(&mut stream)["type"], "prepared");
+        connections.push(stream);
+    }
+    let mut overflow = connect(&server, Duration::from_secs(2));
+    assert_eq!(overflow.read(&mut [0]).unwrap(), 0);
+    let mut released = connections.pop().unwrap();
+    released.shutdown(std::net::Shutdown::Write).unwrap();
+    assert_eq!(released.read(&mut [0]).unwrap(), 0);
+    let mut replacement = connect(&server, Duration::from_secs(2));
+    send_frame(&mut replacement, prepare_frame("replacement", json!([])));
+    assert_eq!(recv_frame(&mut replacement)["type"], "prepared");
+    server.stop();
+}
+
+#[test]
+fn reliable_server_rejects_wrong_command_sessions_without_playing() {
+    let _guard = test_guard();
+    for command in ["start", "stop"] {
+        let (tx, rx) = bounded(256);
+        let server = ReliablePlaybackServer::start("127.0.0.1:0", tx).unwrap();
+        let mut stream = connect(&server, Duration::from_secs(2));
+        send_frame(
+            &mut stream,
+            prepare_frame(
+                "prepared",
+                json!([
+                    {"seq": 0, "dueUs": 0, "data": [0x90, 60, 100]}
+                ]),
+            ),
+        );
+        assert_eq!(recv_frame(&mut stream)["type"], "prepared");
+        send_frame(
+            &mut stream,
+            json!({"type": command, "sessionId": "stale", "startDelayMs": 0}),
+        );
+        let error = recv_frame(&mut stream);
+        assert_eq!(error["type"], "error");
+        assert_eq!(error["sessionId"], "prepared");
+        assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+        assert!(rx.try_recv().is_err());
+        server.stop();
+    }
+}
+
+#[test]
+fn reliable_server_accepts_maximum_due_time_and_cancels_maximum_start_delay() {
+    let _guard = test_guard();
+    let (tx, rx) = bounded(256);
+    let server = ReliablePlaybackServer::start("127.0.0.1:0", tx).unwrap();
+    let mut stream = connect(&server, Duration::from_secs(2));
+    send_frame(
+        &mut stream,
+        prepare_frame(
+            "time-bounds",
+            json!([
+                {"seq": 0, "dueUs": 86_400_000_000u64, "data": [0x90, 60, 100]}
+            ]),
+        ),
+    );
+    assert_eq!(recv_frame(&mut stream)["type"], "prepared");
+    let mut commands = encoded_frame(
+        json!({"type": "start", "sessionId": "time-bounds", "startDelayMs": u64::MAX}),
+    );
+    commands.extend(encoded_frame(
+        json!({"type": "stop", "sessionId": "time-bounds"}),
+    ));
+    stream.write_all(&commands).unwrap();
+    assert_eq!(recv_frame(&mut stream)["type"], "stopped");
+    let frames: Vec<_> = rx.try_iter().collect();
+    assert_eq!(frames.len(), 64);
+    assert!(frames.iter().all(|frame| frame.data[0] & 0xF0 == 0xB0));
+    server.stop();
+}
+
+#[test]
+fn reliable_server_disconnect_before_start_does_not_admit_events_or_reset() {
+    let _guard = test_guard();
+    let (tx, rx) = bounded(256);
+    let server = ReliablePlaybackServer::start("127.0.0.1:0", tx).unwrap();
+    let mut stream = connect(&server, Duration::from_secs(2));
+    send_frame(
+        &mut stream,
+        prepare_frame(
+            "not-started",
+            json!([
+                {"seq": 0, "dueUs": 0, "data": [0x90, 60, 100]}
+            ]),
+        ),
+    );
+    assert_eq!(recv_frame(&mut stream)["type"], "prepared");
+    stream.shutdown(std::net::Shutdown::Write).unwrap();
+    assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+    assert!(rx.try_recv().is_err());
+    server.stop();
+}
+
+#[test]
+fn reliable_server_replacement_prepare_cancels_old_schedule_before_reset() {
+    let _guard = test_guard();
+    let (tx, rx) = bounded(256);
+    let server = ReliablePlaybackServer::start("127.0.0.1:0", tx).unwrap();
+    let mut stream = connect(&server, Duration::from_secs(2));
+    send_frame(
+        &mut stream,
+        prepare_frame(
+            "old",
+            json!([
+                {"seq": 0, "dueUs": 0, "data": [0x90, 60, 100]},
+                {"seq": 1, "dueUs": 60_000_000, "data": [0x90, 61, 100]}
+            ]),
+        ),
+    );
+    assert_eq!(recv_frame(&mut stream)["type"], "prepared");
+    send_frame(
+        &mut stream,
+        json!({"type": "start", "sessionId": "old", "startDelayMs": 0}),
+    );
+    assert_eq!(
+        rx.recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .data
+            .as_slice(),
+        &[0x90, 60, 100]
+    );
+    send_frame(&mut stream, prepare_frame("new", json!([])));
+    let error = recv_frame(&mut stream);
+    assert_eq!(error["type"], "error");
+    assert_eq!(error["sessionId"], "old");
+    assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+    let frames: Vec<_> = rx.try_iter().collect();
+    assert_eq!(frames.len(), 64);
+    assert!(frames.iter().all(|frame| frame.data[0] & 0xF0 == 0xB0));
+    assert!(reliable_playback_metrics_snapshot()
+        .active_session
+        .is_none());
+    server.stop();
 }
 
 #[test]
@@ -97,6 +460,8 @@ fn reliable_server_preserves_duplicates_and_reports_completion() {
     assert_eq!(frames[1].data.as_slice(), &[0x90, 60, 100]);
     assert_eq!(frames[2].data.as_slice(), &[0xB0, 64, 127]);
     assert_eq!(frames[3].data.as_slice(), &[0x80, 60, 0]);
+    assert_eq!(frames[0].ingress_qpc, frames[1].ingress_qpc);
+    assert_eq!(frames[2].ingress_qpc, frames[3].ingress_qpc);
     assert!(frames
         .iter()
         .all(|frame| &*frame.source == "ReliablePLV:dup.mid"));
@@ -180,14 +545,13 @@ fn reliable_server_stop_cancels_session_and_injects_all_notes_off() {
     assert_eq!(stopped["sessionId"], "stop-session");
 
     let frames: Vec<_> = rx.try_iter().collect();
-    assert_eq!(frames.len(), 32);
+    assert_eq!(frames.len(), 64);
     for channel in 0u8..16 {
-        let sustain_off = &frames[(channel as usize) * 2];
-        let all_notes_off = &frames[(channel as usize) * 2 + 1];
-        assert_eq!(sustain_off.data.as_slice(), &[0xB0 | channel, 64, 0]);
-        assert_eq!(all_notes_off.data.as_slice(), &[0xB0 | channel, 123, 0]);
-        assert_eq!(&*sustain_off.source, "ReliablePLV:long.mid");
-        assert_eq!(&*all_notes_off.source, "ReliablePLV:long.mid");
+        for (offset, controller) in [64, 66, 69, 123].into_iter().enumerate() {
+            let frame = &frames[usize::from(channel) * 4 + offset];
+            assert_eq!(frame.data.as_slice(), &[0xB0 | channel, controller, 0]);
+            assert_eq!(&*frame.source, "ReliablePLV:long.mid");
+        }
     }
 
     let metrics = reliable_playback_metrics_snapshot();
@@ -301,7 +665,7 @@ fn reliable_server_shutdown_cancels_scheduled_playback() {
     );
 
     let frames: Vec<_> = rx.try_iter().collect();
-    assert_eq!(frames.len(), 32);
+    assert_eq!(frames.len(), 64);
     assert!(frames.iter().all(|frame| (frame.data[0] & 0xF0) == 0xB0));
     assert_eq!(reliable_playback_metrics_snapshot().messages_out, 1);
     assert!(reliable_playback_metrics_snapshot()
@@ -365,20 +729,16 @@ fn cancel_equal_deadline_burst(disconnect: bool) {
         .iter()
         .position(|frame| frame.data[0] & 0xF0 == 0xB0)
         .unwrap();
-    assert_eq!(frames.len() - first_reset, 32);
+    assert_eq!(frames.len() - first_reset, 64);
     for channel in 0u8..16 {
-        assert_eq!(
-            frames[first_reset + usize::from(channel) * 2]
-                .data
-                .as_slice(),
-            &[0xB0 | channel, 64, 0]
-        );
-        assert_eq!(
-            frames[first_reset + usize::from(channel) * 2 + 1]
-                .data
-                .as_slice(),
-            &[0xB0 | channel, 123, 0]
-        );
+        for (offset, controller) in [64, 66, 69, 123].into_iter().enumerate() {
+            assert_eq!(
+                frames[first_reset + usize::from(channel) * 4 + offset]
+                    .data
+                    .as_slice(),
+                &[0xB0 | channel, controller, 0]
+            );
+        }
     }
     assert!(
         rx.recv_timeout(Duration::from_millis(100)).is_err(),

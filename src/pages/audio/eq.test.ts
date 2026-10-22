@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import reference from "../../../src-tauri/tests/fixtures/eq-response.json";
 import {
   BUNDLED_VST_EQ_KEY,
   createDefaultVstEqSettings,
@@ -9,6 +10,30 @@ import {
 } from "./eq";
 
 describe("VST EQ helpers", () => {
+  it.each(reference)("matches the independent analog reference: $name", ({ settings, sampleRate, response }) => {
+    for (const { frequencyHz, db } of response) {
+      expect(eqResponseDb(settings, frequencyHz, sampleRate)).toBeCloseTo(db, 2);
+    }
+  });
+
+  it("applies the backend gain, frequency and Q limits before plotting", () => {
+    const settings = createDefaultVstEqSettings();
+    settings.enabled = true;
+    settings.midPeak = { frequencyHz: 50_000, gainDb: 90, q: 0 };
+    expect(eqResponseDb(settings, 10_000, 48_000)).toBeCloseTo(18, 3);
+    settings.midPeak = { frequencyHz: NaN, gainDb: Infinity, q: -Infinity };
+    expect(eqResponseDb(settings, 1_000, 48_000)).toBe(0);
+  });
+
+  it("evaluates points above the coefficient guard frequency without flattening the curve", () => {
+    const settings = createDefaultVstEqSettings();
+    settings.enabled = true;
+    settings.highShelf = { frequencyHz: 14_400, gainDb: 12 };
+    // Shelf midpoint is 6 dB; the response must keep rising towards Nyquist.
+    expect(eqResponseDb(settings, 14_400, 32_000)).toBeCloseTo(6, 3);
+    expect(eqResponseDb(settings, 15_500, 32_000)).toBeGreaterThan(11);
+  });
+
   it("uses a stable bundled key when no plugin is selected", () => {
     const audio = {
       enabled: true,

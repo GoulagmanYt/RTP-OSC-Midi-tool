@@ -170,6 +170,8 @@ pub fn audio_settings_from_config(config: &Config) -> crate::audio::AudioSetting
         device_id: config.audio.device_id.clone(),
         sample_rate: config.audio.sample_rate,
         buffer_size: config.audio.buffer_size,
+        render_ahead_blocks: config.audio.render_ahead_blocks,
+        dsp_thread_priority: config.audio.dsp_thread_priority,
         gain_db: config.audio.gain_db,
         limiter_enabled: config.audio.limiter_enabled,
         vst_eq: config

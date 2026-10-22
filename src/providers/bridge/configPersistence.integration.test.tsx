@@ -6,6 +6,7 @@ import type { BridgeContextType } from "./BridgeContext";
 import { useAudioPageController } from "../../pages/audio/useAudioPageController";
 import { useAutosaveSettings } from "./useAutosaveSettings";
 import { useBridgeActions } from "./useBridgeActions";
+import { useAppBootstrap } from "./useAppBootstrap";
 
 const mocks = vi.hoisted(() => ({ bridge: {} as BridgeContextType, invoke: vi.fn() }));
 vi.mock("../../api-client", () => ({ invokeCommand: mocks.invoke }));
@@ -13,9 +14,20 @@ vi.mock("../BridgeProvider", () => ({ useBridge: () => mocks.bridge }));
 vi.mock("../LanguageProvider", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => undefined) }));
 vi.mock("sonner", () => ({ toast: { error: vi.fn(), success: vi.fn() } }));
-const initial = {
-  midi: { inputDevice: "available" }, audio: { enabled: true, vstEqByPlugin: {} }, osc: { listenPort: 9001 },
-} as api.AppConfig;
+const initial: api.AppConfig = {
+  version: 4,
+  midi: { inputDevice: "available", outputDevice: null, channelFilter: null, thruEnabled: true,
+    hotplug: true, routingProfiles: [], routingAssignments: [] },
+  audio: { enabled: true, backend: null, device: null, deviceId: null, sampleRate: 48000,
+    bufferSize: 512, gainDb: 0, limiterEnabled: false, vstPath: null, vstPluginId: null,
+    vstScanPaths: [], vstEqByPlugin: {}, gameMode: true, renderAheadBlocks: 1, dspThreadPriority: "mmcss" },
+  osc: { inputEnabled: false, listenIp: "127.0.0.1", listenPort: 9001, enabled: true,
+    targetIp: "127.0.0.1", targetPort: 9000, logMessages: true },
+  rtp: { thruEnabled: false, enabled: true, sessionName: "OSCMidi", port: 5004,
+    remoteEnabled: false, remotes: [], logMessages: false },
+  ui: { theme: "light", themePalette: "light", cornerRadius: 12, autoStart: false, developerMode: false },
+  logging: { enabled: true, verbose: false, logAllToFile: false },
+};
 const onError = vi.fn();
 
 function mount() {
@@ -33,6 +45,40 @@ function mount() {
 
 beforeEach(() => { vi.useFakeTimers(); vi.clearAllMocks(); });
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
+
+it.each([false, true])("does not autosave before a delayed initial load finishes (failure: %s)", async (fail) => {
+  let finish!: (config: api.AppConfig) => void;
+  let reject!: (error: Error) => void;
+  mocks.invoke.mockImplementation(async (command: string) => {
+    if (command === "get_config") return new Promise<api.AppConfig>((resolve, rejectLoad) => {
+      finish = resolve; reject = rejectLoad;
+    });
+    return [];
+  });
+  const options = {
+    beginStatusUpdate: () => vi.fn(), setPreflight: vi.fn(), setIsLoading: vi.fn(),
+    setInitializationError: vi.fn(), refreshStatus: vi.fn(async () => undefined),
+    refreshLists: vi.fn(async () => undefined), refreshAudioDevices: vi.fn(async () => undefined),
+  };
+  const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const { result } = renderHook(() => {
+    const [config, setConfig] = useState<api.AppConfig | null>(null);
+    useAppBootstrap({ ...options, setConfig });
+    useAutosaveSettings({ config, setConfig, save: api.saveConfig, onError });
+    return config;
+  });
+  await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+  expect(result.current).toBeNull();
+  expect(mocks.invoke.mock.calls.map(([command]) => command)).toEqual(["get_config"]);
+  await act(async () => {
+    if (fail) reject(new Error("configuration is truncated")); else finish(initial);
+  });
+  await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+  expect(result.current).toBe(fail ? null : initial);
+  expect(mocks.invoke.mock.calls.filter(([command]) => command === "save_config")).toHaveLength(0);
+  if (fail) expect(options.setInitializationError).toHaveBeenLastCalledWith("configuration is truncated");
+  errorLog.mockRestore();
+});
 
 it("never queues an enabled autosave behind a slow audio disable transition", async () => {
   let finishSave!: () => void;

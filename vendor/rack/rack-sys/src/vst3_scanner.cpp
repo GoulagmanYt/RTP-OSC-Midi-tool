@@ -30,6 +30,7 @@ using namespace Steinberg::Vst;
 // Internal scanner state
 struct RackVST3Scanner {
     std::vector<std::string> search_paths;
+    bool include_system_paths = false;
 };
 
 #if defined(_WIN32)
@@ -207,6 +208,7 @@ int rack_vst3_scanner_add_default_paths(RackVST3Scanner* scanner) {
     }
 
     auto paths = get_default_vst3_paths();
+    scanner->include_system_paths = true;
     scanner->search_paths.insert(scanner->search_paths.end(), paths.begin(), paths.end());
     return RACK_VST3_OK;
 }
@@ -234,10 +236,12 @@ int rack_vst3_scanner_scan(RackVST3Scanner* scanner, RackVST3PluginInfo* plugins
         module_paths.insert(module_paths.end(), found_bundles.begin(), found_bundles.end());
     }
 
-    // Also include system-discovered modules (from getModulePaths)
-    // This ensures we find all plugins even if custom paths are specified
-    auto system_modules = Hosting::Module::getModulePaths();
-    module_paths.insert(module_paths.end(), system_modules.begin(), system_modules.end());
+    // Explicit paths define the scan boundary. In particular, scan_path must
+    // not load unrelated system modules inside a candidate's probe process.
+    if (scanner->search_paths.empty() || scanner->include_system_paths) {
+        auto system_modules = Hosting::Module::getModulePaths();
+        module_paths.insert(module_paths.end(), system_modules.begin(), system_modules.end());
+    }
 
     // Remove duplicates (in case same plugin is in both custom and system paths)
     std::sort(module_paths.begin(), module_paths.end());

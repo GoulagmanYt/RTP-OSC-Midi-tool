@@ -21,7 +21,7 @@ export function RtpStatusCard({ config, status, t }: Props) {
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="grid gap-3 md:grid-cols-2">
-          <div className="rounded-lg border border-slate-100 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-900/50">
+          <div className="rounded-lg border border-border/60 bg-background p-3">
             <div className="mb-2 flex items-center justify-between">
               <span className="text-sm text-muted-foreground">{t("rtp.server")}</span>
               <Badge variant={status?.rtpActive ? "success" : "secondary"}>
@@ -33,10 +33,10 @@ export function RtpStatusCard({ config, status, t }: Props) {
             </div>
           </div>
 
-          <div className="rounded-lg border border-slate-100 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-900/50">
+          <div className="rounded-lg border border-border/60 bg-background p-3">
             <div className="mb-2 flex items-center justify-between">
               <span className="text-sm text-muted-foreground">{t("rtp.boundPorts")}</span>
-              <code className="rounded bg-slate-200 px-1.5 py-0.5 font-mono text-xs dark:bg-slate-700">
+              <code className="rounded bg-secondary px-1.5 py-0.5 font-mono text-xs">
                 {status?.rtpBoundPort ? `${status.rtpBoundPort}/${status.rtpBoundPort + 1}` : "-"}
               </code>
             </div>

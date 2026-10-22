@@ -97,9 +97,17 @@ mod fixture {
                 } else {
                     CONTROL_PROTOCOL_VERSION
                 },
-                host_abi_version: HOST_ABI_VERSION,
+                host_abi_version: if mode == "wrong-abi" {
+                    HOST_ABI_VERSION.wrapping_add(1)
+                } else {
+                    HOST_ABI_VERSION
+                },
                 session_id: args.session_id,
-                token: args.token,
+                token: if mode == "wrong-token" {
+                    "invalid-token".into()
+                } else {
+                    args.token
+                },
                 worker_pid: std::process::id(),
             },
         )
@@ -188,6 +196,12 @@ mod fixture {
                         }
                         ControlMessage::ListParameters { request_id } => ControlMessage::Parameters { request_id, parameters: Vec::new() },
                         ControlMessage::Ping { sequence } => ControlMessage::Pong { sequence },
+                        ControlMessage::SaveState { .. } if mode == "truncated-response" => {
+                            use tokio::io::AsyncWriteExt;
+                            control_writer.write_u32_le(100).await.map_err(|e| e.to_string())?;
+                            control_writer.write_all(b"{\"type\":").await.map_err(|e| e.to_string())?;
+                            return Ok(());
+                        }
                         ControlMessage::SaveState { request_id } if mode == "slow-command" => {
                             slow_ack = Some((tokio::time::Instant::now() + Duration::from_secs(3), request_id));
                             continue;

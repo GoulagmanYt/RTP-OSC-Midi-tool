@@ -147,7 +147,7 @@ int rack_vst3_plugin_process(
     uint32_t frames
 );
 
-// Queue MIDI and process audio in one realtime FFI transition. Event storage is
+  // Queue MIDI and process audio in one realtime FFI transition. Event storage is
 // preallocated by the host and event_count must not exceed 512.
 int rack_vst3_plugin_process_with_midi(
     RackVST3Plugin* plugin,
@@ -350,6 +350,11 @@ int rack_vst3_plugin_send_midi(
     const RackVST3MidiEvent* events,
     uint32_t event_count
 );
+
+// Audio-thread only. Panic admission is independent of the ordinary MIDI batch;
+// pending remains true until every explicit release has passed a successful DSP block.
+int rack_vst3_plugin_request_midi_reset(RackVST3Plugin* plugin);
+int rack_vst3_plugin_midi_reset_pending(RackVST3Plugin* plugin);
 
 #ifdef __cplusplus
 }

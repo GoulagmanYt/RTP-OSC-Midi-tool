@@ -26,19 +26,19 @@ export function RoutingStatusCard({ t, config, status, activity, displayPortName
       </CardHeader>
       <CardContent className="space-y-3">
         <div className="grid gap-3 md:grid-cols-3">
-          <div className="flex items-center justify-between rounded-lg border border-slate-100 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-900/50">
+          <div className="flex items-center justify-between rounded-lg border border-border/60 bg-background p-3">
             <span className="text-sm text-muted-foreground">{t("routing.input")}</span>
             <Badge variant={config?.midi.inputDevice ? "success" : "secondary"}>
               {config?.midi.inputDevice ? displayPortName(config.midi.inputDevice) : t("routing.notConfigured")}
             </Badge>
           </div>
-          <div className="flex items-center justify-between rounded-lg border border-slate-100 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-900/50">
+          <div className="flex items-center justify-between rounded-lg border border-border/60 bg-background p-3">
             <span className="text-sm text-muted-foreground">{t("routing.output")}</span>
             <Badge variant={config?.midi.outputDevice ? "success" : "secondary"}>
               {config?.midi.outputDevice ? displayPortName(config.midi.outputDevice) : t("routing.notConfigured")}
             </Badge>
           </div>
-          <div className="flex items-center justify-between rounded-lg border border-slate-100 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-900/50">
+          <div className="flex items-center justify-between rounded-lg border border-border/60 bg-background p-3">
             <span className="text-sm text-muted-foreground">{t("routing.bridge")}</span>
             <Badge variant={status?.running ? "success" : "secondary"}>
               {status?.running ? t("common.active") : t("common.stopped")}
@@ -58,7 +58,7 @@ export function RoutingStatusCard({ t, config, status, activity, displayPortName
                 return (
                   <div
                     key={item.source}
-                    className="flex items-center justify-between rounded-md border border-slate-100 bg-white/70 px-3 py-2 dark:border-slate-800 dark:bg-slate-950/40"
+                    className="flex items-center justify-between rounded-md border border-border/60 bg-card px-3 py-2"
                   >
                     <div className="flex items-center gap-3">
                       <div className={`h-2.5 w-2.5 rounded-full ${isActive ? "bg-emerald-500 animate-pulse" : "bg-slate-400"}`} />
@@ -71,7 +71,7 @@ export function RoutingStatusCard({ t, config, status, activity, displayPortName
                     </div>
                     <div className="space-y-1 text-right">
                       <div className="text-sm font-semibold">{item.messagesPerSec ?? 0}/s</div>
-                      <div className="h-1.5 w-20 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
+                      <div className="h-1.5 w-20 overflow-hidden rounded-full bg-secondary">
                         <div className="h-full bg-emerald-500" style={{ width: `${(level / 60) * 100}%` }} />
                       </div>
                     </div>

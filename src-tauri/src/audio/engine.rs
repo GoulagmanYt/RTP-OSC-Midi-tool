@@ -13,7 +13,7 @@ use super::{
 use std::{
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, AtomicU8, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
         Arc,
     },
 };
@@ -96,10 +96,15 @@ pub struct AudioEngine {
     pub(super) midi_transport_failed: Arc<AtomicBool>,
     pub(super) live_parameters: Arc<Mutex<std::collections::BTreeMap<usize, f32>>>,
     pub(super) game_mode: Arc<AtomicBool>,
+    pub(super) game_mode_generation: Arc<AtomicU64>,
     pub(super) editor_open: Arc<AtomicBool>,
     pub(super) maintenance: Arc<AtomicBool>,
     pub(super) deferred_save: Arc<AtomicBool>,
     pub(super) deferred_editor: Arc<AtomicU8>,
+    pub(super) deferred_save_generation: Arc<AtomicU64>,
+    pub(super) deferred_editor_generation: Arc<AtomicU64>,
+    pub(super) deferred_retry_scheduled: Arc<AtomicBool>,
+    pub(super) control_gate: Arc<parking_lot::ReentrantMutex<()>>,
     pub(super) health_telemetry: Arc<ArcSwapOption<AudioTelemetry>>,
     pub(super) lifecycle_gate: Arc<Mutex<()>>,
     pub(super) lifecycle_state: Arc<AtomicU8>,
@@ -120,10 +125,15 @@ impl AudioEngine {
             midi_transport_failed: Arc::new(AtomicBool::new(false)),
             live_parameters: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             game_mode: Arc::new(AtomicBool::new(true)),
+            game_mode_generation: Arc::new(AtomicU64::new(0)),
             editor_open: Arc::new(AtomicBool::new(false)),
             maintenance: Arc::new(AtomicBool::new(false)),
             deferred_save: Arc::new(AtomicBool::new(false)),
             deferred_editor: Arc::new(AtomicU8::new(0)),
+            deferred_save_generation: Arc::new(AtomicU64::new(0)),
+            deferred_editor_generation: Arc::new(AtomicU64::new(0)),
+            deferred_retry_scheduled: Arc::new(AtomicBool::new(false)),
+            control_gate: Arc::new(parking_lot::ReentrantMutex::new(())),
             health_telemetry: Arc::new(ArcSwapOption::empty()),
             lifecycle_gate: Arc::new(Mutex::new(())),
             lifecycle_state: Arc::new(AtomicU8::new(AudioLifecycleState::Stopped as u8)),
@@ -230,6 +240,13 @@ impl AudioEngine {
     }
 
     pub fn deliver_midi_wire(&self, frame: crate::vst_worker::MidiWireFrame) {
+        #[cfg(feature = "latency-diagnostics")]
+        crate::latency_trace::record(
+            crate::latency_trace::Stage::WorkerReceived,
+            frame.bytes(),
+            frame.monotonic_qpc,
+            crate::vst_worker::protocol::monotonic_qpc(),
+        );
         if frame.pipe_qpc != 0 {
             if let Some(ingress) = self.midi_tx.load().as_ref() {
                 ingress.telemetry.pipe_wait_max_us.fetch_max(
@@ -324,7 +341,7 @@ mod tests {
         rx: rtrb::Consumer<MidiPacket>,
         emergency_reset_requested: Arc<AtomicBool>,
     ) -> AudioCallbackState {
-        AudioCallbackState::new(
+        let mut state = AudioCallbackState::new(
             rx,
             0,
             2,
@@ -342,7 +359,142 @@ mod tests {
             emergency_reset_requested,
             48_000,
             crossbeam_channel::bounded(8).1,
-        )
+        );
+        state.last_frames = 1024;
+        state
+    }
+
+    #[test]
+    fn realtime_flag_only_reset_does_not_replay_old_ring_notes() {
+        let (mut tx, rx) = RingBuffer::new(8);
+        tx.push(MidiPacket::from_bytes(&[0x90, 60, 100]).unwrap())
+            .unwrap();
+        let mut state = callback_test_state(rx, Arc::new(AtomicBool::new(true)));
+        state.drain_midi();
+        assert!(state.needs_emergency_reset);
+        assert!(
+            state.pending_midi.is_empty(),
+            "a pre-panic Note-On was admitted again"
+        );
+    }
+
+    #[test]
+    fn panic_epoch_clears_native_fallback_audio() {
+        for flag_only in [false, true] {
+            let (_, rx) = RingBuffer::new(8);
+            let reset = Arc::new(AtomicBool::new(false));
+            let mut state = callback_test_state(rx, reset.clone());
+            state.last_output.fill(0.75);
+            if flag_only {
+                reset.store(true, Ordering::Release);
+            } else {
+                state.telemetry.midi_generation.store(1, Ordering::Release);
+            }
+            state.drain_midi();
+            let mut data = [1.0f32; 16];
+            super::super::callback::replay_last_output_or_silence(&mut data, 2, 0.0, &mut state);
+            assert_eq!(data, [0.0; 16]);
+        }
+    }
+
+    #[test]
+    fn realtime_critical_overflow_accounts_for_every_discarded_message() {
+        let (_, rx) = RingBuffer::new(8);
+        let mut state = callback_test_state(rx, Arc::new(AtomicBool::new(false)));
+        for _ in 0..MAX_PENDING_MIDI {
+            state.enqueue_midi(MidiPacket::from_bytes(&[0x80, 60, 0]).unwrap());
+        }
+        state.enqueue_midi(MidiPacket::from_bytes(&[0xB0, 64, 0]).unwrap());
+        assert!(state.needs_emergency_reset);
+        assert_eq!(state.pending_midi.back().unwrap().data, [0xB0, 64, 0]);
+        assert_eq!(
+            state.telemetry.midi_drop_count.load(Ordering::Relaxed),
+            MAX_PENDING_MIDI as u32
+        );
+    }
+
+    #[test]
+    fn realtime_oversized_callback_requests_recovery_once_without_moving_buffers() {
+        let (_, rx) = RingBuffer::new(8);
+        let mut state = callback_test_state(rx, Arc::new(AtomicBool::new(false)));
+        let input = state.input_silence.as_ptr();
+        let output = state.outputs[0].as_ptr();
+        assert!(!state.prepare(1025));
+        assert!(!state.prepare(4096));
+        assert_eq!(
+            state
+                .telemetry
+                .stream_recovery_requests
+                .load(Ordering::Relaxed),
+            1
+        );
+        assert_ne!(
+            state.telemetry.stream_fatal_error.load(Ordering::Acquire),
+            0
+        );
+        assert_eq!(state.input_silence.as_ptr(), input);
+        assert_eq!(state.outputs[0].as_ptr(), output);
+        assert!(state.prepare(64));
+    }
+
+    #[test]
+    fn realtime_replay_larger_than_capacity_fills_the_tail_with_silence() {
+        let (_, rx) = RingBuffer::new(8);
+        let mut state = callback_test_state(rx, Arc::new(AtomicBool::new(false)));
+        state.last_output.fill(0.5);
+        let mut output = vec![f32::NAN; 8192];
+        replay_last_output_or_silence(&mut output, 2, 0.0, &mut state);
+        assert_eq!(output[0], 0.5);
+        assert!(output.iter().all(|sample| sample.is_finite()));
+        assert!(output[2048..].iter().all(|sample| *sample == 0.0));
+    }
+
+    #[test]
+    fn realtime_200_events_per_second_preserve_releases_and_fifo() {
+        use super::super::callback_midi::submit_pending_vst3_midi;
+        let (mut tx, rx) = RingBuffer::new(1024);
+        let mut state = callback_test_state(rx, Arc::new(AtomicBool::new(false)));
+        // Ten seconds of 200 events/s, delivered in 100 ms scheduling bursts.
+        for _ in 0..100 {
+            for _ in 0..5 {
+                for bytes in [
+                    [0x90, 60, 100],
+                    [0xB0, 64, 127],
+                    [0x80, 60, 0],
+                    [0xB0, 64, 0],
+                ] {
+                    tx.push(MidiPacket::from_bytes(&bytes).unwrap()).unwrap();
+                }
+            }
+            state.drain_midi();
+            submit_pending_vst3_midi(&mut state, 512, |events| {
+                assert_eq!(events.len(), 20);
+                for group in events.chunks_exact(4) {
+                    assert!(matches!(group[0].kind, rack::MidiEventKind::NoteOn { .. }));
+                    assert!(matches!(
+                        group[1].kind,
+                        rack::MidiEventKind::ControlChange {
+                            controller: 64,
+                            value: 127,
+                            ..
+                        }
+                    ));
+                    assert!(matches!(group[2].kind, rack::MidiEventKind::NoteOff { .. }));
+                    assert!(matches!(
+                        group[3].kind,
+                        rack::MidiEventKind::ControlChange {
+                            controller: 64,
+                            value: 0,
+                            ..
+                        }
+                    ));
+                }
+                Ok(())
+            })
+            .unwrap();
+        }
+        assert!(state.pending_midi.is_empty());
+        assert_eq!(state.telemetry.midi_drop_count.load(Ordering::Relaxed), 0);
     }
 
     #[test]
@@ -882,6 +1034,133 @@ mod tests {
     }
 
     #[test]
+    fn late_vst3_note_keeps_release_pending_instead_of_collapsing_duration() {
+        use super::super::callback_midi::submit_pending_vst3_midi_at;
+
+        let (_, rx) = RingBuffer::new(8);
+        let mut state = callback_test_state(rx, Arc::new(AtomicBool::new(false)));
+        state.last_frames = 480;
+        for (data, stamp) in [([0x90, 60, 100], 900_000), ([0x80, 60, 0], 950_000)] {
+            let mut packet = MidiPacket::from_bytes(&data).unwrap();
+            packet.timestamp_us = stamp;
+            state.pending_midi.push_back(packet);
+        }
+        let mut delivered = Vec::new();
+        submit_pending_vst3_midi_at(&mut state, 512, 1_000_000, |events| {
+            delivered.extend_from_slice(events);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            delivered.len(),
+            1,
+            "a late release must retain time after its Note-On"
+        );
+        assert!(matches!(
+            delivered[0].kind,
+            RackMidiEventKind::NoteOn { .. }
+        ));
+        assert_eq!(state.pending_midi.len(), 1);
+        assert!(state.pending_midi[0].is_note_off());
+        for now_us in [1_010_000, 1_020_000] {
+            submit_pending_vst3_midi_at(&mut state, 512, now_us, |events| {
+                delivered.extend_from_slice(events);
+                Ok(())
+            })
+            .unwrap();
+        }
+        assert_eq!(delivered.len(), 2);
+        assert_eq!(delivered[1].sample_offset, 240);
+        assert!(state.pending_midi.is_empty());
+        assert_eq!(state.telemetry.midi_drop_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn late_vst2_chord_and_sustain_keep_time_after_rejected_vst3_submission() {
+        use super::super::callback_midi::{prepare_pending_vst2_midi, submit_pending_vst3_midi_at};
+        let (_, rx) = RingBuffer::new(16);
+        let mut state = callback_test_state(rx, Arc::new(AtomicBool::new(false)));
+        state.last_frames = 480;
+        let events = [
+            ([0x90, 60, 100], 900_000),
+            ([0x90, 64, 100], 900_000),
+            ([0xB0, 64, 127], 905_000),
+            ([0x80, 60, 0], 930_000),
+            ([0x90, 60, 100], 940_000),
+            ([0xB0, 64, 0], 945_000),
+            ([0x80, 60, 0], 950_000),
+            ([0x80, 64, 0], 950_000),
+        ];
+        for (data, stamp) in events {
+            let mut packet = MidiPacket::from_bytes(&data).unwrap();
+            packet.timestamp_us = stamp;
+            state.pending_midi.push_back(packet);
+        }
+        assert!(
+            submit_pending_vst3_midi_at(&mut state, 512, 1_000_000, |_| {
+                Err(rack::Error::Other("rejected".into()))
+            })
+            .is_err()
+        );
+        assert_eq!(state.pending_midi.len(), events.len());
+        let mut delivered = Vec::new();
+        for index in 0..4 {
+            prepare_pending_vst2_midi(&mut state, 1_000_000 + index * 10_000);
+            for event in &state.vst2_midi_events {
+                delivered.push((event.midi_data, index * 480 + event.delta_frames as u64));
+            }
+        }
+        assert_eq!(
+            delivered.iter().map(|(data, _)| *data).collect::<Vec<_>>(),
+            events.map(|(data, _)| data)
+        );
+        assert_eq!(
+            delivered[0].1, delivered[1].1,
+            "chord must remain simultaneous"
+        );
+        assert_eq!(delivered[3].1 - delivered[0].1, 720);
+        assert!(
+            delivered[4].1 > delivered[3].1,
+            "release must precede retrigger"
+        );
+        assert!(state.pending_midi.is_empty());
+    }
+
+    #[test]
+    fn recovery_does_not_skip_notes_beyond_the_ingress_drain_budget() {
+        use super::super::callback_midi::submit_pending_vst3_midi_at;
+        let (mut tx, rx) = RingBuffer::new(1024);
+        let mut state = callback_test_state(rx, Arc::new(AtomicBool::new(false)));
+        state.last_frames = 480;
+        for index in 0..MIDI_DRAIN_BUDGET_PER_CALLBACK + 2 {
+            let (bytes, stamp) = if index < MIDI_DRAIN_BUDGET_PER_CALLBACK {
+                ([0xB0, 1, 80], 900_000)
+            } else if index == MIDI_DRAIN_BUDGET_PER_CALLBACK {
+                ([0x90, 60, 100], 901_000)
+            } else {
+                ([0x80, 60, 0], 902_000)
+            };
+            let mut packet = MidiPacket::from_bytes(&bytes).unwrap();
+            packet.timestamp_us = stamp;
+            tx.push(packet).unwrap();
+        }
+        state.drain_midi();
+        submit_pending_vst3_midi_at(&mut state, 512, 1_000_000, |_| Ok(())).unwrap();
+        state.drain_midi();
+        let mut offsets = Vec::new();
+        submit_pending_vst3_midi_at(&mut state, 512, 1_010_000, |events| {
+            offsets.extend(events.iter().map(|event| event.sample_offset));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(offsets.len(), 2);
+        assert!(
+            offsets[1] > offsets[0],
+            "ring backlog must not collapse a note behind the drain budget"
+        );
+    }
+
+    #[test]
     fn delayed_callback_preserves_note_and_controller_order_without_dropping() {
         let (mut tx, rx) = RingBuffer::<MidiPacket>::new(8);
         let expected = [[0x90, 60, 100], [0xB0, 7, 80], [0x80, 60, 0]];
@@ -1001,6 +1280,20 @@ mod tests {
         let mut long = [1.0f32; 8];
         replay_last_output_or_silence(&mut long, 2, 0.0, &mut state);
         assert_eq!(long, [0.0; 8]);
+    }
+
+    #[test]
+    fn integer_fallback_saturates_audio_saved_with_the_limiter_disabled() {
+        let (_, rx) = RingBuffer::new(8);
+        let mut state = callback_test_state(rx, Arc::new(AtomicBool::new(false)));
+        state.last_output[..4].copy_from_slice(&[2.0, -2.0, 0.5, -0.5]);
+        let silence = cpal::I24::new(0).unwrap();
+        let mut data = [silence; 4];
+        replay_last_output_or_silence(&mut data, 2, silence, &mut state);
+        assert_eq!(
+            data.map(|sample| sample.inner()),
+            [8_388_607, -8_388_608, 0, 0]
+        );
     }
 
     #[test]

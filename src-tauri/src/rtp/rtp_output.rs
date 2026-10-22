@@ -147,9 +147,9 @@ pub(crate) async fn run(
 
 async fn send_midi_panic(session: &RtpMidiSession) -> std::io::Result<()> {
     use midi_types::{Channel, Control, MidiMessage, Value7};
-    let commands: [MidiEvent<'static>; 48] = std::array::from_fn(|index| {
-        let channel = Channel::from((index / 3) as u8);
-        let control = Control::from([64, 123, 120][index % 3]);
+    let commands: [MidiEvent<'static>; 64] = std::array::from_fn(|index| {
+        let channel = Channel::from((index / 4) as u8);
+        let control = Control::from([64, 120, 121, 123][index % 4]);
         MidiEvent::new(
             None,
             MidiMessage::ControlChange(channel, control, Value7::from(0)).into(),
@@ -278,7 +278,23 @@ mod tests {
                 send_bytes(&sender, &bytes).await.unwrap();
                 assert_eq!(sysex.recv().await.unwrap(), bytes[1..bytes.len()-1]);
                 crate::bridge::pipeline::request_critical_midi_reset();
-                for _ in 0..48 { assert!(matches!(notes.recv().await.unwrap(), MidiMessage::ControlChange(..))); }
+                tx.send(OutgoingFrame { frame: MidiFrame { generation: MidiFrame::current_generation(), ingress_qpc: crate::vst_worker::protocol::monotonic_qpc(), data: smallvec::smallvec![0x90, 61, 100], source: Arc::from("Keyboard") }, generation: midi_reset_generation(), route_generation: 0 }).await.unwrap();
+                let mut resets = Vec::new();
+                loop {
+                    match notes.recv().await.unwrap() {
+                        MidiMessage::ControlChange(channel, controller, value) => {
+                            resets.push((u8::from(channel), u8::from(controller), u8::from(value)));
+                        }
+                        MidiMessage::NoteOn(_, note, _) if u8::from(note) == 61 => break,
+                        other => panic!("unexpected reset message: {other:?}"),
+                    }
+                }
+                for channel in 0..16 {
+                    assert!(resets.contains(&(channel, 121, 0)), "remote controllers must be reset before new notes on channel {channel}");
+                    for controller in [64, 120, 123] {
+                        assert!(resets.contains(&(channel, controller, 0)));
+                    }
+                }
                 let _ = stop.send(()); task.await.unwrap();
                 sender.stop_gracefully().await; receiver.stop_gracefully().await;
             }).await.expect("RTP output regression timed out");

@@ -274,10 +274,14 @@ impl AudioEngine {
             return crate::tauri::utils::safe_block_on(self.worker.open_editor())
                 .map_err(AudioError::Message);
         }
-        if self.game_mode.load(Ordering::Acquire) {
-            self.deferred_editor.store(1, Ordering::Release);
-            return Ok(());
+        let result = self.apply_editor_intent(1, || self.open_vst_ui_now(app_handle.clone()));
+        if result.is_err() {
+            self.schedule_deferred_retry(app_handle);
         }
+        result
+    }
+
+    fn open_vst_ui_now(&self, app_handle: tauri::AppHandle) -> Result<(), AudioError> {
         let maintenance = self.begin_maintenance()?;
         let (plugin_arc, editor_window_arc) = {
             let mut guard = self.runtime.lock();
@@ -455,7 +459,7 @@ impl AudioEngine {
                     editor_open.store(true, Ordering::Release);
                     if let Some(telemetry) = &telemetry { telemetry.editor_open.store(true, Ordering::Release); }
                 }
-                let _ = tx.send(result);
+                super::game_mode::finish_maintenance(_maintenance, || { let _ = tx.send(result); });
             })
             .map_err(|_| AudioError::Message("Failed to schedule VST UI on main thread".into()))?;
 
@@ -473,10 +477,14 @@ impl AudioEngine {
             return crate::tauri::utils::safe_block_on(self.worker.close_editor())
                 .map_err(AudioError::Message);
         }
-        if self.game_mode.load(Ordering::Acquire) {
-            self.deferred_editor.store(2, Ordering::Release);
-            return Ok(());
+        let result = self.apply_editor_intent(2, || self.close_vst_ui_now(app_handle.clone()));
+        if result.is_err() {
+            self.schedule_deferred_retry(app_handle);
         }
+        result
+    }
+
+    pub(super) fn close_vst_ui_now(&self, app_handle: tauri::AppHandle) -> Result<(), AudioError> {
         let maintenance = self.begin_maintenance()?;
         let (editor_window_arc, plugin_arc) = {
             let mut guard = self.runtime.lock();
@@ -527,7 +535,9 @@ impl AudioEngine {
                         telemetry.editor_open.store(false, Ordering::Release);
                     }
                 }
-                let _ = tx.send(result);
+                super::game_mode::finish_maintenance(_maintenance, || {
+                    let _ = tx.send(result);
+                });
             })
             .map_err(|_| {
                 AudioError::Message("Failed to schedule VST close on main thread".into())

@@ -7,15 +7,13 @@ src-tauri/target
 tools/diagnostics/target
 .venv
 vendor/rack/rack-sys/external
+vendor/**/Cargo.lock
 reports
+docs/superpowers/
+docs/audio-cpu-resilience.md
 artifacts/
 src-tauri/binaries/*.exe
 .vscode/
-
 *.code-workspace
-
-# AI codebase export dumps (untracked / not committed)
-export_ia/
 __pycache__/
 *.pyc
-DIFF_AUDIT_FIXES.txt

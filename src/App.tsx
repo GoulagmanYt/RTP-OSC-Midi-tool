@@ -58,7 +58,7 @@ function AppContent() {
     if (!config) return;
     const palette = config.ui.themePalette || (config.ui.theme === "dark" ? "dark" : "light");
     const radius = config.ui.cornerRadius ?? 12;
-    applyTheme(palette, radius);
+    return applyTheme(palette, radius, config.ui);
   }, [config]);
 
   if (isLoading) {

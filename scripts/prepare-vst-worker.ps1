@@ -36,60 +36,71 @@ if (-not $env:LIBCLANG_PATH) {
     $env:LIBCLANG_PATH = Split-Path -Parent $libclangPath
 }
 
-$hostLine = rustc -vV | Where-Object { $_ -like 'host: *' } | Select-Object -First 1
-if (-not $hostLine) {
-    throw 'Unable to determine the Rust host target triple.'
-}
-$hostTriple = $hostLine.Substring(6).Trim()
-if ($hostTriple -ne 'x86_64-pc-windows-msvc') {
-    throw "The OSCMidi desktop build requires x86_64-pc-windows-msvc, found $hostTriple."
-}
-
-$targets = @(
-    @{ Triple = 'x86_64-pc-windows-msvc'; Suffix = 'x64' },
-    @{ Triple = 'i686-pc-windows-msvc'; Suffix = 'x86' }
-)
-
-$installedTargets = @(rustup target list --installed)
-foreach ($target in $targets) {
-    if ($installedTargets -notcontains $target.Triple) {
-        throw "Missing Rust target $($target.Triple). Install it with: rustup target add $($target.Triple)"
-    }
-}
-
-$metadata = cargo metadata --manifest-path $manifestPath --format-version 1 --no-deps | ConvertFrom-Json
-$binaryDirectory = Join-Path $repositoryRoot 'src-tauri\binaries'
-New-Item -ItemType Directory -Force -Path $binaryDirectory | Out-Null
-
-function Get-PeMachine {
-    param([Parameter(Mandatory)][string]$Path)
-    $stream = [System.IO.File]::OpenRead((Resolve-Path -LiteralPath $Path).Path)
-    $reader = [System.IO.BinaryReader]::new($stream)
-    try {
-        if ($reader.ReadUInt16() -ne 0x5A4D) { throw "Not a PE file: $Path" }
-        $stream.Position = 0x3C
-        $peOffset = $reader.ReadUInt32()
-        $stream.Position = $peOffset
-        if ($reader.ReadUInt32() -ne 0x00004550) { throw "Invalid PE signature: $Path" }
-        return $reader.ReadUInt16()
-    }
-    finally {
-        $reader.Dispose()
-        $stream.Dispose()
-    }
-}
-
 $previousTauriConfig = $env:TAURI_CONFIG
+$previousLocation = Get-Location
 try {
+    # Cargo discovers configuration and the pinned toolchain from its working directory.
+    Set-Location $repositoryRoot
+    $hostLine = rustc -vV | Where-Object { $_ -like 'host: *' } | Select-Object -First 1
+    if (-not $hostLine) {
+        throw 'Unable to determine the Rust host target triple.'
+    }
+    $hostTriple = $hostLine.Substring(6).Trim()
+    if ($hostTriple -ne 'x86_64-pc-windows-msvc') {
+        throw "The OSCMidi desktop build requires x86_64-pc-windows-msvc, found $hostTriple."
+    }
+
+    $targets = @(
+        @{ Triple = 'x86_64-pc-windows-msvc'; Suffix = 'x64' },
+        @{ Triple = 'i686-pc-windows-msvc'; Suffix = 'x86' }
+    )
+
+    $installedTargets = @(rustup target list --installed)
+    foreach ($target in $targets) {
+        if ($installedTargets -notcontains $target.Triple) {
+            throw "Missing Rust target $($target.Triple). Install it with: rustup target add $($target.Triple)"
+        }
+    }
+
+    $metadata = cargo metadata --manifest-path $manifestPath --format-version 1 --no-deps | ConvertFrom-Json
+    $binaryDirectory = Join-Path $repositoryRoot 'src-tauri\binaries'
+    New-Item -ItemType Directory -Force -Path $binaryDirectory | Out-Null
+
+    function Get-PeMachine {
+        param([Parameter(Mandatory)][string]$Path)
+        $stream = [System.IO.File]::OpenRead((Resolve-Path -LiteralPath $Path).Path)
+        $reader = [System.IO.BinaryReader]::new($stream)
+        try {
+            if ($reader.ReadUInt16() -ne 0x5A4D) { throw "Not a PE file: $Path" }
+            $stream.Position = 0x3C
+            $peOffset = $reader.ReadUInt32()
+            $stream.Position = $peOffset
+            if ($reader.ReadUInt32() -ne 0x00004550) { throw "Invalid PE signature: $Path" }
+            return $reader.ReadUInt16()
+        }
+        finally {
+            $reader.Dispose()
+            $stream.Dispose()
+        }
+    }
+
     $env:TAURI_CONFIG = '{"bundle":{"externalBin":[]}}'
     foreach ($target in $targets) {
+        $workerFeatures = if ($env:OSCMIDI_ENABLE_LATENCY_DIAGNOSTICS -eq '1') {
+            'vst-worker-binary,latency-diagnostics'
+        } else {
+            'vst-worker-binary'
+        }
         $cargoArgs = @(
             'build',
             '--manifest-path', $manifestPath,
-            '--target', $target.Triple,
             '--bin', 'vst-host-worker',
-            '--features', 'vst-worker-binary'
+            '--features', $workerFeatures,
+            '--locked',
+            '--timings'
         )
+        # Native x64 uses the same dependency cache/layout as the desktop app.
+        if ($target.Triple -ne $hostTriple) { $cargoArgs += @('--target', $target.Triple) }
         if ($Profile -eq 'release') {
             $cargoArgs += '--release'
         }
@@ -98,7 +109,8 @@ try {
             throw "Building vst-host-worker for $($target.Triple) failed with exit code $LASTEXITCODE."
         }
 
-        $source = Join-Path $metadata.target_directory "$($target.Triple)\$Profile\vst-host-worker.exe"
+        $relativeOutput = if ($target.Triple -eq $hostTriple) { "$Profile\vst-host-worker.exe" } else { "$($target.Triple)\$Profile\vst-host-worker.exe" }
+        $source = Join-Path $metadata.target_directory $relativeOutput
         if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
             throw "The worker build completed but $source was not produced."
         }
@@ -116,4 +128,5 @@ try {
 }
 finally {
     $env:TAURI_CONFIG = $previousTauriConfig
+    Set-Location $previousLocation
 }

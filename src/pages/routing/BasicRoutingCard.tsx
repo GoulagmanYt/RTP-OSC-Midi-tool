@@ -44,7 +44,7 @@ export function BasicRoutingCard({
     <Card>
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
-          <Cable className="h-5 w-5 text-blue-500" />
+          <Cable className="h-5 w-5 text-muted-foreground" />
           {t("routing.title")}
         </CardTitle>
         <CardDescription>{t("routing.description")}</CardDescription>
@@ -56,7 +56,7 @@ export function BasicRoutingCard({
               {t("routing.midiInput")}
             </Label>
             <Select value={config?.midi.inputDevice ?? ""} onValueChange={onMidiInChange}>
-              <SelectTrigger>
+              <SelectTrigger id="midi-input">
                 <SelectValue placeholder={t("routing.noneSelected")} />
               </SelectTrigger>
               <SelectContent>
@@ -79,7 +79,7 @@ export function BasicRoutingCard({
               {t("routing.midiOutput")}
             </Label>
             <Select value={config?.midi.outputDevice ?? ""} onValueChange={onMidiOutChange}>
-              <SelectTrigger>
+              <SelectTrigger id="midi-output">
                 <SelectValue placeholder={t("routing.noneSelected")} />
               </SelectTrigger>
               <SelectContent>
@@ -97,10 +97,10 @@ export function BasicRoutingCard({
           <div className="space-y-3">
             <div className="flex items-center justify-between">
               <div className="flex flex-col gap-1">
-                <Label>{t("routing.channelFilter")}</Label>
+                <Label htmlFor="midi-channel-filter">{t("routing.channelFilter")}</Label>
                 <p className="text-xs text-muted-foreground">{t("routing.channelFilterHint")}</p>
               </div>
-              <Input
+              <Input id="midi-channel-filter"
                 className="w-28"
                 type="number"
                 min="1"
@@ -113,10 +113,10 @@ export function BasicRoutingCard({
 
             <div className="flex items-center justify-between">
               <div className="flex flex-col gap-1">
-                <Label>{t("routing.midiThru")}</Label>
+                <Label htmlFor="midi-thru">{t("routing.midiThru")}</Label>
                 <p className="text-xs text-muted-foreground">{t("routing.midiThruHint")}</p>
               </div>
-              <Switch
+              <Switch id="midi-thru"
                 checked={config?.midi.thruEnabled ?? false}
                 onCheckedChange={(value) => onUpdateConfig({ midi: { thruEnabled: value } as AppConfig["midi"] })}
               />
@@ -124,10 +124,10 @@ export function BasicRoutingCard({
 
             <div className="flex items-center justify-between">
               <div className="flex flex-col gap-1">
-                <Label>{t("routing.hotplug")}</Label>
+                <Label htmlFor="midi-hotplug">{t("routing.hotplug")}</Label>
                 <p className="text-xs text-muted-foreground">{t("routing.hotplugHint")}</p>
               </div>
-              <Switch
+              <Switch id="midi-hotplug"
                 checked={config?.midi.hotplug ?? false}
                 onCheckedChange={(value) => onUpdateConfig({ midi: { hotplug: value } as AppConfig["midi"] })}
               />
@@ -137,10 +137,10 @@ export function BasicRoutingCard({
           <div className="flex flex-col gap-3">
             <div className="flex items-center justify-between">
               <div className="flex flex-col gap-1">
-                <Label>{t("routing.audioGain")}</Label>
+                <Label htmlFor="routing-gain">{t("routing.audioGain")}</Label>
                 <p className="text-xs text-muted-foreground">{t("routing.audioGainHint")}</p>
               </div>
-              <Input
+              <Input id="routing-gain"
                 className="w-28"
                 type="number"
                 min="-24"

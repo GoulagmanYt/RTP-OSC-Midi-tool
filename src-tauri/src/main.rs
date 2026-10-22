@@ -18,7 +18,11 @@ fn main() {
         std::process::exit(exit_code);
     }
     let _timer_guard = osc_midi_bridge::audio::windows_tuning::enable_high_resolution_timer();
+    let _tuning_diagnostics =
+        osc_midi_bridge::audio::windows_tuning::start_audio_tuning_diagnostics();
     osc_midi_bridge::audio::windows_tuning::reapply_process_priority_on_focus_loss();
+    #[cfg(feature = "latency-diagnostics")]
+    let _latency_trace = osc_midi_bridge::latency_trace::start_file_recorder();
     std::panic::set_hook(Box::new(|info| {
         let msg = match info.payload().downcast_ref::<&str>() {
             Some(s) => *s,
@@ -129,6 +133,7 @@ fn run_app() -> Result<(), Box<dyn std::error::Error>> {
                 window.set_always_on_top(false)?;
                 window.set_resizable(true)?;
                 window.set_title("")?;
+                osc_midi_bridge::audio::windows_tuning::reapply_process_priority_on_focus_loss();
             }
             // UI readiness is telemetry only and must not prevent startup if no listener exists yet.
             window

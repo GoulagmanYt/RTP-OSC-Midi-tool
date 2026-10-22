@@ -37,6 +37,14 @@ use super::runtime_state::{
 
 pub const MAX_CACHED_PARAMETERS: usize = 2048;
 
+fn vst2_shell_plugin_id(class_uid: Option<&str>) -> i32 {
+    class_uid
+        .and_then(|uid| uid.strip_prefix("vst2shell:"))
+        .and_then(|value| u32::from_str_radix(value, 16).ok())
+        .map(|value| value as i32)
+        .unwrap_or(0)
+}
+
 pub(super) fn normalized_parameter_value(value: f32) -> f32 {
     if value.is_finite() {
         value.clamp(0.0, 1.0)
@@ -165,11 +173,7 @@ pub(super) fn load_plugin_backend(
         });
     }
 
-    let plugin_id = probe
-        .and_then(|entry| entry.class_uid.as_deref())
-        .and_then(|uid| uid.strip_prefix("vst2shell:"))
-        .and_then(|value| i32::from_str_radix(value, 16).ok())
-        .unwrap_or(0);
+    let plugin_id = vst2_shell_plugin_id(probe.and_then(|entry| entry.class_uid.as_deref()));
     let time = std::sync::Arc::new(Vst2TimeContext::new());
     let host = std::sync::Arc::new(std::sync::Mutex::new(SimpleHost::new(
         plugin_id,
@@ -544,6 +548,19 @@ impl Host for SimpleHost {
 #[cfg(test)]
 mod parameter_value_tests {
     use super::normalized_parameter_value;
+
+    #[test]
+    fn shell_class_id_preserves_all_32_bits() {
+        assert_eq!(
+            super::vst2_shell_plugin_id(Some("vst2shell:87654321")),
+            -2_023_406_815
+        );
+        assert_eq!(
+            super::vst2_shell_plugin_id(Some("vst2shell:12345678")),
+            0x1234_5678
+        );
+        assert_eq!(super::vst2_shell_plugin_id(Some("vst2:87654321")), 0);
+    }
 
     #[test]
     fn parameter_values_remain_finite_and_normalized_after_loading_or_restoration() {

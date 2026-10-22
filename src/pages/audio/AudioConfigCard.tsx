@@ -139,18 +139,18 @@ export function AudioConfigCard({
       </CardHeader>
       <CardContent className="space-y-6">
         <div className="flex items-center justify-between">
-          <Label className="flex flex-col gap-1">
+          <Label htmlFor="audio-engine-enabled" className="flex flex-col gap-1">
             <span>{t("audio.enableEngine")}</span>
             <span className="text-xs font-normal text-muted-foreground">{t("audio.enableEngineHint")}</span>
           </Label>
-          <Switch checked={config?.audio.enabled ?? false} onCheckedChange={onToggleAudio} />
+          <Switch id="audio-engine-enabled" checked={config?.audio.enabled ?? false} onCheckedChange={onToggleAudio} />
         </div>
 
         <div className="grid gap-4 md:grid-cols-2">
           <div className="space-y-2">
-            <Label>{t("audio.backendLabel")}</Label>
+            <Label htmlFor="audio-backend">{t("audio.backendLabel")}</Label>
             <Select value={config?.audio.backend || ""} onValueChange={onBackendChange} disabled={audioReloading}>
-              <SelectTrigger>
+              <SelectTrigger id="audio-backend">
                 <SelectValue placeholder={t("audio.backendPlaceholder")} />
               </SelectTrigger>
               <SelectContent>
@@ -164,7 +164,7 @@ export function AudioConfigCard({
           </div>
 
           <div className="space-y-2">
-            <Label>{t("audio.deviceLabel")}</Label>
+            <Label htmlFor="audio-device">{t("audio.deviceLabel")}</Label>
             <Select
               value={selectedAudioDeviceValue}
               onValueChange={(value) => {
@@ -175,7 +175,7 @@ export function AudioConfigCard({
               }}
               disabled={!config?.audio.backend || audioReloading}
             >
-              <SelectTrigger>
+              <SelectTrigger id="audio-device">
                 <SelectValue placeholder={t("audio.devicePlaceholder")} />
               </SelectTrigger>
               <SelectContent>
@@ -191,13 +191,13 @@ export function AudioConfigCard({
 
         <div className="grid gap-4 md:grid-cols-3">
           <div className="space-y-2">
-            <Label>{t("audio.sampleRate")}</Label>
+            <Label htmlFor="audio-sample-rate">{t("audio.sampleRate")}</Label>
             <Select
               value={config?.audio.sampleRate?.toString()}
               onValueChange={(value) => onUpdateAudioConfig({ sampleRate: parseInt(value, 10) })}
               disabled={audioReloading}
             >
-              <SelectTrigger>
+              <SelectTrigger id="audio-sample-rate">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -210,13 +210,13 @@ export function AudioConfigCard({
             </Select>
           </div>
           <div className="space-y-2">
-            <Label>{t("audio.bufferSize")}</Label>
+            <Label htmlFor="audio-buffer-size">{t("audio.bufferSize")}</Label>
             <Select
               value={config?.audio.bufferSize?.toString()}
               onValueChange={(value) => onUpdateAudioConfig({ bufferSize: parseInt(value, 10) })}
               disabled={audioReloading}
             >
-              <SelectTrigger>
+              <SelectTrigger id="audio-buffer-size">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -229,10 +229,10 @@ export function AudioConfigCard({
             </Select>
           </div>
           <div className="space-y-2">
-            <Label>
+            <Label htmlFor="audio-master-gain">
               {t("audio.masterGain", { value: config?.audio.gainDb || 0, unit: t("units.db") })}
             </Label>
-            <Input
+            <Input id="audio-master-gain"
               type="range"
               min={-60}
               max={12}
@@ -244,12 +244,43 @@ export function AudioConfigCard({
           </div>
         </div>
 
+        <div className="grid gap-4 md:grid-cols-2">
+          <div className="space-y-2">
+            <Label htmlFor="audio-render-ahead">{t("audio.renderAhead")}</Label>
+            <Select value={String(config?.audio.renderAheadBlocks ?? 1)} disabled={!config || audioReloading}
+              onValueChange={(value) => { void onUpdateAudioConfig({ renderAheadBlocks: Number(value) }); }}>
+              <SelectTrigger id="audio-render-ahead"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="0">{t("audio.renderDirect")}</SelectItem>
+                <SelectItem value="1">{t("audio.renderOne")}</SelectItem>
+                <SelectItem value="2">{t("audio.renderTwo")}</SelectItem>
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">{t("audio.renderAheadHint", {
+              latency: (((config?.audio.renderAheadBlocks ?? 1) * (activeBufferSize || config?.audio.bufferSize || 512) * 1000) / (activeSampleRate || config?.audio.sampleRate || 48000)).toFixed(2),
+            })}</p>
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="audio-dsp-priority">{t("audio.dspPriority")}</Label>
+            <Select value={config?.audio.dspThreadPriority ?? "mmcss"}
+              disabled={!config || audioReloading || config.audio.renderAheadBlocks === 0}
+              onValueChange={(value: "mmcss" | "timeCritical") => { void onUpdateAudioConfig({ dspThreadPriority: value }); }}>
+              <SelectTrigger id="audio-dsp-priority"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="mmcss">{t("audio.dspMmcss")}</SelectItem>
+                <SelectItem value="timeCritical">{t("audio.dspTimeCritical")}</SelectItem>
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">{t("audio.dspPriorityHint")}</p>
+          </div>
+        </div>
+
         <div className="flex items-center justify-between">
-          <Label className="flex flex-col gap-1">
+          <Label htmlFor="audio-limiter" className="flex flex-col gap-1">
             <span>{t("audio.limiter")}</span>
             <span className="text-xs font-normal text-muted-foreground">{t("audio.limiterHint")}</span>
           </Label>
-          <Switch checked={config?.audio.limiterEnabled ?? false} onCheckedChange={onLimiterToggle} />
+          <Switch id="audio-limiter" checked={config?.audio.limiterEnabled ?? false} onCheckedChange={onLimiterToggle} />
         </div>
 
         <div className="flex items-center justify-between gap-3">
@@ -261,13 +292,14 @@ export function AudioConfigCard({
             disabled={!config || audioReloading || status?.realtime?.worker.maintenance}
             onCheckedChange={(gameMode) => { void onUpdateAudioConfig({ gameMode }); }} />
         </div>
-        {status?.realtime?.worker.maintenance && <p role="status" className="text-xs text-amber-600">{t("audio.maintenance")}</p>}
+        {status?.realtime?.worker.maintenance && <p role="status" className="text-xs text-warning">{t("audio.maintenance")}</p>}
         {(status?.realtime?.worker.deferredSave || status?.realtime?.worker.deferredEditor != null) &&
           <p role="status" className="text-xs text-muted-foreground">{t("audio.deferredOperations")}</p>}
         {config?.ui.developerMode && status?.realtime && (
           <div className="text-xs text-muted-foreground">
             {t("audio.deliveryLatency")}: p99 {(status.realtime.worker.midiDeliveryP99Us / 1000).toFixed(2)} ms / max {(status.realtime.worker.midiDeliveryMaxUs / 1000).toFixed(2)} ms
             <br />{t("audio.callbackInterval")}: {(status.realtime.worker.callbackIntervalMaxUs / 1000).toFixed(2)} ms
+            <br />{t("audio.renderUnderflows")}: {status.realtime.worker.renderUnderflows ?? 0} / {t("audio.driverGaps")}: {status.realtime.worker.callbackGapCount ?? 0}
           </div>
         )}
 
@@ -304,7 +336,7 @@ export function AudioConfigCard({
                 {vstMidiCompatible === null ? "--" : vstMidiCompatible ? "OK" : t("audio.vstMidiIncompatible")}
               </span>
             </div>
-            {bufferMismatch ? <p className="text-xs text-amber-600">{t("audio.bufferMismatchWarning")}</p> : null}
+            {bufferMismatch ? <p className="text-xs text-warning">{t("audio.bufferMismatchWarning")}</p> : null}
             <div className="flex items-center justify-between text-xs text-muted-foreground">
               <span>{t("audio.activeBackend")}</span>
               <span className="font-semibold text-foreground">{status?.audioBackend ?? "--"}</span>
@@ -413,7 +445,7 @@ export function AudioConfigCard({
         ) : null}
 
         <div className="space-y-2">
-          <Label>{t("audio.vstInstruments", { path: "Windows VST folders" })}</Label>
+          <Label htmlFor="vst-instrument">{t("audio.vstInstruments", { path: "Windows VST folders" })}</Label>
           <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-5">
             <Input
               value={vstSearch}
@@ -422,7 +454,7 @@ export function AudioConfigCard({
               aria-label={t("audio.vstSearch")}
             />
             <Select value={vstFormat} onValueChange={setVstFormat}>
-              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectTrigger aria-label={t("audio.vstAllFormats")}><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">{t("audio.vstAllFormats")}</SelectItem>
                 <SelectItem value="VST2">VST2</SelectItem>
@@ -430,7 +462,7 @@ export function AudioConfigCard({
               </SelectContent>
             </Select>
             <Select value={vstArchitecture} onValueChange={setVstArchitecture}>
-              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectTrigger aria-label={t("audio.vstAllArchitectures")}><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">{t("audio.vstAllArchitectures")}</SelectItem>
                 <SelectItem value="x64">x64</SelectItem>
@@ -438,7 +470,7 @@ export function AudioConfigCard({
               </SelectContent>
             </Select>
             <Select value={vstStatus} onValueChange={setVstStatus}>
-              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectTrigger aria-label={t("audio.vstAllStatuses")}><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">{t("audio.vstAllStatuses")}</SelectItem>
                 <SelectItem value="compatible">{t("audio.vstStatusCompatible")}</SelectItem>
@@ -450,7 +482,7 @@ export function AudioConfigCard({
             </Select>
             {showVstTechnicalDetails ? (
               <Select value={vstVendor} onValueChange={setVstVendor}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectTrigger aria-label={t("audio.vstAllVendors")}><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">{t("audio.vstAllVendors")}</SelectItem>
                   {vstVendors.map((vendor) => (
@@ -462,7 +494,7 @@ export function AudioConfigCard({
           </div>
           <div className="flex flex-col gap-2 md:flex-row md:flex-wrap md:items-center">
             <Select value={config?.audio.vstPluginId || selectedVstPlugin?.id || ""} onValueChange={onSelectVst} disabled={audioReloading}>
-              <SelectTrigger className="md:flex-1">
+              <SelectTrigger id="vst-instrument" className="md:flex-1">
                 <SelectValue placeholder={t("audio.vstSelectPlaceholder")} />
               </SelectTrigger>
               <SelectContent>
@@ -515,7 +547,7 @@ export function AudioConfigCard({
                   </p>
                 ) : null}
               {selectedVstPlugin.lastError || !selectedVstPlugin.supported ? (
-                <p className="text-xs text-amber-600">
+                <p className="text-xs text-warning">
                   {selectedVstPlugin.failureStage ? `${selectedVstPlugin.failureStage}: ` : ""}
                   {selectedVstPlugin.lastError || selectedPluginStatusLabel}
                 </p>
@@ -581,7 +613,7 @@ export function AudioConfigCard({
           <p className="text-xs text-muted-foreground">{t("audio.vstMidiOnly")}</p>
           <p className="text-xs text-muted-foreground">{t("audio.vstFormats")}</p>
           {selectedVstPlugin?.supported ? <p className="text-xs text-muted-foreground">{t("audio.vstParameterFallback")}</p> : null}
-          {!bridgeRunning ? <p className="text-xs text-amber-600">{t("audio.startBridgeHint")}</p> : null}
+          {!bridgeRunning ? <p className="text-xs text-warning">{t("audio.startBridgeHint")}</p> : null}
           <div className="flex flex-wrap gap-2 pt-2">
             <Button variant="outline" onClick={onPingAudio} disabled={!bridgeRunning || !config?.audio.enabled}>
               <Power className="mr-2 h-4 w-4" />

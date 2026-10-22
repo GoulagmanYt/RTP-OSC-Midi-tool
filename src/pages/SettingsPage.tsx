@@ -23,13 +23,15 @@ import {
 import { useI18n } from "../providers/LanguageProvider";
 import { getErrorMessage } from "../api-errors";
 import { join } from "@tauri-apps/api/path";
+import { AppearanceColors } from "./settings/AppearanceColors";
 
 type PaletteChoice = {
-  id: "light" | "dark" | "contrast";
+  id: "system" | "light" | "dark" | "contrast";
   labelKey: string;
 };
 
 const PALETTE_CHOICES: PaletteChoice[] = [
+  { id: "system", labelKey: "settings.theme.palette.system" },
   { id: "light", labelKey: "settings.theme.palette.light" },
   { id: "dark", labelKey: "settings.theme.palette.dark" },
   { id: "contrast", labelKey: "settings.theme.palette.contrast" },
@@ -104,7 +106,7 @@ export default function SettingsPage() {
   };
 
   const handlePaletteChange = async (palette: PaletteChoice["id"]) => {
-    const nextTheme = palette === "light" ? "light" : "dark";
+    const nextTheme = palette === "system" ? window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light" : palette === "light" ? "light" : "dark";
     try {
       await updateConfig({
         ui: {
@@ -208,33 +210,35 @@ export default function SettingsPage() {
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
-            <Palette className="h-5 w-5 text-blue-500" />
+            <Palette className="h-5 w-5 text-muted-foreground" />
             {t("settings.theme.title")}
           </CardTitle>
           <CardDescription>{t("settings.theme.description")}</CardDescription>
         </CardHeader>
-        <CardContent className="space-y-3">
-          <Label>{t("settings.theme.quickPalette")}</Label>
-          <div className="grid gap-2 sm:grid-cols-3">
-            {PALETTE_CHOICES.map((palette) => (
-              <Button
-                key={palette.id}
-                variant={currentPalette === palette.id ? "default" : "outline"}
-                className="w-full"
-                onClick={() => handlePaletteChange(palette.id)}
-                disabled={busy}
-              >
-                {t(palette.labelKey)}
-              </Button>
-            ))}
-          </div>
+        <CardContent className="space-y-6">
+          <fieldset>
+            <legend className="sr-only">{t("settings.theme.quickPalette")}</legend>
+            <div className="appearance-grid grid grid-cols-2 gap-4 sm:grid-cols-4">
+              {PALETTE_CHOICES.map((palette) => (
+                <label key={palette.id} className="appearance-choice cursor-pointer">
+                  <input type="radio" name="appearance" className="peer sr-only" value={palette.id} checked={currentPalette === palette.id} onChange={() => handlePaletteChange(palette.id)} disabled={busy} />
+                  <span className={`appearance-preview appearance-preview--${palette.id}`} aria-hidden="true">
+                    <span className="appearance-preview-sidebar"><i /><i /><i /></span>
+                    <span className="appearance-preview-content"><i /><i /></span>
+                  </span>
+                  <span className="mt-2 block text-center text-sm">{t(palette.labelKey)}</span>
+                </label>
+              ))}
+            </div>
+          </fieldset>
+          <AppearanceColors ui={config?.ui} disabled={busy || !config} onChange={ui => handleConfigUpdate({ ui })} />
         </CardContent>
       </Card>
 
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
-            <RefreshCcw className="h-5 w-5 text-blue-500" />
+            <RefreshCcw className="h-5 w-5 text-muted-foreground" />
             {t("settings.general.title")}
           </CardTitle>
           <CardDescription>{t("settings.general.description")}</CardDescription>
@@ -242,10 +246,10 @@ export default function SettingsPage() {
         <CardContent className="space-y-4">
           <div className="flex items-center justify-between gap-4">
             <div className="min-w-0 flex flex-col gap-1">
-              <Label>{t("settings.general.developerMode")}</Label>
+              <Label htmlFor="settings-developer">{t("settings.general.developerMode")}</Label>
               <p className="text-xs text-muted-foreground">{t("settings.general.developerModeHint")}</p>
             </div>
-            <Switch
+            <Switch id="settings-developer"
               checked={config?.ui.developerMode || false}
               onCheckedChange={async (checked) => {
                 if (!checked) {
@@ -267,10 +271,10 @@ export default function SettingsPage() {
               <div className="border-t pt-4" />
               <div className="flex items-center justify-between gap-4">
                 <div className="min-w-0 flex flex-col gap-1">
-                  <Label>{t("settings.general.verbose")}</Label>
+                  <Label htmlFor="settings-verbose">{t("settings.general.verbose")}</Label>
                   <p className="text-xs text-muted-foreground">{t("settings.general.verboseHint")}</p>
                 </div>
-                <Switch
+                <Switch id="settings-verbose"
                   checked={config?.logging.verbose || false}
                   onCheckedChange={(checked) => handleConfigUpdate({ logging: { verbose: checked } })}
                 />
@@ -280,10 +284,10 @@ export default function SettingsPage() {
 
               <div className="flex items-center justify-between gap-4">
                 <div className="min-w-0 flex flex-col gap-1">
-                  <Label>{t("settings.general.oscLogs")}</Label>
+                  <Label htmlFor="settings-osc-logs">{t("settings.general.oscLogs")}</Label>
                   <p className="text-xs text-muted-foreground">{t("settings.general.oscLogsHint")}</p>
                 </div>
-                <Switch
+                <Switch id="settings-osc-logs"
                   checked={config?.osc.logMessages || false}
                   onCheckedChange={(checked) => handleConfigUpdate({ osc: { logMessages: checked } })}
                 />
@@ -293,10 +297,10 @@ export default function SettingsPage() {
 
               <div className="flex items-center justify-between gap-4">
                 <div className="min-w-0 flex flex-col gap-1">
-                  <Label>{t("settings.general.logAllToFile")}</Label>
+                  <Label htmlFor="settings-log-file">{t("settings.general.logAllToFile")}</Label>
                   <p className="text-xs text-muted-foreground">{t("settings.general.logAllToFileHint")}</p>
                 </div>
-                <Switch
+                <Switch id="settings-log-file"
                   checked={config?.logging.logAllToFile || false}
                   onCheckedChange={(checked) => handleConfigUpdate({ logging: { logAllToFile: checked } })}
                 />
@@ -306,10 +310,10 @@ export default function SettingsPage() {
 
               <div className="flex items-center justify-between gap-4">
                 <div className="min-w-0 flex flex-col gap-1">
-                  <Label>{t("settings.general.disableLogs")}</Label>
+                  <Label htmlFor="settings-disable-logs">{t("settings.general.disableLogs")}</Label>
                   <p className="text-xs text-muted-foreground">{t("settings.general.disableLogsHint")}</p>
                 </div>
-                <Switch
+                <Switch id="settings-disable-logs"
                   checked={!(config?.logging.enabled ?? true)}
                   onCheckedChange={(checked) => handleConfigUpdate({ logging: { enabled: !checked } })}
                 />
@@ -322,7 +326,7 @@ export default function SettingsPage() {
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
-            <Download className="h-5 w-5 text-blue-500" />
+            <Download className="h-5 w-5 text-muted-foreground" />
             {t("settings.files.title")}
           </CardTitle>
           <CardDescription>{t("settings.files.description")}</CardDescription>
@@ -344,9 +348,9 @@ export default function SettingsPage() {
           </div>
 
           <div className="space-y-2">
-            <Label>{t("settings.files.configFolder")}</Label>
+            <Label htmlFor="settings-config-folder">{t("settings.files.configFolder")}</Label>
             <div className="flex flex-wrap items-center gap-2">
-              <Input readOnly value={paths?.configDir || t("common.unknown")} className="min-w-[240px] flex-1" />
+              <Input id="settings-config-folder" readOnly value={paths?.configDir || t("common.unknown")} className="min-w-[240px] flex-1" />
               <Button variant="outline" size="sm" onClick={() => copyPath(paths?.configDir)} disabled={!paths?.configDir}>
                 {t("common.copyPath")}
               </Button>
@@ -358,9 +362,9 @@ export default function SettingsPage() {
           </div>
 
           <div className="space-y-2">
-            <Label>{t("settings.files.logs")}</Label>
+            <Label htmlFor="settings-log-path">{t("settings.files.logs")}</Label>
             <div className="flex flex-wrap items-center gap-2">
-              <Input readOnly value={paths?.logFile || t("common.unknown")} className="min-w-[240px] flex-1" />
+              <Input id="settings-log-path" readOnly value={paths?.logFile || t("common.unknown")} className="min-w-[240px] flex-1" />
               <Button variant="outline" size="sm" onClick={() => copyPath(paths?.logFile)} disabled={!paths?.logFile}>
                 {t("common.copyPath")}
               </Button>
@@ -377,7 +381,7 @@ export default function SettingsPage() {
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
-              <Trash2 className="h-5 w-5 text-orange-500" />
+              <Trash2 className="h-5 w-5 text-muted-foreground" />
               {t("settings.logs.title")}
             </CardTitle>
             <CardDescription>{t("settings.logs.description")}</CardDescription>

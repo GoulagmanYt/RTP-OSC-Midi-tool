@@ -5,10 +5,11 @@ on:
     branches:
       - main
   workflow_dispatch:
+  workflow_call:
 
 concurrency:
-  group: oscmidi-validate-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: oscmidi-validate-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
 
 permissions:
   contents: read
@@ -42,8 +43,7 @@ jobs:
 
       - name: Lint, type-check and test
         run: |
-          npm run lint
-          npm test
+          pwsh -NoProfile -File scripts/validate.ps1 -Scope Frontend
           npm run build
 
   frontend-required:
@@ -114,75 +114,42 @@ jobs:
           toolchain: 1.90.0
           targets: x86_64-pc-windows-msvc
 
-      - name: Restore Rust cache
-        uses: actions/cache/restore@v6
+      - name: Setup Node.js for script validation
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: Restore Rust caches
+        id: rust-cache
+        uses: ./.github/actions/restore-rust-cache
+        with:
+          stage: validation
+
+      - name: Validate application, diagnostics, vendored hosts and native audio
+        shell: pwsh
+        run: ./scripts/validate.ps1 -Scope Rust
+
+      # Pull requests can read trusted main caches, but never write snapshots.
+      - name: Save dependency downloads
+        if: github.ref == 'refs/heads/main' && steps.rust-cache.outputs.dependency-hit != 'true'
+        uses: actions/cache/save@v6
         with:
           path: |
-            .cargo-target
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-          key: rust-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}
-          restore-keys: |
-            rust-${{ runner.os }}-${{ runner.arch }}-
+          key: ${{ steps.rust-cache.outputs.dependency-key }}
 
-      - name: Validate application version
-        shell: pwsh
-        run: |
-          $PSNativeCommandUseErrorActionPreference = $true
-          $packageVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          $packageLock = Get-Content package-lock.json -Raw | ConvertFrom-Json -AsHashtable
-          $packageLockVersion = $packageLock['version']
-          $packageLockRootVersion = $packageLock['packages']['']['version']
-          $tauriVersion = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
-          $cargoMetadata = cargo metadata `
-            --manifest-path src-tauri/Cargo.toml `
-            --format-version 1 `
-            --no-deps | ConvertFrom-Json
-          $cargoVersion = $cargoMetadata.packages[0].version
-          $diagnosticsMetadata = cargo metadata `
-            --manifest-path tools/diagnostics/Cargo.toml `
-            --format-version 1 `
-            --no-deps | ConvertFrom-Json
-          $diagnosticsVersion = $diagnosticsMetadata.packages[0].version
+      - name: Save exact pinned VST3 SDK
+        if: github.ref == 'refs/heads/main' && steps.rust-cache.outputs.sdk-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: vendor/rack/rack-sys/external/vst3sdk
+          key: ${{ steps.rust-cache.outputs.sdk-key }}
 
-          $versions = @(
-            $packageVersion,
-            $packageLockVersion,
-            $packageLockRootVersion,
-            $tauriVersion,
-            $cargoVersion,
-            $diagnosticsVersion
-          ) | Sort-Object -Unique
-          if ($versions.Count -ne 1) {
-            throw "Version mismatch: package.json=$packageVersion, package-lock.json=$packageLockVersion/$packageLockRootVersion, tauri.conf.json=$tauriVersion, app Cargo.toml=$cargoVersion, diagnostics Cargo.toml=$diagnosticsVersion"
-          }
-          Write-Host "Validated OSCMidi version $packageVersion"
-
-      - name: Validate application and diagnostics
-        run: |
-          $PSNativeCommandUseErrorActionPreference = $true
-          cargo fmt --manifest-path src-tauri/Cargo.toml --package osc-midi-bridge -- --check
-          cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
-          cargo test --manifest-path src-tauri/Cargo.toml --all-targets --all-features
-          cargo fmt --manifest-path tools/diagnostics/Cargo.toml --package oscmidi-diagnostics -- --check
-          cargo clippy --manifest-path tools/diagnostics/Cargo.toml --target-dir tools/diagnostics/target --all-targets -- -D warnings
-          cargo test --manifest-path tools/diagnostics/Cargo.toml --target-dir tools/diagnostics/target --all-targets
-
-      - name: Validate vendored RTP-MIDI
-        run: |
-          $PSNativeCommandUseErrorActionPreference = $true
-          cargo fmt --manifest-path vendor/rtpmidi/Cargo.toml -- --check
-          cargo clippy --manifest-path vendor/rtpmidi/Cargo.toml --all-targets -- -D warnings
-          cargo test --manifest-path vendor/rtpmidi/Cargo.toml --all-targets
-
-      - name: Validate vendored VST hosts
-        run: |
-          $PSNativeCommandUseErrorActionPreference = $true
-          cargo check --manifest-path vendor/rack/Cargo.toml --lib --features vst3
-          cargo test --manifest-path vendor/rack/Cargo.toml --lib --features vst3 --no-run
-          cargo test --manifest-path vendor/rack/Cargo.toml --lib --features vst3 midi::tests
-          cargo test --manifest-path vendor/rack/Cargo.toml --lib --features vst3 vst3::scanner::tests
-          cargo fmt --manifest-path vendor/vst/Cargo.toml -- --check
-          cargo check --manifest-path vendor/vst/Cargo.toml --all-targets --features disable_deprecation_warning
-          cargo test --manifest-path vendor/vst/Cargo.toml --all-targets --features disable_deprecation_warning
+      - name: Save validated compilation snapshot
+        if: github.ref == 'refs/heads/main' && steps.rust-cache.outputs.build-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ steps.rust-cache.outputs.build-paths }}
+          key: ${{ steps.rust-cache.outputs.build-key }}

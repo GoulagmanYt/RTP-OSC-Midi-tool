@@ -30,6 +30,7 @@ pub struct RtpMidiSession {
     pub(super) pending_invitations: Arc<Mutex<HashMap<U32, PendingInvitation>>>, // key by token
     pub(super) midi_port: Arc<MidiPort>,
     pub(super) recovery_generation: Arc<AtomicU64>,
+    retired_invitations: Arc<std::sync::Mutex<HashMap<(SocketAddr, U32), Instant>>>,
 
     listeners: Arc<ArcSwap<EventListeners>>,
     control_port: Arc<ControlPort>,
@@ -115,6 +116,7 @@ impl RtpMidiSession {
             control_port,
             midi_port,
             recovery_generation: Arc::new(AtomicU64::new(0)),
+            retired_invitations: Arc::new(std::sync::Mutex::new(HashMap::new())),
             host_syncer: Arc::new(HostSyncer::new()),
             listeners: Arc::new(ArcSwap::from_pointee(EventListeners::new())),
             cancel_token: Arc::new(CancellationToken::new()),
@@ -292,6 +294,10 @@ impl RtpMidiSession {
         // a participant after the shutdown snapshot has been taken.
         self.remove_all_participants().await;
         self.pending_invitations.lock().await.clear();
+        self.retired_invitations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
         event!(Level::INFO, "Graceful shutdown complete");
     }
 
@@ -342,6 +348,74 @@ impl RtpMidiSession {
 
     pub(super) async fn notify_joined(&self, participant: &Participant) {
         self.listeners.load().notify_participant_joined(participant);
+    }
+
+    pub(super) async fn register_participant(
+        &self,
+        participant: &Participant,
+    ) -> Result<(), &'static str> {
+        let mut peers = self.participants.lock().await;
+        if peers
+            .get(&participant.ssrc())
+            .is_some_and(|peer| peer.addr() != participant.addr())
+        {
+            return Err("SSRC belongs to another endpoint");
+        }
+        let previous = peers
+            .values()
+            .find(|peer| peer.addr() == participant.addr())
+            .cloned();
+        if previous
+            .as_ref()
+            .is_some_and(|peer| peer.initiator_token() == participant.initiator_token())
+        {
+            return Err("Participant already active");
+        }
+        if previous.is_none() && peers.len() >= 128 {
+            return Err("Participant capacity reached");
+        }
+        // Keep retired tokens through the invitation lifetime: a delayed pair
+        // of IN retransmissions must not roll a replacement back to its old
+        // incarnation and make that incarnation's delayed BY valid again.
+        let mut retired = self
+            .retired_invitations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        retired.retain(|_, at| at.elapsed() < Duration::from_secs(30));
+        if participant
+            .initiator_token()
+            .is_some_and(|token| retired.contains_key(&(participant.addr(), token)))
+        {
+            return Err("Retired invitation token");
+        }
+        if let Some(previous) = &previous {
+            if retired.len() >= 256 {
+                return Err("Retired invitation capacity reached");
+            }
+            if let Some(token) = previous.initiator_token() {
+                retired.insert((previous.addr(), token), Instant::now());
+            }
+        }
+        drop(retired);
+        if let Some(previous) = &previous {
+            peers.remove(&previous.ssrc());
+        }
+        peers.insert(participant.ssrc(), participant.clone());
+        drop(peers);
+        // Do not send BY to a restarted endpoint. Release its old router source
+        // before the new join; its fresh identity resets receive/clock history.
+        if let Some(previous) = previous {
+            self.listeners.load().notify_participant_left(&previous);
+        }
+        Ok(())
+    }
+
+    pub(super) fn invitation_is_retired(&self, addr: SocketAddr, token: U32) -> bool {
+        self.retired_invitations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&(addr, token))
+            .is_some_and(|at| at.elapsed() < Duration::from_secs(30))
     }
 
     pub(super) async fn handle_termination(
@@ -409,6 +483,36 @@ pub fn current_timestamp_u32(start_time: Instant) -> U32 {
 #[cfg(test)]
 mod shutdown_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn retired_invitation_protection_is_bounded_and_expires_without_losing_the_active_peer() {
+        let ctx = RtpMidiSession::bind(0, "Retired invitations", 7)
+            .await
+            .unwrap();
+        let addr = "127.0.0.1:5004".parse().unwrap();
+        let peer =
+            |token| Participant::new(addr, false, Some(U32::new(token)), c"Peer", U32::new(42));
+        for token in 0..=256 {
+            ctx.register_participant(&peer(token)).await.unwrap();
+        }
+        assert!(ctx.register_participant(&peer(257)).await.is_err());
+        assert_eq!(
+            ctx.participants().await[0].initiator_token(),
+            Some(U32::new(256))
+        );
+        assert!(ctx.invitation_is_retired(addr, U32::new(0)));
+        // Expire the retained handshakes deterministically, without sleeping.
+        for retired_at in ctx.retired_invitations.lock().unwrap().values_mut() {
+            *retired_at = Instant::now() - Duration::from_secs(31);
+        }
+        assert!(!ctx.invitation_is_retired(addr, U32::new(0)));
+        ctx.register_participant(&peer(257)).await.unwrap();
+        assert_eq!(
+            ctx.participants().await[0].initiator_token(),
+            Some(U32::new(257))
+        );
+        assert!(ctx.invitation_is_retired(addr, U32::new(256)));
+    }
 
     #[tokio::test]
     async fn stale_cleanup_cannot_remove_a_reconnected_peer_with_the_same_ssrc() {

@@ -1,0 +1,254 @@
+[
+  {
+    "name": "low corner at 96k",
+    "sampleRate": 96000,
+    "settings": {
+      "enabled": true,
+      "lowShelf": {
+        "frequencyHz": 40,
+        "gainDb": 18
+      },
+      "midPeak": {
+        "frequencyHz": 1000,
+        "gainDb": 0,
+        "q": 1
+      },
+      "highShelf": {
+        "frequencyHz": 8000,
+        "gainDb": 0
+      }
+    },
+    "response": [
+      {
+        "frequencyHz": 20,
+        "db": 16.283403156066356
+      },
+      {
+        "frequencyHz": 40,
+        "db": 9.0
+      },
+      {
+        "frequencyHz": 100,
+        "db": 0.7899297217338231
+      },
+      {
+        "frequencyHz": 1000,
+        "db": 8.678851875793363e-05
+      },
+      {
+        "frequencyHz": 20000,
+        "db": 2.875277347326353e-10
+      }
+    ]
+  },
+  {
+    "name": "narrow peak at 96k",
+    "sampleRate": 96000,
+    "settings": {
+      "enabled": true,
+      "lowShelf": {
+        "frequencyHz": 120,
+        "gainDb": 0
+      },
+      "midPeak": {
+        "frequencyHz": 100,
+        "gainDb": 18,
+        "q": 10
+      },
+      "highShelf": {
+        "frequencyHz": 8000,
+        "gainDb": 0
+      }
+    },
+    "response": [
+      {
+        "frequencyHz": 20,
+        "db": 0.014709603380379396
+      },
+      {
+        "frequencyHz": 100,
+        "db": 18.0
+      },
+      {
+        "frequencyHz": 120,
+        "db": 1.9757125573167973
+      },
+      {
+        "frequencyHz": 1000,
+        "db": 0.0034600618377875767
+      }
+    ]
+  },
+  {
+    "name": "high band clamped at 32k",
+    "sampleRate": 32000,
+    "settings": {
+      "enabled": true,
+      "lowShelf": {
+        "frequencyHz": 120,
+        "gainDb": 0
+      },
+      "midPeak": {
+        "frequencyHz": 1000,
+        "gainDb": 0,
+        "q": 1
+      },
+      "highShelf": {
+        "frequencyHz": 16000,
+        "gainDb": 12
+      }
+    },
+    "response": [
+      {
+        "frequencyHz": 1000,
+        "db": 9.592301772500318e-07
+      },
+      {
+        "frequencyHz": 8000,
+        "db": 0.010180095142350387
+      },
+      {
+        "frequencyHz": 14400,
+        "db": 6.000000000000001
+      },
+      {
+        "frequencyHz": 15500,
+        "db": 11.852930591938314
+      }
+    ]
+  },
+  {
+    "name": "high band clamped at 8k",
+    "sampleRate": 8000,
+    "settings": {
+      "enabled": true,
+      "lowShelf": {
+        "frequencyHz": 120,
+        "gainDb": 0
+      },
+      "midPeak": {
+        "frequencyHz": 1000,
+        "gainDb": 0,
+        "q": 1
+      },
+      "highShelf": {
+        "frequencyHz": 8000,
+        "gainDb": 12
+      }
+    },
+    "response": [
+      {
+        "frequencyHz": 100,
+        "db": 2.4291952729199614e-08
+      },
+      {
+        "frequencyHz": 2000,
+        "db": 0.010180095142350387
+      },
+      {
+        "frequencyHz": 3500,
+        "db": 3.732479301648857
+      },
+      {
+        "frequencyHz": 3600,
+        "db": 6.000000000000001
+      },
+      {
+        "frequencyHz": 3900,
+        "db": 11.939144049326398
+      }
+    ]
+  },
+  {
+    "name": "combined at 44k1",
+    "sampleRate": 44100,
+    "settings": {
+      "enabled": true,
+      "lowShelf": {
+        "frequencyHz": 120,
+        "gainDb": -6
+      },
+      "midPeak": {
+        "frequencyHz": 1000,
+        "gainDb": 9,
+        "q": 0.7
+      },
+      "highShelf": {
+        "frequencyHz": 8000,
+        "gainDb": -12
+      }
+    },
+    "response": [
+      {
+        "frequencyHz": 20,
+        "db": -5.986298406019154
+      },
+      {
+        "frequencyHz": 120,
+        "db": -2.6920284819903912
+      },
+      {
+        "frequencyHz": 1000,
+        "db": 8.996174098603207
+      },
+      {
+        "frequencyHz": 8000,
+        "db": -5.733306496025145
+      },
+      {
+        "frequencyHz": 19000,
+        "db": -11.988100036232886
+      },
+      {
+        "frequencyHz": 20000,
+        "db": -11.996316583370511
+      }
+    ]
+  },
+  {
+    "name": "limits at 48k",
+    "sampleRate": 48000,
+    "settings": {
+      "enabled": true,
+      "lowShelf": {
+        "frequencyHz": 40,
+        "gainDb": -18
+      },
+      "midPeak": {
+        "frequencyHz": 100,
+        "gainDb": -18,
+        "q": 0.2
+      },
+      "highShelf": {
+        "frequencyHz": 16000,
+        "gainDb": 18
+      }
+    },
+    "response": [
+      {
+        "frequencyHz": 20,
+        "db": -25.558530681665633
+      },
+      {
+        "frequencyHz": 40,
+        "db": -23.291035250077034
+      },
+      {
+        "frequencyHz": 100,
+        "db": -18.78990380946218
+      },
+      {
+        "frequencyHz": 1000,
+        "db": -4.663637350951253
+      },
+      {
+        "frequencyHz": 16000,
+        "db": 8.987897304054526
+      },
+      {
+        "frequencyHz": 20000,
+        "db": 16.660193685660825
+      }
+    ]
+  }
+]

@@ -1,6 +1,7 @@
 #include "rack_vst3.h"
 #include "realtime_parameter_mailbox.h"
 #include "parameter_transfer_queue.h"
+#include "realtime_parameter_changes.h"
 #include "public.sdk/source/vst/hosting/module.h"
 #include "public.sdk/source/vst/hosting/plugprovider.h"
 #include "public.sdk/source/vst/hosting/hostclasses.h"
@@ -58,6 +59,7 @@ static double project_quarter_notes(TSamples block_start, uint32_t sample_offset
 }
 
 static constexpr size_t kRealtimeEventCapacity = 512;
+static constexpr size_t kRealtimeInputEventCapacity = 2 * kRealtimeEventCapacity;
 static constexpr size_t kParameterTransferCapacity = 4096;
 
 struct PendingParameterChange {
@@ -226,8 +228,9 @@ static bool string_to_uid(const char* str, VST3::UID& uid) {
 // Memory stream implementation for state serialization
 class MemoryStream : public IBStream {
 public:
-    MemoryStream() : ref_count_(1), position_(0) {}
-    MemoryStream(const uint8_t* data, size_t size) : ref_count_(1), position_(0) {
+    MemoryStream() : position_(0) { FUNKNOWN_CTOR }
+    MemoryStream(const uint8_t* data, size_t size) : position_(0) {
+        FUNKNOWN_CTOR
         buffer_.assign(data, data + size);
     }
 
@@ -328,7 +331,6 @@ public:
     void clear() { buffer_.clear(); position_ = 0; }
 
 private:
-    uint32 ref_count_;  // Non-atomic - IMPLEMENT_REFCOUNT macro handles thread-safety
     std::vector<uint8_t> buffer_;
     int32 position_;
 };
@@ -348,7 +350,7 @@ struct RackVST3Plugin;
 class RackVST3ComponentHandler : public IComponentHandler, public IComponentHandler2,
                                  public IComponentHandlerBusActivation, public IUnitHandler {
 public:
-    explicit RackVST3ComponentHandler(RackVST3Plugin* plugin) : ref_count_(1), plugin_(plugin) {}
+    explicit RackVST3ComponentHandler(RackVST3Plugin* plugin) : plugin_(plugin) { FUNKNOWN_CTOR }
 
     DECLARE_FUNKNOWN_METHODS
 
@@ -368,7 +370,6 @@ public:
         ProgramListID /*listId*/, int32 /*programIndex*/) override;
 
 private:
-    uint32 ref_count_;
     RackVST3Plugin* plugin_;
 };
 
@@ -388,7 +389,7 @@ tresult PLUGIN_API RackVST3ComponentHandler::queryInterface(const TUID _iid, voi
 class RackVST3PlugFrame : public IPlugFrame {
 public:
     RackVST3PlugFrame(HWND host_window, HWND container_window)
-    : ref_count_(1), host_window_(host_window), container_window_(container_window) {}
+    : host_window_(host_window), container_window_(container_window) { FUNKNOWN_CTOR }
 
     DECLARE_FUNKNOWN_METHODS
 
@@ -439,7 +440,6 @@ public:
     }
 
 private:
-    uint32 ref_count_;
     HWND host_window_;
     HWND container_window_;
 };
@@ -497,10 +497,22 @@ struct RackVST3Plugin {
 
     // Processing structures
     HostProcessData process_data;
-    ParameterChanges input_param_changes;
-    ParameterChanges output_param_changes;
+    rack_realtime::ParameterChanges input_param_changes;
+    rack_realtime::ParameterChanges output_param_changes;
     EventList input_events;
     EventList output_events;
+    // Conservative voice counts survive rejected DSP blocks. Panic releases use
+    // a separate fixed backlog so a full MIDI batch cannot discard them.
+    std::array<uint32_t, 16 * 128> active_notes{};
+    std::array<uint32_t, 16 * 128> notes_after_block{};
+    std::array<uint32_t, 16 * 128> reset_notes{};
+    std::array<uint32_t, 16 * 128> reset_releases_in_block{};
+    uint16_t reset_channels = 0;
+    uint16_t reset_pedal_channels = 0;
+    size_t reset_events_in_block = 0;
+    std::array<RackVST3MidiEvent, kRealtimeEventCapacity> deferred_midi{};
+    size_t deferred_midi_count = 0;
+    bool notes_staged = false;
     ParameterTransferQueue ui_to_audio_parameters;
     RealtimeParameterQueue audio_to_ui_parameters;
     // One atomic latest value per parameter, allocated before processing starts.
@@ -565,6 +577,10 @@ static bool rack_vst3_try_queue_midi_mapping(
     CtrlNumber controller_number,
     ParamValue value_normalized,
     int32 sample_offset);
+static void rack_vst3_begin_midi_block(RackVST3Plugin* plugin);
+static void rack_vst3_queue_note_resets(RackVST3Plugin* plugin, uint32_t sample_offset);
+static void rack_vst3_queue_emergency_controllers(RackVST3Plugin* plugin, uint32_t sample_offset);
+static void rack_vst3_reset_channel(RackVST3Plugin* plugin, uint8_t channel);
 
 static const RackVST3Plugin::ParameterInfo* rack_vst3_find_parameter(
     const RackVST3Plugin* plugin, ParamID id) {
@@ -825,7 +841,7 @@ RackVST3Plugin* rack_vst3_plugin_new(const char* path, const char* uid) {
         }
     }
 
-    plugin->input_events.setMaxSize(static_cast<int32>(kRealtimeEventCapacity));
+    plugin->input_events.setMaxSize(static_cast<int32>(kRealtimeInputEventCapacity));
     plugin->output_events.setMaxSize(static_cast<int32>(kRealtimeEventCapacity));
 
     return plugin;
@@ -1143,23 +1159,8 @@ int rack_vst3_plugin_initialize(RackVST3Plugin* plugin, double sample_rate, uint
         const int32 cached_parameter_count = static_cast<int32>(plugin->parameters.size());
         plugin->input_param_changes.setMaxParameters(cached_parameter_count);
         plugin->output_param_changes.setMaxParameters(cached_parameter_count);
-        // Pre-grow every value queue once so the first edit of a parameter cannot
-        // allocate from the realtime process() call.
-        for (const auto& parameter : plugin->parameters) {
-            ParameterChanges* changes_list[] = {
-                &plugin->input_param_changes,
-                &plugin->output_param_changes,
-            };
-            for (ParameterChanges* changes : changes_list) {
-                int32 queue_index = 0;
-                if (IParamValueQueue* queue = changes->addParameterData(parameter.id, queue_index)) {
-                    int32 point_index = 0;
-                    queue->addPoint(0, parameter.default_value, point_index);
-                }
-            }
-        }
-        plugin->input_param_changes.clearQueue();
-        plugin->output_param_changes.clearQueue();
+        // Both lists now own fixed point arenas; no first-edit warmup or
+        // SDK vector growth is needed from process().
     }
 
     // Enumerate factory presets if available
@@ -1382,6 +1383,11 @@ int rack_vst3_plugin_process(
         return RACK_VST3_ERROR_INVALID_PARAM;
     }
 
+    if (!plugin->notes_staged) {
+        rack_vst3_begin_midi_block(plugin);
+        rack_vst3_queue_note_resets(plugin, 0);
+    }
+
     // Update dynamic fields only (prepare() was called during initialization)
     plugin->process_data.numSamples = frames;
 
@@ -1470,7 +1476,9 @@ int rack_vst3_plugin_process(
     }
     plugin->direct_audio_parameter_count = 0;
     PendingParameterChange pending;
-    while (pending_count < plugin->audio_parameter_scratch.size()
+    size_t parameter_reads = 0;
+    while (parameter_reads++ < kRealtimeEventCapacity
+           && pending_count < plugin->audio_parameter_scratch.size()
            && plugin->ui_to_audio_parameters.pop(pending)) {
         size_t existing = 0;
         for (; existing < pending_count; ++existing) {
@@ -1496,7 +1504,38 @@ int rack_vst3_plugin_process(
     }
 
     // Process
+    // UI/direct edits are merged at offset zero. Emergency pedal release must
+    // take precedence over an edit of the same MIDI proxy in this block.
+    rack_vst3_queue_emergency_controllers(plugin, 0);
     tresult result = plugin->processor->process(plugin->process_data);
+
+    if (result == kResultOk) {
+        plugin->active_notes = plugin->notes_after_block;
+        for (size_t channel = 0; channel < 16; ++channel) {
+            bool remaining = false;
+            for (size_t pitch = 0; pitch < 128; ++pitch) {
+                const size_t index = channel * 128 + pitch;
+                plugin->reset_notes[index] -= plugin->reset_releases_in_block[index];
+                remaining |= plugin->reset_notes[index] != 0;
+            }
+            if (!remaining) {
+                plugin->reset_channels &= static_cast<uint16_t>(~(1u << channel));
+                plugin->reset_pedal_channels &= static_cast<uint16_t>(~(1u << channel));
+            }
+        }
+    } else {
+        // The processor may have consumed only part of a failed block. Retain
+        // every possible Note-On and retry releases before accepting retriggers.
+        for (uint8_t channel = 0; channel < 16; ++channel) {
+            for (size_t pitch = 0; pitch < 128; ++pitch) {
+                const size_t index = channel * 128 + pitch;
+                plugin->reset_notes[index] = std::max(plugin->reset_notes[index], plugin->active_notes[index]);
+            }
+            plugin->reset_channels |= static_cast<uint16_t>(1u << channel);
+            plugin->reset_pedal_channels |= static_cast<uint16_t>(1u << channel);
+        }
+    }
+    plugin->notes_staged = false;
 
     if (result == kResultOk && plugin->symbolic_sample_size == kSample64) {
         for (uint32_t ch = 0; ch < num_output_channels; ++ch) {
@@ -1794,123 +1833,62 @@ int rack_vst3_plugin_load_preset(RackVST3Plugin* plugin, int32_t preset_number) 
         : RACK_VST3_ERROR_GENERIC;
 }
 
-int rack_vst3_plugin_get_state_size(RackVST3Plugin* plugin) {
-    if (!plugin || !plugin->component) {
-        return 0;
-    }
-
-    std::lock_guard<std::mutex> state_lock(plugin->state_mutex);
-    rack_vst3_drain_audio_parameters(plugin);
-
-    // VST3 doesn't provide a query method for state size
-    // We need to actually serialize the state to determine the size
-    // This is done once for buffer allocation - worth the cost for accuracy
-
-    // Create temporary memory stream for size calculation
-    IPtr<MemoryStream> stream(new MemoryStream(), false);
-
-    // Reserve space for component state size marker
-    uint32_t size_marker_placeholder = 0;
-    stream->write(&size_marker_placeholder, sizeof(size_marker_placeholder), nullptr);
-
-    // Record position before component state
-    int64 component_start_pos = 0;
-    stream->tell(&component_start_pos);
-
-    // Get component state
-    tresult result = plugin->component->getState(stream);
-    if (result != kResultOk) {
-        return RACK_VST3_ERROR_NOT_SUPPORTED;
-    }
-
-    // Record position after component state
-    int64 component_end_pos = 0;
-    stream->tell(&component_end_pos);
-
-    // Get controller state if separate controller
-    if (plugin->controller && plugin->separate_controller) {
-        result = plugin->controller->getState(stream);
-        if (result != kResultOk && result != kResultFalse && result != kNotImplemented) {
-            // Controller state failed - return component state size only
-            return static_cast<int>(stream->getSize());
-        }
-    }
-
-    if (component_end_pos <= component_start_pos && stream->getSize() <= sizeof(uint32_t)) {
-        return RACK_VST3_ERROR_NOT_SUPPORTED;
-    }
-
-    // Return actual state size
-    // This avoids the retry pattern - user gets correct size on first call
-    return static_cast<int>(stream->getSize());
-}
-
-int rack_vst3_plugin_get_state(RackVST3Plugin* plugin, uint8_t* data, size_t* size) {
-    if (!plugin || !data || !size || !plugin->component) {
-        return RACK_VST3_ERROR_INVALID_PARAM;
-    }
-
-    std::lock_guard<std::mutex> state_lock(plugin->state_mutex);
-    rack_vst3_drain_audio_parameters(plugin);
-
-    if (*size == 0) {
-        return RACK_VST3_ERROR_INVALID_PARAM;
-    }
-
-    // Create memory stream for state serialization
-    // IPtr ensures automatic cleanup on ALL code paths (success, error, buffer size check failure)
-    IPtr<MemoryStream> stream(new MemoryStream(), false);
-
-    // Reserve space for component state size marker (write it later)
-    uint32_t size_marker_placeholder = 0;
-    stream->write(&size_marker_placeholder, sizeof(size_marker_placeholder), nullptr);
-
-    // Record position before component state
-    int64 component_start_pos = 0;
-    stream->tell(&component_start_pos);
-
-    // Get component state
-    tresult result = plugin->component->getState(stream);
-    if (result != kResultOk) {
-        return (result == kResultFalse || result == kNotImplemented)
+// Each plugin callback owns a zero-based stream: seek(0) must never reach
+// the host envelope or the other component's state.
+static int rack_vst3_serialize_state(RackVST3Plugin* plugin, std::vector<uint8_t>& data) {
+    IPtr<MemoryStream> component(new MemoryStream(), false);
+    const tresult component_result = plugin->component->getState(component);
+    if (component_result != kResultOk) {
+        return (component_result == kResultFalse || component_result == kNotImplemented)
             ? RACK_VST3_ERROR_NOT_SUPPORTED
             : RACK_VST3_ERROR_GENERIC;
     }
 
-    // Record position after component state (= size of component state)
-    int64 component_end_pos = 0;
-    stream->tell(&component_end_pos);
-    uint32_t component_state_size = static_cast<uint32_t>(component_end_pos - component_start_pos);
-
-    // Write component state size marker at the beginning
-    stream->seek(0, IBStream::kIBSeekSet, nullptr);
-    stream->write(&component_state_size, sizeof(component_state_size), nullptr);
-
-    // Seek back to end to append controller state
-    stream->seek(component_end_pos, IBStream::kIBSeekSet, nullptr);
-
-    // Get controller state if separate controller
+    IPtr<MemoryStream> controller(new MemoryStream(), false);
     if (plugin->controller && plugin->separate_controller) {
-        result = plugin->controller->getState(stream);
+        const tresult result = plugin->controller->getState(controller);
         if (result != kResultOk && result != kResultFalse && result != kNotImplemented) {
             return RACK_VST3_ERROR_GENERIC;
         }
     }
-
-    // Copy to output buffer
-    // Note: MemoryStream grows dynamically - no fixed limit, can't overflow
-    // get_state_size() returns the actual size, so this should match
-    // However, we still check in case the state changed between calls
-    size_t state_size = stream->getSize();
-    if (state_size > *size) {
-        *size = state_size;  // Return required size for caller to retry
-        return RACK_VST3_ERROR_INVALID_PARAM;
+    if (component->getSize() == 0 && controller->getSize() == 0) {
+        return RACK_VST3_ERROR_NOT_SUPPORTED;
     }
 
-    memcpy(data, stream->getData().data(), state_size);
-    *size = state_size;
-    // IPtr automatically releases stream on scope exit
+    const uint32_t component_size = static_cast<uint32_t>(component->getSize());
+    data.resize(sizeof(component_size));
+    memcpy(data.data(), &component_size, sizeof(component_size));
+    data.insert(data.end(), component->getData().begin(), component->getData().end());
+    data.insert(data.end(), controller->getData().begin(), controller->getData().end());
+    return RACK_VST3_OK;
+}
 
+int rack_vst3_plugin_get_state_size(RackVST3Plugin* plugin) {
+    if (!plugin || !plugin->component) {
+        return 0;
+    }
+    std::lock_guard<std::mutex> state_lock(plugin->state_mutex);
+    rack_vst3_drain_audio_parameters(plugin);
+    std::vector<uint8_t> data;
+    const int result = rack_vst3_serialize_state(plugin, data);
+    return result == RACK_VST3_OK ? static_cast<int>(data.size()) : result;
+}
+
+int rack_vst3_plugin_get_state(RackVST3Plugin* plugin, uint8_t* data, size_t* size) {
+    if (!plugin || !data || !size || *size == 0 || !plugin->component) {
+        return RACK_VST3_ERROR_INVALID_PARAM;
+    }
+    std::lock_guard<std::mutex> state_lock(plugin->state_mutex);
+    rack_vst3_drain_audio_parameters(plugin);
+    std::vector<uint8_t> state;
+    const int result = rack_vst3_serialize_state(plugin, state);
+    if (result != RACK_VST3_OK) return result;
+    if (state.size() > *size) {
+        *size = state.size();
+        return RACK_VST3_ERROR_INVALID_PARAM;
+    }
+    memcpy(data, state.data(), state.size());
+    *size = state.size();
     return RACK_VST3_OK;
 }
 
@@ -2252,10 +2230,110 @@ int rack_vst3_gui_set_content_scale_factor(RackVST3Gui* gui, float factor) {
 // MIDI API
 // ============================================================================
 
-int rack_vst3_plugin_send_midi(
+static void rack_vst3_begin_midi_block(RackVST3Plugin* plugin) {
+    if (plugin->notes_staged) return;
+    plugin->notes_after_block = plugin->active_notes;
+    plugin->reset_releases_in_block.fill(0);
+    plugin->reset_events_in_block = 0;
+    plugin->notes_staged = true;
+}
+
+static void rack_vst3_reset_channel(RackVST3Plugin* plugin, uint8_t channel) {
+    if (channel >= 16) return;
+    plugin->reset_channels |= static_cast<uint16_t>(1u << channel);
+    for (size_t pitch = 0; pitch < 128; ++pitch) {
+        const size_t index = size_t(channel) * 128 + pitch;
+        const uint32_t unsent = plugin->reset_notes[index] - plugin->reset_releases_in_block[index];
+        plugin->reset_notes[index] = plugin->reset_releases_in_block[index]
+            + std::max(unsent, plugin->notes_after_block[index]);
+    }
+}
+
+static void rack_vst3_queue_emergency_controllers(RackVST3Plugin* plugin, uint32_t sample_offset) {
+    // Pedal release must reach every channel even when the first channel alone
+    // consumes this block's entire explicit Note-Off budget.
+    for (uint8_t channel = 0; channel < 16; ++channel) {
+        if (plugin->reset_pedal_channels & (1u << channel)) {
+            // Keep the original CC64/120/121/123 panic contract, and also
+            // release sostenuto/hold so explicit Note-Offs cannot stay latched.
+            for (CtrlNumber controller : {CtrlNumber(64), CtrlNumber(66), CtrlNumber(69), CtrlNumber(120), CtrlNumber(121), CtrlNumber(123)}) {
+                rack_vst3_try_queue_midi_mapping(plugin, channel, controller, 0.0, sample_offset);
+            }
+        }
+    }
+}
+
+static void rack_vst3_queue_note_resets(RackVST3Plugin* plugin, uint32_t sample_offset) {
+    rack_vst3_queue_emergency_controllers(plugin, sample_offset);
+    for (uint8_t channel = 0; channel < 16; ++channel) {
+        if ((plugin->reset_channels & (1u << channel)) == 0) continue;
+        for (uint8_t pitch = 0; pitch < 128; ++pitch) {
+            const size_t index = size_t(channel) * 128 + pitch;
+            while (plugin->reset_releases_in_block[index] < plugin->reset_notes[index]) {
+                if (plugin->reset_events_in_block >= kRealtimeEventCapacity) return;
+                Event event{};
+                event.type = Event::kNoteOffEvent;
+                event.sampleOffset = sample_offset;
+                event.ppqPosition = project_quarter_notes(plugin->sample_position, sample_offset, plugin->sample_rate);
+                event.noteOff.channel = channel;
+                event.noteOff.pitch = pitch;
+                event.noteOff.noteId = -1;
+                if (plugin->input_events.addEvent(event) != kResultOk) return;
+                ++plugin->reset_releases_in_block[index];
+                ++plugin->reset_events_in_block;
+                if (plugin->notes_after_block[index] > 0) --plugin->notes_after_block[index];
+            }
+        }
+    }
+}
+
+int rack_vst3_plugin_request_midi_reset(RackVST3Plugin* plugin) {
+    if (!plugin || !plugin->initialized) return RACK_VST3_ERROR_NOT_INITIALIZED;
+    plugin->input_events.clear();
+    plugin->deferred_midi_count = 0;
+    plugin->notes_staged = false;
+    rack_vst3_begin_midi_block(plugin);
+    plugin->reset_pedal_channels = UINT16_MAX;
+    for (uint8_t channel = 0; channel < 16; ++channel) rack_vst3_reset_channel(plugin, channel);
+    return RACK_VST3_OK;
+}
+
+int rack_vst3_plugin_midi_reset_pending(RackVST3Plugin* plugin) {
+    return plugin && (plugin->reset_channels != 0 || plugin->deferred_midi_count != 0);
+}
+
+static bool rack_vst3_unsent_note_resets(const RackVST3Plugin* plugin) {
+    if (!plugin->reset_channels) return false;
+    for (size_t index = 0; index < plugin->reset_notes.size(); ++index) {
+        if (plugin->reset_notes[index] > plugin->reset_releases_in_block[index]) return true;
+    }
+    return false;
+}
+
+static bool rack_vst3_would_erase_pedal_release(RackVST3Plugin* plugin, const RackVST3MidiEvent& event) {
+    if ((event.status & 0xF0) != 0xB0 || event.channel >= 16 || event.data2 < 64
+        || (event.data1 != 64 && event.data1 != 66 && event.data1 != 69)
+        || plugin->midi_controller_assignments.empty()) return false;
+    const ParamID id = plugin->midi_controller_assignments[
+        rack_vst3_midi_mapping_index(event.channel, CtrlNumber(event.data1))];
+    if (id == kNoParamId) return false;
+    for (int32 index = 0; index < plugin->input_param_changes.getParameterCount(); ++index) {
+        auto* queue = plugin->input_param_changes.getParameterData(index);
+        if (queue->getParameterId() != id || queue->getPointCount() == 0) continue;
+        int32 offset = 0;
+        ParamValue value = 0.0;
+        if (queue->getPoint(queue->getPointCount() - 1, offset, value) == kResultTrue) {
+            return offset == int32(event.sample_offset) && value < 0.5;
+        }
+    }
+    return false;
+}
+
+static int rack_vst3_queue_midi_for_block(
     RackVST3Plugin* plugin,
     const RackVST3MidiEvent* events,
-    uint32_t event_count)
+    uint32_t event_count,
+    uint32_t frames)
 {
     if (!plugin || !plugin->initialized) {
         return RACK_VST3_ERROR_NOT_INITIALIZED;
@@ -2265,16 +2343,49 @@ int rack_vst3_plugin_send_midi(
     if (!events && event_count > 0) {
         return RACK_VST3_ERROR_INVALID_PARAM;
     }
+    if (event_count > kRealtimeEventCapacity - plugin->deferred_midi_count) {
+        return RACK_VST3_ERROR_INVALID_PARAM;
+    }
 
-    // Early return for zero events (valid - nothing to do)
-    if (event_count == 0) {
+    rack_vst3_begin_midi_block(plugin);
+    rack_vst3_queue_note_resets(plugin, 0);
+
+    if (rack_vst3_unsent_note_resets(plugin) || plugin->reset_pedal_channels != 0) {
+        // Rust sees zero admission capacity until this panic and its FIFO tail
+        // complete. No retrigger can reach a processor before the old releases.
+        for (uint32_t i = 0; i < event_count; ++i) {
+            auto& deferred = plugin->deferred_midi[plugin->deferred_midi_count++];
+            deferred = events[i];
+        }
         return RACK_VST3_OK;
     }
 
+    std::array<RackVST3MidiEvent, kRealtimeEventCapacity> batch{};
+    const size_t deferred_count = plugin->deferred_midi_count;
+    size_t batch_count = deferred_count;
+    std::copy_n(plugin->deferred_midi.begin(), batch_count, batch.begin());
+    for (uint32_t i = 0; i < event_count; ++i) batch[batch_count++] = events[i];
+    plugin->deferred_midi_count = 0;
+
     // Convert MIDI events to VST3 events
     bool event_overflow = false;
-    for (uint32_t i = 0; i < event_count; ++i) {
-        const auto& midi_event = events[i];
+    size_t consumed = 0;
+    uint32_t last_offset = 0;
+    for (size_t i = 0; i < batch_count; ++i) {
+        if (deferred_count != 0) {
+            if (i >= frames) break;
+            // Distinct points preserve pedal-off/on transitions. If a variable
+            // block is too short, retain the FIFO tail for the following block.
+            batch[i].sample_offset = static_cast<uint32_t>(i);
+        }
+        auto midi_event = batch[i];
+        midi_event.sample_offset = std::max(last_offset, midi_event.sample_offset);
+        if (rack_vst3_would_erase_pedal_release(plugin, midi_event)) {
+            if (frames == 0 || midi_event.sample_offset >= frames - 1) break;
+            ++midi_event.sample_offset;
+        }
+        last_offset = midi_event.sample_offset;
+        consumed = i + 1;
 
         Event vst3_event;
         memset(&vst3_event, 0, sizeof(Event));
@@ -2294,7 +2405,13 @@ int rack_vst3_plugin_send_midi(
                 vst3_event.noteOn.pitch = midi_event.data1;
                 vst3_event.noteOn.velocity = static_cast<float>(midi_event.data2) / 127.0f;
                 vst3_event.noteOn.noteId = -1;  // Not specified
-                event_overflow |= plugin->input_events.addEvent(vst3_event) != kResultOk;
+                if (plugin->input_events.addEvent(vst3_event) == kResultOk) {
+                    if (midi_event.channel < 16 && midi_event.data1 < 128) {
+                        const size_t index = size_t(midi_event.channel) * 128 + midi_event.data1;
+                        if (plugin->active_notes[index] != UINT32_MAX) ++plugin->active_notes[index];
+                        if (plugin->notes_after_block[index] != UINT32_MAX) ++plugin->notes_after_block[index];
+                    }
+                } else event_overflow = true;
                 break;
 
             case 0x80:  // Note Off
@@ -2303,7 +2420,12 @@ int rack_vst3_plugin_send_midi(
                 vst3_event.noteOff.pitch = midi_event.data1;
                 vst3_event.noteOff.velocity = static_cast<float>(midi_event.data2) / 127.0f;
                 vst3_event.noteOff.noteId = -1;  // Not specified
-                event_overflow |= plugin->input_events.addEvent(vst3_event) != kResultOk;
+                if (plugin->input_events.addEvent(vst3_event) == kResultOk) {
+                    if (midi_event.channel < 16 && midi_event.data1 < 128) {
+                        auto& count = plugin->notes_after_block[size_t(midi_event.channel) * 128 + midi_event.data1];
+                        if (count > 0) --count;
+                    }
+                } else event_overflow = true;
                 break;
 
             case 0xA0:  // Polyphonic Key Pressure (Aftertouch)
@@ -2321,6 +2443,10 @@ int rack_vst3_plugin_send_midi(
                     static_cast<CtrlNumber>(midi_event.data1),
                     static_cast<ParamValue>(midi_event.data2) / 127.0,
                     midi_event.sample_offset);
+                if (midi_event.data1 == 120 || midi_event.data1 == 123) {
+                    rack_vst3_reset_channel(plugin, midi_event.channel);
+                    rack_vst3_queue_note_resets(plugin, midi_event.sample_offset);
+                }
                 break;
 
             case 0xC0:  // Program Change
@@ -2368,9 +2494,22 @@ int rack_vst3_plugin_send_midi(
                 // Unknown MIDI event - skip it
                 continue;
         }
+        if (rack_vst3_unsent_note_resets(plugin)) {
+            break;
+        }
+    }
+    for (size_t retained = consumed; retained < batch_count; ++retained) {
+        plugin->deferred_midi[plugin->deferred_midi_count++] = batch[retained];
     }
 
     return event_overflow ? RACK_VST3_ERROR_GENERIC : RACK_VST3_OK;
+}
+
+int rack_vst3_plugin_send_midi(
+    RackVST3Plugin* plugin, const RackVST3MidiEvent* events, uint32_t event_count)
+{
+    return rack_vst3_queue_midi_for_block(
+        plugin, events, event_count, plugin ? plugin->max_block_size : 0);
 }
 
 int rack_vst3_plugin_process_with_midi(
@@ -2386,11 +2525,12 @@ int rack_vst3_plugin_process_with_midi(
     if (event_count > kRealtimeEventCapacity) {
         return RACK_VST3_ERROR_INVALID_PARAM;
     }
-    const int midi_result = rack_vst3_plugin_send_midi(plugin, events, event_count);
+    const int midi_result = rack_vst3_queue_midi_for_block(plugin, events, event_count, frames);
     if (midi_result != RACK_VST3_OK) {
         if (plugin) {
             plugin->input_events.clear();
             plugin->input_param_changes.clearQueue();
+            rack_vst3_plugin_request_midi_reset(plugin);
         }
         return midi_result;
     }

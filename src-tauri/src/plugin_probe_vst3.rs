@@ -324,6 +324,8 @@ fn vst3_path_match_score(target: &Path, candidate: &Path) -> Option<u8> {
         .canonicalize()
         .unwrap_or_else(|_| candidate.to_path_buf());
 
+    let target = PathBuf::from(normalize_path(&target));
+    let candidate = PathBuf::from(normalize_path(&candidate));
     if candidate == target {
         return Some(0);
     }
@@ -332,24 +334,6 @@ fn vst3_path_match_score(target: &Path, candidate: &Path) -> Option<u8> {
     }
     if target.starts_with(&candidate) {
         return Some(2);
-    }
-
-    let target_name = target.file_name().and_then(|value| value.to_str());
-    let candidate_name = candidate.file_name().and_then(|value| value.to_str());
-    if target_name
-        .zip(candidate_name)
-        .map(|(left, right)| left.eq_ignore_ascii_case(right))
-        .unwrap_or(false)
-    {
-        return Some(3);
-    }
-
-    let normalized_target = normalize_path(&target);
-    let normalized_candidate = normalize_path(&candidate);
-    if normalized_candidate.contains(&normalized_target)
-        || normalized_target.contains(&normalized_candidate)
-    {
-        return Some(4);
     }
 
     None

@@ -1,4 +1,4 @@
-use std::sync::atomic::{fence, AtomicU32, Ordering};
+use std::sync::atomic::{fence, AtomicU32, AtomicU64, Ordering};
 
 use parking_lot::Mutex;
 
@@ -7,15 +7,17 @@ use crate::config::VstEqSettings;
 const BAND_COUNT: usize = 3;
 const COEFFICIENTS_PER_BAND: usize = 5;
 const SNAPSHOT_VALUES: usize = 1 + BAND_COUNT * COEFFICIENTS_PER_BAND;
-const SMOOTHING_SECONDS: f32 = 0.020;
+const SMOOTHING_SECONDS: f64 = 0.020;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+// Low corners at high sample rates lose significant digits through coefficient
+// cancellation in f32. Keep both coefficients and histories in double precision.
 struct BiquadCoefficients {
-    b0: f32,
-    b1: f32,
-    b2: f32,
-    a1: f32,
-    a2: f32,
+    b0: f64,
+    b1: f64,
+    b2: f64,
+    a1: f64,
+    a2: f64,
 }
 
 impl BiquadCoefficients {
@@ -27,7 +29,7 @@ impl BiquadCoefficients {
         a2: 0.0,
     };
 
-    fn lerp_towards(&mut self, target: Self, denominator: f32) {
+    fn lerp_towards(&mut self, target: Self, denominator: f64) {
         self.b0 += (target.b0 - self.b0) / denominator;
         self.b1 += (target.b1 - self.b1) / denominator;
         self.b2 += (target.b2 - self.b2) / denominator;
@@ -38,40 +40,40 @@ impl BiquadCoefficients {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct EqTarget {
-    mix: f32,
+    mix: f64,
     bands: [BiquadCoefficients; BAND_COUNT],
 }
 
 impl EqTarget {
     fn from_settings(settings: &VstEqSettings, sample_rate: u32) -> Self {
         let settings = settings.normalized(sample_rate);
-        let sample_rate = sample_rate.max(1) as f32;
+        let sample_rate = f64::from(sample_rate.max(1));
 
         Self {
             mix: if settings.enabled { 1.0 } else { 0.0 },
             bands: [
                 low_shelf(
-                    settings.low_shelf.frequency_hz,
-                    settings.low_shelf.gain_db,
+                    settings.low_shelf.frequency_hz.into(),
+                    settings.low_shelf.gain_db.into(),
                     sample_rate,
                 ),
                 peaking(
-                    settings.mid_peak.frequency_hz,
-                    settings.mid_peak.gain_db,
-                    settings.mid_peak.q,
+                    settings.mid_peak.frequency_hz.into(),
+                    settings.mid_peak.gain_db.into(),
+                    settings.mid_peak.q.into(),
                     sample_rate,
                 ),
                 high_shelf(
-                    settings.high_shelf.frequency_hz,
-                    settings.high_shelf.gain_db,
+                    settings.high_shelf.frequency_hz.into(),
+                    settings.high_shelf.gain_db.into(),
                     sample_rate,
                 ),
             ],
         }
     }
 
-    fn encode(self) -> [u32; SNAPSHOT_VALUES] {
-        let mut values = [0u32; SNAPSHOT_VALUES];
+    fn encode(self) -> [u64; SNAPSHOT_VALUES] {
+        let mut values = [0u64; SNAPSHOT_VALUES];
         values[0] = self.mix.to_bits();
         for (band_index, band) in self.bands.iter().enumerate() {
             let offset = 1 + band_index * COEFFICIENTS_PER_BAND;
@@ -84,20 +86,20 @@ impl EqTarget {
         values
     }
 
-    fn decode(values: [u32; SNAPSHOT_VALUES]) -> Self {
+    fn decode(values: [u64; SNAPSHOT_VALUES]) -> Self {
         let mut bands = [BiquadCoefficients::IDENTITY; BAND_COUNT];
         for (band_index, band) in bands.iter_mut().enumerate() {
             let offset = 1 + band_index * COEFFICIENTS_PER_BAND;
             *band = BiquadCoefficients {
-                b0: f32::from_bits(values[offset]),
-                b1: f32::from_bits(values[offset + 1]),
-                b2: f32::from_bits(values[offset + 2]),
-                a1: f32::from_bits(values[offset + 3]),
-                a2: f32::from_bits(values[offset + 4]),
+                b0: f64::from_bits(values[offset]),
+                b1: f64::from_bits(values[offset + 1]),
+                b2: f64::from_bits(values[offset + 2]),
+                a1: f64::from_bits(values[offset + 3]),
+                a2: f64::from_bits(values[offset + 4]),
             };
         }
         Self {
-            mix: f32::from_bits(values[0]),
+            mix: f64::from_bits(values[0]),
             bands,
         }
     }
@@ -107,7 +109,7 @@ impl EqTarget {
 /// writers are serialized away from the callback.
 pub(super) struct PublishedEq {
     sequence: AtomicU32,
-    values: [AtomicU32; SNAPSHOT_VALUES],
+    values: [AtomicU64; SNAPSHOT_VALUES],
     writer: Mutex<()>,
 }
 
@@ -116,7 +118,7 @@ impl PublishedEq {
         let encoded = EqTarget::from_settings(settings, sample_rate).encode();
         Self {
             sequence: AtomicU32::new(0),
-            values: std::array::from_fn(|index| AtomicU32::new(encoded[index])),
+            values: std::array::from_fn(|index| AtomicU64::new(encoded[index])),
             writer: Mutex::new(()),
         }
     }
@@ -147,25 +149,29 @@ impl PublishedEq {
 
 #[derive(Clone, Copy, Debug, Default)]
 struct BiquadState {
-    z1: f32,
-    z2: f32,
+    x1: f64,
+    x2: f64,
+    y1: f64,
+    y2: f64,
 }
 
 impl BiquadState {
-    fn process(&mut self, input: f32, coefficients: BiquadCoefficients) -> f32 {
-        let output = coefficients.b0 * input + self.z1;
-        self.z1 = coefficients.b1 * input - coefficients.a1 * output + self.z2;
-        self.z2 = coefficients.b2 * input - coefficients.a2 * output;
-        if !output.is_finite() || !self.z1.is_finite() || !self.z2.is_finite() {
+    fn process(&mut self, input: f64, coefficients: BiquadCoefficients) -> f64 {
+        // Direct form I retains sample histories when coefficients move. The
+        // transposed form's delays embed the previous coefficients and inject
+        // a transient when reused during a frequency/gain ramp.
+        let output =
+            coefficients.b0 * input + coefficients.b1 * self.x1 + coefficients.b2 * self.x2
+                - coefficients.a1 * self.y1
+                - coefficients.a2 * self.y2;
+        if !output.is_finite() || output.abs() > f64::from(f32::MAX) {
             *self = Self::default();
             return 0.0;
         }
-        if self.z1.abs() < 1.0e-20 {
-            self.z1 = 0.0;
-        }
-        if self.z2.abs() < 1.0e-20 {
-            self.z2 = 0.0;
-        }
+        self.x2 = self.x1;
+        self.x1 = if input.abs() < 1.0e-20 { 0.0 } else { input };
+        self.y2 = self.y1;
+        self.y1 = if output.abs() < 1.0e-20 { 0.0 } else { output };
         output
     }
 }
@@ -186,7 +192,8 @@ impl StereoEqualizer {
             current: target,
             target,
             remaining_samples: 0,
-            smoothing_samples: ((sample_rate as f32 * SMOOTHING_SECONDS).round() as usize).max(1),
+            smoothing_samples: ((f64::from(sample_rate) * SMOOTHING_SECONDS).round() as usize)
+                .max(1),
             channels: [[BiquadState::default(); BAND_COUNT]; 2],
         }
     }
@@ -219,7 +226,7 @@ impl StereoEqualizer {
         if self.remaining_samples == 0 {
             return;
         }
-        let denominator = self.remaining_samples as f32;
+        let denominator = self.remaining_samples as f64;
         self.current.mix += (self.target.mix - self.current.mix) / denominator;
         for (current, target) in self.current.bands.iter_mut().zip(self.target.bands) {
             current.lerp_towards(target, denominator);
@@ -235,12 +242,13 @@ impl StereoEqualizer {
             self.channels[channel].fill(BiquadState::default());
             return 0.0;
         }
+        let dry = f64::from(dry);
         let mut wet = dry;
         for (state, coefficients) in self.channels[channel].iter_mut().zip(self.current.bands) {
             wet = state.process(wet, coefficients);
         }
         // Weighted interpolation avoids overflowing wet - dry for finite inputs.
-        let output = dry * (1.0 - self.current.mix) + wet * self.current.mix;
+        let output = (dry * (1.0 - self.current.mix) + wet * self.current.mix) as f32;
         if output.is_finite() {
             output
         } else {
@@ -249,7 +257,7 @@ impl StereoEqualizer {
     }
 }
 
-fn normalize(b0: f32, b1: f32, b2: f32, a0: f32, a1: f32, a2: f32) -> BiquadCoefficients {
+fn normalize(b0: f64, b1: f64, b2: f64, a0: f64, a1: f64, a2: f64) -> BiquadCoefficients {
     BiquadCoefficients {
         b0: b0 / a0,
         b1: b1 / a0,
@@ -261,12 +269,12 @@ fn normalize(b0: f32, b1: f32, b2: f32, a0: f32, a1: f32, a2: f32) -> BiquadCoef
 
 // Coefficients below follow the W3C Audio EQ Cookbook:
 // https://www.w3.org/TR/audio-eq-cookbook/
-fn peaking(frequency: f32, gain_db: f32, q: f32, sample_rate: f32) -> BiquadCoefficients {
-    if gain_db.abs() < f32::EPSILON {
+fn peaking(frequency: f64, gain_db: f64, q: f64, sample_rate: f64) -> BiquadCoefficients {
+    if gain_db == 0.0 {
         return BiquadCoefficients::IDENTITY;
     }
-    let a = 10.0f32.powf(gain_db / 40.0);
-    let omega = std::f32::consts::TAU * frequency / sample_rate;
+    let a = 10.0f64.powf(gain_db / 40.0);
+    let omega = std::f64::consts::TAU * frequency / sample_rate;
     let alpha = omega.sin() / (2.0 * q);
     let cosine = omega.cos();
     normalize(
@@ -279,14 +287,14 @@ fn peaking(frequency: f32, gain_db: f32, q: f32, sample_rate: f32) -> BiquadCoef
     )
 }
 
-fn low_shelf(frequency: f32, gain_db: f32, sample_rate: f32) -> BiquadCoefficients {
-    if gain_db.abs() < f32::EPSILON {
+fn low_shelf(frequency: f64, gain_db: f64, sample_rate: f64) -> BiquadCoefficients {
+    if gain_db == 0.0 {
         return BiquadCoefficients::IDENTITY;
     }
-    let a = 10.0f32.powf(gain_db / 40.0);
-    let omega = std::f32::consts::TAU * frequency / sample_rate;
+    let a = 10.0f64.powf(gain_db / 40.0);
+    let omega = std::f64::consts::TAU * frequency / sample_rate;
     let cosine = omega.cos();
-    let alpha = omega.sin() * std::f32::consts::FRAC_1_SQRT_2;
+    let alpha = omega.sin() * std::f64::consts::FRAC_1_SQRT_2;
     let two_sqrt_a_alpha = 2.0 * a.sqrt() * alpha;
     normalize(
         a * ((a + 1.0) - (a - 1.0) * cosine + two_sqrt_a_alpha),
@@ -298,14 +306,14 @@ fn low_shelf(frequency: f32, gain_db: f32, sample_rate: f32) -> BiquadCoefficien
     )
 }
 
-fn high_shelf(frequency: f32, gain_db: f32, sample_rate: f32) -> BiquadCoefficients {
-    if gain_db.abs() < f32::EPSILON {
+fn high_shelf(frequency: f64, gain_db: f64, sample_rate: f64) -> BiquadCoefficients {
+    if gain_db == 0.0 {
         return BiquadCoefficients::IDENTITY;
     }
-    let a = 10.0f32.powf(gain_db / 40.0);
-    let omega = std::f32::consts::TAU * frequency / sample_rate;
+    let a = 10.0f64.powf(gain_db / 40.0);
+    let omega = std::f64::consts::TAU * frequency / sample_rate;
     let cosine = omega.cos();
-    let alpha = omega.sin() * std::f32::consts::FRAC_1_SQRT_2;
+    let alpha = omega.sin() * std::f64::consts::FRAC_1_SQRT_2;
     let two_sqrt_a_alpha = 2.0 * a.sqrt() * alpha;
     normalize(
         a * ((a + 1.0) + (a - 1.0) * cosine + two_sqrt_a_alpha),
@@ -321,8 +329,265 @@ fn high_shelf(frequency: f32, gain_db: f32, sample_rate: f32) -> BiquadCoefficie
 mod tests {
     use super::*;
 
-    fn magnitude(coefficients: BiquadCoefficients, frequency: f32, sample_rate: f32) -> f32 {
-        let omega = std::f32::consts::TAU * frequency / sample_rate;
+    #[test]
+    fn interrupted_publication_keeps_the_previous_target_without_waiting() {
+        let published = PublishedEq::new(&VstEqSettings::default(), 48_000);
+        let (revision, target) = published.load().unwrap();
+        let mut eq = StereoEqualizer::new(revision, target, 48_000);
+        let _writer = published.writer.lock();
+        published.sequence.store(1, Ordering::Relaxed);
+        published.values[0].store(1.0f64.to_bits(), Ordering::Relaxed);
+        assert!(published.load().is_none());
+        eq.begin_block(&published);
+        assert_eq!(eq.target, target);
+        assert_eq!(eq.process_stereo(0.25, -0.5), (0.25, -0.5));
+    }
+
+    #[test]
+    fn concurrent_publishers_never_expose_a_mixed_snapshot() {
+        let neutral = VstEqSettings::default();
+        let mut boost = neutral.clone();
+        boost.enabled = true;
+        boost.low_shelf.gain_db = 18.0;
+        boost.mid_peak.gain_db = -12.0;
+        boost.high_shelf.gain_db = 9.0;
+        let mut cut = boost.clone();
+        cut.enabled = false;
+        cut.low_shelf.gain_db = -18.0;
+        cut.mid_peak.frequency_hz = 4_000.0;
+        cut.high_shelf.gain_db = -9.0;
+        let allowed =
+            [&neutral, &boost, &cut].map(|settings| EqTarget::from_settings(settings, 48_000));
+        let published = PublishedEq::new(&neutral, 48_000);
+        let barrier = std::sync::Barrier::new(3);
+        std::thread::scope(|scope| {
+            for settings in [&boost, &cut] {
+                let published = &published;
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    barrier.wait();
+                    for _ in 0..10_000 {
+                        published.publish(settings, 48_000);
+                    }
+                });
+            }
+            barrier.wait();
+            for _ in 0..50_000 {
+                if let Some((revision, target)) = published.load() {
+                    assert_eq!(revision & 1, 0);
+                    assert!(
+                        allowed.contains(&target),
+                        "torn coefficient snapshot: {target:?}"
+                    );
+                }
+            }
+        });
+        assert!(allowed.contains(&published.load().unwrap().1));
+    }
+
+    #[test]
+    fn rapid_changes_remain_stable_and_return_to_neutral_and_bypass() {
+        for rate in [8_000, 44_100, 48_000, 96_000] {
+            let mut settings = VstEqSettings {
+                enabled: true,
+                ..Default::default()
+            };
+            let published = PublishedEq::new(&settings, rate);
+            let (revision, target) = published.load().unwrap();
+            let mut eq = StereoEqualizer::new(revision, target, rate);
+            for block in 0..200 {
+                let gain = if block % 2 == 0 { 18.0 } else { -18.0 };
+                settings.low_shelf.gain_db = gain;
+                settings.low_shelf.frequency_hz = if block % 3 == 0 { 40.0 } else { 500.0 };
+                settings.mid_peak.gain_db = -gain;
+                settings.mid_peak.frequency_hz = if block % 3 == 0 { 100.0 } else { 10_000.0 };
+                settings.mid_peak.q = if block % 2 == 0 { 0.2 } else { 10.0 };
+                settings.high_shelf.gain_db = gain;
+                settings.high_shelf.frequency_hz = if block % 3 == 0 { 2_000.0 } else { 16_000.0 };
+                settings.enabled = block % 5 != 0;
+                published.publish(&settings, rate);
+                eq.begin_block(&published);
+                for n in 0..64 {
+                    let input = 0.01
+                        * (std::f32::consts::TAU * 440.0 * (block * 64 + n) as f32 / rate as f32)
+                            .sin();
+                    let (left, right) = eq.process_stereo(input, 0.0);
+                    assert!(
+                        left.is_finite() && left.abs() < 10.0,
+                        "unstable at {rate}: {left}"
+                    );
+                    assert_eq!(right, 0.0);
+                    for c in eq.current.bands {
+                        // Jury stability criterion for each interpolated denominator.
+                        assert!(
+                            c.a2.abs() < 1.0 && 1.0 + c.a1 + c.a2 > 0.0 && 1.0 - c.a1 + c.a2 > 0.0
+                        );
+                    }
+                }
+            }
+            let neutral = VstEqSettings {
+                enabled: true,
+                ..Default::default()
+            };
+            published.publish(&neutral, rate);
+            eq.begin_block(&published);
+            for _ in 0..eq.smoothing_samples + 2 {
+                eq.process_mono(0.0);
+            }
+            assert_eq!(eq.process_stereo(0.0, 0.0), (0.0, 0.0));
+            assert_eq!(eq.process_stereo(0.125, -0.25), (0.125, -0.25));
+
+            settings.enabled = false;
+            published.publish(&settings, rate);
+            eq.begin_block(&published);
+            for _ in 0..eq.smoothing_samples {
+                eq.process_mono(0.1);
+            }
+            assert_eq!(eq.process_stereo(0.125, -0.25), (0.125, -0.25));
+        }
+    }
+
+    #[test]
+    fn bypass_toggle_preserves_a_warm_filter_and_has_a_bounded_ramp() {
+        let mut settings = VstEqSettings {
+            enabled: true,
+            ..Default::default()
+        };
+        settings.low_shelf.gain_db = 18.0;
+        let published = PublishedEq::new(&settings, 48_000);
+        let (revision, target) = published.load().unwrap();
+        let mut eq = StereoEqualizer::new(revision, target, 48_000);
+        for _ in 0..48_000 {
+            eq.process_mono(0.1);
+        }
+        let mut previous = eq.process_mono(0.1);
+        for enabled in [false, true, false] {
+            settings.enabled = enabled;
+            published.publish(&settings, 48_000);
+            eq.begin_block(&published);
+            for _ in 0..eq.smoothing_samples {
+                let output = eq.process_mono(0.1);
+                assert!(
+                    (output - previous).abs() < 0.001,
+                    "bypass step: {previous} -> {output}"
+                );
+                previous = output;
+            }
+            let expected = if enabled { 0.794_328_2 } else { 0.1 };
+            assert!((previous - expected).abs() < 0.00001);
+        }
+    }
+
+    #[test]
+    fn recreated_filter_uses_new_rate_and_does_not_inherit_the_previous_instrument() {
+        let mut settings = VstEqSettings {
+            enabled: true,
+            ..Default::default()
+        };
+        settings.mid_peak.gain_db = 18.0;
+        settings.mid_peak.frequency_hz = 100.0;
+        settings.mid_peak.q = 10.0;
+        let mut old = StereoEqualizer::new(0, EqTarget::from_settings(&settings, 96_000), 96_000);
+        old.process_stereo(1.0, -1.0);
+        let mut new = StereoEqualizer::new(0, EqTarget::from_settings(&settings, 8_000), 8_000);
+        assert_eq!(new.process_stereo(0.0, 0.0), (0.0, 0.0));
+        assert_eq!(new.smoothing_samples, 160);
+        let mut energy_in = 0.0f64;
+        let mut energy_out = 0.0f64;
+        for n in 0..32_000 {
+            let input = 0.01 * (std::f64::consts::TAU * 100.0 * n as f64 / 8_000.0).sin();
+            let output = new.process_mono(input as f32);
+            if n >= 16_000 {
+                energy_in += input * input;
+                energy_out += f64::from(output).powi(2);
+            }
+        }
+        assert!((10.0 * (energy_out / energy_in).log10() - 18.0).abs() < 0.01);
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ReferenceCase {
+        name: String,
+        sample_rate: u32,
+        settings: VstEqSettings,
+        response: Vec<ReferencePoint>,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ReferencePoint {
+        frequency_hz: f64,
+        db: f64,
+    }
+
+    #[test]
+    fn measured_impulses_match_independent_analog_reference() {
+        // Fixtures come from analog prototypes with BLT prewarping, not from
+        // the digital coefficients under test (tests/fixtures/generate_eq_reference.py).
+        let cases: Vec<ReferenceCase> =
+            serde_json::from_str(include_str!("../../tests/fixtures/eq-response.json")).unwrap();
+        for case in cases {
+            let mut eq = StereoEqualizer::new(
+                0,
+                EqTarget::from_settings(&case.settings, case.sample_rate),
+                case.sample_rate,
+            );
+            let mut dft = vec![(0.0f64, 0.0f64); case.response.len()];
+            for n in 0..131_072 {
+                let (left, right) = eq.process_stereo(if n == 0 { 1.0 } else { 0.0 }, 0.0);
+                assert_eq!(right, 0.0, "cross-channel state: {}", case.name);
+                assert!(left.is_finite());
+                for (point, (re, im)) in case.response.iter().zip(&mut dft) {
+                    let angle = std::f64::consts::TAU * point.frequency_hz * n as f64
+                        / case.sample_rate as f64;
+                    *re += f64::from(left) * angle.cos();
+                    *im -= f64::from(left) * angle.sin();
+                }
+            }
+            for (point, (re, im)) in case.response.iter().zip(dft) {
+                let measured = 20.0 * re.hypot(im).log10();
+                assert!(
+                    (measured - point.db).abs() < 0.01,
+                    "{} at {} Hz: measured {measured}, expected {}",
+                    case.name,
+                    point.frequency_hz,
+                    point.db
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn moving_a_peak_on_dc_does_not_create_audio_transients() {
+        let settings = VstEqSettings {
+            enabled: true,
+            ..Default::default()
+        };
+        let published = PublishedEq::new(&settings, 48_000);
+        let (revision, target) = published.load().unwrap();
+        let mut eq = StereoEqualizer::new(revision, target, 48_000);
+        for _ in 0..4_800 {
+            eq.process_mono(0.1);
+        }
+        let mut changed = settings;
+        changed.mid_peak.gain_db = 18.0;
+        changed.mid_peak.q = 10.0;
+        let mut max_error = 0.0f32;
+        for frequency in [100.0, 10_000.0, 100.0] {
+            changed.mid_peak.frequency_hz = frequency;
+            published.publish(&changed, 48_000);
+            eq.begin_block(&published);
+            for _ in 0..24_000 {
+                max_error = max_error.max((eq.process_mono(0.1) - 0.1).abs());
+            }
+        }
+        // A peaking EQ has unity DC gain at every point of the ramp.
+        assert!(max_error < 0.001, "DC transient: {max_error}");
+    }
+
+    fn magnitude(coefficients: BiquadCoefficients, frequency: f64, sample_rate: f64) -> f64 {
+        let omega = std::f64::consts::TAU * frequency / sample_rate;
         let c1 = omega.cos();
         let s1 = -omega.sin();
         let c2 = (2.0 * omega).cos();
@@ -407,8 +672,8 @@ mod tests {
         assert!(target
             .encode()
             .into_iter()
-            .map(f32::from_bits)
-            .all(f32::is_finite));
+            .map(f64::from_bits)
+            .all(f64::is_finite));
     }
 
     #[test]

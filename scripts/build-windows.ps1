@@ -1,10 +1,50 @@
 [CmdletBinding()]
 param(
-    [switch]$NoLog
+    [switch]$NoLog,
+    [switch]$Clean,
+    [Alias('Cleanup', 'PostClean', 'CleanupAfter', 'CleanIntermediate')]
+    [switch]$CleanAfter,
+    [Alias('CleanWorkspace')]
+    [switch]$CleanOnly,
+    [switch]$FullClean,
+    [switch]$ReinstallDependencies,
+    [switch]$LatencyDiagnostics,
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [string[]]$RemainingArguments
 )
+
+if ($FullClean) {
+    $CleanOnly = $true
+    $Clean = $true
+    # Full cleanup removes artifacts, including the usual build log directory.
+    $NoLog = $true
+}
+
+if ($RemainingArguments) {
+    foreach ($arg in $RemainingArguments) {
+        if ($arg -match '^(?:-+|/+)?clean(?:up)?(?:after)?$') {
+            $CleanAfter = $true
+        }
+        elseif ($arg -match '^(?:-+|/+)?cleanonly$') {
+            $CleanOnly = $true
+        }
+        elseif ($arg -match '^(?:-+|/+)?clean$') {
+            $Clean = $true
+        }
+    }
+}
+
+if ($env:OSCMIDI_CLEAN_AFTER -eq '1' -or $env:OSCMIDI_CLEANUP -eq '1') {
+    $CleanAfter = $true
+}
+
+if ($LatencyDiagnostics -or $env:OSCMIDI_ENABLE_LATENCY_DIAGNOSTICS -eq '1') {
+    $env:OSCMIDI_ENABLE_LATENCY_DIAGNOSTICS = '1'
+}
 
 $ErrorActionPreference = 'Stop'
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot 'build-support.ps1')
 $cargoTargetDirectory = Join-Path $repositoryRoot '.cargo-target'
 $artifactDirectory = Join-Path $repositoryRoot 'artifacts'
 $buildId = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
@@ -15,8 +55,9 @@ $temporaryLog = if ($persistBuildLog) {
     Join-Path $logDirectory "build-$buildId-RUNNING.log"
 }
 else {
-    Join-Path ([System.IO.Path]::GetTempPath()) "oscmidi-build-$buildId-$([guid]::NewGuid().ToString('N')).log"
+    $null
 }
+$buildLogWriter = if ($temporaryLog) { [System.IO.StreamWriter]::new($temporaryLog, $false, [System.Text.UTF8Encoding]::new($false)) } else { $null }
 $totalStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 $buildSucceeded = $false
 $exitCode = 1
@@ -40,7 +81,7 @@ function Write-BuildLog {
 
     $line = "[$(Get-Date -Format 'HH:mm:ss')] $Message"
     Write-Host $line -ForegroundColor $Color
-    Add-Content -LiteralPath $temporaryLog -Value $line -Encoding UTF8
+    if ($buildLogWriter) { $buildLogWriter.WriteLine($line) }
 }
 
 function Show-BuildStage {
@@ -60,7 +101,7 @@ function Show-BuildStage {
     $stageColor = if ($Stage -eq 7) { 'Magenta' } else { 'Cyan' }
     Write-Host "[$bar] $Percent%  Stage $Stage/7 - $Title" -ForegroundColor $stageColor
     Write-Progress -Activity 'OSCMidi Windows Build' -Status "Stage $Stage/7 - $Title" -PercentComplete $Percent
-    Add-Content -LiteralPath $temporaryLog -Value "`r`n=== Stage $Stage/7 - $Title ($Percent%) ===" -Encoding UTF8
+    if ($buildLogWriter) { $buildLogWriter.WriteLine("`r`n=== Stage $Stage/7 - $Title ($Percent%) ==="); $buildLogWriter.Flush() }
 }
 
 function Invoke-BuildCommand {
@@ -74,6 +115,7 @@ function Invoke-BuildCommand {
     Write-BuildLog "> $display" DarkGray
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     $previousErrorActionPreference = $ErrorActionPreference
+    $global:LASTEXITCODE = $null
     try {
         # Native tools commonly use stderr for warnings. PowerShell 5 turns
         # those lines into ErrorRecord instances when stderr is merged, so the
@@ -82,14 +124,15 @@ function Invoke-BuildCommand {
         & $Command @Arguments 2>&1 | ForEach-Object {
             $line = $_.ToString()
             Write-Host $line
-            Add-Content -LiteralPath $temporaryLog -Value (Remove-AnsiSequences $line) -Encoding UTF8
+            if ($buildLogWriter) { $buildLogWriter.WriteLine((Remove-AnsiSequences $line)) }
         }
-        $commandExitCode = $LASTEXITCODE
+        $commandExitCode = $global:LASTEXITCODE
     }
     finally {
         $ErrorActionPreference = $previousErrorActionPreference
     }
     $stopwatch.Stop()
+    if ($buildLogWriter) { $buildLogWriter.Flush() }
     if ($commandExitCode -ne 0) {
         throw "Command failed with exit code $commandExitCode after $([Math]::Round($stopwatch.Elapsed.TotalSeconds, 1)) s: $display"
     }
@@ -196,6 +239,33 @@ function Import-VisualStudioEnvironment {
         }
 }
 
+function Stop-WorkspaceNodeProcesses {
+    # A dev server can outlive its npm/cmd parent. Loaded native modules give
+    # us an absolute workspace path even when Node's command line is relative.
+    $modulePrefix = [System.IO.Path]::GetFullPath((Join-Path $repositoryRoot 'node_modules')).TrimEnd('\') + '\'
+    foreach ($nodeProcess in @(Get-Process -Name node -ErrorAction SilentlyContinue)) {
+        $lockedModule = $null
+        try {
+            $lockedModule = $nodeProcess.Modules | Where-Object {
+                $_.FileName -and
+                $_.FileName.StartsWith($modulePrefix, [System.StringComparison]::OrdinalIgnoreCase) -and
+                $_.FileName.EndsWith('.node', [System.StringComparison]::OrdinalIgnoreCase)
+            } | Select-Object -First 1
+        }
+        catch {
+            # No evidence of a workspace lock: leave this process alone.
+            continue
+        }
+        if (-not $lockedModule) { continue }
+
+        Write-BuildLog "Stopping workspace Node process $($nodeProcess.Id) holding $($lockedModule.FileName)." Yellow
+        Stop-Process -InputObject $nodeProcess -Force -ErrorAction Stop
+        if (-not $nodeProcess.WaitForExit(5000)) {
+            throw "Workspace Node process $($nodeProcess.Id) did not exit; close its development terminal and retry."
+        }
+    }
+}
+
 function Stop-WorkspaceCargoProcesses {
     $processes = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
         Where-Object {
@@ -208,49 +278,17 @@ function Stop-WorkspaceCargoProcesses {
     }
 }
 
-function Remove-GeneratedDirectory {
-    param([Parameter(Mandatory)][string]$RelativePath)
-
-    $candidate = Join-Path $repositoryRoot $RelativePath
-    if (-not (Test-Path -LiteralPath $candidate)) {
-        return
-    }
-    $resolved = (Resolve-Path -LiteralPath $candidate).Path.TrimEnd('\')
-    $rootPrefix = $repositoryRoot.TrimEnd('\') + '\'
-    if (-not $resolved.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase) -or
-        $resolved -eq $repositoryRoot.TrimEnd('\')) {
-        throw "Cleanup refused outside the repository: $resolved"
-    }
-
-    $git = Get-Command git.exe -ErrorAction SilentlyContinue
-    if (-not $git) {
-        $git = Get-Command git -ErrorAction SilentlyContinue
-    }
-    if ($git -and (Test-Path -LiteralPath (Join-Path $repositoryRoot '.git'))) {
-        $gitPath = $RelativePath.Replace('\', '/')
-        $trackedFiles = @(& $git.Source -C $repositoryRoot ls-files -- $gitPath 2>$null)
-        if ($LASTEXITCODE -ne 0) {
-            throw "Cleanup could not verify tracked files in ${RelativePath}."
-        }
-        if ($trackedFiles.Count -gt 0) {
-            throw "Cleanup refused to remove ${RelativePath}: it contains Git-tracked files."
-        }
-    }
-
-    for ($attempt = 1; $attempt -le 3; $attempt++) {
-        try {
-            Get-ChildItem -LiteralPath $resolved -File -Recurse -Force -ErrorAction SilentlyContinue |
-                ForEach-Object { $_.Attributes = [System.IO.FileAttributes]::Normal }
-            [System.IO.Directory]::Delete($resolved, $true)
-            Write-BuildLog "Cleaned: $RelativePath" DarkGray
-            return
-        }
-        catch {
-            if ($attempt -eq 3) {
-                throw "Unable to clean ${RelativePath}: $($_.Exception.Message)"
-            }
-            Start-Sleep -Milliseconds 300
-        }
+function Stop-WorkspaceAppProcesses {
+    $root = $repositoryRoot.TrimEnd('\') + '\'
+    $pattern = [WildcardPattern]::Escape($root) + '*'
+    $processes = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.Name -in 'OSCMidi.exe', 'vst-host-worker-x64.exe', 'vst-host-worker-x86.exe' -and
+            ($_.ExecutablePath -like $pattern)
+        })
+    if ($processes.Count -gt 0) {
+        Stop-Process -Id $processes.ProcessId -Force -ErrorAction SilentlyContinue
+        Write-BuildLog "Stopped $($processes.Count) workspace application process(es)." Yellow
     }
 }
 
@@ -338,6 +376,7 @@ function Get-Sha256Hash {
 }
 
 function Export-BuildArtifacts {
+    Stop-WorkspaceAppProcesses
     $version = (Get-Content (Join-Path $repositoryRoot 'package.json') -Raw | ConvertFrom-Json).version
     $application = Get-Item (Join-Path $cargoTargetDirectory 'release\OSCMidi.exe') -ErrorAction Stop
     $installers = @(
@@ -354,6 +393,7 @@ function Export-BuildArtifacts {
     $workerX86 = Get-Item (Join-Path $cargoTargetDirectory 'release\vst-host-worker-x86.exe') -ErrorAction Stop
 
     Assert-WindowsGuiExecutable $application.FullName
+    Assert-PeMachine $application.FullName 0x8664
     Assert-WindowsGuiExecutable $workerX64.FullName
     Assert-WindowsGuiExecutable $workerX86.FullName
     Assert-PeMachine $workerX64.FullName 0x8664
@@ -439,7 +479,27 @@ function Save-BuildLog {
 Set-Location $repositoryRoot
 $env:CARGO_TARGET_DIR = $cargoTargetDirectory
 $env:CARGO_INCREMENTAL = '0'
-[System.IO.File]::WriteAllText($temporaryLog, "OSCMidi build started at $(Get-Date -Format 'u')`r`n")
+if ($buildLogWriter) { $buildLogWriter.WriteLine("OSCMidi build started at $(Get-Date -Format 'u')") }
+
+if ($CleanOnly) {
+    Write-Host ''
+    Write-Host 'OSCMidi - Workspace Cleanup' -ForegroundColor Cyan
+    Write-Host 'Cleaning compiled libraries, build targets and intermediate caches...' -ForegroundColor Gray
+    Clear-BuildCaches -IncludeNodeModules:$Clean -IncludeOutputs:$FullClean -BeforeClean {
+        Stop-WorkspaceNodeProcesses
+        Stop-WorkspaceCargoProcesses
+        Stop-WorkspaceAppProcesses
+    }
+    $cleanupMessage = if ($FullClean) { '[OK] Full workspace cleanup completed. Sources, Git, SDKs and developer environments are preserved.' } else { '[OK] Workspace cleanup completed successfully. Deliverables in artifacts\ are preserved.' }
+    Write-Host $cleanupMessage -ForegroundColor Green
+    if ($buildLogWriter) {
+        $buildLogWriter.Dispose()
+        if ($temporaryLog -and (Test-Path -LiteralPath $temporaryLog)) {
+            Remove-Item -LiteralPath $temporaryLog -Force -ErrorAction SilentlyContinue
+        }
+    }
+    exit 0
+}
 
 try {
     Show-BuildStage 1 5 'Checking prerequisites'
@@ -498,68 +558,79 @@ try {
     }
     Write-BuildLog "Windows, Node.js v$nodeVersion, Rust, CMake, and LLVM prerequisites are ready." Green
 
-    Show-BuildStage 2 15 'Installing frontend dependencies'
-    Invoke-BuildCommand $npm @('ci', '--no-fund', '--no-audit')
+    if ($Clean) {
+        Write-BuildLog 'Explicit clean build requested; removing generated caches before validation.' Yellow
+        Clear-BuildCaches -IncludeNodeModules -BeforeClean {
+            Stop-WorkspaceNodeProcesses
+            Stop-WorkspaceCargoProcesses
+            Stop-WorkspaceAppProcesses
+        }
+    }
 
+    Show-BuildStage 2 15 'Preparing frontend dependencies'
+    $npmVersion = (& $npm --version).Trim()
+    if ($LASTEXITCODE -ne 0) { throw 'Unable to read npm version.' }
+    Ensure-FrontendDependencies -Npm $npm -NodeVersion $nodeVersion.ToString() -NpmVersion $npmVersion -Force:$ReinstallDependencies -BeforeInstall { Stop-WorkspaceNodeProcesses } -CommandRunner { param($Executable, $CommandArguments) Invoke-BuildCommand $Executable $CommandArguments }
+
+    $validationShell = (Get-Process -Id $PID).Path
     Show-BuildStage 3 30 'Validating the frontend'
-    Invoke-BuildCommand $npm @('run', 'lint')
-    Invoke-BuildCommand $npm @('test')
+    Invoke-BuildCommand $validationShell @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'validate.ps1'), '-Scope', 'Frontend')
 
-    Show-BuildStage 4 45 'Validating Rust'
-    $previousTauriConfig = $env:TAURI_CONFIG
-    try {
-        $env:TAURI_CONFIG = '{"bundle":{"externalBin":[]}}'
-        Invoke-BuildCommand $cargo @('fmt', '--manifest-path', 'src-tauri\Cargo.toml', '--package', 'osc-midi-bridge', '--', '--check')
-        Invoke-BuildCommand $cargo @('clippy', '--manifest-path', 'src-tauri\Cargo.toml', '--all-targets', '--all-features', '--', '-D', 'warnings')
-        Invoke-BuildCommand $cargo @('test', '--manifest-path', 'src-tauri\Cargo.toml', '--all-targets', '--all-features')
-        Invoke-BuildCommand $cargo @('fmt', '--manifest-path', 'tools\diagnostics\Cargo.toml', '--package', 'oscmidi-diagnostics', '--', '--check')
-        Invoke-BuildCommand $cargo @('clippy', '--manifest-path', 'tools\diagnostics\Cargo.toml', '--target-dir', 'tools\diagnostics\target', '--all-targets', '--', '-D', 'warnings')
-    }
-    finally {
-        $env:TAURI_CONFIG = $previousTauriConfig
-    }
+    Show-BuildStage 4 45 'Validating Rust, diagnostics and native audio'
+    Invoke-BuildCommand $validationShell @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'validate.ps1'), '-Scope', 'Rust')
+
+    # Keep compilation outputs but never accept an installer from an earlier run.
+    Remove-GeneratedDirectory '.cargo-target\release\bundle'
+    Remove-GeneratedDirectory '.cargo-target\release\wix'
 
     Show-BuildStage 5 75 'Building the release and MSI installer'
-    Invoke-BuildCommand $npm @('run', 'tauri:build', '--', '--bundles', 'msi', '--ci')
+    $tauriBuildArgs = @('run', 'tauri:build', '--', '--bundles', 'msi', '--ci', '--', '--locked', '--timings')
+    if ($env:OSCMIDI_ENABLE_LATENCY_DIAGNOSTICS -eq '1') {
+        $tauriBuildArgs += @('--features', 'latency-diagnostics')
+        Write-BuildLog 'Building release and MSI installer with latency diagnostics enabled.' Yellow
+    }
+    Invoke-BuildCommand $npm $tauriBuildArgs
 
     Show-BuildStage 6 90 'Verifying and exporting artifacts'
     Export-BuildArtifacts
     $buildSucceeded = $true
     $exitCode = 0
+
+    if ($CleanAfter) {
+        Show-BuildStage 6 95 'Cleaning up intermediate build caches'
+        Write-BuildLog 'Post-build cleanup requested (-CleanAfter); removing intermediate compiled libraries and build caches to free disk space.' Yellow
+        Clear-BuildCaches -BeforeClean {
+            Stop-WorkspaceNodeProcesses
+            Stop-WorkspaceCargoProcesses
+            Stop-WorkspaceAppProcesses
+        }
+        Write-BuildLog 'Intermediate compiled libraries and caches cleaned successfully. Release deliverables preserved in artifacts\.' Green
+    }
 }
 catch {
     Write-BuildLog "FAILED: $($_.Exception.Message)" Red
     $exitCode = 1
 }
 finally {
-    Show-BuildStage 7 96 'Automatic cleanup'
-    try {
-        Stop-WorkspaceCargoProcesses
-        @(
-            '.cargo-target'
-            'src-tauri\target'
-            'tools\diagnostics\target'
-            'node_modules'
-            'src-tauri\binaries'
-            'dist'
-        ) | ForEach-Object { Remove-GeneratedDirectory $_ }
-        Write-BuildLog 'Cleanup complete: artifacts, logs, tracked files, and developer-managed files were preserved.' Green
+    Show-BuildStage 7 96 'Finalizing build logs'
+    if ($CleanAfter) {
+        Write-BuildLog 'Intermediate compiled libraries cleaned up to save disk space; release deliverables preserved in artifacts\.' Green
     }
-    catch {
-        Write-BuildLog "CLEANUP WARNING: $($_.Exception.Message)" Yellow
-        if ($exitCode -eq 0) { $exitCode = 2 }
+    else {
+        Write-BuildLog 'Compilation caches and frontend dependencies preserved for the next build.' DarkGray
     }
 
     $totalStopwatch.Stop()
     $status = if ($buildSucceeded -and $exitCode -eq 0) { 'OK' } else { 'FAIL' }
     Write-BuildLog "Build $status in $([Math]::Round($totalStopwatch.Elapsed.TotalMinutes, 2)) min." $(if ($status -eq 'OK') { 'Green' } else { 'Red' })
+    if ($buildLogWriter) { $buildLogWriter.Dispose() }
     if ($persistBuildLog) {
         Save-BuildLog $status
     }
     else {
         Write-Host 'Persistent build log disabled for this run.' -ForegroundColor DarkGray
     }
-    if (Test-Path -LiteralPath $temporaryLog) {
+    if ($temporaryLog -and (Test-Path -LiteralPath $temporaryLog)) {
         Remove-Item -LiteralPath $temporaryLog -Force
     }
     Write-Progress -Activity 'OSCMidi Windows Build' -Completed

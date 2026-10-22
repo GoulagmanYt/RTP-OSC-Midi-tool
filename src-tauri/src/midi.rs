@@ -12,8 +12,10 @@ pub(crate) struct SourceMidiState {
 #[derive(Default)]
 struct SourceNotes {
     notes: [u128; 16],
-    sustain: [bool; 16],
+    hold_pedals: [[bool; 3]; 16],
 }
+
+const HOLD_PEDALS: [u8; 3] = [64, 66, 69];
 
 impl SourceMidiState {
     pub(crate) fn observe(&mut self, frame: &MidiFrame) {
@@ -34,18 +36,19 @@ impl SourceMidiState {
             0x90 if bytes[2] > 0 => state.notes[channel] |= 1u128 << bytes[1],
             0x80 | 0x90 => state.notes[channel] &= !(1u128 << bytes[1]),
             0xB0 => match bytes[1] {
-                64 => state.sustain[channel] = bytes[2] >= 64,
-                120 => {
-                    state.notes[channel] = 0;
-                    state.sustain[channel] = false;
+                64 | 66 | 69 => {
+                    let pedal = HOLD_PEDALS.iter().position(|cc| *cc == bytes[1]).unwrap();
+                    state.hold_pedals[channel][pedal] = bytes[2] >= 64;
                 }
-                123 => state.notes[channel] = 0,
-                121 => state.sustain[channel] = false,
+                120 | 123..=127 => state.notes[channel] = 0,
+                121 => state.hold_pedals[channel].fill(false),
                 _ => {}
             },
             _ => {}
         }
-        if state.notes.iter().all(|notes| *notes == 0) && !state.sustain.iter().any(|held| *held) {
+        if state.notes.iter().all(|notes| *notes == 0)
+            && !state.hold_pedals.iter().flatten().any(|held| *held)
+        {
             self.sources.remove(&frame.source);
         }
     }
@@ -66,10 +69,15 @@ impl SourceMidiState {
                 exclusive &= exclusive - 1;
                 releases.push([0x80 | channel as u8, note, 0]);
             }
-            if removed.sustain[channel]
-                && !self.sources.values().any(|state| state.sustain[channel])
-            {
-                releases.push([0xB0 | channel as u8, 64, 0]);
+            for (pedal, controller) in HOLD_PEDALS.iter().enumerate() {
+                if removed.hold_pedals[channel][pedal]
+                    && !self
+                        .sources
+                        .values()
+                        .any(|state| state.hold_pedals[channel][pedal])
+                {
+                    releases.push([0xB0 | channel as u8, *controller, 0]);
+                }
             }
         }
         releases
@@ -79,6 +87,64 @@ impl SourceMidiState {
 #[cfg(test)]
 mod source_recovery_tests {
     use super::*;
+
+    #[test]
+    fn peer_reset_releases_each_hold_pedal_without_releasing_another_source() {
+        for controller in [64, 66, 69] {
+            let mut state = SourceMidiState::default();
+            for source in ["RTP:A", "Keyboard"] {
+                state.observe(
+                    &MidiFrame::copy_realtime(
+                        &[0xB2, controller, 127],
+                        std::sync::Arc::from(source),
+                    )
+                    .unwrap(),
+                );
+            }
+            assert!(state.release_source("RTP:A").is_empty());
+            assert_eq!(state.release_source("Keyboard"), [[0xB2, controller, 0]]);
+            assert!(state.release_source("Keyboard").is_empty());
+        }
+    }
+
+    #[test]
+    fn reset_controllers_forgets_every_hold_pedal_but_preserves_held_keys() {
+        let mut state = SourceMidiState::default();
+        for bytes in [
+            [0x91, 60, 100],
+            [0xB1, 64, 127],
+            [0xB1, 66, 127],
+            [0xB1, 69, 127],
+            [0xB1, 121, 0],
+        ] {
+            state
+                .observe(&MidiFrame::copy_realtime(&bytes, std::sync::Arc::from("RTP:A")).unwrap());
+        }
+        assert_eq!(state.release_source("RTP:A"), [[0x81, 60, 0]]);
+    }
+
+    #[test]
+    fn all_sound_off_does_not_forget_latched_pedals() {
+        let mut state = SourceMidiState::default();
+        for bytes in [[0x90, 60, 100], [0xB0, 64, 127], [0xB0, 120, 0]] {
+            state
+                .observe(&MidiFrame::copy_realtime(&bytes, std::sync::Arc::from("RTP:A")).unwrap());
+        }
+        assert_eq!(state.release_source("RTP:A"), [[0xB0, 64, 0]]);
+    }
+
+    #[test]
+    fn channel_modes_forget_released_keys_but_preserve_hold_pedals() {
+        for controller in 123..=127 {
+            let mut state = SourceMidiState::default();
+            for bytes in [[0x91, 60, 100], [0xB1, 64, 127], [0xB1, controller, 0]] {
+                state.observe(
+                    &MidiFrame::copy_realtime(&bytes, std::sync::Arc::from("RTP:A")).unwrap(),
+                );
+            }
+            assert_eq!(state.release_source("RTP:A"), [[0xB1, 64, 0]]);
+        }
+    }
 
     #[test]
     fn peer_reset_releases_only_exclusive_notes_and_preserves_shared_sustain() {

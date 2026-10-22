@@ -364,14 +364,29 @@ mod windows_worker {
             let mut sequence = 0u64;
             loop {
                 tick.tick().await;
+                // Reserve before draining: health reads and a full control
+                // queue must not silently consume per-note diagnostics.
+                #[cfg(feature = "latency-diagnostics")]
+                let heartbeat_permit = match heartbeat_tx.try_reserve() {
+                    Ok(permit) => permit,
+                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => continue,
+                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
+                };
                 sequence = sequence.wrapping_add(1);
                 let mut metrics = health_audio.realtime_metrics();
+                #[cfg(feature = "latency-diagnostics")]
+                {
+                    metrics.diagnostic_trace = osc_midi_bridge::latency_trace::drain();
+                }
                 metrics.limiter_enabled = Some(health_limiter.load(Ordering::Acquire));
                 let message = ControlMessage::Heartbeat {
                     sequence,
                     monotonic_qpc: monotonic_qpc(),
                     metrics,
                 };
+                #[cfg(feature = "latency-diagnostics")]
+                heartbeat_permit.send(message);
+                #[cfg(not(feature = "latency-diagnostics"))]
                 match heartbeat_tx.try_send(message) {
                     Ok(()) | Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {}
                     Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
@@ -537,6 +552,9 @@ mod windows_worker {
                                 audio.stop(Some(app_for_stop));
                                 Ok(())
                             }).await?;
+                            #[cfg(feature = "audio-diagnostics")]
+                            execute_blocking(|| osc_midi_bridge::audio_trace::finish_file_recorder()
+                                .map_err(|error| error.to_string())).await?;
                             send_response(&control_tx, ControlMessage::Stopped { request_id })
                                 .await
                                 .map_err(|error| format!("Failed to acknowledge stop: {error}"))?;
@@ -592,65 +610,89 @@ mod windows_worker {
             window.visible = false;
         }
 
-        tauri::Builder::default()
-            .setup(move |app| {
-                let window = app
-                    .get_webview_window("main")
-                    .ok_or_else(|| "worker host window unavailable".to_string())?;
-                window.hide()?;
-                let logger = FrontendLogger::new(
-                    window.as_ref().window().clone(),
-                    std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                );
-                let app_handle = app.handle().clone();
-                let exit_handle = app_handle.clone();
-                if dsp_mode {
-                    tauri::async_runtime::spawn_blocking(move || {
-                        let result = osc_midi_bridge::audio::run_dsp_bridge_from_env(logger)
-                            .unwrap_or_else(|| Err("Missing DSP bridge arguments".to_string()));
-                        if let Err(error) = result {
-                            background_log("error", format!("VST x86 DSP bridge stopped: {error}"));
-                            exit_handle.exit(1);
-                        } else {
-                            exit_handle.exit(0);
-                        }
-                    });
-                    return Ok(());
-                }
-                let args = args.expect("normal worker arguments");
-                let audio = AudioEngine::new();
-                let (editor_hidden_tx, editor_hidden_rx) = tokio::sync::mpsc::channel(4);
-                app_handle.listen("audio:vst-editor-hidden", move |_| {
-                    let _ = editor_hidden_tx.try_send(());
-                });
-                tauri::async_runtime::spawn(async move {
-                    if let Err(error) =
-                        worker_session(args, app_handle, logger, audio, editor_hidden_rx).await
-                    {
-                        background_log("error", format!("VST worker stopped: {error}"));
+        let builder = tauri::Builder::default().setup(move |app| {
+            #[cfg(feature = "audio-diagnostics")]
+            osc_midi_bridge::audio_trace::record_power_policy(2);
+            let window = app
+                .get_webview_window("main")
+                .ok_or_else(|| "worker host window unavailable".to_string())?;
+            window.hide()?;
+            let logger = FrontendLogger::new(
+                window.as_ref().window().clone(),
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            );
+            let app_handle = app.handle().clone();
+            let exit_handle = app_handle.clone();
+            if dsp_mode {
+                tauri::async_runtime::spawn_blocking(move || {
+                    let result = osc_midi_bridge::audio::run_dsp_bridge_from_env(logger)
+                        .unwrap_or_else(|| Err("Missing DSP bridge arguments".to_string()));
+                    if let Err(error) = result {
+                        background_log("error", format!("VST x86 DSP bridge stopped: {error}"));
                         exit_handle.exit(1);
+                    } else {
+                        exit_handle.exit(0);
                     }
                 });
+                return Ok(());
+            }
+            let args = args.expect("normal worker arguments");
+            let audio = AudioEngine::new();
+            let (editor_hidden_tx, editor_hidden_rx) = tokio::sync::mpsc::channel(4);
+            app_handle.listen("audio:vst-editor-hidden", move |_| {
+                let _ = editor_hidden_tx.try_send(());
+            });
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) =
+                    worker_session(args, app_handle, logger, audio, editor_hidden_rx).await
+                {
+                    background_log("error", format!("VST worker stopped: {error}"));
+                    exit_handle.exit(1);
+                }
+            });
+            Ok(())
+        });
+        #[cfg(feature = "audio-diagnostics")]
+        {
+            let app = builder.build(context).map_err(|error| error.to_string())?;
+            let code = app.run_return(|_, _| {});
+            if code == 0 {
                 Ok(())
-            })
-            .run(context)
-            .map_err(|error| error.to_string())
+            } else {
+                Err(format!("Worker exited with code {code}"))
+            }
+        }
+        #[cfg(not(feature = "audio-diagnostics"))]
+        builder.run(context).map_err(|error| error.to_string())
     }
 }
 
 #[cfg(target_os = "windows")]
 fn main() {
+    #[cfg(feature = "latency-diagnostics")]
+    osc_midi_bridge::latency_trace::start();
     let _timer_guard = osc_midi_bridge::audio::windows_tuning::enable_high_resolution_timer();
+    let _tuning_diagnostics =
+        osc_midi_bridge::audio::windows_tuning::start_audio_tuning_diagnostics();
     osc_midi_bridge::audio::windows_tuning::apply_worker_process_priority();
     windows_worker::install_descendant_console_guard();
     if let Some(exit_code) = osc_midi_bridge::plugin_probe::probe_cli_exit_code() {
         if exit_code == 0 {
             return;
         }
+        drop(_tuning_diagnostics);
         std::process::exit(exit_code);
     }
+    #[cfg(feature = "audio-diagnostics")]
+    let _audio_trace = osc_midi_bridge::audio_trace::start_file_recorder()
+        .expect("Cannot initialize requested audio diagnostic recorder");
+    #[cfg(feature = "audio-diagnostics")]
+    osc_midi_bridge::audio_trace::record_power_policy(1);
     if let Err(error) = windows_worker::run() {
         eprintln!("vst-host-worker: {error}");
+        #[cfg(feature = "audio-diagnostics")]
+        drop(_audio_trace);
+        drop(_tuning_diagnostics);
         std::process::exit(2);
     }
 }

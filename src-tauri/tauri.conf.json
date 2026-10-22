@@ -23,7 +23,7 @@
     ]
   },
   "productName": "OSCMidi",
-  "version": "2.6.1",
+  "version": "2.6.2",
   "identifier": "com.oscmidi.desktop",
   "plugins": {},
   "app": {

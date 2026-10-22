@@ -44,15 +44,15 @@ export default function OscPage() {
           <CardDescription>{t("osc.description")}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-6">
-          <div className="flex items-center justify-between p-4 rounded-lg bg-slate-50 dark:bg-slate-900/50 border border-slate-100 dark:border-slate-800">
+          <div className="flex items-center justify-between p-4 rounded-lg bg-background border border-border/60">
             <div className="flex flex-col gap-1">
-              <Label className="font-medium">{t("osc.enable")}</Label>
+              <Label htmlFor="osc-enabled" className="font-medium">{t("osc.enable")}</Label>
               <p className="text-xs text-muted-foreground">{t("osc.enableHint")}</p>
             </div>
-            <Switch checked={config?.osc.enabled ?? false} onCheckedChange={handleToggleOsc} />
+            <Switch id="osc-enabled" checked={config?.osc.enabled ?? false} onCheckedChange={handleToggleOsc} />
           </div>
 
-          <div className="space-y-4 p-4 rounded-lg bg-slate-50 dark:bg-slate-900/50 border border-slate-100 dark:border-slate-800">
+          <div className="space-y-4 p-4 rounded-lg bg-background border border-border/60">
             <h3 className="font-semibold text-sm">{t("osc.target")}</h3>
             <div className="grid gap-4 md:grid-cols-2">
               <div className="space-y-2">
@@ -82,7 +82,7 @@ export default function OscPage() {
             </div>
           </div>
 
-          <div className="space-y-4 p-4 rounded-lg bg-slate-50 dark:bg-slate-900/50 border border-slate-100 dark:border-slate-800">
+          <div className="space-y-4 p-4 rounded-lg bg-background border border-border/60">
             <h3 className="font-semibold text-sm">{t("osc.inputTitle")}</h3>
             <p className="text-xs text-muted-foreground">{t("osc.inputHint")}</p>
             <div className="flex items-center justify-between">
@@ -109,19 +109,19 @@ export default function OscPage() {
             </div>
           </div>
 
-          <div className="space-y-4 p-4 rounded-lg bg-slate-50 dark:bg-slate-900/50 border border-slate-100 dark:border-slate-800">
+          <div className="space-y-4 p-4 rounded-lg bg-background border border-border/60">
             <h3 className="font-semibold text-sm">{t("osc.protocolOptions")}</h3>
             <div className="space-y-3">
               <div className="flex items-center justify-between">
-                <Label className="text-sm">{t("osc.logOsc")}</Label>
-                <Switch
+                <Label htmlFor="osc-log-messages" className="text-sm">{t("osc.logOsc")}</Label>
+                <Switch id="osc-log-messages"
                   checked={config?.osc.logMessages ?? false}
                   onCheckedChange={(c) => updateConfig({ osc: { logMessages: c } })}
                 />
               </div>
               <div className="flex items-center justify-between">
-                <Label className="text-sm">{t("osc.verbose")}</Label>
-                <Switch
+                <Label htmlFor="osc-verbose" className="text-sm">{t("osc.verbose")}</Label>
+                <Switch id="osc-verbose"
                   checked={config?.logging?.verbose ?? false}
                   onCheckedChange={(c) => updateConfig({ logging: { verbose: c } })}
                 />
@@ -164,7 +164,7 @@ export default function OscPage() {
         </CardHeader>
         <CardContent className="space-y-3">
           <div className="grid gap-3 md:grid-cols-2">
-            <div className="p-3 rounded-lg bg-slate-50 dark:bg-slate-900/50 border border-slate-100 dark:border-slate-800">
+            <div className="p-3 rounded-lg bg-background border border-border/60">
               <div className="flex items-center justify-between">
                 <span className="text-sm text-muted-foreground">{t("osc.statusLabel")}</span>
                 <Badge variant={config?.osc.enabled ? "success" : "secondary"}>
@@ -176,7 +176,7 @@ export default function OscPage() {
               </div>
             </div>
 
-            <div className="p-3 rounded-lg bg-slate-50 dark:bg-slate-900/50 border border-slate-100 dark:border-slate-800">
+            <div className="p-3 rounded-lg bg-background border border-border/60">
               <div className="flex items-center justify-between">
                 <span className="text-sm text-muted-foreground">{t("osc.connected")}</span>
                 <Badge variant={config?.osc.enabled ? "success" : "secondary"}>
@@ -206,7 +206,7 @@ export default function OscPage() {
           <p>{t("osc.aboutText")}</p>
           <p>
             {t("osc.defaultPort")}{" "}
-            <code className="bg-slate-100 dark:bg-slate-900 px-1.5 py-0.5 rounded text-xs">9000</code>
+            <code className="bg-secondary px-1.5 py-0.5 rounded text-xs">9000</code>
           </p>
         </CardContent>
       </Card>

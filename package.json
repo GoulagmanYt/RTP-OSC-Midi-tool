@@ -1,19 +1,22 @@
 {
   "name": "osc-midi-bridge",
-  "version": "2.6.1",
+  "version": "2.6.2",
   "description": "Low-latency Windows bridge for MIDI, RTP-MIDI, OSC, and isolated VST instruments.",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "node ./node_modules/vite/bin/vite.js",
-    "build": "node ./node_modules/vite/bin/vite.js build",
+    "build": "node ./scripts/build-frontend.mjs",
     "prepare:vst-worker:dev": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/prepare-vst-worker.ps1 -Profile debug",
     "prepare:vst-worker:release": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/prepare-vst-worker.ps1 -Profile release",
     "tauri:dev": "node ./node_modules/@tauri-apps/cli/tauri.js dev",
     "tauri:build": "node ./node_modules/@tauri-apps/cli/tauri.js build",
     "lint": "node ./node_modules/eslint/bin/eslint.js src eslint.config.js vite.config.ts vitest.config.ts && node ./node_modules/typescript/bin/tsc --noEmit",
     "lint:typecheck": "node ./node_modules/typescript/bin/tsc --noEmit",
-    "test": "node ./node_modules/vitest/vitest.mjs run"
+    "test": "node ./node_modules/vitest/vitest.mjs run",
+    "clean": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/build-windows.ps1 -CleanOnly",
+    "clean:all": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/build-windows.ps1 -CleanOnly -Clean",
+    "build:clean": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/build-windows.ps1 -CleanAfter"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.23",
@@ -29,7 +32,7 @@
     "lucide-react": "^0.577.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.8",
-    "react-router-dom": "^7.18.2",
+    "react-router-dom": "^7.18.4",
     "sonner": "^2.0.7",
     "tailwind-merge": "^3.6.0",
     "tailwindcss-animate": "^1.0.7"
@@ -38,10 +41,10 @@
     "@eslint/js": "^9.39.1",
     "@tailwindcss/postcss": "^4.3.3",
     "@tauri-apps/cli": "^2.11.4",
-    "@testing-library/react": "^16.3.0",
+    "@testing-library/react": "^16.3.3",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",
-    "@vitejs/plugin-react": "^6.0.5",
+    "@vitejs/plugin-react": "^6.1.2",
     "autoprefixer": "^10.4.27",
     "eslint": "^9.39.1",
     "eslint-plugin-react-hooks": "^7.0.1",
@@ -51,7 +54,7 @@
     "tailwindcss": "^4.2.2",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.46.2",
-    "vite": "^8.2.1",
+    "vite": "^8.3.4",
     "vitest": "^3.2.4"
   }
 }
