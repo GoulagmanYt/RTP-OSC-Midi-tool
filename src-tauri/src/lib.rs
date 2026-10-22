@@ -3,6 +3,8 @@
 pub mod application;
 mod atomic_file;
 pub mod audio;
+#[cfg(feature = "audio-diagnostics")]
+pub mod audio_trace;
 pub mod bridge;
 pub mod config;
 pub mod error;

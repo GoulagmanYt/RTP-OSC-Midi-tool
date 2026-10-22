@@ -27,6 +27,10 @@ name = "audio_reliability"
 path = "src/bin/audio_reliability.rs"
 
 [[bin]]
+name = "audio_scenario"
+path = "src/bin/audio_scenario.rs"
+
+[[bin]]
 name = "rtp_reliability"
 path = "src/bin/rtp_reliability.rs"
 

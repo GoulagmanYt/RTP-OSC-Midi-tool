@@ -620,6 +620,8 @@ impl AudioEngine {
         }
 
         let process_tuning = apply_audio_process_tuning(&logger);
+        #[cfg(feature = "audio-diagnostics")]
+        crate::audio_trace::record_power_policy(3);
 
         let vst_path = super::plugin_host::resolve_vst_path(&settings, vst_fallback, &logger)?;
         let vst_probe =
@@ -924,6 +926,8 @@ impl AudioEngine {
         })?;
 
         let active_backend = selected_backend.unwrap_or_else(|| "unknown".to_string());
+        #[cfg(feature = "audio-diagnostics")]
+        crate::audio_trace::record_power_policy(4);
         let active_device = selected_device.unwrap_or_else(|| "unknown".to_string());
         let active_device_id = selected_device_id;
         let active_device_handle = selected_device_handle.ok_or_else(|| {
@@ -999,6 +1003,12 @@ impl AudioEngine {
         runtime._stream.play().map_err(|error| {
             AudioError::Message(format!("Failed to start audio stream: {error}"))
         })?;
+        // Native driver/plugin initialization can replace process power policy.
+        // Reassert the requested role and timer policy after it completes, before
+        // publishing Ready. This remains entirely off the audio callback.
+        super::windows_tuning::apply_process_priority(&logger);
+        #[cfg(feature = "audio-diagnostics")]
+        crate::audio_trace::record_power_policy(5);
         logger.info("Audio stream started after state restoration and render priming".to_string());
 
         self.health_telemetry.store(Some(runtime.telemetry.clone()));

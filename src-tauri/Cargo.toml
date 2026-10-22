@@ -13,6 +13,7 @@ default = []
 vst-worker-binary = []
 worker-fixtures = ["vst-worker-binary"]
 latency-diagnostics = []
+audio-diagnostics = []
 
 [lib]
 name = "osc_midi_bridge"

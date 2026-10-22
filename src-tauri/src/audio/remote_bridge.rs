@@ -622,6 +622,13 @@ impl RemotePlugin {
             }
             let sequence = slot.sequence.load(Ordering::Acquire);
             if sequence < expected_sequence || sequence < self.min_output_sequence {
+                #[cfg(feature = "audio-diagnostics")]
+                trace_bridge(
+                    crate::audio_trace::Stage::BridgeDiscarded,
+                    sequence,
+                    frames,
+                    expected_sequence,
+                );
                 slot.state.store(SLOT_EMPTY, Ordering::Release);
                 shared.overruns.fetch_add(1, Ordering::Relaxed);
                 continue;
@@ -663,10 +670,24 @@ impl RemotePlugin {
                 }
             }
             slot.state.store(SLOT_EMPTY, Ordering::Release);
+            #[cfg(feature = "audio-diagnostics")]
+            trace_bridge(
+                crate::audio_trace::Stage::BridgeConsumed,
+                sequence,
+                frames,
+                0,
+            );
             rendered = true;
             break;
         }
         if !rendered && !priming {
+            #[cfg(feature = "audio-diagnostics")]
+            trace_bridge(
+                crate::audio_trace::Stage::BridgeMissing,
+                expected_sequence,
+                frames,
+                0,
+            );
             shared.underruns.fetch_add(1, Ordering::Relaxed);
             for (channel, output) in outputs.iter_mut().take(self.output_channels).enumerate() {
                 let start = self.last_output_samples[channel];
@@ -767,6 +788,13 @@ impl RemotePlugin {
                 .unwrap_or(0);
             self.pending_parameter_changes.clear();
             slot.sequence.store(self.next_sequence, Ordering::Relaxed);
+            #[cfg(feature = "audio-diagnostics")]
+            trace_bridge(
+                crate::audio_trace::Stage::BridgeRequest,
+                self.next_sequence,
+                frames,
+                event_count as u64,
+            );
             self.next_sequence = self.next_sequence.wrapping_add(1).max(1);
             slot.state.store(SLOT_REQUESTED, Ordering::Release);
             let _ = unsafe { SetEvent(self.request_event) };
@@ -1447,7 +1475,16 @@ fn run_dsp_server(args: DspArgs, logger: FrontendLogger) -> Result<(), String> {
             args.max_block_size,
             |slot, frames, event_count, parameter_change_count| {
                 input_silence[..frames].fill(0.0);
-                process_local_plugin(
+                #[cfg(feature = "audio-diagnostics")]
+                let trace_start = crate::vst_worker::protocol::monotonic_qpc();
+                #[cfg(feature = "audio-diagnostics")]
+                trace_bridge(
+                    crate::audio_trace::Stage::DspBegin,
+                    slot.sequence.load(Ordering::Relaxed),
+                    frames,
+                    event_count as u64,
+                );
+                let result = process_local_plugin(
                     &mut plugin.lock(),
                     slot,
                     frames,
@@ -1460,7 +1497,31 @@ fn run_dsp_server(args: DspArgs, logger: FrontendLogger) -> Result<(), String> {
                     &mut vst2_events,
                     &mut vst2_batch,
                     &mut rack_events,
-                )
+                );
+                #[cfg(feature = "audio-diagnostics")]
+                if crate::audio_trace::enabled() {
+                    let finished = crate::vst_worker::protocol::monotonic_qpc();
+                    let peak = |channel: usize| {
+                        slot.outputs
+                            [channel * BRIDGE_MAX_FRAMES..channel * BRIDGE_MAX_FRAMES + frames]
+                            .iter()
+                            .fold(0.0f32, |a, b| a.max(b.abs()))
+                    };
+                    crate::audio_trace::record(crate::audio_trace::BlockTrace {
+                        stage: crate::audio_trace::Stage::DspEnd,
+                        qpc: finished,
+                        sequence: slot.sequence.load(Ordering::Relaxed),
+                        frames: frames as u32,
+                        detail: event_count as u64,
+                        duration_us: crate::vst_worker::protocol::qpc_elapsed_us(
+                            trace_start,
+                            finished,
+                        ),
+                        peak_l: peak(0),
+                        peak_r: peak(1),
+                    });
+                }
+                result
             },
             || save_vst_state_checked(&plugin, &selected_probe),
         );
@@ -1771,6 +1832,22 @@ fn process_local_plugin(
         PluginBackend::Remote { .. } => {
             Err("Nested remote VST bridge is not supported".to_string())
         }
+    }
+}
+
+#[cfg(feature = "audio-diagnostics")]
+fn trace_bridge(stage: crate::audio_trace::Stage, sequence: u64, frames: usize, detail: u64) {
+    if crate::audio_trace::enabled() {
+        crate::audio_trace::record(crate::audio_trace::BlockTrace {
+            stage,
+            qpc: crate::vst_worker::protocol::monotonic_qpc(),
+            sequence,
+            frames: frames as u32,
+            detail,
+            duration_us: 0,
+            peak_l: 0.0,
+            peak_r: 0.0,
+        });
     }
 }
 

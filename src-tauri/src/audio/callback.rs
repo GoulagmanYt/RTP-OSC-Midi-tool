@@ -97,6 +97,8 @@ pub(super) fn build_output_stream_for_sample<T: Sample + SizedSample + FromSampl
             *cfg,
             move |data: &mut [T], info: &OutputCallbackInfo| {
                 let started = Instant::now();
+                #[cfg(feature = "audio-diagnostics")]
+                let trace_qpc = crate::vst_worker::protocol::monotonic_qpc();
                 apply_audio_driver_thread_priority(&telemetry);
                 record_driver_callback(&telemetry, info, data.len() / channels, sample_rate);
                 if let Some(output) = output.as_mut() {
@@ -105,6 +107,17 @@ pub(super) fn build_output_stream_for_sample<T: Sample + SizedSample + FromSampl
                 } else if let Some(state) = state.as_mut() {
                     render_audio_block(data, channels, state, &plugin);
                 }
+                #[cfg(feature = "audio-diagnostics")]
+                crate::audio_trace::record(crate::audio_trace::BlockTrace {
+                    stage: crate::audio_trace::Stage::Callback,
+                    qpc: trace_qpc,
+                    sequence: telemetry.callback_count.load(Ordering::Relaxed),
+                    frames: (data.len() / channels) as u32,
+                    detail: u64::from(telemetry.xruns.load(Ordering::Relaxed)),
+                    duration_us: started.elapsed().as_micros() as u64,
+                    peak_l: f32::from_bits(telemetry.meter_left.load(Ordering::Relaxed)),
+                    peak_r: f32::from_bits(telemetry.meter_right.load(Ordering::Relaxed)),
+                });
             },
             move |err| match err.kind() {
                 ErrorKind::Xrun => {
