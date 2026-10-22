@@ -43,6 +43,11 @@ type Biquad = { b0: number; b1: number; b2: number; a1: number; a2: number };
 
 const IDENTITY: Biquad = { b0: 1, b1: 0, b2: 0, a1: 0, a2: 0 };
 
+// Keep these limits and fallback values aligned with VstEqSettings::normalized.
+function finiteClamp(value: number, fallback: number, minimum: number, maximum: number): number {
+  return Math.max(minimum, Math.min(maximum, Number.isFinite(value) ? value : fallback));
+}
+
 function normalize(b0: number, b1: number, b2: number, a0: number, a1: number, a2: number): Biquad {
   return { b0: b0 / a0, b1: b1 / a0, b2: b2 / a0, a1: a1 / a0, a2: a2 / a0 };
 }
@@ -108,12 +113,23 @@ function magnitude(coefficients: Biquad, frequency: number, sampleRate: number):
 
 export function eqResponseDb(settings: VstEqSettings, frequency: number, sampleRate: number): number {
   if (!settings.enabled) return 0;
-  const safeRate = Math.max(sampleRate, 1);
-  const safeFrequency = Math.min(frequency, safeRate * 0.45);
+  const safeRate = Math.max(Number.isFinite(sampleRate) ? sampleRate : 48_000, 1);
+  const guard = Math.max(safeRate * 0.45, 40);
+  const safeFrequency = finiteClamp(frequency, 0, 0, safeRate * 0.5);
   const filters = [
-    shelf(settings.lowShelf.frequencyHz, settings.lowShelf.gainDb, safeRate, false),
-    peak(settings.midPeak.frequencyHz, settings.midPeak.gainDb, settings.midPeak.q, safeRate),
-    shelf(settings.highShelf.frequencyHz, settings.highShelf.gainDb, safeRate, true),
+    shelf(
+      finiteClamp(settings.lowShelf.frequencyHz, 120, 40, Math.min(500, guard)),
+      finiteClamp(settings.lowShelf.gainDb, 0, -18, 18), safeRate, false
+    ),
+    peak(
+      finiteClamp(settings.midPeak.frequencyHz, Math.min(1_000, guard), 100, Math.max(100, Math.min(10_000, guard))),
+      finiteClamp(settings.midPeak.gainDb, 0, -18, 18),
+      finiteClamp(settings.midPeak.q, 1, 0.2, 10), safeRate
+    ),
+    shelf(
+      finiteClamp(settings.highShelf.frequencyHz, Math.min(8_000, guard), Math.min(2_000, guard), Math.min(16_000, guard)),
+      finiteClamp(settings.highShelf.gainDb, 0, -18, 18), safeRate, true
+    ),
   ];
   const response = filters.reduce(
     (product, coefficients) => product * magnitude(coefficients, safeFrequency, safeRate),

@@ -8,6 +8,14 @@ vi.mock("../../providers/LanguageProvider", () => ({
 }));
 
 describe("VstEqDialog", () => {
+  it("ends the graph at Nyquist when the active sample rate is low", () => {
+    render(<VstEqDialog open pluginName="Piano" settings={createDefaultVstEqSettings()}
+      sampleRate={8_000} t={(key) => key} onOpenChange={vi.fn()}
+      onChange={vi.fn()} onReset={vi.fn()} />);
+    const graph = screen.getByRole("img");
+    expect(graph.textContent).not.toContain("20k");
+    expect(graph.textContent).toContain("4k");
+  });
   it("shows the selected plugin, response graph, live bypass and reset controls", () => {
     const onChange = vi.fn();
     const onReset = vi.fn();
