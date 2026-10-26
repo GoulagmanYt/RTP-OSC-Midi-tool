@@ -21,6 +21,7 @@ import type { VstEqSettings, VstParameter, VstPluginEntry } from "../../api";
 import { useI18n } from "../../providers/LanguageProvider";
 import { useBridge } from "../../providers/BridgeProvider";
 import { mergeLiveAudioMetrics } from "./liveStatus";
+import { getAudioLatency } from "./latency";
 import { getErrorMessage } from "../../api-errors";
 import { BUNDLED_VST_EQ_KEY, createDefaultVstEqSettings, getVstEqKey } from "./eq";
 
@@ -189,13 +190,8 @@ export function useAudioPageController() {
     bridgeRunning &&
     Boolean(selectedVstPlugin?.supported);
 
-  const currentLatencyMs = useMemo(() => {
-    if (status?.audioLatencyMs !== undefined && status?.audioLatencyMs !== null) {
-      return status.audioLatencyMs;
-    }
-    if (!activeBufferSize || !activeSampleRate) return null;
-    return Number(((activeBufferSize / activeSampleRate) * 1000).toFixed(2));
-  }, [status?.audioLatencyMs, activeBufferSize, activeSampleRate]);
+  const latency = getAudioLatency(status, config);
+  const currentLatencyMs = latency.ms;
 
   const updateAudioConfig = useCallback(
     async (patch: Partial<NonNullable<typeof config>["audio"]>): Promise<boolean> => {
@@ -538,6 +534,7 @@ export function useAudioPageController() {
     canOpenVstParameterFallback,
     config,
     currentLatencyMs,
+    latencyIsBufferPeriod: latency.source === "bufferPeriod",
     midiMessagesPerSec: metrics?.midiMessagesPerSec ?? null,
     requestedBufferSize,
     selectedPluginKindLabel,

@@ -9,6 +9,7 @@ import { useBridgeActions } from "./bridge/useBridgeActions";
 import { useLogs } from "./bridge/useLogs";
 import { useRuntimeEvents } from "./bridge/useRuntimeEvents";
 import { useI18n } from "./LanguageProvider";
+import { isDeveloperMode } from "../developer-mode";
 
 export { useBridge } from "./bridge/BridgeContext";
 
@@ -127,6 +128,7 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
 
   useRuntimeEvents({
     appendLog,
+    developerMode: isDeveloperMode(config),
     setMetrics: receiveMetrics,
     setStatus: applyStatus,
     t,

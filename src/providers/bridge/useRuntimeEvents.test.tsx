@@ -1,5 +1,5 @@
 import { renderHook, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RuntimeMetrics } from "../../api";
 import { listen } from "@tauri-apps/api/event";
 import { useRuntimeEvents } from "./useRuntimeEvents";
@@ -54,15 +54,19 @@ function metrics(patch: Partial<RuntimeMetrics>): RuntimeMetrics {
 describe("useRuntimeEvents", () => {
   beforeEach(() => {
     listeners.clear();
+    vi.mocked(listen).mockClear();
     toastError.mockClear();
     vi.spyOn(Date, "now").mockReturnValue(10_000);
   });
+
+  afterEach(() => vi.restoreAllMocks());
 
   it("toasts when audio health counters increase beyond xruns", async () => {
     const setMetrics = vi.fn();
     renderHook(() =>
       useRuntimeEvents({
         appendLog: vi.fn(),
+        developerMode: true,
         setMetrics,
         t: (key, vars) => `${key}:${vars?.count ?? ""}`,
       })
@@ -81,6 +85,45 @@ describe("useRuntimeEvents", () => {
 
     expect(toastError).toHaveBeenCalledWith("toasts.audio.dropouts:7");
     expect(setMetrics).toHaveBeenCalledTimes(2);
+  });
+
+  it("uses the current mode for incident notifications without resubscribing or losing metrics and logs", async () => {
+    const options = { appendLog: vi.fn(), setMetrics: vi.fn(), t: (key: string) => key };
+    const { rerender } = renderHook(({ developerMode }) => useRuntimeEvents({ ...options, developerMode }), {
+      initialProps: { developerMode: true },
+    });
+    await waitFor(() => expect(listeners.has("runtime:metrics")).toBe(true));
+    const receive = listeners.get("runtime:metrics")!;
+    receive({ payload: metrics({}) });
+    receive({ payload: metrics({ audioXruns: 1 }) });
+    expect(toastError).toHaveBeenLastCalledWith("toasts.audio.dropouts");
+
+    rerender({ developerMode: false });
+    vi.mocked(Date.now).mockReturnValue(15_000);
+    receive({ payload: metrics({ audioXruns: 2 }) });
+    expect(toastError).toHaveBeenLastCalledWith("toasts.audio.dropoutsNormal");
+    expect(listen).toHaveBeenCalledTimes(2);
+    expect(options.setMetrics).toHaveBeenCalledTimes(3);
+
+    const entry = { level: "debug", timestamp: "12:00", message: "worker IPC diagnostic" };
+    listeners.get("log:entry")?.({ payload: entry });
+    expect(options.appendLog).toHaveBeenCalledWith(entry);
+
+    rerender({ developerMode: true });
+    vi.mocked(Date.now).mockReturnValue(20_000);
+    receive({ payload: metrics({ audioXruns: 3 }) });
+    expect(toastError).toHaveBeenLastCalledWith("toasts.audio.dropouts");
+    expect(listen).toHaveBeenCalledTimes(2);
+  });
+
+  it("defaults to a simple, actionable notification without exposing counter values", async () => {
+    const t = vi.fn((key: string) => key);
+    renderHook(() => useRuntimeEvents({ appendLog: vi.fn(), setMetrics: vi.fn(), t }));
+    await waitFor(() => expect(listeners.has("runtime:metrics")).toBe(true));
+    listeners.get("runtime:metrics")?.({ payload: metrics({}) });
+    listeners.get("runtime:metrics")?.({ payload: metrics({ audioLockMisses: 5 }) });
+    expect(t).toHaveBeenCalledWith("toasts.audio.dropoutsNormal");
+    expect(t).not.toHaveBeenCalledWith("toasts.audio.dropouts", expect.anything());
   });
 
   it("cleans up subscriptions that finish registering after unmount", async () => {

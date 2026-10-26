@@ -5,23 +5,23 @@ import { Button } from "../../components/ui/Button";
 import { Card, CardContent, CardHeader, CardTitle } from "../../components/ui/Card";
 import type { AppConfig, LogEntry, RuntimeStatus } from "../../api-types";
 import type { TranslateFn } from "../audio/shared";
+import { isDeveloperMode } from "../../developer-mode";
+import { selectLogPreview } from "./events";
 
 type Props = {
-  audioBackend: string;
   audioDevice: string;
-  bufferSamples?: number;
   config: AppConfig | null;
   limiterEnabled: boolean;
-  logPreview: LogEntry[];
+  logs: LogEntry[];
   rtpPort?: number | null;
-  sampleRate?: number;
   status: RuntimeStatus | null;
   t: TranslateFn;
-  xrunCount?: number | null;
   onNavigateLogs: () => void;
 };
 
-export function OverviewGrid({ audioBackend, audioDevice, bufferSamples, config, limiterEnabled, logPreview, rtpPort, sampleRate, status, t, xrunCount, onNavigateLogs }: Props) {
+export function OverviewGrid({ audioDevice, config, limiterEnabled, logs, rtpPort, status, t, onNavigateLogs }: Props) {
+  const developerMode = isDeveloperMode(config);
+  const logPreview = selectLogPreview(logs, developerMode);
   return (
     <div className="space-y-6">
       <div className="overview-grid grid gap-4 lg:grid-cols-2">
@@ -35,10 +35,7 @@ export function OverviewGrid({ audioBackend, audioDevice, bufferSamples, config,
           <CardContent>
             <p className="break-words text-sm font-medium">{audioDevice}</p>
             <dl className="mt-3">
-              <div className="data-row"><dt>{t("dashboard.backend")}</dt><dd className="text-sm tabular-nums">{audioBackend}</dd></div>
-              <div className="data-row"><dt>{t("dashboard.sampleRate")} / {t("dashboard.buffer")}</dt><dd className="text-sm tabular-nums">{sampleRate ? `${sampleRate} ${t("units.hz")}` : "—"} / {bufferSamples ? `${bufferSamples} ${t("units.samples")}` : "—"}</dd></div>
               <div className="data-row"><dt>{t("dashboard.gain")} / {t("dashboard.limiter")}</dt><dd className="text-sm tabular-nums">{config ? `${config.audio.gainDb} ${t("units.db")}` : "—"} / {limiterEnabled ? t("common.on") : t("common.off")}</dd></div>
-              <div className="data-row"><dt>{t("dashboard.xruns")}</dt><dd className={xrunCount ? "text-warning tabular-nums" : "tabular-nums"}>{xrunCount ?? "—"}</dd></div>
             </dl>
             <Button asChild variant="link" size="sm" className="mt-2 min-h-8 px-0"><Link to="/audio">{t("dashboard.configureAudio")}<ArrowUpRight className="h-3.5 w-3.5" aria-hidden="true" /></Link></Button>
           </CardContent>
@@ -61,7 +58,7 @@ export function OverviewGrid({ audioBackend, audioDevice, bufferSamples, config,
       <section className="border-t pt-4" aria-labelledby="recent-events-title">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
           <h2 id="recent-events-title" className="flex items-center gap-2 text-sm font-semibold"><ScrollText className="h-4 w-4 text-muted-foreground" aria-hidden="true" />{t("dashboard.quickLogs")}</h2>
-          {config?.ui.developerMode && <Button variant="link" size="sm" className="min-h-8 px-0" onClick={onNavigateLogs}>{t("dashboard.viewMore")}<ArrowUpRight className="h-3.5 w-3.5" aria-hidden="true" /></Button>}
+          {developerMode && <Button variant="link" size="sm" className="min-h-8 px-0" onClick={onNavigateLogs}>{t("dashboard.viewMore")}<ArrowUpRight className="h-3.5 w-3.5" aria-hidden="true" /></Button>}
         </div>
         {logPreview.length === 0 ? <p className="text-sm text-muted-foreground">{t("dashboard.noRecentLogs")}</p> : (
           <ul className="divide-y">
@@ -69,7 +66,7 @@ export function OverviewGrid({ audioBackend, audioDevice, bufferSamples, config,
               <li key={idx} className="flex flex-wrap items-start gap-x-3 gap-y-1 py-2 text-sm">
                 <span className="font-mono text-xs leading-6 text-muted-foreground">{log.timestamp}</span>
                 <Badge variant={log.level === "error" ? "destructive" : log.level === "warn" ? "warning" : "secondary"}>{t(`logs.level.${log.level}`)}</Badge>
-                <p className="min-w-0 flex-1 break-words leading-6">{log.message}</p>
+                <p className="min-w-0 flex-1 break-words leading-6">{developerMode ? log.message : t(log.level === "error" ? "dashboard.eventsError" : "dashboard.eventsWarning")}</p>
               </li>
             ))}
           </ul>

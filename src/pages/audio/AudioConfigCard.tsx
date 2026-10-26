@@ -9,6 +9,7 @@ import type { AppConfig, AudioDeviceEntry, RuntimeStatus, VstPluginEntry } from 
 import type { TranslateFn } from "./shared";
 import { Power, RefreshCcw, SlidersHorizontal, X } from "lucide-react";
 import { useMemo, useState } from "react";
+import { isDeveloperMode } from "../../developer-mode";
 
 type Props = {
   audioBackends: string[];
@@ -21,6 +22,7 @@ type Props = {
   canOpenVstEq: boolean;
   config: AppConfig | null;
   currentLatencyMs: number | null;
+  latencyIsBufferPeriod?: boolean;
   midiMessagesPerSec: number | null;
   selectedPluginKindLabel: string;
   selectedPluginStatusLabel: string;
@@ -65,6 +67,7 @@ export function AudioConfigCard({
   canOpenVstEq,
   config,
   currentLatencyMs,
+  latencyIsBufferPeriod = false,
   midiMessagesPerSec,
   selectedPluginKindLabel,
   selectedPluginStatusLabel,
@@ -109,7 +112,7 @@ export function AudioConfigCard({
     audioDevices.find((device) => device.name === config?.audio.device)?.id ||
     config?.audio.device ||
     "";
-  const showVstTechnicalDetails = config?.ui.developerMode === true;
+  const showVstTechnicalDetails = isDeveloperMode(config);
   const vstVendors = useMemo(
     () =>
       Array.from(
@@ -124,7 +127,7 @@ export function AudioConfigCard({
       return (
         (!query || haystack.includes(query)) &&
         (vstFormat === "all" || plugin.format === vstFormat) &&
-        (vstArchitecture === "all" || plugin.architecture === vstArchitecture) &&
+        (!showVstTechnicalDetails || vstArchitecture === "all" || plugin.architecture === vstArchitecture) &&
         (vstStatus === "all" || plugin.status === vstStatus) &&
         (!showVstTechnicalDetails || vstVendor === "all" || plugin.vendor === vstVendor)
       );
@@ -244,8 +247,9 @@ export function AudioConfigCard({
           </div>
         </div>
 
-        <div className="grid gap-4 md:grid-cols-2">
-          <div className="space-y-2">
+        <details className="rounded-md border border-border/60 p-3">
+          <summary className="cursor-pointer text-sm font-medium">{t("audio.advancedSettings")}</summary>
+          <div className="mt-4 space-y-2">
             <Label htmlFor="audio-render-ahead">{t("audio.renderAhead")}</Label>
             <Select value={String(config?.audio.renderAheadBlocks ?? 1)} disabled={!config || audioReloading}
               onValueChange={(value) => { void onUpdateAudioConfig({ renderAheadBlocks: Number(value) }); }}>
@@ -256,24 +260,11 @@ export function AudioConfigCard({
                 <SelectItem value="2">{t("audio.renderTwo")}</SelectItem>
               </SelectContent>
             </Select>
-            <p className="text-xs text-muted-foreground">{t("audio.renderAheadHint", {
+            <p className="text-xs text-muted-foreground">{showVstTechnicalDetails ? t("audio.renderAheadHint", {
               latency: (((config?.audio.renderAheadBlocks ?? 1) * (activeBufferSize || config?.audio.bufferSize || 512) * 1000) / (activeSampleRate || config?.audio.sampleRate || 48000)).toFixed(2),
-            })}</p>
+            }) : t("audio.renderAheadSimpleHint")}</p>
           </div>
-          <div className="space-y-2">
-            <Label htmlFor="audio-dsp-priority">{t("audio.dspPriority")}</Label>
-            <Select value={config?.audio.dspThreadPriority ?? "mmcss"}
-              disabled={!config || audioReloading || config.audio.renderAheadBlocks === 0}
-              onValueChange={(value: "mmcss" | "timeCritical") => { void onUpdateAudioConfig({ dspThreadPriority: value }); }}>
-              <SelectTrigger id="audio-dsp-priority"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="mmcss">{t("audio.dspMmcss")}</SelectItem>
-                <SelectItem value="timeCritical">{t("audio.dspTimeCritical")}</SelectItem>
-              </SelectContent>
-            </Select>
-            <p className="text-xs text-muted-foreground">{t("audio.dspPriorityHint")}</p>
-          </div>
-        </div>
+        </details>
 
         <div className="flex items-center justify-between">
           <Label htmlFor="audio-limiter" className="flex flex-col gap-1">
@@ -295,163 +286,181 @@ export function AudioConfigCard({
         {status?.realtime?.worker.maintenance && <p role="status" className="text-xs text-warning">{t("audio.maintenance")}</p>}
         {(status?.realtime?.worker.deferredSave || status?.realtime?.worker.deferredEditor != null) &&
           <p role="status" className="text-xs text-muted-foreground">{t("audio.deferredOperations")}</p>}
-        {config?.ui.developerMode && status?.realtime && (
-          <div className="text-xs text-muted-foreground">
-            {t("audio.deliveryLatency")}: p99 {(status.realtime.worker.midiDeliveryP99Us / 1000).toFixed(2)} ms / max {(status.realtime.worker.midiDeliveryMaxUs / 1000).toFixed(2)} ms
-            <br />{t("audio.callbackInterval")}: {(status.realtime.worker.callbackIntervalMaxUs / 1000).toFixed(2)} ms
-            <br />{t("audio.renderUnderflows")}: {status.realtime.worker.renderUnderflows ?? 0} / {t("audio.driverGaps")}: {status.realtime.worker.callbackGapCount ?? 0}
-          </div>
+        {showVstTechnicalDetails && (
+          <details open className="rounded-md border border-border/60 p-3">
+            <summary className="cursor-pointer text-sm font-medium">{t("audio.developerDiagnostics")}</summary>
+            <div className="mt-4 space-y-4">
+              <div className="space-y-2">
+                <Label htmlFor="audio-dsp-priority">{t("audio.dspPriority")}</Label>
+                <Select value={config?.audio.dspThreadPriority ?? "mmcss"}
+                  disabled={!config || audioReloading || config.audio.renderAheadBlocks === 0}
+                  onValueChange={(value: "mmcss" | "timeCritical") => { void onUpdateAudioConfig({ dspThreadPriority: value }); }}>
+                  <SelectTrigger id="audio-dsp-priority"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="mmcss">{t("audio.dspMmcss")}</SelectItem>
+                    <SelectItem value="timeCritical">{t("audio.dspTimeCritical")}</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">{t("audio.dspPriorityHint")}</p>
+              </div>
+              {status?.realtime && (
+                <div className="text-xs text-muted-foreground">
+                  {t("audio.deliveryLatency")}: p99 {(status.realtime.worker.midiDeliveryP99Us / 1000).toFixed(2)} ms / max {(status.realtime.worker.midiDeliveryMaxUs / 1000).toFixed(2)} ms
+                  <br />{t("audio.callbackInterval")}: {(status.realtime.worker.callbackIntervalMaxUs / 1000).toFixed(2)} ms
+                  <br />{t("audio.renderUnderflows")}: {status.realtime.worker.renderUnderflows ?? 0} / {t("audio.driverGaps")}: {status.realtime.worker.callbackGapCount ?? 0}
+                </div>
+              )}
+
+              <div className="flex items-center justify-between text-xs text-muted-foreground">
+          <span>{t(latencyIsBufferPeriod ? "audio.latencyBufferPeriod" : "audio.estimatedLatency")}</span>
+                <span className="font-semibold text-foreground">
+                  {currentLatencyMs !== null ? `${currentLatencyMs.toFixed(2)} ${t("units.ms")}` : "--"}
+                </span>
+              </div>
+              <div className="space-y-2">
+                <div className="flex items-center justify-between text-xs text-muted-foreground">
+                  <span>{t("audio.activeLabel")}</span>
+                  <span className="font-semibold text-foreground">
+                    {activeSampleRate ? `${activeSampleRate} ${t("units.hz")}` : "--"} /{" "}
+                    {activeBufferSize ? `${activeBufferSize} ${t("units.samples")}` : t("common.auto")}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between text-xs text-muted-foreground">
+                  <span>{t("audio.requestedBuffer")}</span>
+                  <span className="font-semibold text-foreground">
+                    {requestedBufferSize ? `${requestedBufferSize} ${t("units.samples")}` : "--"}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between text-xs text-muted-foreground">
+                  <span>{t("audio.streamBuffer")}</span>
+                  <span className="font-semibold text-foreground">
+                    {streamBufferSize ? `${streamBufferSize} ${t("units.samples")}` : t("common.auto")}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between text-xs text-muted-foreground">
+                  <span>{t("audio.vstMidiCompat")}</span>
+                  <span className="font-semibold text-foreground">
+                    {vstMidiCompatible === null ? "--" : vstMidiCompatible ? "OK" : t("audio.vstMidiIncompatible")}
+                  </span>
+                </div>
+                {bufferMismatch ? <p className="text-xs text-warning">{t("audio.bufferMismatchWarning")}</p> : null}
+                <div className="flex items-center justify-between text-xs text-muted-foreground">
+                  <span>{t("audio.activeBackend")}</span>
+                  <span className="font-semibold text-foreground">{status?.audioBackend ?? "--"}</span>
+                </div>
+                <div className="flex items-center justify-between text-xs text-muted-foreground">
+                  <span>{t("audio.activeDevice")}</span>
+                  <span className="font-semibold text-foreground">{status?.audioDevice ?? "--"}</span>
+                </div>
+                <div className="flex items-center justify-between text-xs text-muted-foreground">
+                  <span>{t("audio.xruns")}</span>
+                  <span className="font-semibold text-foreground">{status?.audioXruns ?? "--"}</span>
+                </div>
+                <div className="grid gap-2 rounded-md border border-border/60 bg-muted/20 p-3 text-xs text-muted-foreground md:grid-cols-2">
+                  <div className="flex items-center justify-between gap-3">
+                    <span>{t("dashboard.audioMidiDrops")}</span>
+                    <span className="font-semibold text-foreground">{status?.audioMidiDrops ?? "--"}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span>{t("dashboard.audioLockMisses")}</span>
+                    <span className="font-semibold text-foreground">{status?.audioLockMisses ?? "--"}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span>{t("dashboard.audioEmergencyResets")}</span>
+                    <span className="font-semibold text-foreground">{status?.audioEmergencyResets ?? "--"}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span>{t("dashboard.audioCallbackOverBudget")}</span>
+                    <span className="font-semibold text-foreground">{status?.audioCallbackOverBudgetCount ?? "--"}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span>{t("dashboard.audioCallbackMax")}</span>
+                    <span className="font-semibold text-foreground">
+                      {status?.audioCallbackMaxUs !== null && status?.audioCallbackMaxUs !== undefined
+                        ? `${status.audioCallbackMaxUs} us`
+                        : "--"}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span>{t("dashboard.audioBufferPeriod")}</span>
+                    <span className="font-semibold text-foreground">
+                      {status?.audioBufferPeriodMs !== null && status?.audioBufferPeriodMs !== undefined
+                        ? `${status.audioBufferPeriodMs.toFixed(2)} ms`
+                        : "--"}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span>{t("dashboard.pluginLatency")}</span>
+                    <span className="font-semibold text-foreground">
+                      {status?.pluginLatencySamples !== null && status?.pluginLatencySamples !== undefined
+                        ? `${status.pluginLatencySamples} ${t("units.samples")}`
+                        : "--"}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span>{t("dashboard.dspP99")}</span>
+                    <span className="font-semibold text-foreground">
+                      {status?.dspProcessP99Us !== null && status?.dspProcessP99Us !== undefined
+                        ? `${status.dspProcessP99Us} us`
+                        : "--"}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span>{t("dashboard.dspLast")}</span>
+                    <span className="font-semibold text-foreground">
+                      {status?.dspProcessLastUs !== null && status?.dspProcessLastUs !== undefined
+                        ? `${status.dspProcessLastUs} us`
+                        : "--"}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span>{t("dashboard.dspMax")}</span>
+                    <span className="font-semibold text-foreground">
+                      {status?.dspProcessMaxUs !== null && status?.dspProcessMaxUs !== undefined
+                        ? `${status.dspProcessMaxUs} us`
+                        : "--"}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span>{t("dashboard.midiThroughput")}</span>
+                    <span className="font-semibold text-foreground">
+                      {midiMessagesPerSec !== null ? `${midiMessagesPerSec.toLocaleString()} msg/s` : "--"}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span>{t("dashboard.midiQueue")}</span>
+                    <span className="font-semibold text-foreground">
+                      {status?.audioMidiQueueDepth ?? "--"} / {status?.audioMidiQueueMaxDepth ?? "--"}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span>{t("dashboard.consecutiveMisses")}</span>
+                    <span className="font-semibold text-foreground">{status?.consecutiveDeadlineMisses ?? "--"}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span>{t("dashboard.audioMmcss")}</span>
+                    <span className="font-semibold text-foreground">
+                      {status?.audioMmcssEnabled === null || status?.audioMmcssEnabled === undefined
+                        ? "--"
+                        : status.audioMmcssEnabled
+                        ? "OK"
+                        : t("common.off")}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </details>
         )}
 
-        <div className="flex items-center justify-between text-xs text-muted-foreground">
-          <span>{t("audio.estimatedLatency")}</span>
-          <span className="font-semibold text-foreground">
-            {currentLatencyMs !== null ? `${currentLatencyMs.toFixed(2)} ${t("units.ms")}` : "--"}
-          </span>
-        </div>
-        {config?.ui.developerMode ? (
-          <div className="space-y-2">
-            <div className="flex items-center justify-between text-xs text-muted-foreground">
-              <span>{t("audio.activeLabel")}</span>
-              <span className="font-semibold text-foreground">
-                {activeSampleRate ? `${activeSampleRate} ${t("units.hz")}` : "--"} /{" "}
-                {activeBufferSize ? `${activeBufferSize} ${t("units.samples")}` : t("common.auto")}
-              </span>
-            </div>
-            <div className="flex items-center justify-between text-xs text-muted-foreground">
-              <span>{t("audio.requestedBuffer")}</span>
-              <span className="font-semibold text-foreground">
-                {requestedBufferSize ? `${requestedBufferSize} ${t("units.samples")}` : "--"}
-              </span>
-            </div>
-            <div className="flex items-center justify-between text-xs text-muted-foreground">
-              <span>{t("audio.streamBuffer")}</span>
-              <span className="font-semibold text-foreground">
-                {streamBufferSize ? `${streamBufferSize} ${t("units.samples")}` : t("common.auto")}
-              </span>
-            </div>
-            <div className="flex items-center justify-between text-xs text-muted-foreground">
-              <span>{t("audio.vstMidiCompat")}</span>
-              <span className="font-semibold text-foreground">
-                {vstMidiCompatible === null ? "--" : vstMidiCompatible ? "OK" : t("audio.vstMidiIncompatible")}
-              </span>
-            </div>
-            {bufferMismatch ? <p className="text-xs text-warning">{t("audio.bufferMismatchWarning")}</p> : null}
-            <div className="flex items-center justify-between text-xs text-muted-foreground">
-              <span>{t("audio.activeBackend")}</span>
-              <span className="font-semibold text-foreground">{status?.audioBackend ?? "--"}</span>
-            </div>
-            <div className="flex items-center justify-between text-xs text-muted-foreground">
-              <span>{t("audio.activeDevice")}</span>
-              <span className="font-semibold text-foreground">{status?.audioDevice ?? "--"}</span>
-            </div>
-            <div className="flex items-center justify-between text-xs text-muted-foreground">
-              <span>{t("audio.xruns")}</span>
-              <span className="font-semibold text-foreground">{status?.audioXruns ?? "--"}</span>
-            </div>
-            <div className="grid gap-2 rounded-md border border-border/60 bg-muted/20 p-3 text-xs text-muted-foreground md:grid-cols-2">
-              <div className="flex items-center justify-between gap-3">
-                <span>{t("dashboard.audioMidiDrops")}</span>
-                <span className="font-semibold text-foreground">{status?.audioMidiDrops ?? "--"}</span>
-              </div>
-              <div className="flex items-center justify-between gap-3">
-                <span>{t("dashboard.audioLockMisses")}</span>
-                <span className="font-semibold text-foreground">{status?.audioLockMisses ?? "--"}</span>
-              </div>
-              <div className="flex items-center justify-between gap-3">
-                <span>{t("dashboard.audioEmergencyResets")}</span>
-                <span className="font-semibold text-foreground">{status?.audioEmergencyResets ?? "--"}</span>
-              </div>
-              <div className="flex items-center justify-between gap-3">
-                <span>{t("dashboard.audioCallbackOverBudget")}</span>
-                <span className="font-semibold text-foreground">{status?.audioCallbackOverBudgetCount ?? "--"}</span>
-              </div>
-              <div className="flex items-center justify-between gap-3">
-                <span>{t("dashboard.audioCallbackMax")}</span>
-                <span className="font-semibold text-foreground">
-                  {status?.audioCallbackMaxUs !== null && status?.audioCallbackMaxUs !== undefined
-                    ? `${status.audioCallbackMaxUs} us`
-                    : "--"}
-                </span>
-              </div>
-              <div className="flex items-center justify-between gap-3">
-                <span>{t("dashboard.audioBufferPeriod")}</span>
-                <span className="font-semibold text-foreground">
-                  {status?.audioBufferPeriodMs !== null && status?.audioBufferPeriodMs !== undefined
-                    ? `${status.audioBufferPeriodMs.toFixed(2)} ms`
-                    : "--"}
-                </span>
-              </div>
-              <div className="flex items-center justify-between gap-3">
-                <span>{t("dashboard.pluginLatency")}</span>
-                <span className="font-semibold text-foreground">
-                  {status?.pluginLatencySamples !== null && status?.pluginLatencySamples !== undefined
-                    ? `${status.pluginLatencySamples} ${t("units.samples")}`
-                    : "--"}
-                </span>
-              </div>
-              <div className="flex items-center justify-between gap-3">
-                <span>{t("dashboard.dspP99")}</span>
-                <span className="font-semibold text-foreground">
-                  {status?.dspProcessP99Us !== null && status?.dspProcessP99Us !== undefined
-                    ? `${status.dspProcessP99Us} us`
-                    : "--"}
-                </span>
-              </div>
-              <div className="flex items-center justify-between gap-3">
-                <span>{t("dashboard.dspLast")}</span>
-                <span className="font-semibold text-foreground">
-                  {status?.dspProcessLastUs !== null && status?.dspProcessLastUs !== undefined
-                    ? `${status.dspProcessLastUs} us`
-                    : "--"}
-                </span>
-              </div>
-              <div className="flex items-center justify-between gap-3">
-                <span>{t("dashboard.dspMax")}</span>
-                <span className="font-semibold text-foreground">
-                  {status?.dspProcessMaxUs !== null && status?.dspProcessMaxUs !== undefined
-                    ? `${status.dspProcessMaxUs} us`
-                    : "--"}
-                </span>
-              </div>
-              <div className="flex items-center justify-between gap-3">
-                <span>{t("dashboard.midiThroughput")}</span>
-                <span className="font-semibold text-foreground">
-                  {midiMessagesPerSec !== null ? `${midiMessagesPerSec.toLocaleString()} msg/s` : "--"}
-                </span>
-              </div>
-              <div className="flex items-center justify-between gap-3">
-                <span>{t("dashboard.midiQueue")}</span>
-                <span className="font-semibold text-foreground">
-                  {status?.audioMidiQueueDepth ?? "--"} / {status?.audioMidiQueueMaxDepth ?? "--"}
-                </span>
-              </div>
-              <div className="flex items-center justify-between gap-3">
-                <span>{t("dashboard.consecutiveMisses")}</span>
-                <span className="font-semibold text-foreground">{status?.consecutiveDeadlineMisses ?? "--"}</span>
-              </div>
-              <div className="flex items-center justify-between gap-3">
-                <span>{t("dashboard.audioMmcss")}</span>
-                <span className="font-semibold text-foreground">
-                  {status?.audioMmcssEnabled === null || status?.audioMmcssEnabled === undefined
-                    ? "--"
-                    : status.audioMmcssEnabled
-                    ? "OK"
-                    : t("common.off")}
-                </span>
-              </div>
-            </div>
-          </div>
-        ) : null}
-
         <div className="space-y-2">
-          <Label htmlFor="vst-instrument">{t("audio.vstInstruments", { path: "Windows VST folders" })}</Label>
-          <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-5">
+          <Label htmlFor="vst-instrument">{t("audio.vstInstrumentLabel")}</Label>
+          <div className={`grid gap-2 md:grid-cols-2 ${showVstTechnicalDetails ? "xl:grid-cols-5" : "xl:grid-cols-3"}`}>
             <Input
               value={vstSearch}
               onChange={(event) => setVstSearch(event.target.value)}
-              placeholder={t("audio.vstSearch")}
-              aria-label={t("audio.vstSearch")}
+              placeholder={t(showVstTechnicalDetails ? "audio.vstSearch" : "audio.vstSearchSimple")}
+              aria-label={t(showVstTechnicalDetails ? "audio.vstSearch" : "audio.vstSearchSimple")}
             />
             <Select value={vstFormat} onValueChange={setVstFormat}>
               <SelectTrigger aria-label={t("audio.vstAllFormats")}><SelectValue /></SelectTrigger>
@@ -461,14 +470,14 @@ export function AudioConfigCard({
                 <SelectItem value="VST3">VST3</SelectItem>
               </SelectContent>
             </Select>
-            <Select value={vstArchitecture} onValueChange={setVstArchitecture}>
+            {showVstTechnicalDetails && <Select value={vstArchitecture} onValueChange={setVstArchitecture}>
               <SelectTrigger aria-label={t("audio.vstAllArchitectures")}><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">{t("audio.vstAllArchitectures")}</SelectItem>
                 <SelectItem value="x64">x64</SelectItem>
                 <SelectItem value="x86">x86</SelectItem>
               </SelectContent>
-            </Select>
+            </Select>}
             <Select value={vstStatus} onValueChange={setVstStatus}>
               <SelectTrigger aria-label={t("audio.vstAllStatuses")}><SelectValue /></SelectTrigger>
               <SelectContent>
@@ -505,7 +514,7 @@ export function AudioConfigCard({
                 ) : null}
                 {filteredVstPlugins.map((plugin) => (
                   <SelectItem key={plugin.id} value={plugin.id} disabled={!plugin.supported}>
-                    {[plugin.name, plugin.format, plugin.architecture, plugin.status].join(" \u00b7 ")}
+                    {showVstTechnicalDetails ? [plugin.name, plugin.format, plugin.architecture, plugin.status].join(" \u00b7 ") : plugin.name}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -517,27 +526,27 @@ export function AudioConfigCard({
           {selectedVstPlugin ? (
             <div className="space-y-2 rounded-md border border-border/60 bg-muted/30 p-3">
               <div className="flex flex-wrap gap-2">
-                <Badge variant="secondary">{selectedVstPlugin.format}</Badge>
-                <Badge variant="outline">{selectedVstPlugin.architecture}</Badge>
-                <Badge variant="outline">
+                {showVstTechnicalDetails && <Badge variant="secondary">{selectedVstPlugin.format}</Badge>}
+                {showVstTechnicalDetails && <Badge variant="outline">{selectedVstPlugin.architecture}</Badge>}
+                {showVstTechnicalDetails && <Badge variant="outline">
                   {selectedVstPlugin.hostingMode === "bridgedX86" ? t("audio.vstModeBridged") : t("audio.vstModeDirect")}
-                </Badge>
+                </Badge>}
                 <Badge variant={selectedVstPlugin.supported ? "success" : "warning"}>
                   {selectedVstPlugin.supported ? t("audio.vstStatusCompatible") : t("audio.vstStatusUnsupported")}
                 </Badge>
-                <Badge variant={selectedVstPlugin.kind === "instrument" ? "success" : "warning"}>
+                {showVstTechnicalDetails && <Badge variant={selectedVstPlugin.kind === "instrument" ? "success" : "warning"}>
                   {selectedPluginKindLabel}
-                </Badge>
-                <Badge variant={selectedVstPlugin.hasEditor ? "secondary" : "outline"}>
+                </Badge>}
+                {showVstTechnicalDetails && <Badge variant={selectedVstPlugin.hasEditor ? "secondary" : "outline"}>
                   {selectedVstPlugin.hasEditor ? t("audio.vstEditorAvailable") : t("audio.vstNoEditor")}
-                </Badge>
-                {selectedVstPlugin.midiCompatible !== null ? (
+                </Badge>}
+                {showVstTechnicalDetails && selectedVstPlugin.midiCompatible != null ? (
                   <Badge variant={selectedVstPlugin.midiCompatible ? "success" : "warning"}>
                     {selectedVstPlugin.midiCompatible ? t("audio.vstMidiCompatibleBadge") : t("audio.vstMidiIncompatibleBadge")}
                   </Badge>
                 ) : null}
               </div>
-              <p className="break-all text-xs text-muted-foreground">{selectedVstPlugin.path}</p>
+              {showVstTechnicalDetails && <p className="break-all text-xs text-muted-foreground">{selectedVstPlugin.path}</p>}
               {showVstTechnicalDetails && selectedVstPlugin.vendor ? (
                 <p className="text-xs text-muted-foreground">{selectedVstPlugin.vendor}</p>
               ) : null}
@@ -548,8 +557,8 @@ export function AudioConfigCard({
                 ) : null}
               {selectedVstPlugin.lastError || !selectedVstPlugin.supported ? (
                 <p className="text-xs text-warning">
-                  {selectedVstPlugin.failureStage ? `${selectedVstPlugin.failureStage}: ` : ""}
-                  {selectedVstPlugin.lastError || selectedPluginStatusLabel}
+                  {showVstTechnicalDetails && selectedVstPlugin.failureStage ? `${selectedVstPlugin.failureStage}: ` : ""}
+                  {showVstTechnicalDetails ? selectedVstPlugin.lastError || selectedPluginStatusLabel : t("audio.pluginUnavailableHint")}
                 </p>
               ) : null}
               {showVstTechnicalDetails && selectedVstPlugin.hostingMode === "bridgedX86" ? (
@@ -560,34 +569,37 @@ export function AudioConfigCard({
                   <span>{t("audio.vstBridgeUnderruns")}: {status?.x86BridgeUnderruns ?? 0} / {status?.x86BridgeOverruns ?? 0}</span>
                 </div>
               ) : null}
-              <div className="flex flex-wrap gap-2">
+              {showVstTechnicalDetails && <div className="flex flex-wrap gap-2">
                 <Button variant="outline" onClick={() => onRetestVst(selectedVstPlugin.id)} disabled={vstPluginsLoading}>
                   {t("audio.vstRetest")}
                 </Button>
                 <Button variant="outline" onClick={() => onOpenVstFolder(selectedVstPlugin.id)}>
                   {t("audio.vstOpenFolder")}
                 </Button>
-              </div>
+              </div>}
             </div>
           ) : null}
-          <div className="space-y-2 rounded-md border border-border/60 p-3">
-            <Label htmlFor="vst-scan-paths">{t("audio.vstCustomPaths")}</Label>
-            <Input
-              id="vst-scan-paths"
-              value={scanPathsDraft ?? savedScanPaths}
-              onChange={(event) => setScanPathsDraft(event.target.value)}
-              onBlur={async (event) => {
-                const vstScanPaths = event.target.value.split(";").map((path) => path.trim()).filter(Boolean);
-                if (vstScanPaths.join(";") !== savedScanPaths) {
-                  const accepted = await onUpdateAudioConfig({ vstScanPaths });
-                  if (accepted === false) return;
-                }
-                setScanPathsDraft(null);
-              }}
-              placeholder={t("audio.vstCustomPathsPlaceholder")}
-            />
-            <p className="text-xs text-muted-foreground">{t("audio.vstCustomPathsHint")}</p>
-          </div>
+          <details className="rounded-md border border-border/60 p-3">
+            <summary className="cursor-pointer text-sm font-medium">{t("audio.vstLibrarySettings")}</summary>
+            <div className="mt-3 space-y-2">
+              <Label htmlFor="vst-scan-paths">{t("audio.vstCustomPaths")}</Label>
+              <Input
+                id="vst-scan-paths"
+                value={scanPathsDraft ?? savedScanPaths}
+                onChange={(event) => setScanPathsDraft(event.target.value)}
+                onBlur={async (event) => {
+                  const vstScanPaths = event.target.value.split(";").map((path) => path.trim()).filter(Boolean);
+                  if (vstScanPaths.join(";") !== savedScanPaths) {
+                    const accepted = await onUpdateAudioConfig({ vstScanPaths });
+                    if (accepted === false) return;
+                  }
+                  setScanPathsDraft(null);
+                }}
+                placeholder={t("audio.vstCustomPathsPlaceholder")}
+              />
+              <p className="text-xs text-muted-foreground">{t("audio.vstCustomPathsHint")}</p>
+            </div>
+          </details>
           <div className="flex flex-wrap gap-2">
             <Button variant="outline" onClick={onOpenVstEq} disabled={!canOpenVstEq}>
               <SlidersHorizontal className="mr-2 h-4 w-4" />
@@ -611,7 +623,7 @@ export function AudioConfigCard({
           </div>
           <p className="text-xs text-muted-foreground">{t("audio.vstSettingsSaved")}</p>
           <p className="text-xs text-muted-foreground">{t("audio.vstMidiOnly")}</p>
-          <p className="text-xs text-muted-foreground">{t("audio.vstFormats")}</p>
+          {showVstTechnicalDetails && <p className="text-xs text-muted-foreground">{t("audio.vstFormats")}</p>}
           {selectedVstPlugin?.supported ? <p className="text-xs text-muted-foreground">{t("audio.vstParameterFallback")}</p> : null}
           {!bridgeRunning ? <p className="text-xs text-warning">{t("audio.startBridgeHint")}</p> : null}
           <div className="flex flex-wrap gap-2 pt-2">

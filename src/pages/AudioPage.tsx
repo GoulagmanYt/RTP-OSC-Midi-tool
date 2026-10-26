@@ -3,13 +3,14 @@ import { VstParametersDialog } from "./audio/VstParametersDialog";
 import { AudioStressTestCard } from "./audio/AudioStressTestCard";
 import { useAudioPageController } from "./audio/useAudioPageController";
 import { VstEqDialog } from "./audio/VstEqDialog";
+import { isDeveloperMode } from "../developer-mode";
 
 export default function AudioPage() {
   const controller = useAudioPageController();
 
   return (
     <div className="space-y-6">
-      {controller.config?.ui.developerMode && (
+      {isDeveloperMode(controller.config) && (
         <AudioStressTestCard
           bridgeRunning={controller.bridgeRunning}
           audioRunning={controller.status?.audioRunning ?? false}
@@ -27,6 +28,7 @@ export default function AudioPage() {
         canOpenVstEq={Boolean(controller.config)}
         config={controller.config}
         currentLatencyMs={controller.currentLatencyMs}
+        latencyIsBufferPeriod={controller.latencyIsBufferPeriod}
         midiMessagesPerSec={controller.midiMessagesPerSec}
         selectedPluginKindLabel={controller.selectedPluginKindLabel}
         selectedPluginStatusLabel={controller.selectedPluginStatusLabel}

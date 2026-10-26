@@ -12,7 +12,7 @@ import { toast } from "sonner";
 import { getErrorMessage } from "../api-errors";
 
 export default function OscPage() {
-  const { config, updateConfig, saveConfig } = useBridge();
+  const { config, status, updateConfig, saveConfig } = useBridge();
   const [busy, setBusy] = useState(false);
   const [portResetNonce, setPortResetNonce] = useState(0);
   const { t } = useI18n();
@@ -39,7 +39,7 @@ export default function OscPage() {
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <Radio className="h-5 w-5 text-purple-500" />
-            {t("osc.title")}
+            {t("osc.configurationTitle")}
           </CardTitle>
           <CardDescription>{t("osc.description")}</CardDescription>
         </CardHeader>
@@ -109,26 +109,6 @@ export default function OscPage() {
             </div>
           </div>
 
-          <div className="space-y-4 p-4 rounded-lg bg-background border border-border/60">
-            <h3 className="font-semibold text-sm">{t("osc.protocolOptions")}</h3>
-            <div className="space-y-3">
-              <div className="flex items-center justify-between">
-                <Label htmlFor="osc-log-messages" className="text-sm">{t("osc.logOsc")}</Label>
-                <Switch id="osc-log-messages"
-                  checked={config?.osc.logMessages ?? false}
-                  onCheckedChange={(c) => updateConfig({ osc: { logMessages: c } })}
-                />
-              </div>
-              <div className="flex items-center justify-between">
-                <Label htmlFor="osc-verbose" className="text-sm">{t("osc.verbose")}</Label>
-                <Switch id="osc-verbose"
-                  checked={config?.logging?.verbose ?? false}
-                  onCheckedChange={(c) => updateConfig({ logging: { verbose: c } })}
-                />
-              </div>
-            </div>
-          </div>
-
           <div className="flex justify-end gap-2 pt-4 border-t">
             <Button
               variant="outline"
@@ -159,42 +139,23 @@ export default function OscPage() {
         <CardHeader>
           <CardTitle className="text-sm flex items-center gap-2">
             <Server className="h-4 w-4" />
-            {t("osc.connectionStatus")}
+            {t("osc.outputStatus")}
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
-          <div className="grid gap-3 md:grid-cols-2">
-            <div className="p-3 rounded-lg bg-background border border-border/60">
-              <div className="flex items-center justify-between">
-                <span className="text-sm text-muted-foreground">{t("osc.statusLabel")}</span>
-                <Badge variant={config?.osc.enabled ? "success" : "secondary"}>
-                  {config?.osc.enabled ? t("common.enabled") : t("common.disabled")}
-                </Badge>
-              </div>
-              <div className="text-xs text-muted-foreground mt-2">
-                {config?.osc.targetIp}:{config?.osc.targetPort}
-              </div>
+          <dl className="space-y-3 text-sm">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <dt className="text-muted-foreground">{t("osc.target")}</dt>
+              <dd className="break-all font-mono">{config ? `${config.osc.targetIp}:${config.osc.targetPort}` : t("common.unknown")}</dd>
             </div>
-
-            <div className="p-3 rounded-lg bg-background border border-border/60">
-              <div className="flex items-center justify-between">
-                <span className="text-sm text-muted-foreground">{t("osc.connected")}</span>
-                <Badge variant={config?.osc.enabled ? "success" : "secondary"}>
-                  {config?.osc.enabled ? t("common.yes") : t("common.no")}
-                </Badge>
-              </div>
-              <div className="text-xs text-muted-foreground mt-2">
-                {config?.osc.enabled ? (
-                  <div className="flex items-center gap-1">
-                    <div className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
-                    {t("osc.flowActive")}
-                  </div>
-                ) : (
-                  t("osc.waiting")
-                )}
-              </div>
+            <div className="flex items-center justify-between gap-2">
+              <dt className="text-muted-foreground">{t("osc.transmission")}</dt>
+              <dd><Badge variant={config?.osc.enabled && status?.running ? "success" : "secondary"}>
+                {!config ? t("common.unknown") : !config.osc.enabled ? t("common.disabled") : !status ? t("common.unknown") : status.running ? t("osc.outputReady") : t("common.stopped")}
+              </Badge></dd>
             </div>
-          </div>
+          </dl>
+          <p className="text-xs text-muted-foreground">{t("osc.deliveryHint")}</p>
         </CardContent>
       </Card>
 

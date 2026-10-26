@@ -5,8 +5,10 @@ import OscPage from "./OscPage";
 const mocks = vi.hoisted(() => ({
   updateConfig: vi.fn(),
   saveConfig: vi.fn(),
+  status: { running: false } as { running: boolean } | null,
   config: {
     osc: {
+      enabled: true,
       targetIp: "127.0.0.1",
       targetPort: 9000,
       inputEnabled: false,
@@ -22,7 +24,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("../providers/BridgeProvider", () => ({
   useBridge: () => ({
     config: mocks.config,
-    status: {},
+    status: mocks.status,
     updateConfig: mocks.updateConfig,
     saveConfig: mocks.saveConfig,
   }),
@@ -38,6 +40,34 @@ vi.mock("sonner", () => ({
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.config.osc.enabled = true;
+  mocks.status = { running: false };
+});
+
+it("distinguishes an enabled output from a running bridge without claiming connectivity", () => {
+  const { rerender } = render(<OscPage />);
+  expect(screen.getByText("common.stopped")).toBeTruthy();
+  expect(screen.queryByText("osc.outputReady")).toBeNull();
+  expect(screen.queryByText("osc.connected")).toBeNull();
+  expect(screen.queryByText("osc.flowActive")).toBeNull();
+  expect(screen.getByText("osc.deliveryHint")).toBeTruthy();
+
+  mocks.status = { running: true };
+  rerender(<OscPage />);
+  expect(screen.getByText("osc.outputReady")).toBeTruthy();
+  expect(screen.queryByText("common.stopped")).toBeNull();
+
+  mocks.config.osc.enabled = false;
+  rerender(<OscPage />);
+  expect(screen.getByText("common.disabled")).toBeTruthy();
+  expect(screen.queryByText("osc.outputReady")).toBeNull();
+});
+
+it("shows an unknown transmission state before runtime status is available", () => {
+  mocks.status = null;
+  render(<OscPage />);
+  expect(screen.getByText("common.unknown")).toBeTruthy();
+  expect(screen.queryByText("osc.outputReady")).toBeNull();
 });
 
 it("renders OSC configuration fields with current values", () => {

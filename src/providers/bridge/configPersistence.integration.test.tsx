@@ -22,7 +22,7 @@ const initial: api.AppConfig = {
     bufferSize: 512, gainDb: 0, limiterEnabled: false, vstPath: null, vstPluginId: null,
     vstScanPaths: [], vstEqByPlugin: {}, gameMode: true, renderAheadBlocks: 1, dspThreadPriority: "mmcss" },
   osc: { inputEnabled: false, listenIp: "127.0.0.1", listenPort: 9001, enabled: true,
-    targetIp: "127.0.0.1", targetPort: 9000, logMessages: true },
+    targetIp: "127.0.0.1", targetPort: 9000, logMessages: false },
   rtp: { thruEnabled: false, enabled: true, sessionName: "OSCMidi", port: 5004,
     remoteEnabled: false, remotes: [], logMessages: false },
   ui: { theme: "light", themePalette: "light", cornerRadius: 12, autoStart: false, developerMode: false },

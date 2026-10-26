@@ -2,6 +2,7 @@ import { NavLink } from "react-router-dom";
 import { AudioLines, Cable, Globe2, LayoutDashboard, ListRestart, RadioTower, Settings, Waypoints } from "lucide-react";
 import { useBridge } from "../../providers/BridgeProvider";
 import { useI18n } from "../../providers/LanguageProvider";
+import { isDeveloperMode } from "../../developer-mode";
 
 export function Sidebar() {
   const { config } = useBridge();
@@ -15,7 +16,7 @@ export function Sidebar() {
       { to: "/audio", label: t("nav.audioVst"), icon: AudioLines },
     ] },
     { label: "sidebar.application", items: [
-      ...(config?.ui.developerMode ? [{ to: "/logs", label: t("nav.logs"), icon: ListRestart }] : []),
+      ...(isDeveloperMode(config) ? [{ to: "/logs", label: t("nav.logs"), icon: ListRestart }] : []),
       { to: "/settings", label: t("nav.settings"), icon: Settings },
     ] },
   ];

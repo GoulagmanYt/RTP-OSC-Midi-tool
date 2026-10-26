@@ -4,17 +4,20 @@ import { useBridge } from "../providers/BridgeProvider";
 import { pingAudio, reloadVst } from "../api";
 import { toast } from "sonner";
 import { useI18n } from "../providers/LanguageProvider";
-import { RTP_VIRTUAL_INPUT, VST_OUTPUT } from "../constants";
 import { DiagnosticsGrid } from "./dashboard/DiagnosticsGrid";
 import { ErrorCard } from "./dashboard/ErrorCard";
 import { OverviewGrid } from "./dashboard/OverviewGrid";
 import { SignalFlow } from "./dashboard/SignalFlow";
 import { getErrorMessage } from "../api-errors";
+import { isDeveloperMode } from "../developer-mode";
+import { mergeLiveAudioMetrics } from "./audio/liveStatus";
+import { getAudioLatency } from "./audio/latency";
 
 export default function Dashboard() {
   const navigate = useNavigate();
-  const { status, config, metrics, logs, preflight, runPreflight, refreshStatus } =
+  const { status: statusSnapshot, config, metrics, logs, preflight, runPreflight, refreshStatus } =
     useBridge();
+  const status = mergeLiveAudioMetrics(statusSnapshot, metrics);
   const { t } = useI18n();
   const [lastDropoutAt, setLastDropoutAt] = useState<number | null>(null);
   const lastXrun = useRef<number | null>(null);
@@ -24,7 +27,6 @@ export default function Dashboard() {
   const audioBackend = status?.audioBackend || config?.audio.backend || t("common.auto");
   const audioDevice = status?.audioDevice || config?.audio.device || t("dashboard.systemDefault");
   const vstPath = config?.audio.vstPath || t("dashboard.bundledVstDefault");
-  const shortVstPath = vstPath.length > 42 ? `...${vstPath.slice(vstPath.length - 42)}` : vstPath;
   const bufferSamples = status?.audioBufferSize ?? config?.audio.bufferSize ?? undefined;
   const requestedBufferSamples =
     status?.audioRequestedBufferSize ?? config?.audio.bufferSize ?? undefined;
@@ -33,30 +35,9 @@ export default function Dashboard() {
   const bufferMismatch =
     status?.audioBufferMismatch ??
     (bufferSamples && requestedBufferSamples ? bufferSamples !== requestedBufferSamples : false);
-  const vstMidiCompatible = status?.vstMidiCompatible ?? null;
   const limiterEnabled = status?.audioLimiterEnabled ?? config?.audio.limiterEnabled ?? false;
-  const xrunCount = metrics?.audioXruns ?? status?.audioXruns ?? null;
-  const audioMidiDrops = metrics?.audioMidiDrops ?? status?.audioMidiDrops ?? null;
-  const audioLockMisses = metrics?.audioLockMisses ?? status?.audioLockMisses ?? null;
-  const audioEmergencyResets = metrics?.audioEmergencyResets ?? status?.audioEmergencyResets ?? null;
-  const audioCallbackMaxUs = metrics?.audioCallbackMaxUs ?? status?.audioCallbackMaxUs ?? null;
-  const audioCallbackOverBudgetCount =
-    metrics?.audioCallbackOverBudgetCount ?? status?.audioCallbackOverBudgetCount ?? null;
-  const audioMmcssEnabled = metrics?.audioMmcssEnabled ?? status?.audioMmcssEnabled ?? null;
-  const audioPowerThrottlingDisabled =
-    metrics?.audioPowerThrottlingDisabled ?? status?.audioPowerThrottlingDisabled ?? null;
-  const latencyMs =
-    metrics?.audioLatencyMs ??
-    status?.audioLatencyMs ??
-    (bufferSamples && sampleRate ? Number(((bufferSamples / sampleRate) * 1000 * 2).toFixed(2)) : null);
-  const audioPeakL = metrics?.audioPeakL ?? null;
-  const audioPeakR = metrics?.audioPeakR ?? null;
-  const midiRate = metrics ? metrics.midiMessagesPerSec : null;
-  const oscRate = metrics ? metrics.oscMessagesPerSec : null;
+  const latency = getAudioLatency(status, config);
   const dropoutsActive = lastDropoutAt !== null && now - lastDropoutAt < 30_000;
-  const latencyBadge: "secondary" | "warning" | "success" =
-    latencyMs === null ? "secondary" : latencyMs > 40 ? "warning" : "success";
-  const latencyDisplay = latencyMs !== null ? Number(latencyMs.toFixed(1)) : null;
 
   useEffect(() => {
     const healthTotal =
@@ -65,7 +46,9 @@ export default function Dashboard() {
       (metrics?.audioLockMisses ?? 0) +
       (metrics?.audioEmergencyResets ?? 0) +
       (metrics?.audioCallbackOverBudgetCount ?? 0);
-    if (!metrics || healthTotal === 0) {
+    if (!metrics) {
+      lastXrun.current = null;
+      setLastDropoutAt(null);
       return;
     }
     const current = healthTotal;
@@ -73,6 +56,8 @@ export default function Dashboard() {
     lastXrun.current = current;
     if (previous !== null && current > previous) {
       setLastDropoutAt(Date.now());
+    } else if (previous !== null && current < previous) {
+      setLastDropoutAt(null);
     }
   }, [
     metrics,
@@ -94,14 +79,6 @@ export default function Dashboard() {
     }, 5000);
     return () => window.clearInterval(id);
   }, [lastDropoutAt]);
-
-  const logPreview = logs.slice(0, 3);
-
-  const displayPortName = (name: string) => {
-    if (name === RTP_VIRTUAL_INPUT) return t("devices.rtpVirtualInput");
-    if (name === VST_OUTPUT) return t("devices.vstInternalOutput");
-    return name;
-  };
 
   const handlePing = async () => {
     try {
@@ -127,52 +104,34 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-6 min-w-0">
-      {status?.lastError ? <ErrorCard error={status.lastError} t={t} /> : null}
+      {status?.lastError ? <ErrorCard error={status.lastError} developerMode={isDeveloperMode(config)} t={t} /> : null}
       <SignalFlow config={config} status={status} t={t} />
       <OverviewGrid
-        audioBackend={audioBackend}
         audioDevice={audioDevice}
-        bufferSamples={bufferSamples}
         config={config}
         limiterEnabled={limiterEnabled}
-        logPreview={logPreview}
+        logs={logs}
         rtpPort={rtpPort}
-        sampleRate={sampleRate}
         status={status}
         t={t}
-        xrunCount={xrunCount}
         onNavigateLogs={() => navigate("/logs")}
       />
-      {config?.ui.developerMode && (
+      {isDeveloperMode(config) && (
         <DiagnosticsGrid
-          audioPeakL={audioPeakL}
-          audioPeakR={audioPeakR}
+          audioBackend={audioBackend}
           bufferMismatch={bufferMismatch}
           bufferSamples={bufferSamples}
           config={config}
-          displayPortName={displayPortName}
           dropoutsActive={dropoutsActive}
-          latencyBadge={latencyBadge}
-          latencyDisplay={latencyDisplay}
-          midiRate={midiRate}
-          oscRate={oscRate}
-          audioMidiDrops={audioMidiDrops}
-          audioLockMisses={audioLockMisses}
-          audioEmergencyResets={audioEmergencyResets}
-          audioCallbackMaxUs={audioCallbackMaxUs}
-          audioCallbackOverBudgetCount={audioCallbackOverBudgetCount}
-          audioMmcssEnabled={audioMmcssEnabled}
-          audioPowerThrottlingDisabled={audioPowerThrottlingDisabled}
+          latency={latency}
+          metrics={metrics}
           preflight={preflight}
           requestedBufferSamples={requestedBufferSamples}
           sampleRate={sampleRate}
           status={status}
           streamBufferSamples={streamBufferSamples}
           t={t}
-          vstMidiCompatible={vstMidiCompatible}
           vstPath={vstPath}
-          shortVstPath={shortVstPath}
-          xrunCount={xrunCount}
           onHandlePing={handlePing}
           onHandleReloadVst={handleReloadVst}
           onRunPreflight={runPreflight}

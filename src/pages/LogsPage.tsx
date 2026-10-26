@@ -11,15 +11,14 @@ export default function LogsPage() {
 
   return (
     <div className="h-full flex flex-col space-y-4">
-      <div className="flex items-center justify-between">
-        <h2 className="text-2xl font-bold tracking-tight">{t("logs.title")}</h2>
+      <div className="flex justify-end">
         <Button variant="outline" size="sm" onClick={clearLogs}>
           <Trash2 className="mr-2 h-4 w-4" />
           {t("logs.clear")}
         </Button>
       </div>
 
-      <div className="flex-1 overflow-hidden rounded-xl border bg-card text-card-foreground shadow-sm">
+      <section aria-label={t("logs.entries")} className="flex-1 overflow-hidden rounded-xl border bg-card text-card-foreground shadow-sm">
         <div className="h-full space-y-2 overflow-auto p-4 font-mono text-xs">
           {logs.length === 0 && (
             <div className="py-10 text-center text-muted-foreground">{t("logs.none")}</div>
@@ -51,7 +50,7 @@ export default function LogsPage() {
             </div>
           ))}
         </div>
-      </div>
+      </section>
     </div>
   );
 }

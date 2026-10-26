@@ -200,26 +200,6 @@ export function RtpConfigCard({
           ) : null}
         </div>
 
-        <div className="space-y-4 rounded-lg border border-border/60 bg-background p-4">
-          <h3 className="text-sm font-semibold">{t("rtp.advanced")}</h3>
-          <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <Label htmlFor="rtp-log-messages" className="text-sm">{t("rtp.logRtp")}</Label>
-              <Switch id="rtp-log-messages"
-                checked={config?.rtp.logMessages ?? false}
-                onCheckedChange={(checked) => onUpdateConfig({ rtp: { logMessages: checked } })}
-              />
-            </div>
-            <div className="flex items-center justify-between">
-              <Label htmlFor="rtp-verbose" className="text-sm">{t("rtp.verbose")}</Label>
-              <Switch id="rtp-verbose"
-                checked={config?.logging.verbose ?? false}
-                onCheckedChange={(checked) => onUpdateConfig({ logging: { verbose: checked } })}
-              />
-            </div>
-          </div>
-        </div>
-
         {remoteEnabled ? (
           <div className="space-y-4 rounded-lg border border-border/60 bg-background p-4">
             <div className="flex items-center justify-between">

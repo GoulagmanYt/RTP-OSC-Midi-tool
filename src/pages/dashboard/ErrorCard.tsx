@@ -4,10 +4,11 @@ import type { TranslateFn } from "../audio/shared";
 
 type Props = {
   error: string;
+  developerMode?: boolean;
   t: TranslateFn;
 };
 
-export function ErrorCard({ error, t }: Props) {
+export function ErrorCard({ error, developerMode = false, t }: Props) {
   return (
     <Card className="border-destructive" role="alert">
       <CardHeader className="pb-2">
@@ -16,7 +17,8 @@ export function ErrorCard({ error, t }: Props) {
         </CardTitle>
       </CardHeader>
       <CardContent>
-        <p className="break-words font-mono text-sm text-foreground">{error}</p>
+        <p className="text-sm text-foreground">{t("dashboard.errorRecoveryHint")}</p>
+        {developerMode && <p className="mt-3 break-words font-mono text-sm text-foreground">{error}</p>}
       </CardContent>
     </Card>
   );

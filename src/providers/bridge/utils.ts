@@ -1,4 +1,5 @@
 import type { AppConfig, DeepPartial } from "../../api";
+import { normalizeDeveloperConfig } from "../../developer-mode";
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -26,5 +27,5 @@ export function mergeConfig(config: AppConfig, patch: DeepPartial<AppConfig>): A
   if (patch.audio?.vstEqByPlugin !== undefined) {
     next.audio.vstEqByPlugin = patch.audio.vstEqByPlugin as AppConfig["audio"]["vstEqByPlugin"];
   }
-  return next;
+  return normalizeDeveloperConfig(next);
 }

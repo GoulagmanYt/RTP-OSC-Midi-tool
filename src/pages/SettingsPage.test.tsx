@@ -77,7 +77,9 @@ it.each([true, false])("preserves logging.enabled=%s when leaving developer mode
   await waitFor(() => expect(mocks.updateConfig).toHaveBeenCalled());
   const patch = mocks.updateConfig.mock.calls[0][0];
   expect(patch.ui.developerMode).toBe(false);
-  expect(patch.logging).toEqual({ verbose: false, logAllToFile: false });
+  expect(patch).toEqual({ ui: { developerMode: false } });
+  // Flag cleanup is enforced by the shared configuration policy, not this view.
+  expect(patch.logging).toBeUndefined();
 });
 
 it.each([
@@ -90,4 +92,29 @@ it.each([
   await waitFor(() => expect(mocks.save).toHaveBeenCalled());
   expect(mocks.join).toHaveBeenCalledWith("/home/user/config", filename);
   expect(mocks.save.mock.calls[0][0].defaultPath).toBe(`/home/user/config/${filename}`);
+});
+
+it("keeps configuration import/export direct and reveals support tools on demand in normal mode", async () => {
+  mocks.config = { ...mocks.config, ui: { ...mocks.config.ui, developerMode: false } };
+  render(<SettingsPage />);
+  await waitFor(() => expect(screen.getByDisplayValue("/home/user/config")).toBeTruthy());
+  const support = screen.getByText("settings.files.support").closest("details")!;
+  expect(support.open).toBe(false);
+  expect(screen.getByRole("button", { name: "settings.files.exportYaml" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "settings.files.importYaml" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "settings.files.exportDiagnostics" }).closest("details")).toBe(support);
+
+  fireEvent.click(screen.getByText("settings.files.support"));
+  expect(support.open).toBe(true);
+  await waitFor(() => expect(screen.getByDisplayValue("/home/user/config")).toBeTruthy());
+  fireEvent.click(screen.getByRole("button", { name: "settings.files.exportDiagnostics" }));
+  await waitFor(() => expect(mocks.exportDiagnostics).toHaveBeenCalledWith("/chosen/export"));
+  await waitFor(() => expect((screen.getByRole("button", { name: "settings.files.exportDiagnostics" }) as HTMLButtonElement).disabled).toBe(false));
+});
+
+it("opens support details for developers", async () => {
+  render(<SettingsPage />);
+  await waitFor(() => expect(screen.getByDisplayValue("/home/user/config")).toBeTruthy());
+  expect(screen.getByText("settings.files.support").closest("details")?.open).toBe(true);
+  expect(screen.getByRole("button", { name: "settings.logs.clear" })).toBeTruthy();
 });

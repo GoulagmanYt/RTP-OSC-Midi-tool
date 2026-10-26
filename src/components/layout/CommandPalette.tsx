@@ -24,6 +24,7 @@ import { useBridge } from "../../providers/BridgeProvider";
 import { useI18n } from "../../providers/LanguageProvider";
 import { toast } from "sonner";
 import { getErrorMessage } from "../../api-errors";
+import { isDeveloperMode } from "../../developer-mode";
 
 interface CommandPaletteProps {
   open: boolean;
@@ -71,10 +72,10 @@ export default function CommandPalette({ open, onOpenChange }: CommandPalettePro
             <AudioLines className="mr-2 h-4 w-4" />
             <span>{t("nav.audioVst")}</span>
           </CommandItem>
-          <CommandItem onSelect={() => runCommand(() => navigate("/logs"))}>
+          {isDeveloperMode(config) && <CommandItem onSelect={() => runCommand(() => navigate("/logs"))}>
             <ListRestart className="mr-2 h-4 w-4" />
             <span>{t("nav.logs")}</span>
-          </CommandItem>
+          </CommandItem>}
           <CommandItem onSelect={() => runCommand(() => navigate("/settings"))}>
             <Settings className="mr-2 h-4 w-4" />
             <span>{t("nav.settings")}</span>

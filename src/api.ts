@@ -1,4 +1,5 @@
 import { invokeCommand } from "./api-client";
+import { normalizeDeveloperConfig } from "./developer-mode";
 import { persistConfigReplacement, persistConfigSave, persistConfigSerially } from "./config-persistence";
 import type {
   AppConfig,
@@ -19,11 +20,11 @@ export { CommandFailure } from "./api-errors";
 export type * from "./api-types";
 
 export async function getConfig(): Promise<AppConfig> {
-  return invokeCommand("get_config");
+  return normalizeDeveloperConfig(await invokeCommand<AppConfig>("get_config"));
 }
 
 export async function saveConfig(config: AppConfig, shouldSave?: () => boolean): Promise<boolean> {
-  return persistConfigSave(config, (next) => invokeCommand<void>("save_config", { config: next }), shouldSave);
+  return persistConfigSave(normalizeDeveloperConfig(config), (next) => invokeCommand<void>("save_config", { config: next }), shouldSave);
 }
 
 export async function listMidiInputs(): Promise<string[]> {
@@ -35,7 +36,7 @@ export async function listMidiOutputs(): Promise<string[]> {
 }
 
 export async function startBridge(config: AppConfig): Promise<RuntimeStatus> {
-  return persistConfigSerially(config, (next) => invokeCommand<RuntimeStatus>("start_bridge", { config: next }));
+  return persistConfigSerially(normalizeDeveloperConfig(config), (next) => invokeCommand<RuntimeStatus>("start_bridge", { config: next }));
 }
 
 export async function stopBridge(): Promise<void> {
@@ -59,7 +60,7 @@ export async function getRtpParticipants(): Promise<RtpParticipantInfo[]> {
 }
 
 export async function resetConfigDefaults(): Promise<AppConfig> {
-  return persistConfigReplacement(() => invokeCommand<AppConfig>("reset_config_defaults"));
+  return persistConfigReplacement(async () => normalizeDeveloperConfig(await invokeCommand<AppConfig>("reset_config_defaults")));
 }
 
 export async function restartRtp(): Promise<RuntimeStatus> {
@@ -139,7 +140,7 @@ export async function exportDiagnostics(path: string): Promise<void> {
 }
 
 export async function importConfig(path: string): Promise<AppConfig> {
-  return persistConfigReplacement(() => invokeCommand<AppConfig>("import_config", { path }));
+  return persistConfigReplacement(async () => normalizeDeveloperConfig(await invokeCommand<AppConfig>("import_config", { path })));
 }
 
 export async function getAppPaths(): Promise<AppPaths> {

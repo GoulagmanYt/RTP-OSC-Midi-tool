@@ -11,6 +11,7 @@ import { TestMidiCard } from "./routing/TestMidiCard";
 import { clampNullableMidiNumber, displayPortName as displayPortNameLabel, formatNote } from "./routing/shared";
 import { toast } from "sonner";
 import { getErrorMessage } from "../api-errors";
+import { isDeveloperMode } from "../developer-mode";
 
 export default function RoutingPage() {
   const { config, status, updateConfig, midiInputs, midiOutputs, refreshLists } = useBridge();
@@ -254,7 +255,7 @@ export default function RoutingPage() {
         updateAssignment={updateAssignment}
         removeAssignment={removeAssignment}
       />
-      {config?.ui.developerMode && (
+      {isDeveloperMode(config) && (
         <TestMidiCard
           t={t}
           testChannel={testChannel}

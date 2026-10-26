@@ -7,6 +7,7 @@ import { applyTheme } from "./themes";
 import { Button } from "./components/ui/Button";
 import { AppErrorBoundary } from "./components/AppErrorBoundary";
 import { useI18n } from "./providers/LanguageProvider";
+import { isDeveloperMode } from "./developer-mode";
 
 const Dashboard = lazy(() => import("./pages/Dashboard"));
 const AudioPage = lazy(() => import("./pages/AudioPage"));
@@ -77,7 +78,7 @@ function AppContent() {
           <Route path="/osc" element={<OscPage />} />
           <Route path="/rtp" element={<RtpPage />} />
           <Route path="/audio" element={<AudioPage />} />
-          <Route path="/logs" element={config?.ui.developerMode ? <LogsPage /> : <Navigate to="/" replace />} />
+          <Route path="/logs" element={isDeveloperMode(config) ? <LogsPage /> : <Navigate to="/" replace />} />
           <Route path="/settings" element={<SettingsPage />} />
         </Route>
       </Routes>

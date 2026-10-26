@@ -59,6 +59,7 @@ function makeConfig(): AppConfig {
 describe("mergeConfig", () => {
   it("merges nested sections without losing sibling values", () => {
     const current = makeConfig();
+    current.ui.developerMode = true;
 
     const next = mergeConfig(current, {
       audio: {

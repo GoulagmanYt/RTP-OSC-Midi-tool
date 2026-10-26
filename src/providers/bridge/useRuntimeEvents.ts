@@ -7,10 +7,13 @@ type RuntimeEventsOptions = {
   appendLog: (entry: LogEntry) => void;
   setMetrics: (metrics: RuntimeMetrics) => void;
   setStatus?: React.Dispatch<React.SetStateAction<RuntimeStatus | null>>;
+  developerMode?: boolean;
   t: (key: string, vars?: Record<string, string | number>) => string;
 };
 
-export function useRuntimeEvents({ appendLog, setMetrics, setStatus, t }: RuntimeEventsOptions) {
+export function useRuntimeEvents({ appendLog, setMetrics, setStatus, developerMode = false, t }: RuntimeEventsOptions) {
+  const developerModeRef = useRef(developerMode);
+  developerModeRef.current = developerMode;
   const lastAudioHealth = useRef<{
     xruns: number | null;
     midiDrops: number | null;
@@ -87,14 +90,14 @@ export function useRuntimeEvents({ appendLog, setMetrics, setStatus, t }: Runtim
       }
       lastDropoutToastMs.current = now;
       toast.error(
-        t("toasts.audio.dropouts", {
+        developerModeRef.current ? t("toasts.audio.dropouts", {
           count: increment,
           xruns: deltas.xruns,
           deadlines: deltas.deadlines,
           lockMisses: deltas.lockMisses,
           midiDrops: deltas.midiDrops,
           resets: deltas.emergencyResets,
-        })
+        }) : t("toasts.audio.dropoutsNormal")
       );
     });
 

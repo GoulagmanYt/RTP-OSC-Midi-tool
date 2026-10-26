@@ -24,6 +24,7 @@ import { useI18n } from "../providers/LanguageProvider";
 import { getErrorMessage } from "../api-errors";
 import { join } from "@tauri-apps/api/path";
 import { AppearanceColors } from "./settings/AppearanceColors";
+import { isDeveloperMode } from "../developer-mode";
 
 type PaletteChoice = {
   id: "system" | "light" | "dark" | "contrast";
@@ -250,23 +251,12 @@ export default function SettingsPage() {
               <p className="text-xs text-muted-foreground">{t("settings.general.developerModeHint")}</p>
             </div>
             <Switch id="settings-developer"
-              checked={config?.ui.developerMode || false}
-              onCheckedChange={async (checked) => {
-                if (!checked) {
-                  await handleConfigUpdate({
-                    ui: { developerMode: false },
-                    logging: { verbose: false, logAllToFile: false },
-                    osc: { logMessages: false },
-                    rtp: { logMessages: false },
-                  });
-                } else {
-                  await handleConfigUpdate({ ui: { developerMode: true } });
-                }
-              }}
+              checked={isDeveloperMode(config)}
+              onCheckedChange={(developerMode) => handleConfigUpdate({ ui: { developerMode } })}
             />
           </div>
 
-          {config?.ui.developerMode && (
+          {isDeveloperMode(config) && (
             <>
               <div className="border-t pt-4" />
               <div className="flex items-center justify-between gap-4">
@@ -290,6 +280,19 @@ export default function SettingsPage() {
                 <Switch id="settings-osc-logs"
                   checked={config?.osc.logMessages || false}
                   onCheckedChange={(checked) => handleConfigUpdate({ osc: { logMessages: checked } })}
+                />
+              </div>
+
+              <div className="border-t pt-4" />
+
+              <div className="flex items-center justify-between gap-4">
+                <div className="min-w-0 flex flex-col gap-1">
+                  <Label htmlFor="settings-rtp-logs">{t("settings.general.rtpLogs")}</Label>
+                  <p className="text-xs text-muted-foreground">{t("settings.general.rtpLogsHint")}</p>
+                </div>
+                <Switch id="settings-rtp-logs"
+                  checked={config?.rtp?.logMessages || false}
+                  onCheckedChange={(logMessages) => handleConfigUpdate({ rtp: { logMessages } })}
                 />
               </div>
 
@@ -337,47 +340,53 @@ export default function SettingsPage() {
               <Download className="h-4 w-4 mr-2" />
               {t("settings.files.exportYaml")}
             </Button>
-            <Button variant="outline" disabled={busy} onClick={handleExportDiagnostics}>
-              <FileOutput className="h-4 w-4 mr-2" />
-              {t("settings.files.exportDiagnostics")}
-            </Button>
             <Button variant="outline" disabled={busy} onClick={handleImportConfig}>
               <RefreshCcw className="h-4 w-4 mr-2" />
               {t("settings.files.importYaml")}
             </Button>
           </div>
 
-          <div className="space-y-2">
-            <Label htmlFor="settings-config-folder">{t("settings.files.configFolder")}</Label>
-            <div className="flex flex-wrap items-center gap-2">
-              <Input id="settings-config-folder" readOnly value={paths?.configDir || t("common.unknown")} className="min-w-[240px] flex-1" />
-              <Button variant="outline" size="sm" onClick={() => copyPath(paths?.configDir)} disabled={!paths?.configDir}>
-                {t("common.copyPath")}
+          <details open={isDeveloperMode(config)} className="rounded-md border border-border/60 p-3">
+            <summary className="cursor-pointer text-sm font-medium">{t("settings.files.support")}</summary>
+            <div className="mt-4 space-y-4">
+              <p className="text-xs text-muted-foreground">{t("settings.files.supportHint")}</p>
+              <Button variant="outline" disabled={busy} onClick={handleExportDiagnostics}>
+                <FileOutput className="h-4 w-4 mr-2" />
+                {t("settings.files.exportDiagnostics")}
               </Button>
-              <Button variant="outline" size="sm" onClick={() => handleOpenDir("config")} disabled={!paths?.configDir}>
-                <FileOutput className="w-4 h-4 mr-1" />
-                {t("common.openFolder")}
-              </Button>
-            </div>
-          </div>
+              <div className="space-y-2">
+                <Label htmlFor="settings-config-folder">{t("settings.files.configFolder")}</Label>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Input id="settings-config-folder" readOnly value={paths?.configDir || t("common.unknown")} className="min-w-[240px] flex-1" />
+                  <Button variant="outline" size="sm" onClick={() => copyPath(paths?.configDir)} disabled={!paths?.configDir}>
+                    {t("common.copyPath")}
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={() => handleOpenDir("config")} disabled={!paths?.configDir}>
+                    <FileOutput className="w-4 h-4 mr-1" />
+                    {t("common.openFolder")}
+                  </Button>
+                </div>
+              </div>
 
-          <div className="space-y-2">
-            <Label htmlFor="settings-log-path">{t("settings.files.logs")}</Label>
-            <div className="flex flex-wrap items-center gap-2">
-              <Input id="settings-log-path" readOnly value={paths?.logFile || t("common.unknown")} className="min-w-[240px] flex-1" />
-              <Button variant="outline" size="sm" onClick={() => copyPath(paths?.logFile)} disabled={!paths?.logFile}>
-                {t("common.copyPath")}
-              </Button>
-              <Button variant="outline" size="sm" onClick={() => handleOpenDir("logs")} disabled={!paths?.logFile}>
-                <FileOutput className="w-4 h-4 mr-1" />
-                {t("common.openFolder")}
-              </Button>
+              <div className="space-y-2">
+                <Label htmlFor="settings-log-path">{t("settings.files.logs")}</Label>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Input id="settings-log-path" readOnly value={paths?.logFile || t("common.unknown")} className="min-w-[240px] flex-1" />
+                  <Button variant="outline" size="sm" onClick={() => copyPath(paths?.logFile)} disabled={!paths?.logFile}>
+                    {t("common.copyPath")}
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={() => handleOpenDir("logs")} disabled={!paths?.logFile}>
+                    <FileOutput className="w-4 h-4 mr-1" />
+                    {t("common.openFolder")}
+                  </Button>
+                </div>
+              </div>
             </div>
-          </div>
+          </details>
         </CardContent>
       </Card>
 
-      {config?.ui.developerMode && (
+      {isDeveloperMode(config) && (
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">

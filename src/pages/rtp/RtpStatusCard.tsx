@@ -3,6 +3,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "../../components/ui/Ca
 import type { AppConfig, RuntimeStatus } from "../../api-types";
 import type { TranslateFn } from "./shared";
 import { Server } from "lucide-react";
+import { isDeveloperMode } from "../../developer-mode";
 
 type Props = {
   config: AppConfig | null;
@@ -11,6 +12,8 @@ type Props = {
 };
 
 export function RtpStatusCard({ config, status, t }: Props) {
+  const boundPort = status?.rtpActive ? status.rtpBoundPort : null;
+  const connectionPort = boundPort ?? config?.rtp.port;
   return (
     <Card>
       <CardHeader>
@@ -20,77 +23,48 @@ export function RtpStatusCard({ config, status, t }: Props) {
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
-        <div className="grid gap-3 md:grid-cols-2">
-          <div className="rounded-lg border border-border/60 bg-background p-3">
-            <div className="mb-2 flex items-center justify-between">
-              <span className="text-sm text-muted-foreground">{t("rtp.server")}</span>
-              <Badge variant={status?.rtpActive ? "success" : "secondary"}>
-                {status?.rtpActive ? t("common.active") : t("common.inactive")}
-              </Badge>
-            </div>
-            <div className="text-xs text-muted-foreground">
-              {config?.rtp.sessionName || "OSCMidi"} - {t("dashboard.rtpPort")} {config?.rtp.port || 5004}
-            </div>
+        <dl className="space-y-3 text-sm">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <dt className="text-muted-foreground">{t("rtp.sessionNameLabel")}</dt>
+            <dd className="break-all font-medium">{config?.rtp.sessionName || t("common.unknown")}</dd>
           </div>
-
-          <div className="rounded-lg border border-border/60 bg-background p-3">
-            <div className="mb-2 flex items-center justify-between">
-              <span className="text-sm text-muted-foreground">{t("rtp.boundPorts")}</span>
-              <code className="rounded bg-secondary px-1.5 py-0.5 font-mono text-xs">
-                {status?.rtpBoundPort ? `${status.rtpBoundPort}/${status.rtpBoundPort + 1}` : "-"}
-              </code>
-            </div>
-            <div className="text-xs text-muted-foreground">
-              {status?.rtpActive ? (
-                <div className="flex items-center gap-1">
-                  <div className="h-1.5 w-1.5 animate-pulse rounded-full bg-green-500" />
-                  {t("rtp.ready")}
-                </div>
-              ) : (
-                t("rtp.waiting")
-              )}
-            </div>
+          <div className="flex items-center justify-between gap-2">
+            <dt className="text-muted-foreground">{t("rtp.statusLabel")}</dt>
+            <dd><Badge variant={status?.rtpActive ? "success" : "secondary"}>
+              {!status ? t("common.unknown") : status.rtpActive ? t("rtp.ready") : t("rtp.waiting")}
+            </Badge></dd>
           </div>
-        </div>
-
-        <div className="space-y-2 border-t pt-4">
-          <h4 className="text-sm font-semibold">{t("rtp.details")}</h4>
-          <div className="space-y-2">
-            <div className="flex items-center justify-between rounded p-2 text-sm">
-              <span className="text-muted-foreground">{t("rtp.sessionNameLabel")}</span>
-              <span className="font-medium">{config?.rtp.sessionName || "-"}</span>
+          <div className="flex items-center justify-between gap-2">
+            <dt className="text-muted-foreground">{t(boundPort ? "rtp.boundPorts" : "rtp.connectionPorts")}</dt>
+            <dd className="font-mono">{connectionPort ? `${connectionPort}/${connectionPort + 1}` : t("common.unknown")}</dd>
+          </div>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <dt className="text-muted-foreground">{t("rtp.connectionAddresses")}</dt>
+            <dd className="min-w-0 break-all text-right font-medium">
+              {status?.rtpAdvertisedAddresses?.length ? status.rtpAdvertisedAddresses.join(", ") : t("common.unknown")}
+            </dd>
+          </div>
+        </dl>
+        {status?.rtpNetworkWarning ? (
+          <p role="status" className="rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-100">
+            {status.rtpNetworkWarning}
+          </p>
+        ) : null}
+        <details open={isDeveloperMode(config)} className="border-t pt-4">
+          <summary className="cursor-pointer text-sm font-medium">{t("rtp.networkDetails")}</summary>
+          <dl className="mt-3 space-y-3 text-sm">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <dt className="text-muted-foreground">{t("rtp.advertisedHost")}</dt>
+              <dd className="min-w-0 break-all font-medium">{status?.rtpAdvertisedHost || t("common.unknown")}</dd>
             </div>
-            <div className="flex items-center justify-between rounded p-2 text-sm">
-              <span className="text-muted-foreground">{t("rtp.portConfigured")}</span>
-              <span className="font-medium">{config?.rtp.port || "-"}</span>
-            </div>
-            <div className="flex items-center justify-between rounded p-2 text-sm">
-              <span className="text-muted-foreground">{t("rtp.portData")}</span>
-              <span className="font-medium">{config?.rtp.port ? config.rtp.port + 1 : "-"}</span>
-            </div>
-            <div className="flex items-center justify-between gap-3 rounded p-2 text-sm">
-              <span className="text-muted-foreground">{t("rtp.advertisedHost")}</span>
-              <span className="min-w-0 truncate font-medium">{status?.rtpAdvertisedHost || "-"}</span>
-            </div>
-            <div className="flex items-center justify-between gap-3 rounded p-2 text-sm">
-              <span className="text-muted-foreground">{t("rtp.advertisedAddresses")}</span>
-              <span className="min-w-0 truncate font-medium">
-                {status?.rtpAdvertisedAddresses?.length ? status.rtpAdvertisedAddresses.join(", ") : "-"}
-              </span>
-            </div>
-            {status?.rtpNetworkWarning ? (
-              <div className="rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-100">
-                {status.rtpNetworkWarning}
+            {boundPort && boundPort !== config?.rtp.port ? (
+              <div className="flex items-center justify-between gap-2">
+                <dt className="text-muted-foreground">{t("rtp.portConfigured")}</dt>
+                <dd className="font-mono">{config?.rtp.port ?? t("common.unknown")}</dd>
               </div>
             ) : null}
-            <div className="flex items-center justify-between rounded p-2 text-sm">
-              <span className="text-muted-foreground">{t("rtp.statusLabel")}</span>
-              <span className="font-medium">
-                {status?.rtpActive ? t("common.active") : t("common.inactive")}
-              </span>
-            </div>
-          </div>
-        </div>
+          </dl>
+        </details>
       </CardContent>
     </Card>
   );
