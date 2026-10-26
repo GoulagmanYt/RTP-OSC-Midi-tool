@@ -8,6 +8,8 @@ tools/diagnostics/target
 .venv
 vendor/rack/rack-sys/external
 vendor/**/Cargo.lock
+!vendor/rack/Cargo.lock
+!vendor/rtpmidi/Cargo.lock
 reports
 docs/superpowers/
 docs/audio-cpu-resilience.md
@@ -17,3 +19,24 @@ src-tauri/binaries/*.exe
 *.code-workspace
 __pycache__/
 *.pyc
+
+# Local credentials and signing material (templates may be shared).
+.env
+.env.*
+!.env.example
+!.env.sample
+.aws/
+*.pem
+*.key
+*.pfx
+*.p12
+id_rsa
+id_ed25519
+
+# Generated diagnostics, test results and operating system metadata.
+*.log
+coverage/
+test-results/
+playwright-report/
+.DS_Store
+Thumbs.db
