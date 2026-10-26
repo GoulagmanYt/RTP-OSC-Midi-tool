@@ -102,7 +102,7 @@ impl Default for OscConfig {
             enabled: true,
             target_ip: "127.0.0.1".to_string(),
             target_port: 9000,
-            log_messages: true,
+            log_messages: false,
         }
     }
 }
@@ -350,6 +350,17 @@ pub struct AppConfig {
 impl AppConfig {
     pub const CURRENT_VERSION: u32 = 4;
 
+    /// Diagnostic logging is a developer capability, regardless of config source.
+    /// Keep the user's global logging preference when disabling diagnostics.
+    pub(crate) fn normalize_developer_mode(&mut self) {
+        if !self.ui.developer_mode {
+            self.logging.verbose = false;
+            self.logging.log_all_to_file = false;
+            self.osc.log_messages = false;
+            self.rtp.log_messages = false;
+        }
+    }
+
     pub fn parse_yaml(raw: &str) -> Result<Self, String> {
         let mut value =
             serde_yaml::from_str::<serde_yaml::Value>(raw).map_err(|e| e.to_string())?;
@@ -375,6 +386,7 @@ impl AppConfig {
             *settings = settings.normalized(cfg.audio.sample_rate);
         }
         cfg.validate()?;
+        cfg.normalize_developer_mode();
         Ok(cfg)
     }
 
@@ -414,6 +426,77 @@ impl Default for AppConfig {
 }
 
 pub type Config = AppConfig;
+
+#[cfg(test)]
+mod developer_mode_tests {
+    use super::*;
+
+    fn with_diagnostic_logging(developer_mode: bool, enabled: bool) -> AppConfig {
+        let mut cfg = AppConfig::default();
+        cfg.ui.developer_mode = developer_mode;
+        cfg.logging.enabled = enabled;
+        cfg.logging.verbose = true;
+        cfg.logging.log_all_to_file = true;
+        cfg.osc.log_messages = true;
+        cfg.rtp.log_messages = true;
+        cfg
+    }
+
+    fn assert_normal_logging(cfg: &AppConfig, enabled: bool) {
+        assert!(!cfg.ui.developer_mode);
+        assert_eq!(cfg.logging.enabled, enabled);
+        assert!(!cfg.logging.verbose);
+        assert!(!cfg.logging.log_all_to_file);
+        assert!(!cfg.osc.log_messages);
+        assert!(!cfg.rtp.log_messages);
+    }
+
+    #[test]
+    fn normal_mode_defaults_do_not_request_diagnostic_logging() {
+        assert_normal_logging(&AppConfig::default(), true);
+    }
+
+    #[test]
+    fn loaded_and_imported_yaml_obey_the_developer_policy() {
+        for enabled in [true, false] {
+            let requested = with_diagnostic_logging(false, enabled);
+            let raw = serde_yaml::to_string(&requested).unwrap();
+            let parsed = AppConfig::parse_yaml(&raw).unwrap();
+            assert_normal_logging(&parsed, enabled);
+            assert_eq!(parsed.audio, requested.audio);
+            assert_eq!(parsed.osc.target_port, requested.osc.target_port);
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.yaml");
+            fs::write(&path, &raw).unwrap();
+            assert_normal_logging(
+                &ConfigStore::with_path(path).load_checked().unwrap(),
+                enabled,
+            );
+        }
+    }
+
+    #[test]
+    fn saves_normalize_logging_and_preserve_developer_preferences() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let store = ConfigStore::with_path(path.clone());
+        for developer_mode in [false, true] {
+            let requested = with_diagnostic_logging(developer_mode, false);
+            store.save(&requested).unwrap();
+            let persisted: AppConfig =
+                serde_yaml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            if developer_mode {
+                assert_eq!(persisted, requested);
+                assert_eq!(
+                    AppConfig::parse_yaml(&serde_yaml::to_string(&requested).unwrap()).unwrap(),
+                    requested
+                );
+            } else {
+                assert_normal_logging(&persisted, false);
+            }
+        }
+    }
+}
 
 pub const RTP_VIRTUAL_INPUT: &str = "RTP-MIDI (Serveur)";
 pub const VST_INTERNAL_OUTPUT: &str = "VST (Interne)";
@@ -564,8 +647,10 @@ impl ConfigStore {
 
     fn save_locked(&self, cfg: &AppConfig) -> Result<(), String> {
         cfg.validate()?;
+        let mut cfg = cfg.clone();
+        cfg.normalize_developer_mode();
         self.backup_if_unreadable()?;
-        let raw = serde_yaml::to_string(cfg).map_err(|e| e.to_string())?;
+        let raw = serde_yaml::to_string(&cfg).map_err(|e| e.to_string())?;
         crate::atomic_file::write_atomically(&self.path, raw.as_bytes()).map_err(|e| e.to_string())
     }
 

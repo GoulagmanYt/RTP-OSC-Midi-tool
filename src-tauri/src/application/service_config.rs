@@ -61,6 +61,9 @@ fn apply_and_save_config(
     force_restart: bool,
 ) -> Result<(), CommandError> {
     let _change = state.config_change.lock();
+    let mut normalized = config.clone();
+    normalized.normalize_developer_mode();
+    let config = &normalized;
     let previous = state.config_store.load();
     let audio_was_running = state.audio.is_running();
     let audio_was_requested = state.audio.has_runtime_request();

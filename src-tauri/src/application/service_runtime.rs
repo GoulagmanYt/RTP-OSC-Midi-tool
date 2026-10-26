@@ -46,17 +46,18 @@ pub fn list_midi_outputs() -> Result<Vec<String>, CommandError> {
 pub fn start_bridge(
     app: &AppHandle,
     window: &Window,
-    config: Config,
+    mut config: Config,
     state: &AppState,
 ) -> Result<BridgeStatus, CommandError> {
     let _change = state.config_change.lock();
-    sync_runtime_logging(&config, &state.dev_logging);
-    set_log_all_to_file(config.logging.log_all_to_file);
-    set_logs_enabled(config.logging.enabled);
+    config.normalize_developer_mode();
     state
         .config_store
         .save(&config)
         .map_err(|err| super::service_common::config_error("config.save-failed", err))?;
+    sync_runtime_logging(&config, &state.dev_logging);
+    set_log_all_to_file(config.logging.log_all_to_file);
+    set_logs_enabled(config.logging.enabled);
     sync_rtp_discovery(&config, state, app);
     let status = state
         .bridge

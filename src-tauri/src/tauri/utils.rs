@@ -136,8 +136,9 @@ pub fn open_folder_in_explorer(path: &Path) -> Result<(), String> {
 }
 
 pub fn sync_runtime_logging(config: &Config, dev_logging: &Arc<std::sync::atomic::AtomicBool>) {
-    dev_logging.store(config.logging.verbose, std::sync::atomic::Ordering::Relaxed);
-    crate::logger::set_global_dev_mode(config.logging.verbose);
+    let verbose = config.ui.developer_mode && config.logging.verbose;
+    dev_logging.store(verbose, std::sync::atomic::Ordering::Relaxed);
+    crate::logger::set_global_dev_mode(verbose);
 }
 
 pub fn sync_rtp_discovery(config: &Config, state: &AppState, app: &AppHandle) {
