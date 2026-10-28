@@ -164,7 +164,7 @@ export function BasicRoutingCard({
                 {t("routing.refreshPorts")}
               </Button>
               <Button variant="outline" size="sm" onClick={onReset}>
-                {t("common.reset")}
+                {t("ui.resetRouting")}
               </Button>
               <Button variant="destructive" size="sm" onClick={onPanic}>
                 <Zap className="mr-2 h-4 w-4" />

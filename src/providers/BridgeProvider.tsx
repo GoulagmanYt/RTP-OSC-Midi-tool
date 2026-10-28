@@ -1,6 +1,5 @@
 import { useCallback, useRef, useState } from "react";
 import * as api from "../api";
-import { getErrorMessage } from "../api-errors";
 import { toast } from "sonner";
 import { BridgeContext } from "./bridge/BridgeContext";
 import { useAppBootstrap } from "./bridge/useAppBootstrap";
@@ -21,6 +20,7 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
   const [audioDevices, setAudioDevices] = useState<api.AudioDeviceEntry[]>([]);
   const [midiInputs, setMidiInputs] = useState<string[]>([]);
   const [midiOutputs, setMidiOutputs] = useState<string[]>([]);
+  const [saveState, setSaveState] = useState<"saving" | "saved" | "error">("saved");
   const [isLoading, setIsLoading] = useState(true);
   const [initializationError, setInitializationError] = useState<string | null>(null);
   const [preflight, setPreflight] = useState<api.PreflightReport | null>(null);
@@ -149,7 +149,8 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
   });
 
   const handleAutosaveError = useCallback((error: unknown) => {
-    toast.error(getErrorMessage(error) || t("toasts.settings.configSaveFailed"));
+    console.error("Settings could not be saved", error);
+    toast.error(t("ui.saveFailed"));
   }, [t]);
 
   const saveAndRefreshStatus = useCallback(async (next: api.AppConfig, shouldSave?: () => boolean) => {
@@ -163,6 +164,7 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
     save: saveAndRefreshStatus,
     setConfig,
     onError: handleAutosaveError,
+    onStateChange: setSaveState,
     loadAccepted: api.getConfig,
   });
 
@@ -178,6 +180,7 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
         midiInputs,
         midiOutputs,
         isLoading,
+        saveState,
         initializationError,
         preflight,
         refreshStatus,

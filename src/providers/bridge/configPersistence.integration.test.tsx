@@ -43,7 +43,7 @@ function mount() {
   });
 }
 
-beforeEach(() => { vi.useFakeTimers(); vi.clearAllMocks(); });
+beforeEach(() => { vi.useFakeTimers(); vi.clearAllMocks(); localStorage.clear(); });
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
 it.each([false, true])("does not autosave before a delayed initial load finishes (failure: %s)", async (fail) => {
@@ -74,7 +74,7 @@ it.each([false, true])("does not autosave before a delayed initial load finishes
     if (fail) reject(new Error("configuration is truncated")); else finish(initial);
   });
   await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
-  expect(result.current).toBe(fail ? null : initial);
+  expect(result.current).toEqual(fail ? null : { ...initial, ui: { ...initial.ui, themePalette: "system" } });
   expect(mocks.invoke.mock.calls.filter(([command]) => command === "save_config")).toHaveLength(0);
   if (fail) expect(options.setInitializationError).toHaveBeenLastCalledWith("configuration is truncated");
   errorLog.mockRestore();
@@ -187,6 +187,6 @@ it.each(["reset", "import"])("keeps an accepted %s after a slow save and an olde
   await act(async () => { await vi.advanceTimersByTimeAsync(700); });
   expect(applied.map((config) => config.osc.listenPort)).toEqual([9001, 9002, 9100]);
   expect(nativeConfig).toBe(accepted);
-  expect(result.current.config).toBe(accepted);
+  expect(result.current.config).toEqual(operation === "reset" ? { ...accepted, ui: { ...accepted.ui, themePalette: "system" } } : accepted);
   expect(onError).not.toHaveBeenCalled();
 });

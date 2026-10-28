@@ -54,10 +54,11 @@ function RecoveryScreen({ message }: { message: string }) {
 
 function AppContent() {
   const { config, initializationError, isLoading } = useBridge();
+  const { t } = useI18n();
 
   useEffect(() => {
     if (!config) return;
-    const palette = config.ui.themePalette || (config.ui.theme === "dark" ? "dark" : "light");
+    const palette = config.ui.themePalette || "system";
     const radius = config.ui.cornerRadius ?? 12;
     return applyTheme(palette, radius, config.ui);
   }, [config]);
@@ -66,7 +67,7 @@ function AppContent() {
     return <RouteFallback />;
   }
   if (initializationError || !config) {
-    return <RecoveryScreen message={initializationError || "Configuration unavailable"} />;
+    return <RecoveryScreen message={initializationError || t("ui.configurationUnavailable")} />;
   }
 
   return (

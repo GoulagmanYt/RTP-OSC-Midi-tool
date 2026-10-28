@@ -5,7 +5,7 @@ import { Label } from "../components/ui/Label";
 import { Switch } from "../components/ui/Switch";
 import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
-import { Palette, Trash2, Save, RefreshCcw, Download, FileOutput } from "lucide-react";
+import { Palette, Trash2, RefreshCcw, Download, FileOutput } from "lucide-react";
 import { toast } from "sonner";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import {
@@ -25,6 +25,7 @@ import { getErrorMessage } from "../api-errors";
 import { join } from "@tauri-apps/api/path";
 import { AppearanceColors } from "./settings/AppearanceColors";
 import { isDeveloperMode } from "../developer-mode";
+import { useConfirmAction } from "../components/ui/useConfirmAction";
 
 type PaletteChoice = {
   id: "system" | "light" | "dark" | "contrast";
@@ -39,10 +40,11 @@ const PALETTE_CHOICES: PaletteChoice[] = [
 ];
 
 export default function SettingsPage() {
-  const { config, updateConfig, saveConfig, clearLogs, reloadConfig } = useBridge();
+  const { config, updateConfig, saveConfig, clearLogs, reloadConfig, saveState } = useBridge();
   const [busy, setBusy] = useState(false);
   const [paths, setPaths] = useState<AppPaths | null>(null);
   const { t } = useI18n();
+  const { confirmAction, confirmation } = useConfirmAction(t);
 
   useEffect(() => {
     let cancelled = false;
@@ -61,19 +63,8 @@ export default function SettingsPage() {
     };
   }, [t]);
 
-  const currentPalette = (config?.ui.themePalette as PaletteChoice["id"]) || "light";
+  const currentPalette = (config?.ui.themePalette as PaletteChoice["id"]) || "system";
 
-  const handleSave = async () => {
-    setBusy(true);
-    try {
-      await saveConfig();
-      toast.success(t("toasts.settings.configSaved"));
-    } catch (error) {
-      toast.error(getErrorMessage(error) || t("toasts.settings.configSaveFailed"));
-    } finally {
-      setBusy(false);
-    }
-  };
 
   const handleClearLogs = async () => {
     setBusy(true);
@@ -90,9 +81,6 @@ export default function SettingsPage() {
   };
 
   const handleReset = async () => {
-    if (!window.confirm(t("settings.general.resetConfirmation"))) {
-      return;
-    }
     setBusy(true);
     try {
       const accepted = await resetConfigDefaults();
@@ -137,6 +125,7 @@ export default function SettingsPage() {
         filters: [{ name: "YAML", extensions: ["yaml", "yml"] }],
       });
       if (!target) return;
+      await saveConfig();
       await exportConfig(target.toString());
       toast.success(t("toasts.settings.exportSuccess"));
     } catch (e) {
@@ -175,9 +164,11 @@ export default function SettingsPage() {
         filters: [{ name: "YAML", extensions: ["yaml", "yml"] }],
       });
       if (!selected || Array.isArray(selected)) return;
-      const accepted = await importConfig(selected.toString());
-      await reloadConfig(accepted);
-      toast.success(t("toasts.settings.importSuccess"));
+      confirmAction(t("ui.replaceConfiguration"), async () => {
+        const accepted = await importConfig(selected.toString());
+        await reloadConfig(accepted);
+        toast.success(t("toasts.settings.importSuccess"));
+      });
     } catch (e) {
       const message = getErrorMessage(e);
       toast.error(message || t("toasts.settings.importFailed"));
@@ -208,6 +199,8 @@ export default function SettingsPage() {
 
   return (
     <div className="space-y-6">
+      {confirmation}
+      <p role="status" className="text-sm text-muted-foreground">{t(saveState === "saving" ? "ui.saving" : saveState === "error" ? "ui.saveFailed" : "ui.saved")}</p>
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
@@ -398,7 +391,7 @@ export default function SettingsPage() {
           <CardContent className="space-y-4">
             <p className="text-sm text-muted-foreground">{t("settings.logs.hint")}</p>
             <div className="flex justify-end gap-2">
-              <Button variant="outline" disabled={busy} onClick={handleClearLogs}>
+              <Button variant="outline" disabled={busy} onClick={() => confirmAction(t("settings.logs.clear"), handleClearLogs)}>
                 <RefreshCcw className="h-4 w-4 mr-2" />
                 {t("settings.logs.clear")}
               </Button>
@@ -408,13 +401,9 @@ export default function SettingsPage() {
       )}
 
       <div className="flex justify-end gap-2">
-        <Button variant="outline" disabled={busy} onClick={handleReset}>
+        <Button variant="outline" disabled={busy} onClick={() => confirmAction(t("ui.resetConfiguration"), handleReset, t("settings.general.resetConfirmation"))}>
           <RefreshCcw className="h-4 w-4 mr-2" />
-          {t("common.reset")}
-        </Button>
-        <Button disabled={busy} onClick={handleSave}>
-          <Save className="h-4 w-4 mr-2" />
-          {t("common.save")}
+          {t("ui.resetConfiguration")}
         </Button>
       </div>
     </div>

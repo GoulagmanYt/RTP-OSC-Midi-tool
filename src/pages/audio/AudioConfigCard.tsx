@@ -93,7 +93,6 @@ export function AudioConfigCard({
   onPingAudio,
   onRefreshVstPluginsList,
   onReloadVst,
-  onSaveConfig,
   onSelectVst,
   onRetestVst,
   onOpenVstFolder,
@@ -639,11 +638,6 @@ export function AudioConfigCard({
           <p className="text-xs text-muted-foreground">{t("audio.pingHint")}</p>
         </div>
 
-        <div className="flex justify-end gap-2 pt-4">
-          <Button variant="outline" onClick={onSaveConfig}>
-            {t("audio.saveConfiguration")}
-          </Button>
-        </div>
       </CardContent>
     </Card>
   );

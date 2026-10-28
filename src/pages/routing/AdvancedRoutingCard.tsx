@@ -7,6 +7,7 @@ import { Input } from "../../components/ui/Input";
 import { Label } from "../../components/ui/Label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../components/ui/Select";
 import { Switch } from "../../components/ui/Switch";
+import { useConfirmAction } from "../../components/ui/useConfirmAction";
 
 import { clampMidiNumber, clampNullableMidiNumber, type Translate } from "./shared";
 
@@ -48,8 +49,10 @@ export function AdvancedRoutingCard(props: Props) {
     removeAssignment,
   } = props;
 
+  const { confirmAction, confirmation } = useConfirmAction(t);
   return (
     <Card>
+      {confirmation}
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
           <SlidersHorizontal className="h-5 w-5 text-muted-foreground" />
@@ -94,7 +97,7 @@ export function AdvancedRoutingCard(props: Props) {
                       />
                       <span className="text-xs text-muted-foreground">{t("routing.profileEnabled")}</span>
                     </div>
-                    <Button variant="ghost" size="sm" aria-label={t("ui.deleteProfile", { name: profile.name })} onClick={() => removeProfile(profile.id)}>
+                    <Button variant="ghost" size="sm" aria-label={t("ui.deleteProfile", { name: profile.name })} onClick={() => confirmAction(t("ui.deleteProfile", { name: profile.name }), () => removeProfile(profile.id))}>
                       <Trash2 className="h-4 w-4" />
                     </Button>
                   </div>
@@ -190,7 +193,7 @@ export function AdvancedRoutingCard(props: Props) {
                                     })
                                   }
                                 />
-                                <Button variant="ghost" size="icon" aria-label={t("ui.deleteMapping")} onClick={() => removeProfileMap(profile.id, mapKey, idx)}>
+                                <Button variant="ghost" size="icon" aria-label={t("ui.deleteMapping")} onClick={() => confirmAction(t("ui.deleteMapping"), () => removeProfileMap(profile.id, mapKey, idx))}>
                                   <Trash2 className="h-4 w-4" />
                                 </Button>
                               </div>
@@ -247,7 +250,7 @@ export function AdvancedRoutingCard(props: Props) {
                       ))}
                     </SelectContent>
                   </Select>
-                  <Button variant="ghost" size="icon" aria-label={t("ui.deleteAssignment")} onClick={() => removeAssignment(idx)}>
+                  <Button variant="ghost" size="icon" aria-label={t("ui.deleteAssignment")} onClick={() => confirmAction(t("ui.deleteAssignment"), () => removeAssignment(idx))}>
                     <Trash2 className="h-4 w-4" />
                   </Button>
                 </div>

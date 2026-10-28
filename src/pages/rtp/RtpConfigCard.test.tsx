@@ -1,8 +1,10 @@
 import { useState } from "react";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within, waitFor } from "@testing-library/react";
 import { expect, it, vi } from "vitest";
 import type { AppConfig, RtpRemoteEntry } from "../../api-types";
 import { RtpConfigCard } from "./RtpConfigCard";
+
+vi.mock("../../providers/LanguageProvider", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 
 function mount() {
   const commit = vi.fn();
@@ -52,13 +54,14 @@ it.each(["", "500", "65535", "5004.5"])("retains invalid draft %s without applyi
   expect(commit).not.toHaveBeenCalled();
 });
 
-it("commits with Enter and reflects a subsequent reset", () => {
+it("commits with Enter and resets only after confirmation", async () => {
   const commit = mount();
   const input = screen.getByLabelText("rtp.portLabel") as HTMLInputElement;
   input.focus();
   fireEvent.change(input, { target: { value: "6010" } });
   fireEvent.keyDown(input, { key: "Enter" });
   expect(commit).toHaveBeenCalledWith({ rtp: { port: 6010 } });
-  fireEvent.click(screen.getByText("common.default"));
-  expect((screen.getByLabelText("rtp.portLabel") as HTMLInputElement).value).toBe("5004");
+  fireEvent.click(screen.getByRole("button", { name: "ui.resetRtp" }));
+  fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "ui.resetRtp" }));
+  await waitFor(() => expect((screen.getByLabelText("rtp.portLabel") as HTMLInputElement).value).toBe("5004"));
 });

@@ -12,10 +12,12 @@ import { clampNullableMidiNumber, displayPortName as displayPortNameLabel, forma
 import { toast } from "sonner";
 import { getErrorMessage } from "../api-errors";
 import { isDeveloperMode } from "../developer-mode";
+import { useConfirmAction } from "../components/ui/useConfirmAction";
 
 export default function RoutingPage() {
   const { config, status, updateConfig, midiInputs, midiOutputs, refreshLists } = useBridge();
   const { t } = useI18n();
+  const { confirmAction, confirmation } = useConfirmAction(t);
   const [activity, setActivity] = useState<MidiActivityInfo[]>([]);
   const [testChannel, setTestChannel] = useState(1);
   const [testNote, setTestNote] = useState(60);
@@ -225,6 +227,7 @@ export default function RoutingPage() {
 
   return (
     <div className="space-y-6">
+      {confirmation}
       <BasicRoutingCard
         config={config}
         inputsList={inputsList}
@@ -234,7 +237,7 @@ export default function RoutingPage() {
         onMidiOutChange={handleMidiOutChange}
         onChannelFilterChange={handleChannelFilterChange}
         onRefreshLists={refreshLists}
-        onReset={handleReset}
+        onReset={() => confirmAction(t("ui.resetRouting"), handleReset)}
         onPanic={handlePanic}
         onUpdateConfig={updateConfig}
         onGainChange={handleGainChange}

@@ -25,6 +25,7 @@ import { useI18n } from "../../providers/LanguageProvider";
 import { toast } from "sonner";
 import { getErrorMessage } from "../../api-errors";
 import { isDeveloperMode } from "../../developer-mode";
+import { useConfirmAction } from "../ui/useConfirmAction";
 
 interface CommandPaletteProps {
   open: boolean;
@@ -35,6 +36,7 @@ export default function CommandPalette({ open, onOpenChange }: CommandPalettePro
   const navigate = useNavigate();
   const { toggleBridge, status, reloadConfig, refreshStatus, config } = useBridge();
   const { t } = useI18n();
+  const { confirmAction, confirmation } = useConfirmAction(t);
 
   const runCommand = (command: () => void | Promise<void>) => {
     onOpenChange(false);
@@ -47,6 +49,8 @@ export default function CommandPalette({ open, onOpenChange }: CommandPalettePro
   };
 
   return (
+    <>
+    {confirmation}
     <CommandDialog open={open} onOpenChange={onOpenChange}>
       <CommandInput placeholder={t("command.placeholder")} aria-label={t("command.placeholder")} />
       <CommandList>
@@ -118,16 +122,19 @@ export default function CommandPalette({ open, onOpenChange }: CommandPalettePro
           <CommandItem
             onSelect={() =>
               runCommand(async () => {
-                const accepted = await resetConfigDefaults();
-                await reloadConfig(accepted);
+                confirmAction(t("ui.resetConfiguration"), async () => {
+                  const accepted = await resetConfigDefaults();
+                  await reloadConfig(accepted);
+                });
               })
             }
           >
             <Settings className="mr-2 h-4 w-4" />
-            <span>{t("actions.resetConfig")}</span>
+            <span>{t("ui.resetConfiguration")}</span>
           </CommandItem>
         </CommandGroup>
       </CommandList>
     </CommandDialog>
+    </>
   );
 }

@@ -9,6 +9,7 @@ import type { AppConfig, DeepPartial, RtpRemoteEntry, RtpSessionInfo } from "../
 import type { TranslateFn } from "./shared";
 import { Plus, RefreshCcw, Trash2, Wifi } from "lucide-react";
 import { RtpPortInput } from "./RtpPortInput";
+import { useConfirmAction } from "../../components/ui/useConfirmAction";
 
 type Props = {
   busy: boolean;
@@ -44,14 +45,15 @@ export function RtpConfigCard({
   onConnect,
   onRefreshSessions,
   onRemoveRemote,
-  onSave,
   onToggleRtp,
   onUpdateConfig,
   onUpdateRemote,
 }: Props) {
+  const { confirmAction, confirmation } = useConfirmAction(t);
   const [portResetNonce, setPortResetNonce] = useState(0);
   return (
     <Card>
+      {confirmation}
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
           <Wifi className="h-5 w-5 text-muted-foreground" />
@@ -188,7 +190,7 @@ export function RtpConfigCard({
                           size="sm"
                           onMouseDown={(e) => e.preventDefault()}
                           aria-label={t("ui.deleteFavorite", { name: remote.name })}
-                          onClick={() => onRemoveRemote(remote.id)}
+                          onClick={() => confirmAction(t("ui.deleteFavorite", { name: remote.name }), () => onRemoveRemote(remote.id))}
                         >
                           <Trash2 className="h-4 w-4" />
                         </Button>
@@ -246,16 +248,13 @@ export function RtpConfigCard({
           <Button
             variant="outline"
             disabled={busy}
-            onClick={() => {
+            onClick={() => confirmAction(t("ui.resetRtp"), () => {
               setPortResetNonce((prev) => prev + 1);
               onUpdateConfig({ rtp: { sessionName: "OSCMidi", port: 5004 } });
-            }}
+            })}
           >
             <RefreshCcw className="mr-2 h-4 w-4" />
-            {t("common.default")}
-          </Button>
-          <Button onClick={onSave} disabled={busy}>
-            {t("common.save")}
+            {t("ui.resetRtp")}
           </Button>
         </div>
       </CardContent>

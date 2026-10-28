@@ -14,6 +14,13 @@ function importedConfig(): AppConfig {
   } as AppConfig;
 }
 
+it("persists normalized imported logging before publishing the replacement", async () => {
+  invoke.mockResolvedValue(importedConfig());
+  const accepted = await importConfig("C:/config.yaml");
+  expect(invoke).toHaveBeenNthCalledWith(2, "save_config", { config: accepted });
+  expectNormal(accepted);
+});
+
 function expectNormal(config: AppConfig) {
   expect(config.logging).toEqual({ enabled: false, verbose: false, logAllToFile: false });
   expect(config.osc.logMessages).toBe(false);

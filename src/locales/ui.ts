@@ -1,5 +1,7 @@
 export const enUi = {
   "activityActive": "Active",
+  "undo": "Undo",
+  "actionFailed": "The action could not be completed. Check the application folders and devices, then try again.",
   "activityInactive": "Inactive",
   "notifications": "Notifications",
   "dismissNotification": "Dismiss notification",
@@ -61,6 +63,8 @@ export const enUi = {
 
 export const frUi: typeof enUi = {
   "activityActive": "Actif",
+  "undo": "Annuler",
+  "actionFailed": "L’action n’a pas pu aboutir. Vérifiez les dossiers et les périphériques de l’application, puis réessayez.",
   "activityInactive": "Inactif",
   "notifications": "Notifications",
   "dismissNotification": "Fermer la notification",

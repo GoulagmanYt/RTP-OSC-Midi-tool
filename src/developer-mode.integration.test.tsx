@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import type { AppConfig, LogEntry, RuntimeMetrics, RuntimeStatus, VstPluginEntry } from "./api-types";
 import { LanguageProvider } from "./providers/LanguageProvider";
+import { enUi } from "./locales/ui";
 
 const native = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -221,13 +222,15 @@ describe("developer mode across the real application", () => {
     imported.rtp.logMessages = true;
     imported.audio.gainDb = -9;
     fireEvent.click(await screen.findByRole("button", { name: "Import YAML" }));
+    const confirmation = await screen.findByRole("dialog", { name: enUi.replaceConfiguration });
+    fireEvent.click(within(confirmation).getByRole("button", { name: enUi.replaceConfiguration }));
     await waitFor(() => expect(screen.getByRole("switch", { name: "Developer Mode" }).getAttribute("aria-checked")).toBe("false"));
     expect(document.querySelector("#settings-verbose")).toBeNull();
     expect(within(screen.getByRole("navigation")).queryByRole("link", { name: "Logs" })).toBeNull();
     await visit("Audio & VST");
     expect((document.querySelector("#audio-master-gain") as HTMLInputElement).value).toBe("-9");
     await visit("Settings");
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
     await waitFor(() => assertNormalLogging(persisted, false));
     expect(persisted.audio.gainDb).toBe(-9);
     expect(persisted.audio.vstPluginId).toBe(instrument.id);
@@ -240,7 +243,7 @@ describe("developer mode across the real application", () => {
     rejectSave = true;
     fireEvent.click(await screen.findByRole("switch", { name: "Developer Mode" }));
     expect(within(screen.getByRole("navigation")).queryByRole("link", { name: "Logs" })).toBeNull();
-    await waitFor(() => expect(native.toastError).toHaveBeenCalledWith("disk write rejected"));
+    await waitFor(() => expect(native.toastError).toHaveBeenCalledWith(enUi.saveFailed));
     await waitFor(() => expect(screen.getByRole("switch", { name: "Developer Mode" }).getAttribute("aria-checked")).toBe("true"));
     for (const label of ["Verbose mode", "OSC logs", "RTP-MIDI logs", "Log everything to file"]) {
       expect(screen.getByRole("switch", { name: label }).getAttribute("aria-checked")).toBe("true");

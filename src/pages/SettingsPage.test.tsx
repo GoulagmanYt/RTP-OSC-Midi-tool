@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 import type { AppConfig } from "../api-types";
 import SettingsPage from "./SettingsPage";
@@ -34,6 +34,7 @@ beforeEach(() => {
 });
 
 it("lets people follow the system appearance", async () => {
+  mocks.config.ui.themePalette = "light";
   vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: true })));
   try {
     render(<SettingsPage />);
@@ -59,15 +60,14 @@ it.each(["reset", "import"])("publishes the accepted %s snapshot directly instea
   mocks.resetConfigDefaults.mockResolvedValue(accepted);
   mocks.importConfig.mockResolvedValue(accepted);
   mocks.open.mockResolvedValue("C:/import/config.yaml");
-  const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
-  try {
-    render(<SettingsPage />);
-    const label = operation === "reset" ? "common.reset" : "settings.files.importYaml";
-    fireEvent.click(screen.getByRole("button", { name: label }));
-    await waitFor(() => expect(mocks.reloadConfig).toHaveBeenCalledWith(accepted));
-  } finally {
-    confirm.mockRestore();
-  }
+  render(<SettingsPage />);
+  const label = operation === "reset" ? "ui.resetConfiguration" : "settings.files.importYaml";
+  fireEvent.click(screen.getByRole("button", { name: label }));
+  const dialog = await screen.findByRole("dialog");
+  expect(mocks.reloadConfig).not.toHaveBeenCalled();
+  const confirmLabel = operation === "reset" ? "ui.resetConfiguration" : "ui.replaceConfiguration";
+  fireEvent.click(within(dialog).getByRole("button", { name: confirmLabel }));
+  await waitFor(() => expect(mocks.reloadConfig).toHaveBeenCalledWith(accepted));
 });
 
 it.each([true, false])("preserves logging.enabled=%s when leaving developer mode", async (enabled) => {

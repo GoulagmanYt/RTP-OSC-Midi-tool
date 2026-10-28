@@ -5,6 +5,24 @@ import type { AppConfig } from "../../api";
 import { useAutosaveSettings } from "./useAutosaveSettings";
 import { persistConfigReplacement } from "../../config-persistence";
 
+it("publishes saving, saved and failed states without accepting a rejected edit", async () => {
+  const state = vi.fn();
+  const save = vi.fn().mockResolvedValueOnce(true).mockRejectedValueOnce(new Error("disk unavailable"));
+  const { result } = renderHook(() => {
+    const [config, setConfig] = useState<AppConfig | null>(initial);
+    useAutosaveSettings({ config, setConfig, save, onError: vi.fn(), onStateChange: state });
+    return { config, setConfig };
+  });
+  await act(async () => { result.current.setConfig({ osc: { listenPort: 9002 } } as AppConfig); });
+  expect(state).toHaveBeenLastCalledWith("saving");
+  await act(async () => { await vi.advanceTimersByTimeAsync(350); });
+  expect(state).toHaveBeenLastCalledWith("saved");
+  await act(async () => { result.current.setConfig({ osc: { listenPort: 9003 } } as AppConfig); });
+  await act(async () => { await vi.advanceTimersByTimeAsync(350); });
+  expect(state).toHaveBeenLastCalledWith("error");
+  expect(result.current.config?.osc.listenPort).toBe(9002);
+});
+
 const initial = { osc: { listenPort: 9001 } } as AppConfig;
 
 beforeEach(() => {

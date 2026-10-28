@@ -9,9 +9,10 @@ type AutosaveOptions = {
   setConfig: Dispatch<SetStateAction<AppConfig | null>>;
   onError: (error: unknown) => void;
   loadAccepted?: () => Promise<AppConfig>;
+  onStateChange?: (state: "saving" | "saved" | "error") => void;
 };
 
-export function useAutosaveSettings({ config, save, setConfig, onError, loadAccepted }: AutosaveOptions) {
+export function useAutosaveSettings({ config, save, setConfig, onError, loadAccepted, onStateChange }: AutosaveOptions) {
   const accepted = useRef<AppConfig | null>(null);
   const latest = useRef(config);
   const pendingSave = useRef<Promise<void>>(Promise.resolve());
@@ -23,12 +24,14 @@ export function useAutosaveSettings({ config, save, setConfig, onError, loadAcce
     }
     if (!accepted.current || isAcceptedConfigReplacement(config)) {
       accepted.current = config;
+      onStateChange?.("saved");
       return;
     }
     if (config === accepted.current) {
       return;
     }
 
+    onStateChange?.("saving");
     const generation = getConfigSaveGeneration();
     const shouldSave = () => latest.current === config && getConfigSaveGeneration() === generation;
     const timer = window.setTimeout(() => {
@@ -37,10 +40,14 @@ export function useAutosaveSettings({ config, save, setConfig, onError, loadAcce
         if (!shouldSave()) return;
         try {
           const saved = await save(config, shouldSave);
-          if (saved !== false) accepted.current = config;
+          if (saved !== false) {
+            accepted.current = config;
+            if (latest.current === config) onStateChange?.("saved");
+          }
         } catch (error) {
           console.error("Auto-save failed", error);
           onError(error);
+          if (latest.current === config) onStateChange?.("error");
           let restored = accepted.current;
           if (loadAccepted) {
             try {
@@ -58,5 +65,5 @@ export function useAutosaveSettings({ config, save, setConfig, onError, loadAcce
     return () => {
       window.clearTimeout(timer);
     };
-  }, [config, save, setConfig, onError, loadAccepted]);
+  }, [config, save, setConfig, onError, loadAccepted, onStateChange]);
 }

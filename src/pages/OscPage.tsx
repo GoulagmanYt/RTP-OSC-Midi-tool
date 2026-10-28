@@ -4,31 +4,21 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "../co
 import { Label } from "../components/ui/Label";
 import { Input } from "../components/ui/Input";
 import { PortInput } from "../components/ui/PortInput";
+import { useConfirmAction } from "../components/ui/useConfirmAction";
 import { Switch } from "../components/ui/Switch";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { Radio, Server, RefreshCcw } from "lucide-react";
 import { useI18n } from "../providers/LanguageProvider";
-import { toast } from "sonner";
-import { getErrorMessage } from "../api-errors";
 
 export default function OscPage() {
-  const { config, status, updateConfig, saveConfig } = useBridge();
-  const [busy, setBusy] = useState(false);
+  const { config, status, updateConfig } = useBridge();
+  const busy = !config;
   const [portResetNonce, setPortResetNonce] = useState(0);
   const { t } = useI18n();
 
-  const handleSave = async () => {
-    setBusy(true);
-    try {
-      await saveConfig();
-      toast.success(t("toasts.settings.configSaved"));
-    } catch (error) {
-      toast.error(getErrorMessage(error) || t("toasts.settings.configSaveFailed"));
-    } finally {
-      setBusy(false);
-    }
-  };
+
+  const { confirmAction, confirmation } = useConfirmAction(t);
 
   const handleToggleOsc = async (checked: boolean) => {
     await updateConfig({ osc: { enabled: checked } });
@@ -36,6 +26,7 @@ export default function OscPage() {
 
   return (
     <div className="space-y-6">
+      {confirmation}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
@@ -114,7 +105,7 @@ export default function OscPage() {
             <Button
               variant="outline"
               disabled={busy}
-              onClick={() => {
+              onClick={() => confirmAction(t("ui.resetOsc"), () => {
                 setPortResetNonce((prev) => prev + 1);
                 updateConfig({
                   osc: {
@@ -124,13 +115,10 @@ export default function OscPage() {
                     listenPort: 9001,
                   },
                 });
-              }}
+              })}
             >
               <RefreshCcw className="h-4 w-4 mr-2" />
-              {t("common.default")}
-            </Button>
-            <Button onClick={handleSave} disabled={busy}>
-              {t("common.save")}
+              {t("ui.resetOsc")}
             </Button>
           </div>
         </CardContent>

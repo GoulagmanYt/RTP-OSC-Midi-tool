@@ -1,4 +1,5 @@
 import { invokeCommand } from "./api-client";
+import { initialAppearance, rememberAppearance } from "./appearance-preference";
 import { normalizeDeveloperConfig } from "./developer-mode";
 import { persistConfigReplacement, persistConfigSave, persistConfigSerially } from "./config-persistence";
 import type {
@@ -20,11 +21,15 @@ export { CommandFailure } from "./api-errors";
 export type * from "./api-types";
 
 export async function getConfig(): Promise<AppConfig> {
-  return normalizeDeveloperConfig(await invokeCommand<AppConfig>("get_config"));
+  const config = normalizeDeveloperConfig(await invokeCommand<AppConfig>("get_config"));
+  const palette = initialAppearance(config.ui?.themePalette);
+  return palette === config.ui?.themePalette ? config : { ...config, ui: { ...config.ui, themePalette: palette } };
 }
 
 export async function saveConfig(config: AppConfig, shouldSave?: () => boolean): Promise<boolean> {
-  return persistConfigSave(normalizeDeveloperConfig(config), (next) => invokeCommand<void>("save_config", { config: next }), shouldSave);
+  const saved = await persistConfigSave(normalizeDeveloperConfig(config), (next) => invokeCommand<void>("save_config", { config: next }), shouldSave);
+  if (saved) rememberAppearance(config.ui?.themePalette);
+  return saved;
 }
 
 export async function listMidiInputs(): Promise<string[]> {
@@ -60,7 +65,11 @@ export async function getRtpParticipants(): Promise<RtpParticipantInfo[]> {
 }
 
 export async function resetConfigDefaults(): Promise<AppConfig> {
-  return persistConfigReplacement(async () => normalizeDeveloperConfig(await invokeCommand<AppConfig>("reset_config_defaults")));
+  return persistConfigReplacement(async () => {
+    const config = normalizeDeveloperConfig(await invokeCommand<AppConfig>("reset_config_defaults"));
+    rememberAppearance("system");
+    return { ...config, ui: { ...config.ui, themePalette: "system" } };
+  });
 }
 
 export async function restartRtp(): Promise<RuntimeStatus> {
@@ -140,7 +149,13 @@ export async function exportDiagnostics(path: string): Promise<void> {
 }
 
 export async function importConfig(path: string): Promise<AppConfig> {
-  return persistConfigReplacement(async () => normalizeDeveloperConfig(await invokeCommand<AppConfig>("import_config", { path })));
+  return persistConfigReplacement(async () => {
+    const imported = await invokeCommand<AppConfig>("import_config", { path });
+    const config = normalizeDeveloperConfig(imported);
+    if (config !== imported) await invokeCommand<void>("save_config", { config });
+    rememberAppearance(config.ui?.themePalette ?? "system");
+    return config;
+  });
 }
 
 export async function getAppPaths(): Promise<AppPaths> {

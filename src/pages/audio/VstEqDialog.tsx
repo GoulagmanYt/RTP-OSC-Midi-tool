@@ -1,4 +1,5 @@
 import { RotateCcw } from "lucide-react";
+import { toast } from "sonner";
 import type { VstEqSettings } from "../../api-types";
 import { Button } from "../../components/ui/Button";
 import {
@@ -268,7 +269,7 @@ export function VstEqDialog({ open, pluginName, settings, sampleRate, t, onOpenC
         </div>
 
         <DialogFooter>
-          <Button variant="outline" onClick={onReset}>
+          <Button variant="outline" onClick={() => { onReset(); toast.success(t("audio.eq.reset"), { duration: 10000, action: { label: t("ui.undo"), onClick: () => onChange(settings) } }); }}>
             <RotateCcw className="mr-2 h-4 w-4" />
             {t("audio.eq.reset")}
           </Button>
