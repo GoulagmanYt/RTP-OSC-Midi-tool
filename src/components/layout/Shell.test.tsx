@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
 import { Shell } from "./Shell";
@@ -39,6 +39,8 @@ it("opens an accessibly named command dialog from the keyboard and lets Escape c
   HTMLElement.prototype.scrollIntoView = vi.fn();
   render(<MemoryRouter><Shell /></MemoryRouter>);
   fireEvent.keyDown(document, { key: "k", ctrlKey: true });
+  // Module compilation can exceed the default DOM wait on a busy build machine.
+  await act(async () => { await vi.dynamicImportSettled(); });
   const dialog = await screen.findByRole("dialog", { name: "command.title" });
   fireEvent.keyDown(dialog, { key: "Escape" });
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
