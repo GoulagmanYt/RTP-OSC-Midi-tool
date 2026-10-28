@@ -9,15 +9,16 @@ type MeterRowProps = {
 };
 
 export function MeterRow({ label, value, max, valueLabel, className }: MeterRowProps) {
-  const safeValue = value ?? 0;
-  const pct = max > 0 ? Math.min(safeValue / max, 1) : 0;
+  const safeMax = Number.isFinite(max) && max > 0 ? max : 1;
+  const safeValue = Math.max(0, Math.min(Number.isFinite(value) ? value! : 0, safeMax));
+  const pct = safeValue / safeMax;
   return (
     <div className="space-y-1">
       <div className="flex items-center justify-between text-xs text-muted-foreground">
         <span>{label}</span>
         <span className="font-medium text-foreground">{valueLabel ?? "--"}</span>
       </div>
-      <div className="h-2 overflow-hidden rounded-full bg-muted/30">
+      <div role="meter" aria-label={label} aria-valuemin={0} aria-valuemax={safeMax} aria-valuenow={safeValue} aria-valuetext={valueLabel ?? "--"} className="h-2 overflow-hidden rounded-full bg-muted/30">
         <div className={cn("h-full transition-all duration-200", className)} style={{ width: `${pct * 100}%` }} />
       </div>
     </div>

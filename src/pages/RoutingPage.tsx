@@ -101,7 +101,7 @@ export default function RoutingPage() {
       ...profiles,
       {
         id: makeId(),
-        name: `Profile ${profiles.length + 1}`,
+        name: t("ui.newProfile", { number: profiles.length + 1 }),
         enabled: true,
         channelFilter: null,
         noteMin: null,

@@ -37,6 +37,8 @@ export function VstParametersDialog({ open, params, loading, t, onOpenChange, on
                     </div>
                     <Input
                       type="range"
+                      aria-label={param.name}
+                      aria-valuetext={`${displayValue.toFixed(3)} ${param.unit}`}
                       min={0}
                       max={1}
                       step={0.001}

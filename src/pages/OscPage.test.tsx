@@ -110,13 +110,14 @@ it("commits new port on Enter key press", () => {
   });
 });
 
-it("resets draft to original value when blurred with an invalid port", () => {
+it("retains an invalid port draft and displays correction guidance", () => {
   render(<OscPage />);
   const targetPortInput = screen.getByPlaceholderText("9000") as HTMLInputElement;
 
   fireEvent.change(targetPortInput, { target: { value: "999999" } });
   fireEvent.blur(targetPortInput);
 
-  expect(targetPortInput.value).toBe("9000");
+  expect(targetPortInput.value).toBe("999999");
+  expect(screen.getByRole("alert").textContent).toBe("ui.portRange");
   expect(mocks.updateConfig).not.toHaveBeenCalled();
 });

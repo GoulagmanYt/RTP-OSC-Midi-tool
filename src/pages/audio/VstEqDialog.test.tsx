@@ -8,6 +8,13 @@ vi.mock("../../providers/LanguageProvider", () => ({
 }));
 
 describe("VstEqDialog", () => {
+  it("names bypass and announces frequencies in Hz rather than slider coordinates", () => {
+    render(<VstEqDialog open pluginName="Piano" settings={createDefaultVstEqSettings()}
+      sampleRate={48000} t={(key) => key} onOpenChange={vi.fn()} onChange={vi.fn()} onReset={vi.fn()} />);
+    expect(screen.getByRole("switch", { name: /audio.eq.enabled/ })).toBeTruthy();
+    expect(screen.getAllByRole("slider", { name: "audio.eq.frequency" })[0].getAttribute("aria-valuetext")).toBe("120 units.hz");
+    expect(screen.getByRole("img").querySelectorAll("text")).toHaveLength(0);
+  });
   it("ends the graph at Nyquist when the active sample rate is low", () => {
     render(<VstEqDialog open pluginName="Piano" settings={createDefaultVstEqSettings()}
       sampleRate={8_000} t={(key) => key} onOpenChange={vi.fn()}

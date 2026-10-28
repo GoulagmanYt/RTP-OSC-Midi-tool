@@ -98,7 +98,7 @@ export function RtpConfigCard({
               <Label htmlFor="rtp-port" className="text-sm">
                 {t("rtp.portLabel")}
               </Label>
-              <RtpPortInput
+              <RtpPortInput t={t}
                 id="rtp-port"
                 value={config?.rtp.port}
                 resetNonce={portResetNonce}
@@ -163,7 +163,7 @@ export function RtpConfigCard({
                         </div>
                         <div className="space-y-1">
                           <Label htmlFor={`rtp-port-${remote.id}`} className="text-xs">{t("rtp.favoritePort")}</Label>
-                          <RtpPortInput
+                          <RtpPortInput t={t}
                             id={`rtp-port-${remote.id}`}
                             value={remote.port}
                             onCommit={(port) => onUpdateRemote(remote.id, { port })}
@@ -187,6 +187,7 @@ export function RtpConfigCard({
                           variant="ghost"
                           size="sm"
                           onMouseDown={(e) => e.preventDefault()}
+                          aria-label={t("ui.deleteFavorite", { name: remote.name })}
                           onClick={() => onRemoveRemote(remote.id)}
                         >
                           <Trash2 className="h-4 w-4" />

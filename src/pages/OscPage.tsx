@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useBridge } from "../providers/BridgeProvider";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "../components/ui/Card";
 import { Label } from "../components/ui/Label";
 import { Input } from "../components/ui/Input";
+import { PortInput } from "../components/ui/PortInput";
 import { Switch } from "../components/ui/Switch";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
@@ -183,45 +184,7 @@ type OscPortInputProps = {
   onCommit: (port: number) => void;
 };
 
-export function OscPortInput(props: OscPortInputProps) {
-  return <OscPortDraft key={`${props.resetNonce ?? 0}-${props.value ?? "empty"}`} {...props} />;
-}
-
-function OscPortDraft({ id, value, placeholder = "9000", onCommit }: OscPortInputProps) {
-  const [draft, setDraft] = useState(value?.toString() ?? "");
-
-  useEffect(() => {
-    setDraft(value !== undefined ? String(value) : "");
-  }, [value]);
-
-  const commit = () => {
-    const port = Number(draft);
-    if (draft.trim() !== "" && Number.isInteger(port) && port >= 1 && port <= 65535) {
-      setDraft(String(port));
-      if (port !== value) onCommit(port);
-    } else {
-      setDraft(value?.toString() ?? "");
-    }
-  };
-
-  return (
-    <Input
-      id={id}
-      type="number"
-      min={1}
-      max={65535}
-      step={1}
-      placeholder={placeholder}
-      value={draft}
-      onChange={(event) => setDraft(event.target.value)}
-      onBlur={commit}
-      onKeyDown={(event) => {
-        if (event.key === "Enter") {
-          event.preventDefault();
-          commit();
-          event.currentTarget.blur();
-        }
-      }}
-    />
-  );
+export function OscPortInput({ id, value, placeholder = "9000", resetNonce, onCommit }: OscPortInputProps) {
+  const { t } = useI18n();
+  return <PortInput id={id} value={value} placeholder={placeholder} resetNonce={resetNonce} onCommit={onCommit} min={1} max={65535} t={t} />;
 }

@@ -83,16 +83,18 @@ export function AdvancedRoutingCard(props: Props) {
                       className="min-w-[180px] flex-1"
                       type="text"
                       value={profile.name}
+                      aria-label={t("ui.profileName")}
                       onChange={(event) => updateProfile(profile.id, { name: event.target.value })}
                     />
                     <div className="flex items-center gap-2">
                       <Switch
                         checked={profile.enabled}
+                        aria-label={t("ui.profileEnabled", { name: profile.name })}
                         onCheckedChange={(checked) => updateProfile(profile.id, { enabled: checked })}
                       />
                       <span className="text-xs text-muted-foreground">{t("routing.profileEnabled")}</span>
                     </div>
-                    <Button variant="ghost" size="sm" onClick={() => removeProfile(profile.id)}>
+                    <Button variant="ghost" size="sm" aria-label={t("ui.deleteProfile", { name: profile.name })} onClick={() => removeProfile(profile.id)}>
                       <Trash2 className="h-4 w-4" />
                     </Button>
                   </div>
@@ -104,6 +106,7 @@ export function AdvancedRoutingCard(props: Props) {
                         min="1"
                         max="16"
                         placeholder={t("routing.all")}
+                        aria-label={t("routing.profileChannel")}
                         value={profile.channelFilter ?? ""}
                         onChange={(event) =>
                           updateProfile(profile.id, {
@@ -119,6 +122,7 @@ export function AdvancedRoutingCard(props: Props) {
                         min="0"
                         max="127"
                         placeholder="0"
+                        aria-label={t("routing.profileNoteMin")}
                         value={profile.noteMin ?? ""}
                         onChange={(event) =>
                           updateProfile(profile.id, {
@@ -134,6 +138,7 @@ export function AdvancedRoutingCard(props: Props) {
                         min="0"
                         max="127"
                         placeholder="127"
+                        aria-label={t("routing.profileNoteMax")}
                         value={profile.noteMax ?? ""}
                         onChange={(event) =>
                           updateProfile(profile.id, {
@@ -165,6 +170,7 @@ export function AdvancedRoutingCard(props: Props) {
                                   type="number"
                                   min="0"
                                   max="127"
+                                  aria-label={t("ui.mappingFrom")}
                                   value={entry.from}
                                   onChange={(event) =>
                                     updateProfileMap(profile.id, mapKey, idx, {
@@ -176,6 +182,7 @@ export function AdvancedRoutingCard(props: Props) {
                                   type="number"
                                   min="0"
                                   max="127"
+                                  aria-label={t("ui.mappingTo")}
                                   value={entry.to}
                                   onChange={(event) =>
                                     updateProfileMap(profile.id, mapKey, idx, {
@@ -183,7 +190,7 @@ export function AdvancedRoutingCard(props: Props) {
                                     })
                                   }
                                 />
-                                <Button variant="ghost" size="icon" onClick={() => removeProfileMap(profile.id, mapKey, idx)}>
+                                <Button variant="ghost" size="icon" aria-label={t("ui.deleteMapping")} onClick={() => removeProfileMap(profile.id, mapKey, idx)}>
                                   <Trash2 className="h-4 w-4" />
                                 </Button>
                               </div>
@@ -217,7 +224,7 @@ export function AdvancedRoutingCard(props: Props) {
               {assignments.map((assignment, idx) => (
                 <div key={`${assignment.source}-${idx}`} className="grid items-center gap-3 md:grid-cols-[1fr_1fr_auto]">
                   <Select value={assignment.source} onValueChange={(value) => updateAssignment(idx, { source: value })}>
-                    <SelectTrigger>
+                    <SelectTrigger aria-label={t("ui.assignmentSource")}>
                       <SelectValue placeholder={t("routing.assignmentSource")} />
                     </SelectTrigger>
                     <SelectContent>
@@ -229,7 +236,7 @@ export function AdvancedRoutingCard(props: Props) {
                     </SelectContent>
                   </Select>
                   <Select value={assignment.profileId} onValueChange={(value) => updateAssignment(idx, { profileId: value })}>
-                    <SelectTrigger>
+                    <SelectTrigger aria-label={t("ui.assignmentProfile")}>
                       <SelectValue placeholder={t("routing.assignmentProfile")} />
                     </SelectTrigger>
                     <SelectContent>
@@ -240,7 +247,7 @@ export function AdvancedRoutingCard(props: Props) {
                       ))}
                     </SelectContent>
                   </Select>
-                  <Button variant="ghost" size="icon" onClick={() => removeAssignment(idx)}>
+                  <Button variant="ghost" size="icon" aria-label={t("ui.deleteAssignment")} onClick={() => removeAssignment(idx)}>
                     <Trash2 className="h-4 w-4" />
                   </Button>
                 </div>

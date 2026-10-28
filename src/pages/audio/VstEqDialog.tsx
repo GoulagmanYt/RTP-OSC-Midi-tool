@@ -76,6 +76,7 @@ function FrequencyControl({
         max={1_000}
         step={1}
         value={frequencyToSlider(value, range.min, range.max)}
+        aria-valuetext={`${value} ${unit}`}
         onChange={(event) => onChange(sliderToFrequency(Number(event.target.value), range.min, range.max))}
         className="h-7 w-full px-0 py-0"
       />
@@ -155,42 +156,25 @@ function ResponseGraph({ settings, sampleRate, label }: { settings: VstEqSetting
   }).join(" ");
 
   return (
-    <svg role="img" aria-label={label} viewBox={`0 0 ${width} ${height}`} className="w-full rounded-md border bg-muted/20">
-      {dbLines.map((db) => (
-        <g key={db}>
-          <line
-            x1={padding.left}
-            x2={width - padding.right}
-            y1={yForDb(db)}
-            y2={yForDb(db)}
-            className={db === 0 ? "stroke-border" : "stroke-border/50"}
-          />
-          <text x={padding.left - 5} y={yForDb(db) + 3} textAnchor="end" className="fill-muted-foreground text-[0.8125rem]">
-            {db > 0 ? `+${db}` : db}
-          </text>
-        </g>
-      ))}
-      {frequencies.map((frequency) => (
-        <g key={frequency}>
-          <line
-            x1={xForFrequency(frequency)}
-            x2={xForFrequency(frequency)}
-            y1={padding.top}
-            y2={height - padding.bottom}
-            className="stroke-border/30"
-          />
-          <text
-            x={xForFrequency(frequency)}
-            y={height - 7}
-            textAnchor="middle"
-            className="fill-muted-foreground text-[0.8125rem]"
-          >
-            {frequency >= 1_000 ? `${frequency / 1_000}k` : frequency}
-          </text>
-        </g>
-      ))}
-      <path d={responsePath} fill="none" className="stroke-primary" strokeWidth="2.5" />
-    </svg>
+    <div role="img" aria-label={label} className="w-full rounded-md border bg-muted/20 p-2">
+      <div className="relative h-[10rem]">
+        <svg aria-hidden="true" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" className="h-full w-full">
+          {dbLines.map(db => <line key={db} x1={padding.left} x2={width - padding.right} y1={yForDb(db)} y2={yForDb(db)} className={db === 0 ? "stroke-input" : "stroke-border"} />)}
+          {frequencies.map(frequency => <line key={frequency} x1={xForFrequency(frequency)} x2={xForFrequency(frequency)} y1={padding.top} y2={height - padding.bottom} className="stroke-border" />)}
+          <path d={responsePath} fill="none" className="stroke-primary" strokeWidth="2.5" />
+        </svg>
+        <div aria-hidden="true" className="absolute inset-y-0 left-0 flex w-8 flex-col justify-between pb-5 text-[0.8125rem] tabular-nums text-muted-foreground">
+          <span>+18</span><span>0</span><span>−18</span>
+        </div>
+      </div>
+      <div aria-hidden="true" className="relative h-6 text-[0.8125rem] tabular-nums text-muted-foreground">
+        {[20, 200, 2000, maximumFrequency].filter((frequency, index, all) => frequency <= maximumFrequency && all.indexOf(frequency) === index).map(frequency => (
+          <span key={frequency} className="absolute" style={{ left: `${xForFrequency(frequency) / width * 100}%`, transform: frequency === maximumFrequency ? "translateX(-100%)" : "translateX(-50%)" }}>
+            {frequency >= 1000 ? `${frequency / 1000}k` : frequency}
+          </span>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -204,11 +188,11 @@ export function VstEqDialog({ open, pluginName, settings, sampleRate, t, onOpenC
         </DialogHeader>
 
         <div className="flex items-center justify-between rounded-md border p-3">
-          <Label className="flex flex-col gap-1">
+          <Label htmlFor="eq-enabled" className="flex flex-col gap-1">
             <span>{t("audio.eq.enabled")}</span>
             <span className="text-xs font-normal text-muted-foreground">{t("audio.eq.enabledHint")}</span>
           </Label>
-          <Switch checked={settings.enabled} onCheckedChange={(enabled) => onChange({ ...settings, enabled })} />
+          <Switch id="eq-enabled" checked={settings.enabled} onCheckedChange={(enabled) => onChange({ ...settings, enabled })} />
         </div>
 
         <ResponseGraph settings={settings} sampleRate={sampleRate} label={t("audio.eq.responseGraph")} />

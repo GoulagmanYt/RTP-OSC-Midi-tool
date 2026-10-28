@@ -42,12 +42,13 @@ it.each(["rtp.portLabel", "rtp.favoritePort"])("allows replacing %s digit by dig
   expect((screen.getByLabelText(label) as HTMLInputElement).value).toBe("6008");
 });
 
-it.each(["", "500", "65535", "5004.5"])("restores the saved port when %s is invalid", (value) => {
+it.each(["", "500", "65535", "5004.5"])("retains invalid draft %s without applying it", (value) => {
   const commit = mount();
   const input = screen.getByLabelText("rtp.portLabel") as HTMLInputElement;
   fireEvent.change(input, { target: { value } });
   fireEvent.blur(input);
-  expect(input.value).toBe("5004");
+  expect(input.value).toBe(value);
+  expect(screen.getByRole("alert").textContent).toBe("ui.portRange");
   expect(commit).not.toHaveBeenCalled();
 });
 
