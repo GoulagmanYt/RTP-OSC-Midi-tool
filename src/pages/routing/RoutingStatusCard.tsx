@@ -61,7 +61,8 @@ export function RoutingStatusCard({ t, config, status, activity, displayPortName
                     className="flex items-center justify-between rounded-md border border-border/60 bg-card px-3 py-2"
                   >
                     <div className="flex items-center gap-3">
-                      <div className={`h-2.5 w-2.5 rounded-full ${isActive ? "bg-emerald-500 animate-pulse" : "bg-slate-400"}`} />
+                      <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${isActive ? "bg-success" : "bg-muted-foreground"}`} aria-hidden="true" />
+                      <span className="text-xs text-muted-foreground">{t(isActive ? "ui.activityActive" : "ui.activityInactive")}</span>
                       <div>
                         <div className="text-sm font-medium">{item.source}</div>
                         <div className="text-xs text-muted-foreground">
@@ -72,7 +73,7 @@ export function RoutingStatusCard({ t, config, status, activity, displayPortName
                     <div className="space-y-1 text-right">
                       <div className="text-sm font-semibold">{item.messagesPerSec ?? 0}/s</div>
                       <div className="h-1.5 w-20 overflow-hidden rounded-full bg-secondary">
-                        <div className="h-full bg-emerald-500" style={{ width: `${(level / 60) * 100}%` }} />
+                        <div className="h-full bg-primary" style={{ width: `${(level / 60) * 100}%` }} />
                       </div>
                     </div>
                   </div>

@@ -165,7 +165,7 @@ function ResponseGraph({ settings, sampleRate, label }: { settings: VstEqSetting
             y2={yForDb(db)}
             className={db === 0 ? "stroke-border" : "stroke-border/50"}
           />
-          <text x={padding.left - 5} y={yForDb(db) + 3} textAnchor="end" className="fill-muted-foreground text-[9px]">
+          <text x={padding.left - 5} y={yForDb(db) + 3} textAnchor="end" className="fill-muted-foreground text-[0.8125rem]">
             {db > 0 ? `+${db}` : db}
           </text>
         </g>
@@ -183,7 +183,7 @@ function ResponseGraph({ settings, sampleRate, label }: { settings: VstEqSetting
             x={xForFrequency(frequency)}
             y={height - 7}
             textAnchor="middle"
-            className="fill-muted-foreground text-[9px]"
+            className="fill-muted-foreground text-[0.8125rem]"
           >
             {frequency >= 1_000 ? `${frequency / 1_000}k` : frequency}
           </text>

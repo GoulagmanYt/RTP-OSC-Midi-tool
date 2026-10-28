@@ -31,7 +31,7 @@ export default function LogsPage() {
               <span className="w-32 shrink-0 text-muted-foreground">{log.timestamp}</span>
               <Badge
                 variant={log.level === "error" ? "destructive" : log.level === "warn" ? "warning" : "outline"}
-                className="h-5 w-16 shrink-0 justify-center text-[10px] uppercase"
+                className="h-5 w-16 shrink-0 justify-center text-[0.75rem] uppercase"
               >
                 {t(`logs.level.${log.level}`)}
               </Badge>

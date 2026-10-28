@@ -1,6 +1,8 @@
 import type { TranslationTree } from "./types";
+import { enUi } from "./ui";
 
 const en: TranslationTree = {
+    ui: enUi,
     common: {
       status: "Status",
       running: "Running",

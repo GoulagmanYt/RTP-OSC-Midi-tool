@@ -94,7 +94,7 @@ function App() {
       <BrowserRouter>
         <BridgeProvider>
           <AppContent />
-          <Toaster closeButton richColors position="bottom-right" />
+          <Toaster closeButton position="bottom-right" containerAriaLabel={t("ui.notifications")} toastOptions={{ closeButtonAriaLabel: t("ui.dismissNotification") }} />
         </BridgeProvider>
       </BrowserRouter>
     </AppErrorBoundary>

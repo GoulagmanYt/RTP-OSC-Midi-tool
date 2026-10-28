@@ -104,7 +104,7 @@ export function AudioStressTestCard({ bridgeRunning, audioRunning, t }: Props) {
         </div>
 
         {error && (
-          <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-600 dark:border-red-900/50 dark:bg-red-900/20 dark:text-red-400" role="alert">
+          <div className="rounded-md border border-destructive bg-destructive/10 p-3 text-sm text-destructive" role="alert">
             {error}
           </div>
         )}
@@ -144,7 +144,7 @@ export function AudioStressTestCard({ bridgeRunning, audioRunning, t }: Props) {
                 <h5 className="text-xs font-medium text-muted-foreground uppercase tracking-wider">{t("stress.segments")}</h5>
                 <div className="grid gap-3 text-xs sm:grid-cols-2">
                   {result.segmentBridge && (
-                    <div className={`p-2 rounded-md ${result.segmentBridge.dropped > 0 ? "bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-900/50" : "bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-900/50"}`}>
+                    <div className={`p-2 rounded-md ${result.segmentBridge.dropped > 0 ? "bg-destructive/10 border border-destructive" : "bg-success-surface border border-success"}`}>
                       <div className="flex items-center gap-1 font-medium mb-1">
                         <Workflow className="h-3 w-3" />
                         {t("stress.bridgeSegment")}
@@ -159,7 +159,7 @@ export function AudioStressTestCard({ bridgeRunning, audioRunning, t }: Props) {
                   )}
 
                   {result.segmentAudio && (
-                    <div className={`p-2 rounded-md ${(result.segmentAudio.dropped > 0 || result.segmentAudio.xruns > 0) ? "bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-900/50" : "bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-900/50"}`}>
+                    <div className={`p-2 rounded-md ${(result.segmentAudio.dropped > 0 || result.segmentAudio.xruns > 0) ? "bg-destructive/10 border border-destructive" : "bg-success-surface border border-success"}`}>
                       <div className="flex items-center gap-1 font-medium mb-1">
                         <AudioWaveform className="h-3 w-3" />
                         Audio/VST

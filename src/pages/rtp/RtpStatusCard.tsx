@@ -46,7 +46,7 @@ export function RtpStatusCard({ config, status, t }: Props) {
           </div>
         </dl>
         {status?.rtpNetworkWarning ? (
-          <p role="status" className="rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-100">
+          <p role="status" className="rounded border border-warning bg-warning-surface p-2 text-xs text-warning">
             {status.rtpNetworkWarning}
           </p>
         ) : null}

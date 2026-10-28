@@ -38,7 +38,7 @@ export default function OscPage() {
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
-            <Radio className="h-5 w-5 text-purple-500" />
+            <Radio className="h-5 w-5 text-muted-foreground" />
             {t("osc.configurationTitle")}
           </CardTitle>
           <CardDescription>{t("osc.description")}</CardDescription>

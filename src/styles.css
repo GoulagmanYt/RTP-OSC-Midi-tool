@@ -1,4 +1,25 @@
 @import "tailwindcss";
+
+/* Semantic desktop feedback; Sonner's own fixed palette must not override it. */
+html [data-sonner-toaster][data-sonner-theme] {
+  --normal-bg: hsl(var(--card));
+  --normal-text: hsl(var(--card-foreground));
+  --normal-border: hsl(var(--input));
+  font-family: var(--font-sans);
+}
+html [data-sonner-toast][data-styled="true"] { font-size: 0.8125rem; }
+html [data-sonner-toast][data-styled="true"] [data-description] { color: hsl(var(--muted-foreground)); }
+html [data-sonner-toast][data-styled="true"] [data-close-button] { width: 1.75rem; height: 1.75rem; color: hsl(var(--foreground)); background: hsl(var(--card)); border-color: hsl(var(--input)); }
+html [data-sonner-toast][data-styled="true"] [data-button] { min-height: 1.75rem; font-size: 0.8125rem; }
+html [data-sonner-toast][data-type="error"] [data-icon] { color: hsl(var(--destructive)); }
+html [data-sonner-toast][data-type="success"] [data-icon] { color: hsl(var(--success)); }
+html [data-sonner-toast][data-type="warning"] [data-icon] { color: hsl(var(--warning)); }
+html [data-sonner-toast]:focus-visible, html [data-sonner-toast] button:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 2px; }
+summary { min-height: 1.75rem; padding-block: 0.25rem; }
+@media (forced-colors: active) {
+  html [data-sonner-toast][data-styled="true"], html [data-sonner-toast] button { border: 1px solid ButtonText; }
+}
+
 @plugin "tailwindcss-animate";
 @custom-variant dark (&:where(.dark, .dark *));
 
@@ -31,12 +52,24 @@
   --switch-off: 240.00 2.11% 53.53%;
   --radius: 12px;
   --ui-scale: 1;
+  --overlay: 0 0% 0%;
+  --switch-thumb: 0 0% 100%;
+  --preview-light-background: 240 11.11% 96.47%;
+  --preview-light-sidebar: 240 10% 92.16%;
+  --preview-light-card: 0 0% 100%;
+  --preview-dark-background: 240 3.33% 11.76%;
+  --preview-dark-sidebar: 240 3.03% 19.41%;
+  --preview-dark-card: 240 2.22% 26.47%;
   --page-padding: 32px;
   --sidebar-width: 14rem;
 }
 
 @theme {
-  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  --font-sans: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  --text-xs: 0.8125rem;
+  --text-xs--line-height: 1.25rem;
+  --color-overlay: hsl(var(--overlay));
+  --color-switch-thumb: hsl(var(--switch-thumb));
   --font-mono: "Cascadia Code", Consolas, ui-monospace, monospace;
   --color-border: hsl(var(--border));
   --color-input: hsl(var(--input));
@@ -70,7 +103,7 @@
 
 @layer base {
   * { @apply border-border; }
-  html { font-size: calc(16px * var(--ui-scale)); }
+  html { font-size: calc(100% * var(--ui-scale)); }
   body {
     @apply bg-background font-sans text-foreground;
     min-width: 320px;
@@ -114,7 +147,7 @@
     background-color: hsl(var(--card));
     border-color: hsl(var(--border) / 0.75);
     border-radius: calc(var(--radius) + 8px);
-    box-shadow: 0 2px 8px -4px rgb(0 0 0 / 0.1), 0 0 1px rgb(0 0 0 / 0.08);
+    box-shadow: 0 2px 8px -4px hsl(var(--foreground) / 0.1), 0 0 1px hsl(var(--foreground) / 0.08);
   }
   .card-surface > * { min-width: 0; }
   .nav-item {
@@ -243,13 +276,11 @@
 
 @layer components {
   .navigation-material {
-    background: hsl(var(--sidebar) / 0.82);
-    backdrop-filter: blur(24px) saturate(1.2);
+    background: hsl(var(--sidebar));
     border-color: hsl(var(--border) / 0.7);
   }
   .toolbar-material {
-    background: hsl(var(--background) / 0.85);
-    backdrop-filter: blur(24px) saturate(1.2);
+    background: hsl(var(--background));
   }
   .toolbar-icon, .bridge-action { border-radius: 999px; }
   .toolbar-search { border-radius: 999px; background: hsl(var(--card) / 0.8); box-shadow: 0 0 0 1px hsl(var(--border) / 0.65); }
@@ -268,29 +299,29 @@
     height: 5.5rem;
     margin-inline: auto;
     overflow: hidden;
-    border: 1px solid #8b8b90;
+    border: 1px solid hsl(var(--input));
     border-radius: 0.75rem;
-    background: #f5f5f7;
-    color: #6e6e73;
+    background: hsl(var(--preview-light-background));
+    color: hsl(var(--muted-foreground));
   }
-  .appearance-preview-sidebar { display: flex; width: 30%; flex-direction: column; gap: 6px; padding: 12px 6px; background: #e5e5ea; }
+  .appearance-preview-sidebar { display: flex; width: 30%; flex-direction: column; gap: 6px; padding: 12px 6px; background: hsl(var(--preview-light-sidebar)); }
   .appearance-preview-sidebar i { height: 4px; border-radius: 2px; background: currentColor; opacity: 0.5; }
-  .appearance-preview-sidebar i:first-child { background: #0064d9; opacity: 1; }
+  .appearance-preview-sidebar i:first-child { background: hsl(var(--primary)); opacity: 1; }
   .appearance-preview-content { display: flex; flex: 1; flex-direction: column; gap: 6px; padding: 12px 8px; }
-  .appearance-preview-content i { height: 14px; border-radius: 4px; background: #fff; }
-  .appearance-preview--dark, .appearance-preview--contrast { background: #242426; color: #aeaeb2; }
-  .appearance-preview--dark .appearance-preview-sidebar, .appearance-preview--contrast .appearance-preview-sidebar { background: #303033; }
-  .appearance-preview--dark .appearance-preview-content i, .appearance-preview--contrast .appearance-preview-content i { background: #424245; }
-  .appearance-preview--system { background: linear-gradient(90deg, #f5f5f7 50%, #242426 50%); }
-  .appearance-preview--contrast { border-color: #aeaeb2; }
-  .appearance-preview--contrast .appearance-preview-content i { box-shadow: inset 0 0 0 1px #aeaeb2; }
+  .appearance-preview-content i { height: 14px; border-radius: 4px; background: hsl(var(--preview-light-card)); }
+  .appearance-preview--dark, .appearance-preview--contrast { background: hsl(var(--preview-dark-background)); color: hsl(var(--muted-foreground)); }
+  .appearance-preview--dark .appearance-preview-sidebar, .appearance-preview--contrast .appearance-preview-sidebar { background: hsl(var(--preview-dark-sidebar)); }
+  .appearance-preview--dark .appearance-preview-content i, .appearance-preview--contrast .appearance-preview-content i { background: hsl(var(--preview-dark-card)); }
+  .appearance-preview--system { background: linear-gradient(90deg, hsl(var(--preview-light-background)) 50%, hsl(var(--preview-dark-background)) 50%); }
+  .appearance-preview--contrast { border-color: hsl(var(--muted-foreground)); }
+  .appearance-preview--contrast .appearance-preview-content i { box-shadow: inset 0 0 0 1px hsl(var(--muted-foreground)); }
   .appearance-choice input:checked + .appearance-preview { outline: 3px solid hsl(var(--primary)); outline-offset: 3px; }
   .appearance-choice input:focus-visible + .appearance-preview { outline: 3px solid hsl(var(--ring)); outline-offset: 5px; }
   .appearance-choice input:checked ~ span:last-child { color: hsl(var(--primary)); font-weight: 600; }
   .color-choice { display: flex; min-width: 3.5rem; min-height: 3.5rem; align-items: center; flex-direction: column; gap: 0.375rem; padding: 0.375rem; border-radius: 0.625rem; }
   .color-choice:hover { background: hsl(var(--muted)); }
-  .color-choice-swatch { display: grid; width: 1.75rem; height: 1.75rem; place-items: center; border: 1px solid hsl(var(--foreground) / 0.25); border-radius: 50%; background: hsl(var(--swatch-color)); box-shadow: inset 0 1px 1px #ffffff20; }
-  .color-choice-swatch svg { visibility: hidden; color: white; background: #1d1d1f; border-radius: 50%; padding: 1px; }
+  .color-choice-swatch { display: grid; width: 1.75rem; height: 1.75rem; place-items: center; border: 1px solid hsl(var(--foreground) / 0.25); border-radius: 50%; background: hsl(var(--swatch-color)); box-shadow: inset 0 1px 1px hsl(var(--foreground) / 0.12); }
+  .color-choice-swatch svg { visibility: hidden; color: hsl(var(--primary-foreground)); background: hsl(var(--primary)); border-radius: 50%; padding: 1px; }
   .color-choice input:checked + .color-choice-swatch { outline: 2px solid hsl(var(--primary)); outline-offset: 3px; }
   .color-choice input:checked + .color-choice-swatch svg { visibility: visible; }
   .color-choice input:focus-visible + .color-choice-swatch { outline: 3px solid hsl(var(--ring)); outline-offset: 4px; }

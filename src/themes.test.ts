@@ -13,6 +13,34 @@ function luminance(token: string) {
     .reduce((sum, c, i) => sum + c * [0.2126, 0.7152, 0.0722][i], 0);
 }
 
+it("covers feedback text and non-text controls in explicit and system palettes", () => {
+  for (const [palette, resolved] of [["light", "light"], ["dark", "dark"], ["contrast", "contrast"], ["system", "light"], ["system", "dark"]]) {
+    vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: resolved === "dark", addEventListener() {}, removeEventListener() {} })));
+    for (const background of resolved === "light" ? LIGHT_BACKGROUNDS : DARK_BACKGROUNDS) {
+      for (const accent of ACCENT_CHOICES) {
+        const release = applyTheme(palette, 12, { accentColor: accent.id, lightBackground: background.id, darkBackground: background.id });
+        for (const [text, surface, minimum] of [
+          ["foreground", "background", 4.5], ["card-foreground", "card", 4.5],
+          ["popover-foreground", "popover", 4.5], ["muted-foreground", "control", 4.5],
+          ["secondary-foreground", "secondary", 4.5], ["accent-foreground", "accent", 4.5],
+          ["primary-foreground", "primary", 4.5], ["destructive-foreground", "destructive", 4.5],
+          ["success", "success-surface", 4.5], ["warning", "warning-surface", 4.5],
+          ["destructive", "card", 4.5], ["primary", "card", 4.5],
+          ["input", "control", 3], ["switch-off", "card", 3],
+          ["ring", "card", 3], ["ring", "control", 3],
+          ["success", "card", 3], ["muted-foreground", "card", 3],
+          ["primary", "muted", 3],
+        ] as const) {
+          const a = luminance(text), b = luminance(surface);
+          expect((Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05),
+            `${palette}/${resolved}/${background.id}/${accent.id}: ${text}/${surface}`).toBeGreaterThanOrEqual(minimum);
+        }
+        release();
+      }
+    }
+  }
+});
+
 it("keeps readable text contrast across every accent and background combination", () => {
   for (const mode of ["light", "dark", "contrast"]) {
     for (const background of mode === "light" ? LIGHT_BACKGROUNDS : DARK_BACKGROUNDS) {

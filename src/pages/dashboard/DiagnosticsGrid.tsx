@@ -134,16 +134,16 @@ export function DiagnosticsGrid({
           <div className="grid gap-6 md:grid-cols-3">
             <div className="space-y-3">
               <h3 className="text-xs font-semibold uppercase text-muted-foreground">{t("dashboard.metersAudio")}</h3>
-              <MeterRow label={t("dashboard.metersLeft")} value={metrics?.audioPeakL} max={1} valueLabel={formatPercent(metrics?.audioPeakL)} className="bg-emerald-500" />
-              <MeterRow label={t("dashboard.metersRight")} value={metrics?.audioPeakR} max={1} valueLabel={formatPercent(metrics?.audioPeakR)} className="bg-emerald-500" />
+              <MeterRow label={t("dashboard.metersLeft")} value={metrics?.audioPeakL} max={1} valueLabel={formatPercent(metrics?.audioPeakL)} className="bg-primary" />
+              <MeterRow label={t("dashboard.metersRight")} value={metrics?.audioPeakR} max={1} valueLabel={formatPercent(metrics?.audioPeakR)} className="bg-primary" />
             </div>
             <div className="space-y-3">
               <h3 className="text-xs font-semibold uppercase text-muted-foreground">{t("dashboard.metersMidi")}</h3>
-              <MeterRow label={t("dashboard.metersMessages")} value={metrics?.midiMessagesPerSec} max={200} valueLabel={formatRate(metrics?.midiMessagesPerSec)} className="bg-sky-500" />
+              <MeterRow label={t("dashboard.metersMessages")} value={metrics?.midiMessagesPerSec} max={200} valueLabel={formatRate(metrics?.midiMessagesPerSec)} className="bg-primary" />
             </div>
             <div className="space-y-3">
               <h3 className="text-xs font-semibold uppercase text-muted-foreground">{t("dashboard.metersOsc")}</h3>
-              <MeterRow label={t("dashboard.metersMessages")} value={metrics?.oscMessagesPerSec} max={200} valueLabel={formatRate(metrics?.oscMessagesPerSec)} className="bg-amber-500" />
+              <MeterRow label={t("dashboard.metersMessages")} value={metrics?.oscMessagesPerSec} max={200} valueLabel={formatRate(metrics?.oscMessagesPerSec)} className="bg-primary" />
             </div>
           </div>
           <section className="space-y-3 border-t pt-4" aria-label={t("dashboard.transportTitle")}>
