@@ -8,16 +8,16 @@ export type AppearancePreferences = {
   darkBackground?: string;
 };
 
-// Separate light and dark shades keep selected controls and their labels legible.
+// Saturated shades avoid pastel accents while keeping controls and labels legible.
 export const ACCENT_CHOICES = [
-  { id: "blue", light: "212.35 100% 42.55%", dark: "216.84 100% 77.65%" },
-  { id: "purple", light: "272 65% 40%", dark: "272 90% 82%" },
-  { id: "pink", light: "330 72% 38%", dark: "330 85% 80%" },
-  { id: "red", light: "4 75% 38%", dark: "4 90% 80%" },
-  { id: "orange", light: "25 100% 32%", dark: "30 100% 76%" },
-  { id: "green", light: "145 68% 27%", dark: "145 62% 72%" },
-  { id: "teal", light: "185 90% 25%", dark: "185 65% 72%" },
-  { id: "graphite", light: "240 4% 36%", dark: "240 7% 80%" },
+  { id: "blue", light: "212.35 100% 42.55%", dark: "212.35 100% 68%" },
+  { id: "purple", light: "272 80% 40%", dark: "272 100% 75%" },
+  { id: "pink", light: "330 85% 38%", dark: "330 100% 69%" },
+  { id: "red", light: "4 90% 40%", dark: "4 100% 69%" },
+  { id: "orange", light: "25 100% 34%", dark: "25 100% 60%" },
+  { id: "green", light: "145 80% 26%", dark: "145 80% 46%" },
+  { id: "teal", light: "185 100% 24%", dark: "185 85% 46%" },
+  { id: "graphite", light: "240 4% 36%", dark: "240 7% 72%" },
 ] as const;
 
 export const LIGHT_BACKGROUNDS = [
@@ -79,7 +79,7 @@ const palettes: Record<Exclude<ThemePalette, "system">, PaletteConfig> = {
       cardForeground: "240.00 11.11% 96.47%",
       popover: "240.00 3.03% 19.41%",
       popoverForeground: "240.00 11.11% 96.47%",
-      primary: "216.84 100.00% 77.65%",
+      primary: "212.35 100% 68%",
       primaryForeground: "240.00 3.33% 11.76%",
       secondary: "240.00 3.03% 19.41%",
       secondaryForeground: "240.00 11.11% 96.47%",
@@ -91,7 +91,7 @@ const palettes: Record<Exclude<ThemePalette, "system">, PaletteConfig> = {
       destructiveForeground: "349.41 31.48% 21.18%",
       border: "240.00 2.22% 26.47%",
       input: "240.00 2.26% 56.67%",
-      ring: "216.84 100.00% 77.65%",
+      ring: "212.35 100% 68%",
       success: "135.17 53.37% 68.04%",
       successSurface: "142.94 41.46% 16.08%",
       warning: "38.27 100.00% 75.10%",
@@ -110,7 +110,7 @@ const palettes: Record<Exclude<ThemePalette, "system">, PaletteConfig> = {
       cardForeground: "0.00 0.00% 100.00%",
       popover: "240.00 3.53% 16.67%",
       popoverForeground: "0.00 0.00% 100.00%",
-      primary: "218.68 100.00% 85.10%",
+      primary: "212.35 100% 72%",
       primaryForeground: "240.00 5.88% 6.67%",
       secondary: "240.00 3.53% 16.67%",
       secondaryForeground: "0.00 0.00% 100.00%",
@@ -122,7 +122,7 @@ const palettes: Record<Exclude<ThemePalette, "system">, PaletteConfig> = {
       destructiveForeground: "240.00 5.88% 6.67%",
       border: "240.00 2.26% 56.67%",
       input: "240.00 2.53% 69.02%",
-      ring: "218.68 100.00% 85.10%",
+      ring: "212.35 100% 72%",
       success: "135.17 53.37% 68.04%",
       successSurface: "142.94 41.46% 16.08%",
       warning: "38.27 100.00% 75.10%",
@@ -152,7 +152,7 @@ export function applyTheme(paletteId: string, radius: number, preferences: Appea
       colors.primary = palette.dark ? accent.dark : accent.light;
       colors.ring = colors.primary;
       const hue = colors.primary.split(" ")[0];
-      colors.accent = `${hue} ${palette.dark ? "30% 22%" : "60% 96%"}`;
+      colors.accent = `${hue} ${palette.dark ? "40% 18%" : "75% 94%"}`;
       colors.accentForeground = colors.primary;
     }
     Object.entries(colors).forEach(([token, value]) => {
