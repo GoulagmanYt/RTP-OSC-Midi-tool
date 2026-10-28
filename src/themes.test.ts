@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { buttonVariants } from "./components/ui/Button";
 import { ACCENT_CHOICES, DARK_BACKGROUNDS, LIGHT_BACKGROUNDS, applyTheme } from "./themes";
 
-function luminance(token: string) {
+function rgbFor(token: string) {
   const [hue, saturation, lightness] = document.documentElement.style.getPropertyValue(`--${token}`).match(/[\d.]+/g)!.map(Number);
   const s = saturation / 100, l = lightness / 100;
   const chroma = (1 - Math.abs(2 * l - 1)) * s;
@@ -9,7 +10,10 @@ function luminance(token: string) {
   const m = l - chroma / 2;
   const sector = Math.floor(hue / 60) % 6;
   const rgb = [[chroma, x, 0], [x, chroma, 0], [0, chroma, x], [0, x, chroma], [x, 0, chroma], [chroma, 0, x]][sector];
-  return rgb.map(c => c + m).map(c => c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4)
+  return rgb.map(c => c + m);
+}
+function luminance(token: string | number[]) {
+  return (typeof token === "string" ? rgbFor(token) : token).map(c => c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4)
     .reduce((sum, c, i) => sum + c * [0.2126, 0.7152, 0.0722][i], 0);
 }
 
@@ -19,6 +23,19 @@ it("covers feedback text and non-text controls in explicit and system palettes",
     for (const background of resolved === "light" ? LIGHT_BACKGROUNDS : DARK_BACKGROUNDS) {
       for (const accent of ACCENT_CHOICES) {
         const release = applyTheme(palette, 12, { accentColor: accent.id, lightBackground: background.id, darkBackground: background.id });
+        const classes = buttonVariants();
+        const activeAlpha = Number(classes.match(/active:bg-primary\/(\d+)/)?.[1] ?? 100) / 100;
+        const disabledAlpha = Number(classes.match(/disabled:opacity-(\d+)/)?.[1] ?? 100) / 100;
+        const blend = (token: string, alpha: number) => rgbFor(token).map((value, index) => value * alpha + rgbFor("card")[index] * (1 - alpha));
+        for (const [state, foreground, stateBackground] of [
+          ["active", rgbFor("primary-foreground"), blend("primary", activeAlpha)],
+          ["disabled", blend("foreground", disabledAlpha), blend("control", disabledAlpha)],
+          ["error-surface", rgbFor("destructive"), blend("destructive", 0.1)],
+        ] as const) {
+          const a = luminance(foreground), b = luminance(stateBackground);
+          expect((Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05),
+            `${palette}/${resolved}/${background.id}/${accent.id}: ${state}`).toBeGreaterThanOrEqual(4.5);
+        }
         for (const [text, surface, minimum] of [
           ["foreground", "background", 4.5], ["card-foreground", "card", 4.5],
           ["popover-foreground", "popover", 4.5], ["muted-foreground", "control", 4.5],
