@@ -49,7 +49,7 @@ function config(developerMode: boolean): AppConfig {
   };
 }
 
-function renderCard(developerMode: boolean, vstEqEnabled = false) {
+function renderCard(developerMode: boolean, vstEqEnabled = false, vstPlugins = [plugin]) {
   const noop = vi.fn(async () => undefined);
   const card = (mode: boolean) => (
     <AudioConfigCard
@@ -72,7 +72,7 @@ function renderCard(developerMode: boolean, vstEqEnabled = false) {
       streamBufferSize={512}
       t={(key, values) => values?.layout ? `${key}: ${values.layout}` : key}
       vstMidiCompatible
-      vstPlugins={[plugin]}
+      vstPlugins={vstPlugins}
       vstPluginsLoading={false}
       vstUiOpen={false}
       activeBufferSize={512}
@@ -101,6 +101,24 @@ function renderCard(developerMode: boolean, vstEqEnabled = false) {
 }
 
 describe("AudioConfigCard VST diagnostics", () => {
+  it.each([false, true])("identifies unavailable VSTs before selection (developer mode: %s)", (developerMode) => {
+    const unavailable: VstPluginEntry = { ...plugin, id: "unavailable", name: "Unavailable Organ", supported: false, status: "failed" };
+    const warning: VstPluginEntry = { ...plugin, id: "warning", name: "Warning Organ", status: "unverified" };
+    const { action } = renderCard(developerMode, false, [plugin, unavailable, warning]);
+    fireEvent.keyDown(screen.getByRole("combobox", { name: "audio.vstInstrumentLabel" }), { key: " " });
+
+    const unavailableOption = screen.getByRole("option", { name: /Unavailable Organ.*audio.vstStatusUnsupported/ });
+    expect(unavailableOption.getAttribute("aria-disabled")).toBe("true");
+    fireEvent.click(unavailableOption);
+    expect(action).not.toHaveBeenCalled();
+
+    const availableOption = screen.getByRole("option", { name: /Warning Organ/ });
+    expect(availableOption.textContent).not.toContain("audio.vstStatusUnsupported");
+    expect(availableOption.getAttribute("aria-disabled")).not.toBe("true");
+    fireEvent.click(availableOption);
+    expect(action).toHaveBeenCalledWith(warning.id);
+  });
+
   it("preserves separators while typing multiple scan paths and commits on blur", async () => {
     const { action: update } = renderCard(false);
     const librarySettings = screen.getByText("audio.vstLibrarySettings").closest("details")!;

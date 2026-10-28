@@ -1,12 +1,14 @@
 @import "tailwindcss";
 
-/* Keep the main overview visible in a widescreen window without reducing type. */
+/* Fill the standard overview and keep developer diagnostics compact. */
 .dashboard-page { padding: 1rem; }
+.dashboard-page .page-content { display: flex; min-height: 100%; flex-direction: column; }
 .dashboard-page .page-heading { margin-bottom: 1rem; }
+.dashboard-layout { display: flex; flex: 1; flex-direction: column; gap: 1.5rem; }
 .dashboard-primary { display: grid; gap: 1rem; min-width: 0; }
 .dashboard-primary > * { min-width: 0; }
 @container workspace (min-width: 48rem) {
-  .dashboard-primary { grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; }
+  .dashboard-primary { grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: stretch; }
   .dashboard-primary > .card-surface { align-self: stretch; }
   .dashboard-primary .card-surface > :first-child { padding: 1rem; }
   .dashboard-primary .card-surface > :last-child { padding: 0 1rem 1rem; }
@@ -18,15 +20,24 @@
   .dashboard-primary .signal-port { gap: 0.5rem; padding: 0.25rem 0.5rem; }
   .dashboard-primary .port-symbol { width: 1.75rem; height: 1.75rem; }
   .dashboard-primary .signal-port > svg { display: none; }
-  .dashboard-primary > :nth-child(2) { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1rem; }
-  .dashboard-primary > :nth-child(2) > * { margin-block: 0; }
+  .dashboard-overview { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto; }
   .dashboard-primary .overview-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.75rem; }
   .dashboard-primary .data-row { padding-block: 0.25rem; }
-  .dashboard-primary .overview-events > ul { height: 4.5rem; overflow: auto; }
-  .dashboard-primary .overview-events > p { min-height: 4.5rem; display: flex; align-items: center; }
+  .dashboard-primary .overview-events-list { max-height: 7rem; overflow: auto; }
+  .dashboard-primary .overview-events-empty { min-height: 4.5rem; display: flex; align-items: center; }
   .dashboard-primary .overview-events li { height: 2.25rem; flex-wrap: nowrap; align-items: center; padding-block: 0.25rem; }
   .dashboard-primary .overview-events li > :not(p) { flex-shrink: 0; }
   .dashboard-primary .overview-events li > p { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dashboard-layout--standard .dashboard-primary { flex: 1; }
+}
+@media (min-height: 55rem) {
+  @container workspace (min-width: 48rem) {
+    .dashboard-layout--standard .dashboard-primary { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto; }
+    .dashboard-layout--standard .signal-flow { grid-template-columns: minmax(0, 1fr) 9rem minmax(0, 1fr); }
+    .dashboard-layout--standard .signal-junction { grid-column: auto; grid-row: auto; flex-direction: column; padding-block: 1rem; }
+    .dashboard-layout--standard .dashboard-overview { grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-rows: auto; }
+    .dashboard-layout--standard .overview-grid { display: contents; }
+  }
 }
 
 
@@ -57,6 +68,7 @@ summary { min-height: 1.75rem; padding-block: 0.25rem; }
   --background: 240.00 11.11% 96.47%;
   --foreground: 240.00 3.33% 11.76%;
   --card: 0.00 0.00% 100.00%;
+  --card-border: 240 4% 78%;
   --card-foreground: 240.00 3.33% 11.76%;
   --popover: 0.00 0.00% 100.00%;
   --popover-foreground: 240.00 3.33% 11.76%;
@@ -175,7 +187,7 @@ summary { min-height: 1.75rem; padding-block: 0.25rem; }
   .card-surface {
     min-width: 0;
     background-color: hsl(var(--card));
-    border-color: hsl(var(--border) / 0.75);
+    border-color: hsl(var(--card-border));
     border-radius: calc(var(--radius) + 8px);
     box-shadow: 0 2px 8px -4px hsl(var(--foreground) / 0.1), 0 0 1px hsl(var(--foreground) / 0.08);
   }
@@ -296,7 +308,7 @@ summary { min-height: 1.75rem; padding-block: 0.25rem; }
   }
 }
 @media (prefers-contrast: more) {
-  :root { --border: var(--muted-foreground) !important; --input: var(--muted-foreground) !important; }
+  :root { --border: var(--muted-foreground) !important; --card-border: var(--muted-foreground) !important; --input: var(--muted-foreground) !important; }
 }
 @media (forced-colors: active) {
   .card-surface, .signal-port, .nav-item[aria-current="page"] { border: 1px solid CanvasText; }

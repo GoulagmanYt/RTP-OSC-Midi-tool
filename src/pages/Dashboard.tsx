@@ -19,6 +19,7 @@ export default function Dashboard() {
     useBridge();
   const status = mergeLiveAudioMetrics(statusSnapshot, metrics);
   const { t } = useI18n();
+  const developerMode = isDeveloperMode(config);
   const [lastDropoutAt, setLastDropoutAt] = useState<number | null>(null);
   const lastXrun = useRef<number | null>(null);
   const [now, setNow] = useState(() => Date.now());
@@ -103,8 +104,8 @@ export default function Dashboard() {
   };
 
   return (
-    <div className="space-y-6 min-w-0">
-      {status?.lastError ? <ErrorCard error={status.lastError} developerMode={isDeveloperMode(config)} t={t} /> : null}
+    <div className={`dashboard-layout min-w-0 ${developerMode ? "dashboard-layout--developer" : "dashboard-layout--standard"}`}>
+      {status?.lastError ? <ErrorCard error={status.lastError} developerMode={developerMode} t={t} /> : null}
       <div className="dashboard-primary">
         <SignalFlow config={config} status={status} t={t} />
         <OverviewGrid
@@ -118,7 +119,7 @@ export default function Dashboard() {
           onNavigateLogs={() => navigate("/logs")}
         />
       </div>
-      {isDeveloperMode(config) && (
+      {developerMode && (
         <DiagnosticsGrid
           audioBackend={audioBackend}
           bufferMismatch={bufferMismatch}

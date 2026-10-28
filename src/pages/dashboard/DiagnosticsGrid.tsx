@@ -60,7 +60,7 @@ export function DiagnosticsGrid({
 
   return (
     <div className="space-y-4">
-      <div className="grid items-start gap-4 xl:grid-cols-3">
+      <div className="grid gap-4 xl:grid-cols-3">
         <Card className="min-w-0">
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
             <CardTitle className="text-base font-semibold">{t("dashboard.runtimeSignals")}</CardTitle>

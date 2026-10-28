@@ -514,6 +514,7 @@ export function AudioConfigCard({
                 {filteredVstPlugins.map((plugin) => (
                   <SelectItem key={plugin.id} value={plugin.id} disabled={!plugin.supported}>
                     {showVstTechnicalDetails ? [plugin.name, plugin.format, plugin.architecture, plugin.status].join(" \u00b7 ") : plugin.name}
+                    {!plugin.supported ? ` \u00b7 ${t("audio.vstStatusUnsupported")}` : ""}
                   </SelectItem>
                 ))}
               </SelectContent>
