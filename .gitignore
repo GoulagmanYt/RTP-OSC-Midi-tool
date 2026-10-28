@@ -16,6 +16,7 @@ docs/audio-cpu-resilience.md
 artifacts/
 src-tauri/binaries/*.exe
 .vscode/
+/.agents/
 *.code-workspace
 __pycache__/
 *.pyc
@@ -40,3 +41,5 @@ test-results/
 playwright-report/
 .DS_Store
 Thumbs.db
+skills-lock.json
+docs/UI-HIG-2.6.3.md
