@@ -285,7 +285,7 @@ summary { min-height: 1.75rem; padding-block: 0.25rem; }
   .toolbar-icon, .bridge-action { border-radius: 999px; }
   .toolbar-search { border-radius: 999px; background: hsl(var(--card) / 0.8); box-shadow: 0 0 0 1px hsl(var(--border) / 0.65); }
   .toolbar-icon { color: hsl(var(--muted-foreground)); }
-  .window-controls { padding: 3px; border: 1px solid hsl(var(--border) / 0.8); border-radius: 0.875rem; background: hsl(var(--card) / 0.75); box-shadow: 0 1px 2px hsl(var(--foreground) / 0.03); }
+  .window-controls { padding: 0.1875rem; border: 1px solid hsl(var(--input)); border-radius: 0.875rem; background: hsl(var(--card)); box-shadow: 0 1px 2px hsl(var(--foreground) / 0.03); }
   .window-action--close { color: hsl(var(--destructive)); }
   .window-action--close:hover, .window-action--close:active { background: hsl(var(--destructive)); color: hsl(var(--destructive-foreground)); }
   .data-row dd { font-variant-numeric: tabular-nums; }

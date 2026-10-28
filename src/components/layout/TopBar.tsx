@@ -3,6 +3,7 @@ import { Button } from "../ui/Button";
 import { useBridge } from "../../providers/BridgeProvider";
 import { useI18n } from "../../providers/LanguageProvider";
 import { isDeveloperMode } from "../../developer-mode";
+import { WindowControls } from "./WindowControls";
 
 type Props = { onOpenCommand: () => void; sidebarVisible: boolean; onToggleSidebar: () => void };
 
@@ -35,6 +36,7 @@ export function TopBar({ onOpenCommand, sidebarVisible, onToggleSidebar }: Props
         <span className="bridge-action-label">{bridgeLabel}</span>
       </Button>
       {isDeveloperMode(config) && <Button variant="outline" size="sm" onClick={() => updateConfig({ ui: { developerMode: false } })} aria-label={t("ui.disableDeveloper")} title={t("ui.disableDeveloper")}>{t("ui.developerActive")}</Button>}
+      <WindowControls />
     </header>
   );
 }

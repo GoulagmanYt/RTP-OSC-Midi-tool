@@ -34,19 +34,19 @@ export function WindowControls() {
   const maximizeLabel = t(maximized ? "window.restore" : "window.maximize");
 
   return (
-    <div className="window-controls flex shrink-0 items-center gap-1" role="group" aria-label={t("window.controls")}>
+    <div className="window-controls ml-auto flex shrink-0 items-center gap-1" role="group" aria-label={t("window.controls")}>
       <button type="button" className="window-action" aria-label={t("window.minimize")} title={t("window.minimize")} onClick={() => run(() => getCurrentWebviewWindow().minimize())}>
-        <Minus size={16} strokeWidth={1.75} aria-hidden="true" />
+        <Minus className="h-4 w-4" strokeWidth={1.75} aria-hidden="true" />
       </button>
       <button type="button" className="window-action" aria-label={maximizeLabel} title={maximizeLabel} onClick={() => run(async () => {
         const appWindow = getCurrentWebviewWindow();
         await appWindow.toggleMaximize();
         setMaximized(await appWindow.isMaximized());
       })}>
-        {maximized ? <Copy size={14} strokeWidth={1.75} aria-hidden="true" /> : <Square size={14} strokeWidth={1.75} aria-hidden="true" />}
+        {maximized ? <Copy className="h-[0.875rem] w-[0.875rem]" strokeWidth={1.75} aria-hidden="true" /> : <Square className="h-[0.875rem] w-[0.875rem]" strokeWidth={1.75} aria-hidden="true" />}
       </button>
-      <button type="button" className="window-action window-action--close" aria-label={t("window.close")} title={t("window.close")} onClick={() => run(() => getCurrentWebviewWindow().close())}>
-        <X size={17} strokeWidth={1.75} aria-hidden="true" />
+      <button type="button" className="window-action window-action--close" aria-label={t("window.close")} title={`${t("window.close")} (Alt+F4)`} aria-keyshortcuts="Alt+F4" onClick={() => run(() => getCurrentWebviewWindow().close())}>
+        <X className="h-[1.0625rem] w-[1.0625rem]" strokeWidth={1.75} aria-hidden="true" />
       </button>
     </div>
   );

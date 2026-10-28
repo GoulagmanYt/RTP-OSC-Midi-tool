@@ -47,6 +47,8 @@ it("covers feedback text and non-text controls in explicit and system palettes",
           ["ring", "card", 3], ["ring", "control", 3],
           ["success", "card", 3], ["muted-foreground", "card", 3],
           ["primary", "muted", 3],
+          ["foreground", "card", 3], ["foreground", "muted", 3],
+          ["foreground", "border", 3],
         ] as const) {
           const a = luminance(text), b = luminance(surface);
           expect((Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05),
