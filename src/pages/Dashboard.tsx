@@ -105,17 +105,19 @@ export default function Dashboard() {
   return (
     <div className="space-y-6 min-w-0">
       {status?.lastError ? <ErrorCard error={status.lastError} developerMode={isDeveloperMode(config)} t={t} /> : null}
-      <SignalFlow config={config} status={status} t={t} />
-      <OverviewGrid
-        audioDevice={audioDevice}
-        config={config}
-        limiterEnabled={limiterEnabled}
-        logs={logs}
-        rtpPort={rtpPort}
-        status={status}
-        t={t}
-        onNavigateLogs={() => navigate("/logs")}
-      />
+      <div className="dashboard-primary">
+        <SignalFlow config={config} status={status} t={t} />
+        <OverviewGrid
+          audioDevice={audioDevice}
+          config={config}
+          limiterEnabled={limiterEnabled}
+          logs={logs}
+          rtpPort={rtpPort}
+          status={status}
+          t={t}
+          onNavigateLogs={() => navigate("/logs")}
+        />
+      </div>
       {isDeveloperMode(config) && (
         <DiagnosticsGrid
           audioBackend={audioBackend}

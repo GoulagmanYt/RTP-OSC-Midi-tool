@@ -66,7 +66,7 @@ export function Shell() {
             setOpen(true);
           }}
         />
-        <main id="main-content" className="page-body flex-1 overflow-auto" tabIndex={-1}>
+        <main id="main-content" className={`page-body flex-1 overflow-auto ${location.pathname === "/" ? "dashboard-page" : ""}`} tabIndex={-1}>
           <div className="page-content">
             <div className="page-heading mb-7 space-y-1.5">
               <h1 className="text-[1.75rem] font-semibold tracking-tight">{t(`topBar.${pageKey}`)}</h1>

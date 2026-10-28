@@ -55,20 +55,23 @@ export function OverviewGrid({ audioDevice, config, limiterEnabled, logs, rtpPor
           </CardContent>
         </Card>
       </div>
-      <section className="border-t pt-4" aria-labelledby="recent-events-title">
+      <section className="overview-events border-t pt-4" aria-labelledby="recent-events-title">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
           <h2 id="recent-events-title" className="flex items-center gap-2 text-sm font-semibold"><ScrollText className="h-4 w-4 text-muted-foreground" aria-hidden="true" />{t("dashboard.quickLogs")}</h2>
           {developerMode && <Button variant="link" size="sm" className="min-h-8 px-0" onClick={onNavigateLogs}>{t("dashboard.viewMore")}<ArrowUpRight className="h-3.5 w-3.5" aria-hidden="true" /></Button>}
         </div>
         {logPreview.length === 0 ? <p className="text-sm text-muted-foreground">{t("dashboard.noRecentLogs")}</p> : (
-          <ul className="divide-y">
-            {logPreview.map((log, idx) => (
-              <li key={idx} className="flex flex-wrap items-start gap-x-3 gap-y-1 py-2 text-sm">
-                <span className="font-mono text-xs leading-6 text-muted-foreground">{log.timestamp}</span>
-                <Badge variant={log.level === "error" ? "destructive" : log.level === "warn" ? "warning" : "secondary"}>{t(`logs.level.${log.level}`)}</Badge>
-                <p className="min-w-0 flex-1 break-words leading-6">{developerMode ? log.message : t(log.level === "error" ? "dashboard.eventsError" : "dashboard.eventsWarning")}</p>
-              </li>
-            ))}
+          <ul className="divide-y" tabIndex={0} aria-labelledby="recent-events-title">
+            {logPreview.map((log, idx) => {
+              const message = developerMode ? log.message : t(log.level === "error" ? "dashboard.eventsError" : "dashboard.eventsWarning");
+              return (
+                <li key={idx} className="flex flex-wrap items-start gap-x-3 gap-y-1 py-2 text-sm">
+                  <span className="font-mono text-xs leading-6 text-muted-foreground">{log.timestamp}</span>
+                  <Badge variant={log.level === "error" ? "destructive" : log.level === "warn" ? "warning" : "secondary"}>{t(`logs.level.${log.level}`)}</Badge>
+                  <p className="min-w-0 flex-1 break-words leading-6" title={message}>{message}</p>
+                </li>
+              );
+            })}
           </ul>
         )}
       </section>

@@ -56,6 +56,12 @@ describe("OverviewGrid recent events", () => {
     expect(history).toHaveLength(6);
   });
 
+  it("keeps the complete message available in the compact preview", () => {
+    render(overview(true));
+    expect(screen.getByText(history[0].message).getAttribute("title")).toBe(history[0].message);
+    expect(screen.getByRole("list", { name: "dashboard.quickLogs" }).getAttribute("tabindex")).toBe("0");
+  });
+
   it("shows an empty overview for a normal session containing only informational and debug logs", () => {
     render(overview(false, history.slice(0, 3)));
     expect(screen.getByText("dashboard.noRecentLogs")).toBeTruthy();
