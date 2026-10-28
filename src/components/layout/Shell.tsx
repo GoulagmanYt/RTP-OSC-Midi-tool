@@ -22,7 +22,7 @@ export function Shell() {
 
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
-      if (!e.ctrlKey || e.altKey || e.shiftKey || e.repeat || e.isComposing) return;
+      if (e.defaultPrevented || !e.ctrlKey || e.altKey || e.shiftKey || e.repeat || e.isComposing) return;
       const key = e.key.toLowerCase();
       const modal = document.querySelector('[role="dialog"]');
       if (key === "k") {
@@ -31,13 +31,13 @@ export function Shell() {
         setOpen((open) => !open);
         return;
       }
-      if (modal) return;
+      if (modal || document.querySelector('[role="listbox"], [role="menu"], [role="alertdialog"]')) return;
       if (key === ",") {
         e.preventDefault();
         shortcutState.current.navigate("/settings");
         return;
       }
-      if (e.target instanceof Element && e.target.closest('input, textarea, select, [contenteditable="true"]')) return;
+      if (e.target instanceof Element && e.target.closest('input, textarea, select, [role="combobox"], [role="slider"], [role="spinbutton"], [role="textbox"], [contenteditable="true"]')) return;
       if (key === "b") {
         e.preventDefault();
         setSidebarVisible(visible => !visible);

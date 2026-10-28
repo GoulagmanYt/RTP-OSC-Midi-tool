@@ -19,6 +19,10 @@ it("supports Windows shortcuts without starting the bridge while editing or conf
   fireEvent.keyDown(input, { key: "Enter", ctrlKey: true });
   expect(toggleBridge).not.toHaveBeenCalled();
   input.remove();
+  const picker = document.createElement("button"); picker.setAttribute("role", "combobox"); document.body.append(picker);
+  fireEvent.keyDown(picker, { key: "Enter", ctrlKey: true });
+  expect(toggleBridge).not.toHaveBeenCalled();
+  picker.remove();
   const modal = document.createElement("div"); modal.setAttribute("role", "dialog"); document.body.append(modal);
   fireEvent.keyDown(document, { key: "Enter", ctrlKey: true });
   expect(toggleBridge).not.toHaveBeenCalled();
