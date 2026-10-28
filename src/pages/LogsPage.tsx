@@ -78,7 +78,7 @@ export default function LogsPage() {
   };
   const toggleSelection = (entry: LogEntry) => {
     // Freeze the displayed entries so selection never shifts under the pointer.
-    if (snapshot === null) setSnapshot(logs);
+    if (snapshot === null) { setSnapshot(logs); setFollow(false); }
     setSelection(previous => {
       const next = new Map(previous);
       const id = idFor(entry);
@@ -91,13 +91,19 @@ export default function LogsPage() {
     <div className="flex flex-wrap items-end gap-3">
       <Button variant="outline" onClick={() => {
         setSnapshot(snapshot === null ? logs : null);
+        setFollow(snapshot !== null);
         setSelection(new Map());
       }}>
         {snapshot === null ? <Pause className="h-4 w-4" aria-hidden="true" /> : <Play className="h-4 w-4" aria-hidden="true" />}
         {t(snapshot === null ? "ui.logs.pause" : "ui.logs.resume")}
       </Button>
       <label className="flex min-h-9 items-center gap-2 text-sm">
-        <input type="checkbox" className="h-7 w-7 accent-primary" checked={follow} onChange={event => setFollow(event.target.checked)} />
+        <input type="checkbox" className="h-7 w-7 accent-primary" checked={follow} onChange={event => {
+          const enabled = event.target.checked;
+          setFollow(enabled);
+          setSnapshot(enabled ? null : logs);
+          if (enabled) setSelection(new Map());
+        }} />
         {t("ui.logs.autoscroll")}
       </label>
       <label className="min-w-0 flex-1 basis-48 space-y-1 text-sm">
@@ -126,7 +132,10 @@ export default function LogsPage() {
       onScroll={event => {
         const top = event.currentTarget.scrollTop;
         setViewport(previous => ({ ...previous, top }));
-        if (top > 0 && follow) setFollow(false);
+        if (top > 0 && follow) {
+          setFollow(false);
+          if (snapshot === null) setSnapshot(logs);
+        }
       }}
       onKeyDown={event => {
         if (event.ctrlKey && event.key.toLowerCase() === "c" && selection.size > 0) {

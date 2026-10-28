@@ -13,6 +13,14 @@ it("reuses page actions and focuses labelled fields inside collapsed details", (
   expect(document.querySelector("details")!.open).toBe(true);
   expect(document.activeElement?.id).toBe("port");
 });
+it("includes Radix switches labelled by an external label", () => {
+  document.body.innerHTML = '<main><label for="osc-enabled">Enable OSC</label><button id="osc-enabled" role="switch"><span></span></button></main>';
+  expect(collectPageCommands().map(command => command.label)).toEqual(["Enable OSC"]);
+});
+it("uses the active dialog as its command context", () => {
+  document.body.innerHTML = '<main><button>Background</button></main><div role="dialog"><button>Reset EQ</button></div>';
+  expect(collectPageCommands().map(command => command.label)).toEqual(["Reset EQ"]);
+});
 it("does not execute a command that became disabled or was removed", () => {
   document.body.innerHTML = "<main><button>Action</button></main>";
   const command = collectPageCommands()[0];

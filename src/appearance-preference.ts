@@ -5,7 +5,7 @@ const KEY = "oscMIDI.appearance-choice.v1";
 export function initialAppearance(palette?: string): ThemePalette {
   const valid = palette === "light" || palette === "dark" || palette === "contrast" || palette === "system" ? palette : "system";
   try {
-    if (valid === "light" && !localStorage.getItem(KEY)) return "system";
+    if (valid === "light" && localStorage.getItem(KEY) !== "light") return "system";
   } catch {
     return valid === "light" ? "system" : valid;
   }

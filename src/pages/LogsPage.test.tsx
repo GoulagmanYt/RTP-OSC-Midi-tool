@@ -32,6 +32,15 @@ it("pauses incoming display updates and filters by level and search", () => {
   fireEvent.change(screen.getByRole("searchbox"), { target: { value: "" } });
   expect(screen.getByText("incoming")).toBeTruthy();
 });
+it("freezes the reading position when follow is disabled", () => {
+  const { rerender } = render(<LogsPage />);
+  fireEvent.click(screen.getByRole("checkbox", { name: "ui.logs.autoscroll" }));
+  state.logs = [{ timestamp: "next", level: "error", message: "new arrival" }, ...state.logs];
+  rerender(<LogsPage />);
+  expect(screen.queryByText("new arrival")).toBeNull();
+  expect(screen.getByText("message 0")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "ui.logs.resume" })).toBeTruthy();
+});
 it("confirms clearing and preserves the buffer on cancel", async () => {
   render(<LogsPage />);
   fireEvent.click(screen.getByRole("button", { name: "ui.clearLogView" }));

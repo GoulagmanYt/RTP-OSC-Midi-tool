@@ -33,7 +33,7 @@ export function Sidebar() {
             <p className="sidebar-heading mb-2 px-3 text-xs font-medium text-muted-foreground">{t(group.label)}</p>
             <div className="space-y-1">
               {group.items.map((item) => (
-                <NavLink key={item.to} to={item.to} end={item.to === "/"} className="nav-item" aria-label={item.label} title={item.label}>
+                <NavLink key={item.to} to={item.to} end={item.to === "/"} className="nav-item" aria-label={item.label} title={item.to === "/settings" ? `${item.label} (Ctrl+,)` : item.label}>
                   <item.icon className="h-[1.125rem] w-[1.125rem] shrink-0" strokeWidth={1.75} aria-hidden="true" />
                   <span className="sidebar-label">{item.label}</span>
                 </NavLink>

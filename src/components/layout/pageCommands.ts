@@ -6,7 +6,10 @@ function labelFor(element: HTMLElement): string {
     const label = labelledBy.split(/\s+/).map(id => document.getElementById(id)?.textContent ?? "").join(" ").trim();
     if (label) return label;
   }
+  const externalLabel = element.id ? Array.from(document.querySelectorAll("label"))
+    .filter(label => label.htmlFor === element.id).map(label => label.textContent).join(" ").trim() : "";
   return (element.getAttribute("aria-label")
+    || externalLabel
     || (element instanceof HTMLInputElement || element instanceof HTMLSelectElement || element instanceof HTMLTextAreaElement
       ? Array.from(element.labels ?? []).map(label => label.textContent).join(" ")
       : element.textContent)
@@ -15,9 +18,12 @@ function labelFor(element: HTMLElement): string {
 
 // One snapshot when opening the palette; no observers or idle polling.
 export function collectPageCommands(): PageCommand[] {
-  return Array.from(document.querySelectorAll<HTMLElement>(
-    "main button, main input:not([type=hidden]), main select, main textarea, main summary, header button",
-  )).filter(element => !element.closest('[hidden], [data-command-exclude]') && !element.matches(":disabled"))
+  const dialogs = Array.from(document.querySelectorAll<HTMLElement>('[role="dialog"]:not([aria-hidden="true"]):not([data-state="closed"])'));
+  const dialog = dialogs[dialogs.length - 1];
+  const root = dialog ?? document;
+  const selector = dialog ? "button, input:not([type=hidden]), select, textarea, summary"
+    : "main button, main input:not([type=hidden]), main select, main textarea, main summary, header button";
+  return Array.from(root.querySelectorAll<HTMLElement>(selector)).filter(element => !element.closest('[hidden], [data-command-exclude]') && !element.matches(":disabled"))
     .map((element, index) => ({ id: `page-control-${index}`, label: labelFor(element), element }))
     .filter(command => command.label.length > 0);
 }

@@ -25,7 +25,6 @@ export function Shell() {
       if (!e.ctrlKey || e.altKey || e.shiftKey || e.repeat || e.isComposing) return;
       const key = e.key.toLowerCase();
       const modal = document.querySelector('[role="dialog"]');
-      if (modal && !modal.querySelector('[cmdk-root]')) return;
       if (key === "k") {
         e.preventDefault();
         setCommandPaletteRequested(true);

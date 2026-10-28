@@ -20,6 +20,7 @@ import {
   CommandItem,
   CommandList,
   CommandSeparator,
+  CommandShortcut,
 } from "../ui/command";
 import { openVstUi, resetConfigDefaults, restartRtp } from "../../api";
 import { useBridge } from "../../providers/BridgeProvider";
@@ -37,6 +38,7 @@ interface CommandPaletteProps {
 export default function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
   const navigate = useNavigate();
   const pageCommands = useMemo(() => open ? collectPageCommands() : [], [open]);
+  const inDialog = useMemo(() => open && Boolean(document.querySelector('[role="dialog"]:not([aria-hidden="true"]):not([data-state="closed"])')), [open]);
   const { toggleBridge, status, reloadConfig, refreshStatus, config } = useBridge();
   const { t } = useI18n();
   const { confirmAction, confirmation } = useConfirmAction(t);
@@ -58,7 +60,7 @@ export default function CommandPalette({ open, onOpenChange }: CommandPalettePro
       <CommandInput placeholder={t("command.placeholder")} aria-label={t("command.placeholder")} />
       <CommandList>
         <CommandEmpty>{t("command.noResults")}</CommandEmpty>
-        <CommandGroup heading={t("command.navigation")}>
+        {!inDialog && <CommandGroup heading={t("command.navigation")}>
           <CommandItem onSelect={() => runCommand(() => navigate("/"))}>
             <LayoutDashboard className="mr-2 h-4 w-4" />
             <span>{t("nav.dashboard")}</span>
@@ -85,9 +87,9 @@ export default function CommandPalette({ open, onOpenChange }: CommandPalettePro
           </CommandItem>}
           <CommandItem onSelect={() => runCommand(() => navigate("/settings"))}>
             <Settings className="mr-2 h-4 w-4" />
-            <span>{t("nav.settings")}</span>
+            <span>{t("nav.settings")}</span><CommandShortcut>Ctrl+,</CommandShortcut>
           </CommandItem>
-        </CommandGroup>
+        </CommandGroup>}
         <CommandSeparator />
         <CommandGroup heading={t("ui.pageCommands")}>
           {pageCommands.map(command => <CommandItem key={command.id} value={`${command.label} ${command.id}`} onSelect={() => runCommand(() => {
@@ -98,10 +100,10 @@ export default function CommandPalette({ open, onOpenChange }: CommandPalettePro
           })}>{t("ui.pageCommands")} · {command.label}</CommandItem>)}
         </CommandGroup>
         <CommandSeparator />
-        <CommandGroup heading={t("command.actions")}>
+        {!inDialog && <CommandGroup heading={t("command.actions")}>
           <CommandItem onSelect={() => runCommand(() => toggleBridge())}>
             <Power className="mr-2 h-4 w-4" />
-            <span>{status?.running ? t("actions.stopBridge") : t("actions.startBridge")}</span>
+            <span>{status?.running ? t("actions.stopBridge") : t("actions.startBridge")}</span><CommandShortcut>Ctrl+Enter</CommandShortcut>
           </CommandItem>
           <CommandItem
             onSelect={() =>
@@ -144,7 +146,7 @@ export default function CommandPalette({ open, onOpenChange }: CommandPalettePro
             <Settings className="mr-2 h-4 w-4" />
             <span>{t("ui.resetConfiguration")}</span>
           </CommandItem>
-        </CommandGroup>
+        </CommandGroup>}
       </CommandList>
     </CommandDialog>
     </>

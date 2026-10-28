@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { createDefaultVstEqSettings } from "./eq";
 import { VstEqDialog } from "./VstEqDialog";
@@ -23,7 +23,7 @@ describe("VstEqDialog", () => {
     expect(graph.textContent).not.toContain("20k");
     expect(graph.textContent).toContain("4k");
   });
-  it("shows the selected plugin, response graph, live bypass and reset controls", () => {
+  it("shows the selected plugin and requires confirmation before resetting EQ", async () => {
     const onChange = vi.fn();
     const onReset = vi.fn();
     const settings = createDefaultVstEqSettings();
@@ -53,6 +53,9 @@ describe("VstEqDialog", () => {
       lowShelf: { ...settings.lowShelf, gainDb: -18 },
     });
     fireEvent.click(screen.getByRole("button", { name: /audio.eq.reset/ }));
-    expect(onReset).toHaveBeenCalledOnce();
+    expect(onReset).not.toHaveBeenCalled();
+    const confirmation = screen.getByRole("dialog", { name: "audio.eq.reset" });
+    fireEvent.click(within(confirmation).getByRole("button", { name: "audio.eq.reset" }));
+    await waitFor(() => expect(onReset).toHaveBeenCalledOnce());
   });
 });

@@ -1,5 +1,5 @@
 import { RotateCcw } from "lucide-react";
-import { toast } from "sonner";
+import { useConfirmAction } from "../../components/ui/useConfirmAction";
 import type { VstEqSettings } from "../../api-types";
 import { Button } from "../../components/ui/Button";
 import {
@@ -180,7 +180,10 @@ function ResponseGraph({ settings, sampleRate, label }: { settings: VstEqSetting
 }
 
 export function VstEqDialog({ open, pluginName, settings, sampleRate, t, onOpenChange, onChange, onReset }: Props) {
+  const { confirmAction, confirmation } = useConfirmAction(t);
   return (
+    <>
+    {confirmation}
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[92vh] max-w-4xl overflow-y-auto">
         <DialogHeader>
@@ -269,12 +272,13 @@ export function VstEqDialog({ open, pluginName, settings, sampleRate, t, onOpenC
         </div>
 
         <DialogFooter>
-          <Button variant="outline" onClick={() => { onReset(); toast.success(t("audio.eq.reset"), { duration: 10000, action: { label: t("ui.undo"), onClick: () => onChange(settings) } }); }}>
+          <Button variant="outline" onClick={() => confirmAction(t("audio.eq.reset"), onReset)}>
             <RotateCcw className="mr-2 h-4 w-4" />
             {t("audio.eq.reset")}
           </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
+    </>
   );
 }
