@@ -3,8 +3,9 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
 import { Shell } from "./Shell";
 
+const toggleBridge = vi.fn();
 vi.mock("../../providers/BridgeProvider", () => ({
-  useBridge: () => ({ config: { ui: { developerMode: false } }, status: { running: false }, isLoading: false }),
+  useBridge: () => ({ config: { ui: { developerMode: false } }, status: { running: false }, isLoading: false, toggleBridge }),
 }));
 vi.mock("../../providers/LanguageProvider", () => ({
   useI18n: () => ({ t: (key: string) => key, language: "fr" }),

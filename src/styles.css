@@ -234,7 +234,7 @@ summary { min-height: 1.75rem; padding-block: 0.25rem; }
   :root { --page-padding: 20px; }
   .signal-flow { grid-template-columns: minmax(0, 1fr) 7rem minmax(0, 1fr); }
 }
-@media (max-width: 900px) {
+@media (max-width: 1100px) {
   :root { --sidebar-width: 4.25rem; }
   .sidebar-label, .sidebar-heading, .sidebar-footer { display: none; }
   .sidebar-brand { justify-content: center; padding-inline: 0.5rem; }

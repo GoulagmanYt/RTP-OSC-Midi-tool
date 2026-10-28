@@ -1,3 +1,5 @@
+import { useMemo } from "react";
+import { collectPageCommands, activatePageCommand } from "./pageCommands";
 import { useNavigate } from "react-router-dom";
 import {
   Settings,
@@ -34,6 +36,7 @@ interface CommandPaletteProps {
 
 export default function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
   const navigate = useNavigate();
+  const pageCommands = useMemo(() => open ? collectPageCommands() : [], [open]);
   const { toggleBridge, status, reloadConfig, refreshStatus, config } = useBridge();
   const { t } = useI18n();
   const { confirmAction, confirmation } = useConfirmAction(t);
@@ -84,6 +87,15 @@ export default function CommandPalette({ open, onOpenChange }: CommandPalettePro
             <Settings className="mr-2 h-4 w-4" />
             <span>{t("nav.settings")}</span>
           </CommandItem>
+        </CommandGroup>
+        <CommandSeparator />
+        <CommandGroup heading={t("ui.pageCommands")}>
+          {pageCommands.map(command => <CommandItem key={command.id} value={`${command.label} ${command.id}`} onSelect={() => runCommand(() => {
+            // Wait for the palette to release its focus trap before focusing a page control.
+            window.setTimeout(() => {
+              if (!activatePageCommand(command)) toast.error(t("ui.commandUnavailable"));
+            }, 0);
+          })}>{t("ui.pageCommands")} · {command.label}</CommandItem>)}
         </CommandGroup>
         <CommandSeparator />
         <CommandGroup heading={t("command.actions")}>

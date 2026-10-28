@@ -1,4 +1,5 @@
 export const enUi = {
+  "pageCommands": "Controls on this page",
   "activityActive": "Active",
   "undo": "Undo",
   "actionFailed": "The action could not be completed. Check the application folders and devices, then try again.",
@@ -62,6 +63,7 @@ export const enUi = {
 };
 
 export const frUi: typeof enUi = {
+  "pageCommands": "Commandes de cette page",
   "activityActive": "Actif",
   "undo": "Annuler",
   "actionFailed": "L’action n’a pas pu aboutir. Vérifiez les dossiers et les périphériques de l’application, puis réessayez.",

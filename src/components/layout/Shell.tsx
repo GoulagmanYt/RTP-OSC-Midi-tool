@@ -1,8 +1,9 @@
-import { Suspense, lazy, useEffect, useState } from "react";
-import { Outlet, useLocation } from "react-router-dom";
+import { Suspense, lazy, useEffect, useRef, useState } from "react";
+import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import { Sidebar } from "./Sidebar";
 import { TopBar } from "./TopBar";
 import { useI18n } from "../../providers/LanguageProvider";
+import { useBridge } from "../../providers/BridgeProvider";
 import { pageKeys } from "./pageMeta";
 
 const CommandPalette = lazy(() => import("./CommandPalette"));
@@ -10,6 +11,10 @@ const CommandPalette = lazy(() => import("./CommandPalette"));
 export function Shell() {
   const { t } = useI18n();
   const location = useLocation();
+  const navigate = useNavigate();
+  const { toggleBridge, isLoading, config } = useBridge();
+  const shortcutState = useRef({ navigate, toggleBridge, isLoading, config });
+  shortcutState.current = { navigate, toggleBridge, isLoading, config };
   const pageKey = pageKeys[location.pathname] ?? "dashboard";
   const [open, setOpen] = useState(false);
   const [sidebarVisible, setSidebarVisible] = useState(true);
@@ -17,10 +22,30 @@ export function Shell() {
 
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
-      if (e.key === "k" && (e.metaKey || e.ctrlKey)) {
+      if (!e.ctrlKey || e.altKey || e.shiftKey || e.repeat || e.isComposing) return;
+      const key = e.key.toLowerCase();
+      const modal = document.querySelector('[role="dialog"]');
+      if (modal && !modal.querySelector('[cmdk-root]')) return;
+      if (key === "k") {
         e.preventDefault();
         setCommandPaletteRequested(true);
         setOpen((open) => !open);
+        return;
+      }
+      if (modal) return;
+      if (key === ",") {
+        e.preventDefault();
+        shortcutState.current.navigate("/settings");
+        return;
+      }
+      if (e.target instanceof Element && e.target.closest('input, textarea, select, [contenteditable="true"]')) return;
+      if (key === "b") {
+        e.preventDefault();
+        setSidebarVisible(visible => !visible);
+      }
+      if (key === "enter" && !shortcutState.current.isLoading && shortcutState.current.config) {
+        e.preventDefault();
+        void shortcutState.current.toggleBridge();
       }
     };
     document.addEventListener("keydown", down);
