@@ -297,6 +297,9 @@ impl AudioEngine {
             metrics.audio_wait_max_us = t.audio_wait_max_us.load(Ordering::Relaxed);
             metrics.midi_delivery_max_us = t.midi_delivery_max_us.load(Ordering::Relaxed);
             metrics.midi_delivery_p99_us = t.midi_delivery_percentile(99);
+            metrics.midi_recovery_max_lag_us = t.midi_recovery_max_lag_us.load(Ordering::Relaxed);
+            metrics.midi_recovery_max_duration_us =
+                t.midi_recovery_max_duration_us.load(Ordering::Relaxed);
             metrics.x86_bridge_underruns = t.x86_underruns.load(Ordering::Relaxed);
             metrics.x86_bridge_overruns = t.x86_overruns.load(Ordering::Relaxed);
             metrics.x86_worker_alive = t.x86_alive.load(Ordering::Relaxed);

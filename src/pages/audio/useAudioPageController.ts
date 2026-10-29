@@ -24,6 +24,9 @@ import { mergeLiveAudioMetrics } from "./liveStatus";
 import { getAudioLatency } from "./latency";
 import { getErrorMessage } from "../../api-errors";
 import { BUNDLED_VST_EQ_KEY, createDefaultVstEqSettings, getVstEqKey } from "./eq";
+import { createVstParameterQueue } from "./vstParameterQueue";
+
+const vstParameterQueue = createVstParameterQueue(setVstParameter);
 
 export function useAudioPageController() {
   const {
@@ -63,6 +66,7 @@ export function useAudioPageController() {
   const vstEqSendInFlight = useRef(false);
   const pendingVstParams = useRef<Map<number, number>>(new Map());
   const vstParamFrame = useRef<number | null>(null);
+  const vstParamOwner = useRef(Symbol());
   const vstEqControllerMounted = useRef(true);
   const flushVstEqRef = useRef<() => void>(() => undefined);
   const flushVstParamsRef = useRef<() => void>(() => undefined);
@@ -76,6 +80,7 @@ export function useAudioPageController() {
     setVstParameterDialogOpen(false);
     setVstParams([]);
     pendingVstParams.current.clear();
+    vstParameterQueue.cancel(vstParamOwner.current);
     if (vstParamFrame.current !== null) {
       window.cancelAnimationFrame(vstParamFrame.current);
       vstParamFrame.current = null;
@@ -84,6 +89,10 @@ export function useAudioPageController() {
 
   useEffect(() => {
     activePluginIdRef.current = config?.audio.vstPluginId ?? config?.audio.vstPath ?? null;
+    vstParameterQueue.setTarget(JSON.stringify([
+      activePluginIdRef.current, status?.audioRunning,
+      status?.vstWorkerState, status?.vstWorkerRestarts,
+    ]));
     invalidateVstParameters();
   }, [config?.audio.vstPluginId, config?.audio.vstPath, status?.audioRunning,
     status?.vstWorkerState, status?.vstWorkerRestarts, invalidateVstParameters]);
@@ -462,11 +471,10 @@ export function useAudioPageController() {
 
   const flushVstParams = useCallback(() => {
     vstParamFrame.current = null;
-    if (pendingVstParams.current.size === 0) return;
     const entries = Array.from(pendingVstParams.current.entries());
     pendingVstParams.current.clear();
     for (const [idx, val] of entries) {
-      setVstParameter(idx, val).catch((e) => {
+      vstParameterQueue.enqueue(vstParamOwner.current, idx, val, (e) => {
         const message = getErrorMessage(e);
         toast.error(message || t("toasts.audio.vstParamFailed"));
       });

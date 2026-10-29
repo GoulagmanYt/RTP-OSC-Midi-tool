@@ -4,6 +4,16 @@
 #[derive(Default)]
 pub(super) struct MidiPlaybackClock {
     cursor_us: Option<u64>,
+    recovery_started_us: Option<u64>,
+}
+
+/// Observation of an admitted block; failed admission does not advance recovery.
+#[derive(Default)]
+pub(super) struct MidiRecoveryObservation {
+    /// Source-clock lag relative to the normal start of this audio block.
+    pub(super) lag_us: u64,
+    /// Source-clock time from the first recovery block's start through this block's end.
+    pub(super) duration_us: u64,
 }
 
 impl MidiPlaybackClock {
@@ -24,19 +34,39 @@ impl MidiPlaybackClock {
         block
     }
 
-    pub(super) fn commit(&mut self, block: &MidiBlockTiming, next_us: Option<u64>) {
+    pub(super) fn commit(
+        &mut self,
+        block: &MidiBlockTiming,
+        next_us: Option<u64>,
+    ) -> MidiRecoveryObservation {
         // Capacity spills must not advance the cursor past unsubmitted events.
         let cursor = next_us.map_or(block.end_us, |next| next.min(block.end_us));
         self.cursor_us = (cursor < block.now_us).then_some(cursor.max(block.start_us));
+        let lag_us = block.live_start_us.saturating_sub(block.start_us);
+        if lag_us > 0 && self.recovery_started_us.is_none() {
+            self.recovery_started_us = Some(block.live_start_us);
+        }
+        let duration_us = self
+            .recovery_started_us
+            .map_or(0, |start| block.now_us.saturating_sub(start));
+        if self.cursor_us.is_none() {
+            self.recovery_started_us = None;
+        }
+        MidiRecoveryObservation {
+            lag_us,
+            duration_us,
+        }
     }
 
     pub(super) fn reset(&mut self) {
         self.cursor_us = None;
+        self.recovery_started_us = None;
     }
 }
 
 pub(super) struct MidiBlockTiming {
     start_us: u64,
+    live_start_us: u64,
     end_us: u64,
     now_us: u64,
     frames: u64,
@@ -49,6 +79,7 @@ impl MidiBlockTiming {
         let period_us = frames.saturating_mul(1_000_000) / u64::from(sample_rate.max(1));
         Self {
             start_us: now_us.saturating_sub(period_us.max(1)),
+            live_start_us: now_us.saturating_sub(period_us.max(1)),
             end_us: now_us,
             now_us,
             frames,
@@ -76,6 +107,78 @@ impl MidiBlockTiming {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn simulated_stalls_measure_recovery_lag_and_duration() {
+        for lag_us in [50_000, 100_000, 300_000] {
+            let mut clock = MidiPlaybackClock::default();
+            let mut max_lag = 0;
+            let mut duration = 0;
+            for index in 0..100 {
+                let block = clock.begin_block(
+                    480,
+                    48_000,
+                    1_000_000 + index * 10_000,
+                    (index == 0).then_some(990_000 - lag_us),
+                );
+                let recovery = clock.commit(&block, None);
+                max_lag = max_lag.max(recovery.lag_us);
+                duration = duration.max(recovery.duration_us);
+                if clock.cursor_us.is_none() {
+                    break;
+                }
+            }
+            assert_eq!(max_lag, lag_us);
+            assert_eq!(
+                duration, lag_us,
+                "2x recovery takes one extra block per block of lag"
+            );
+            println!("simulated lag_us={max_lag}, recovery_duration_us={duration}");
+        }
+    }
+
+    #[test]
+    fn reset_starts_a_new_recovery_episode_and_live_blocks_report_zero() {
+        let mut clock = MidiPlaybackClock::default();
+        let live = clock.begin_block(480, 48_000, 1_000_000, None);
+        assert_eq!(clock.commit(&live, None).duration_us, 0);
+        let late = clock.begin_block(480, 48_000, 1_010_000, Some(900_000));
+        assert_eq!(clock.commit(&late, None).duration_us, 10_000);
+        // An uncommitted (failed admission) block must not advance recovery.
+        let _ = clock.begin_block(480, 48_000, 1_500_000, Some(900_000));
+        clock.reset();
+        let late = clock.begin_block(480, 48_000, 2_000_000, Some(1_900_000));
+        let recovery = clock.commit(&late, Some(1_905_000));
+        assert_eq!(recovery.duration_us, 10_000);
+        assert_eq!(recovery.lag_us, 90_000);
+        let spilled = clock.begin_block(480, 48_000, 2_010_000, None);
+        assert_eq!(clock.commit(&spilled, None).duration_us, 20_000);
+    }
+
+    #[test]
+    fn telemetry_keeps_session_maxima_across_recovery_resets() {
+        use super::super::runtime_state::AudioTelemetry;
+        use std::sync::atomic::Ordering;
+        let telemetry = AudioTelemetry::new();
+        let mut clock = MidiPlaybackClock::default();
+        for (now, oldest) in [(1_000_000, 900_000), (1_010_000, 0)] {
+            let block = clock.begin_block(480, 48_000, now, Some(oldest));
+            telemetry.record_midi_recovery(clock.commit(&block, None));
+        }
+        clock.reset();
+        let live = clock.begin_block(480, 48_000, 2_000_000, None);
+        telemetry.record_midi_recovery(clock.commit(&live, None));
+        assert_eq!(
+            telemetry.midi_recovery_max_lag_us.load(Ordering::Relaxed),
+            90_000
+        );
+        assert_eq!(
+            telemetry
+                .midi_recovery_max_duration_us
+                .load(Ordering::Relaxed),
+            20_000
+        );
+    }
 
     #[test]
     fn time_and_frame_boundaries_saturate_without_wrapping() {

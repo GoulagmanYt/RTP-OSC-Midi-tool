@@ -209,6 +209,8 @@ pub(super) struct AudioTelemetry {
     pub(super) x86_overruns: AtomicU32,
     pub(super) x86_alive: AtomicBool,
     pub(super) midi_delivery_max_us: AtomicU64,
+    pub(super) midi_recovery_max_lag_us: AtomicU64,
+    pub(super) midi_recovery_max_duration_us: AtomicU64,
     pub(super) midi_delivery_histogram: [AtomicU64; 512],
     pub(super) callback_count: AtomicU64,
     pub(super) callback_last_qpc: AtomicU64,
@@ -268,6 +270,8 @@ impl AudioTelemetry {
             x86_overruns: AtomicU32::new(0),
             x86_alive: AtomicBool::new(true),
             midi_delivery_max_us: AtomicU64::new(0),
+            midi_recovery_max_lag_us: AtomicU64::new(0),
+            midi_recovery_max_duration_us: AtomicU64::new(0),
             midi_delivery_histogram: std::array::from_fn(|_| AtomicU64::new(0)),
             callback_count: AtomicU64::new(0),
             callback_last_qpc: AtomicU64::new(0),
@@ -293,6 +297,20 @@ impl AudioTelemetry {
             audio_midi_queue_depth: AtomicU32::new(0),
             audio_midi_queue_max_depth: AtomicU32::new(0),
             audio_midi_oldest_us: AtomicU64::new(0),
+        }
+    }
+
+    pub(super) fn record_midi_recovery(
+        &self,
+        recovery: super::midi_playback::MidiRecoveryObservation,
+    ) {
+        if recovery.lag_us > 0 {
+            self.midi_recovery_max_lag_us
+                .fetch_max(recovery.lag_us, Ordering::Relaxed);
+        }
+        if recovery.duration_us > 0 {
+            self.midi_recovery_max_duration_us
+                .fetch_max(recovery.duration_us, Ordering::Relaxed);
         }
     }
 

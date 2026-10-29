@@ -123,9 +123,10 @@ pub(super) fn prepare_pending_vst2_midi(state: &mut AudioCallbackState, now_us: 
             _reserved2: 0,
         });
     }
-    state
+    let recovery = state
         .midi_playback
         .commit(&timing, state.next_midi_timestamp_us());
+    state.telemetry.record_midi_recovery(recovery);
     for (index, event) in state.vst2_midi_events.iter_mut().enumerate() {
         state.vst2_event_batch.events[index] = event as *mut api::MidiEvent as *mut api::Event;
     }
@@ -206,9 +207,10 @@ pub(super) fn submit_pending_vst3_midi_at(
     for msg in state.pending_midi.drain(..consumed) {
         state.telemetry.record_midi_delivery(msg);
     }
-    state
+    let recovery = state
         .midi_playback
         .commit(&timing, state.next_midi_timestamp_us());
+    state.telemetry.record_midi_recovery(recovery);
     Ok(())
 }
 

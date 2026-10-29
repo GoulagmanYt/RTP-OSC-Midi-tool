@@ -1,5 +1,54 @@
 use super::*;
 
+#[tokio::test(flavor = "current_thread")]
+async fn long_command_yields_to_the_calling_thread() {
+    let caller = std::thread::current().id();
+    let (release, wait) = std::sync::mpsc::channel();
+    let command = blocking_command("test.task-failed", "test", move || {
+        // The other future can release this simulated long operation only if
+        // polling the command leaves the single async thread available.
+        let released = wait.recv_timeout(std::time::Duration::from_secs(2)).is_ok();
+        Ok((released, std::thread::current().id()))
+    });
+    let (result, ()) = tokio::join!(biased; command, async move {
+        let _ = release.send(());
+    });
+    let (released, worker) = result.expect("command result");
+    assert!(
+        released,
+        "blocking command prevented its caller from progressing"
+    );
+    assert_ne!(caller, worker, "service must run on a blocking thread");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn blocking_command_preserves_service_errors() {
+    let error = blocking_command("test.task-failed", "test", || {
+        Err::<(), _>(CommandError::new(
+            "audio.original",
+            "audio",
+            "service error",
+        ))
+    })
+    .await
+    .expect_err("service error");
+    assert_eq!(error.code, "audio.original");
+    assert_eq!(error.domain, "audio");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn blocking_command_maps_task_panics_to_command_errors() {
+    let error = blocking_command("audio.test-task-failed", "audio", || {
+        panic!("simulated blocking task failure");
+        #[allow(unreachable_code)]
+        Ok(())
+    })
+    .await
+    .expect_err("task failure");
+    assert_eq!(error.code, "audio.test-task-failed");
+    assert_eq!(error.domain, "audio");
+}
+
 #[test]
 fn get_app_paths_returns_legacy_shape() {
     let paths = get_app_paths().expect("paths");

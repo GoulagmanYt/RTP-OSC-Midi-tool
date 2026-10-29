@@ -862,12 +862,15 @@ impl RemotePlugin {
             );
             event_count =
                 write_bridge_midi_events(&mut slot.events, midi, event_count, &mut timing);
-            self.midi_playback.commit(
+            let recovery = self.midi_playback.commit(
                 &timing,
                 midi.front()
                     .map(|packet| packet.timestamp_us)
                     .or(next_ingress_us),
             );
+            if let Some(telemetry) = telemetry {
+                telemetry.record_midi_recovery(recovery);
+            }
             let parameter_count = self
                 .pending_parameter_changes
                 .len()

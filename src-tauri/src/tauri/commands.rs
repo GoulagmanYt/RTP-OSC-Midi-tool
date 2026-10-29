@@ -17,6 +17,16 @@ use crate::{
 #[path = "commands_tests.rs"]
 mod tests;
 
+async fn blocking_command<T: Send + 'static>(
+    code: &'static str,
+    domain: &'static str,
+    task: impl FnOnce() -> Result<T, CommandError> + Send + 'static,
+) -> Result<T, CommandError> {
+    ::tauri::async_runtime::spawn_blocking(task)
+        .await
+        .map_err(|error| CommandError::new(code, domain, error.to_string()))?
+}
+
 #[::tauri::command]
 pub fn get_config(app: AppHandle, state: State<AppState>) -> Result<Config, CommandError> {
     services::get_config(&app, state.inner())
@@ -51,9 +61,12 @@ pub async fn start_bridge(
     app: AppHandle,
     window: Window,
     config: Config,
-    state: State<'_, AppState>,
 ) -> Result<BridgeStatus, CommandError> {
-    services::start_bridge(&app, &window, config, state.inner())
+    blocking_command("runtime.start-task-failed", "runtime", move || {
+        let state = app.state::<AppState>();
+        services::start_bridge(&app, &window, config, state.inner())
+    })
+    .await
 }
 
 #[::tauri::command]
@@ -62,8 +75,12 @@ pub async fn stop_bridge(app: AppHandle, state: State<'_, AppState>) -> Result<(
 }
 
 #[::tauri::command]
-pub fn panic_midi(state: State<AppState>) -> Result<(), CommandError> {
-    services::panic_midi(state.inner())
+pub async fn panic_midi(app: AppHandle) -> Result<(), CommandError> {
+    blocking_command("runtime.panic-task-failed", "runtime", move || {
+        let state = app.state::<AppState>();
+        services::panic_midi(state.inner())
+    })
+    .await
 }
 
 #[::tauri::command]
@@ -85,8 +102,12 @@ pub fn get_status(window: Window, state: State<AppState>) -> BridgeStatus {
 }
 
 #[::tauri::command]
-pub fn restart_rtp(window: Window, state: State<AppState>) -> Result<BridgeStatus, CommandError> {
-    services::restart_rtp(&window, state.inner())
+pub async fn restart_rtp(app: AppHandle, window: Window) -> Result<BridgeStatus, CommandError> {
+    blocking_command("runtime.restart-rtp-task-failed", "runtime", move || {
+        let state = app.state::<AppState>();
+        services::restart_rtp(&window, state.inner())
+    })
+    .await
 }
 
 #[::tauri::command]
@@ -111,16 +132,24 @@ pub fn reset_config_defaults(
 }
 
 #[::tauri::command]
-pub fn list_audio_backends(state: State<AppState>) -> Vec<String> {
-    services::list_audio_backends(state.inner())
+pub async fn list_audio_backends(app: AppHandle) -> Result<Vec<String>, CommandError> {
+    blocking_command("audio.list-backends-task-failed", "audio", move || {
+        let state = app.state::<AppState>();
+        Ok(services::list_audio_backends(state.inner()))
+    })
+    .await
 }
 
 #[::tauri::command]
-pub fn list_audio_devices(
+pub async fn list_audio_devices(
+    app: AppHandle,
     backend: Option<String>,
-    state: State<AppState>,
-) -> Vec<AudioDeviceEntry> {
-    services::list_audio_devices(backend, state.inner())
+) -> Result<Vec<AudioDeviceEntry>, CommandError> {
+    blocking_command("audio.list-devices-task-failed", "audio", move || {
+        let state = app.state::<AppState>();
+        Ok(services::list_audio_devices(backend, state.inner()))
+    })
+    .await
 }
 
 #[::tauri::command]
@@ -130,27 +159,36 @@ pub fn list_vst_plugins(state: State<AppState>) -> Vec<VstPluginEntry> {
 
 #[::tauri::command]
 pub async fn refresh_vst_plugins(
+    app: AppHandle,
     window: Window,
-    state: State<'_, AppState>,
 ) -> Result<Vec<VstPluginEntry>, CommandError> {
-    let _ = window.emit(
-        "vst:scan-progress",
-        serde_json::json!({ "state": "started" }),
-    );
-    let plugins = services::refresh_vst_plugins(state.inner());
-    let _ = window.emit(
-        "vst:scan-progress",
-        serde_json::json!({ "state": "finished", "count": plugins.len() }),
-    );
-    Ok(plugins)
+    blocking_command(
+        "audio.refresh-vst-plugins-task-failed",
+        "audio",
+        move || {
+            let state = app.state::<AppState>();
+            let _ = window.emit(
+                "vst:scan-progress",
+                serde_json::json!({ "state": "started" }),
+            );
+            let plugins = services::refresh_vst_plugins(state.inner());
+            let _ = window.emit(
+                "vst:scan-progress",
+                serde_json::json!({ "state": "finished", "count": plugins.len() }),
+            );
+            Ok(plugins)
+        },
+    )
+    .await
 }
 
 #[::tauri::command]
-pub fn retest_vst_plugin(
-    id: String,
-    state: State<AppState>,
-) -> Result<VstPluginEntry, CommandError> {
-    services::retest_vst_plugin(&id, state.inner())
+pub async fn retest_vst_plugin(app: AppHandle, id: String) -> Result<VstPluginEntry, CommandError> {
+    blocking_command("audio.retest-vst-plugin-task-failed", "audio", move || {
+        let state = app.state::<AppState>();
+        services::retest_vst_plugin(&id, state.inner())
+    })
+    .await
 }
 
 #[::tauri::command]
@@ -159,31 +197,47 @@ pub fn open_vst_folder(id: String, state: State<AppState>) -> Result<(), Command
 }
 
 #[::tauri::command]
-pub fn list_vst_parameters(state: State<AppState>) -> Result<Vec<VstParameter>, CommandError> {
-    services::list_vst_parameters(state.inner())
+pub async fn list_vst_parameters(app: AppHandle) -> Result<Vec<VstParameter>, CommandError> {
+    blocking_command(
+        "audio.list-vst-parameters-task-failed",
+        "audio",
+        move || {
+            let state = app.state::<AppState>();
+            services::list_vst_parameters(state.inner())
+        },
+    )
+    .await
 }
 
 #[::tauri::command]
-pub fn set_vst_parameter(
+pub async fn set_vst_parameter(
+    app: AppHandle,
     index: usize,
     value: f32,
-    state: State<'_, AppState>,
 ) -> Result<(), CommandError> {
-    services::set_vst_parameter(index, value, state.inner())
+    blocking_command("audio.set-vst-parameter-task-failed", "audio", move || {
+        let state = app.state::<AppState>();
+        services::set_vst_parameter(index, value, state.inner())
+    })
+    .await
 }
 
 #[::tauri::command]
-pub async fn open_vst_ui(
-    app: AppHandle,
-    window: Window,
-    state: State<'_, AppState>,
-) -> Result<(), CommandError> {
-    services::open_vst_ui(&app, &window, state.inner())
+pub async fn open_vst_ui(app: AppHandle, window: Window) -> Result<(), CommandError> {
+    blocking_command("audio.open-vst-ui-task-failed", "audio", move || {
+        let state = app.state::<AppState>();
+        services::open_vst_ui(&app, &window, state.inner())
+    })
+    .await
 }
 
 #[::tauri::command]
-pub async fn close_vst_ui(app: AppHandle, state: State<'_, AppState>) -> Result<(), CommandError> {
-    services::close_vst_ui(&app, state.inner())
+pub async fn close_vst_ui(app: AppHandle) -> Result<(), CommandError> {
+    blocking_command("audio.close-vst-ui-task-failed", "audio", move || {
+        let state = app.state::<AppState>();
+        services::close_vst_ui(&app, state.inner())
+    })
+    .await
 }
 
 #[::tauri::command]
@@ -205,29 +259,33 @@ pub fn set_vst_eq(
 }
 
 #[::tauri::command]
-pub async fn ping_audio(
-    app: AppHandle,
-    window: Window,
-    state: State<'_, AppState>,
-) -> Result<(), CommandError> {
-    services::ping_audio(&app, &window, state.inner())
+pub async fn ping_audio(app: AppHandle, window: Window) -> Result<(), CommandError> {
+    blocking_command("audio.ping-task-failed", "audio", move || {
+        let state = app.state::<AppState>();
+        services::ping_audio(&app, &window, state.inner())
+    })
+    .await
 }
 
 #[::tauri::command]
-pub async fn reload_vst(
-    app: AppHandle,
-    window: Window,
-    state: State<'_, AppState>,
-) -> Result<BridgeStatus, CommandError> {
-    services::reload_vst(&app, &window, state.inner())
+pub async fn reload_vst(app: AppHandle, window: Window) -> Result<BridgeStatus, CommandError> {
+    blocking_command("audio.reload-vst-task-failed", "audio", move || {
+        let state = app.state::<AppState>();
+        services::reload_vst(&app, &window, state.inner())
+    })
+    .await
 }
 
 #[::tauri::command]
-pub fn preflight_check(
+pub async fn preflight_check(
+    app: AppHandle,
     config: Option<Config>,
-    state: State<AppState>,
 ) -> Result<PreflightReport, CommandError> {
-    services::preflight_check(config, state.inner())
+    blocking_command("runtime.preflight-task-failed", "runtime", move || {
+        let state = app.state::<AppState>();
+        services::preflight_check(config, state.inner())
+    })
+    .await
 }
 
 #[::tauri::command]
@@ -245,9 +303,12 @@ pub async fn import_config(
     app: AppHandle,
     window: Window,
     path: String,
-    state: State<'_, AppState>,
 ) -> Result<Config, CommandError> {
-    services::import_config(&app, &window, path, state.inner())
+    blocking_command("config.import-task-failed", "config", move || {
+        let state = app.state::<AppState>();
+        services::import_config(&app, &window, path, state.inner())
+    })
+    .await
 }
 
 #[::tauri::command]
@@ -266,12 +327,16 @@ pub fn clear_log_file() -> Result<(), CommandError> {
 }
 
 #[::tauri::command]
-pub fn run_automated_stress_test(
+pub async fn run_automated_stress_test(
+    app: AppHandle,
     rate: u32,
     duration: u32,
     mode: Option<String>,
-    state: State<AppState>,
 ) -> Result<crate::types::StressTestResult, CommandError> {
-    let mode = mode.as_deref().unwrap_or("audio-vst");
-    services::run_stress_test(mode, rate, duration, state.inner())
+    blocking_command("runtime.stress-test-task-failed", "runtime", move || {
+        let state = app.state::<AppState>();
+        let mode = mode.as_deref().unwrap_or("audio-vst");
+        services::run_stress_test(mode, rate, duration, state.inner())
+    })
+    .await
 }

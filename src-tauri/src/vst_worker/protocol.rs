@@ -74,6 +74,12 @@ pub struct WorkerMetrics {
     pub midi_delivery_max_us: u64,
     #[serde(default)]
     pub midi_delivery_p99_us: u64,
+    /// Maximum source-clock lag seen during admitted MIDI recovery blocks.
+    #[serde(default)]
+    pub midi_recovery_max_lag_us: u64,
+    /// Longest recovery episode, including elapsed time of an ongoing episode.
+    #[serde(default)]
+    pub midi_recovery_max_duration_us: u64,
     #[serde(default)]
     pub callback_count: u64,
     /// Actual callback size; older workers omit it, preserving the Ready value.
@@ -448,6 +454,27 @@ mod tests {
                 .block_size_frames,
             Some(128)
         );
+    }
+
+    #[test]
+    fn midi_recovery_metrics_round_trip_and_default_for_older_workers() {
+        let metrics = WorkerMetrics {
+            midi_recovery_max_lag_us: 300_000,
+            midi_recovery_max_duration_us: 310_000,
+            ..WorkerMetrics::default()
+        };
+        let mut json = serde_json::to_value(&metrics).unwrap();
+        assert_eq!(
+            serde_json::from_value::<WorkerMetrics>(json.clone()).unwrap(),
+            metrics
+        );
+        json.as_object_mut().unwrap().remove("midiRecoveryMaxLagUs");
+        json.as_object_mut()
+            .unwrap()
+            .remove("midiRecoveryMaxDurationUs");
+        let legacy: WorkerMetrics = serde_json::from_value(json).unwrap();
+        assert_eq!(legacy.midi_recovery_max_lag_us, 0);
+        assert_eq!(legacy.midi_recovery_max_duration_us, 0);
     }
 
     #[test]

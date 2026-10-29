@@ -1073,6 +1073,11 @@ mod tests {
         assert_eq!(delivered[1].sample_offset, 240);
         assert!(state.pending_midi.is_empty());
         assert_eq!(state.telemetry.midi_drop_count.load(Ordering::Relaxed), 0);
+        let engine = AudioEngine::new();
+        engine.health_telemetry.store(Some(state.telemetry.clone()));
+        let diagnostics = serde_json::to_value(engine.realtime_diagnostics()).unwrap();
+        assert_eq!(diagnostics["worker"]["midiRecoveryMaxLagUs"], 90_000);
+        assert_eq!(diagnostics["worker"]["midiRecoveryMaxDurationUs"], 30_000);
     }
 
     #[test]
@@ -1103,6 +1108,14 @@ mod tests {
             .is_err()
         );
         assert_eq!(state.pending_midi.len(), events.len());
+        assert_eq!(
+            state
+                .telemetry
+                .midi_recovery_max_lag_us
+                .load(Ordering::Relaxed),
+            0,
+            "rejected submission must not publish an admitted recovery block"
+        );
         let mut delivered = Vec::new();
         for index in 0..4 {
             prepare_pending_vst2_midi(&mut state, 1_000_000 + index * 10_000);
@@ -1124,6 +1137,20 @@ mod tests {
             "release must precede retrigger"
         );
         assert!(state.pending_midi.is_empty());
+        assert_eq!(
+            state
+                .telemetry
+                .midi_recovery_max_lag_us
+                .load(Ordering::Relaxed),
+            90_000
+        );
+        assert_eq!(
+            state
+                .telemetry
+                .midi_recovery_max_duration_us
+                .load(Ordering::Relaxed),
+            40_000
+        );
     }
 
     #[test]
