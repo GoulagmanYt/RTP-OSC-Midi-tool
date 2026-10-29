@@ -33,6 +33,7 @@ const CONTROL_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
 const HEARTBEAT_WARNING: Duration = Duration::from_millis(1_500);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(5);
 const PROCESS_POLL_PERIOD: Duration = Duration::from_millis(100);
+const EXIT_REPLY_DRAIN_TIMEOUT: Duration = Duration::from_millis(250);
 const MIDI_PIPE_CAPACITY: usize = 16_384;
 const RESTART_WINDOW: Duration = Duration::from_secs(60);
 const MAX_RESTARTS_PER_WINDOW: usize = 3;
@@ -1391,6 +1392,14 @@ async fn run_session(runtime: SessionRuntime) {
                 }
                 match child.child.try_wait() {
                     Ok(Some(status)) => {
+                        // The worker may exit immediately after writing Stopped.
+                        // Let the reader deliver complete replies before failing
+                        // requests; process exit alone never acknowledges Stop.
+                        drain_exited_control_replies(
+                            &mut event_rx,
+                            &mut pending,
+                            EXIT_REPLY_DRAIN_TIMEOUT,
+                        ).await;
                         terminal_error = Some(format!("worker exited with {status}"));
                         break;
                     }
@@ -1453,6 +1462,26 @@ async fn run_session(runtime: SessionRuntime) {
     }
 }
 
+async fn drain_exited_control_replies(
+    events: &mut mpsc::Receiver<Result<ControlMessage, String>>,
+    pending: &mut HashMap<u64, oneshot::Sender<Result<ControlMessage, String>>>,
+    timeout: Duration,
+) {
+    let _ = tokio::time::timeout(timeout, async {
+        while !pending.is_empty() {
+            let Some(Ok(message)) = events.recv().await else {
+                break;
+            };
+            if let Some(request_id) = message_request_id(&message) {
+                if let Some(response) = pending.remove(&request_id) {
+                    let _ = response.send(Ok(message));
+                }
+            }
+        }
+    })
+    .await;
+}
+
 fn update_audio_status(status: &mut WorkerAudioStatus, metrics: &WorkerMetrics) {
     if let Some(enabled) = metrics.limiter_enabled {
         status.limiter_enabled = enabled;
@@ -1482,6 +1511,51 @@ fn set_session_fault(inner: &Arc<SupervisorInner>, error: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn exited_worker_delivers_stop_reply_before_the_reader_reports_eof() {
+        let (events_tx, mut events) = mpsc::channel(4);
+        let (reply_tx, mut reply) = oneshot::channel();
+        let mut pending = HashMap::from([(42, reply_tx)]);
+        // Process polling can win before the pipe reader has been scheduled.
+        let reader = tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            events_tx
+                .send(Ok(ControlMessage::Stopped { request_id: 42 }))
+                .await
+                .unwrap();
+            let _ = events_tx.send(Err("pipe closed".into())).await;
+        });
+        drain_exited_control_replies(&mut events, &mut pending, Duration::from_secs(1)).await;
+        assert!(matches!(
+            reply.try_recv(),
+            Ok(Ok(ControlMessage::Stopped { request_id: 42 }))
+        ));
+        assert!(pending.is_empty());
+        reader.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn exited_worker_without_a_correlated_reply_does_not_acknowledge_stop() {
+        let (events_tx, mut events) = mpsc::channel(4);
+        let (reply_tx, mut reply) = oneshot::channel();
+        let mut pending = HashMap::from([(42, reply_tx)]);
+        events_tx
+            .send(Ok(ControlMessage::Stopped { request_id: 43 }))
+            .await
+            .unwrap();
+        events_tx.send(Err("pipe closed".into())).await.unwrap();
+        drain_exited_control_replies(&mut events, &mut pending, Duration::from_secs(1)).await;
+        assert!(matches!(
+            reply.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert_eq!(pending.len(), 1);
+
+        // A reader retaining its channel cannot block termination indefinitely.
+        drain_exited_control_replies(&mut events, &mut pending, Duration::from_millis(1)).await;
+        assert_eq!(pending.len(), 1);
+    }
 
     #[test]
     fn heartbeat_updates_negotiated_buffer_and_x86_latency_without_changing_plugin_delay() {
