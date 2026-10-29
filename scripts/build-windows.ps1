@@ -1,5 +1,13 @@
 [CmdletBinding()]
 param(
+    [switch]$Interactive,
+    [ValidateSet('Dev', 'Release', 'Both')]
+    [string]$BuildMode = 'Release',
+    [Alias('Checks')]
+    [ValidateSet('Auto', 'None', 'Quick', 'Full')]
+    [string]$ValidationMode = 'Auto',
+    [ValidateSet('None', 'Light', 'Partial', 'Full')]
+    [string]$CleanupMode = 'None',
     [switch]$NoLog,
     [switch]$Clean,
     [Alias('Cleanup', 'PostClean', 'CleanupAfter', 'CleanIntermediate')]
@@ -12,6 +20,24 @@ param(
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$RemainingArguments
 )
+
+$ErrorActionPreference = 'Stop'
+$repositoryRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot 'build-support.ps1')
+if ($Interactive) {
+    . (Join-Path $PSScriptRoot 'build-menu.ps1')
+    $selection = Read-BuildSelection
+    if ($selection.Cancelled) {
+        Write-Host '  Cancelled. No build or cleanup was started.' -ForegroundColor DarkGray
+        exit 0
+    }
+    $BuildMode = $selection.BuildMode
+    $ValidationMode = $selection.ValidationMode
+    $CleanupMode = $selection.CleanupMode
+    $NoLog = $selection.NoLog
+    $CleanOnly = $selection.CleanOnly
+    $FullClean = $selection.FullClean
+}
 
 if ($FullClean) {
     $CleanOnly = $true
@@ -31,24 +57,24 @@ if ($RemainingArguments) {
         elseif ($arg -match '^(?:-+|/+)?clean$') {
             $Clean = $true
         }
+        else { throw "Unknown build option: $arg" }
     }
 }
 
-if ($env:OSCMIDI_CLEAN_AFTER -eq '1' -or $env:OSCMIDI_CLEANUP -eq '1') {
+if (-not $Interactive -and ($env:OSCMIDI_CLEAN_AFTER -eq '1' -or $env:OSCMIDI_CLEANUP -eq '1')) {
     $CleanAfter = $true
 }
+if ($CleanAfter -and $CleanupMode -eq 'None') { $CleanupMode = 'Partial' }
+if ($ValidationMode -eq 'Auto') { $ValidationMode = if ($BuildMode -eq 'Dev') { 'Quick' } else { 'Full' } }
 
 if ($LatencyDiagnostics -or $env:OSCMIDI_ENABLE_LATENCY_DIAGNOSTICS -eq '1') {
     $env:OSCMIDI_ENABLE_LATENCY_DIAGNOSTICS = '1'
 }
 
-$ErrorActionPreference = 'Stop'
-$repositoryRoot = Split-Path -Parent $PSScriptRoot
-. (Join-Path $PSScriptRoot 'build-support.ps1')
 $cargoTargetDirectory = Join-Path $repositoryRoot '.cargo-target'
 $artifactDirectory = Join-Path $repositoryRoot 'artifacts'
-$buildId = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
-$persistBuildLog = -not ($NoLog -or $env:OSCMIDI_BUILD_NO_LOG -eq '1')
+$buildId = (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss') + "-$PID"
+$persistBuildLog = -not ($NoLog -or (-not $Interactive -and $env:OSCMIDI_BUILD_NO_LOG -eq '1'))
 $logDirectory = Join-Path $artifactDirectory 'logs'
 $temporaryLog = if ($persistBuildLog) {
     New-Item -ItemType Directory -Force -Path $logDirectory | Out-Null
@@ -61,6 +87,10 @@ $buildLogWriter = if ($temporaryLog) { [System.IO.StreamWriter]::new($temporaryL
 $totalStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 $buildSucceeded = $false
 $exitCode = 1
+$cleanupCompleted = $false
+$temporaryBuildConfig = $null
+$plan = @(Get-WindowsBuildPlan -BuildMode $BuildMode -ValidationMode $ValidationMode -CleanupMode $CleanupMode)
+$stageCount = if ($CleanOnly) { 2 } else { $plan.Count + 1 }
 
 function Remove-AnsiSequences {
     param([AllowNull()][string]$Text)
@@ -81,7 +111,7 @@ function Write-BuildLog {
 
     $line = "[$(Get-Date -Format 'HH:mm:ss')] $Message"
     Write-Host $line -ForegroundColor $Color
-    if ($buildLogWriter) { $buildLogWriter.WriteLine($line) }
+    if ($buildLogWriter) { $buildLogWriter.WriteLine($line); $buildLogWriter.Flush() }
 }
 
 function Show-BuildStage {
@@ -98,10 +128,10 @@ function Show-BuildStage {
     $filled = [Math]::Min($width, [Math]::Floor($Percent * $width / 100))
     $bar = ('#' * $filled) + ('-' * ($width - $filled))
     Write-Host ''
-    $stageColor = if ($Stage -eq 7) { 'Magenta' } else { 'Cyan' }
-    Write-Host "[$bar] $Percent%  Stage $Stage/7 - $Title" -ForegroundColor $stageColor
-    Write-Progress -Activity 'OSCMidi Windows Build' -Status "Stage $Stage/7 - $Title" -PercentComplete $Percent
-    if ($buildLogWriter) { $buildLogWriter.WriteLine("`r`n=== Stage $Stage/7 - $Title ($Percent%) ==="); $buildLogWriter.Flush() }
+    $stageColor = if ($Stage -eq $stageCount) { 'Magenta' } else { 'Cyan' }
+    Write-Host "[$bar] $Percent%  Stage $Stage/$stageCount - $Title" -ForegroundColor $stageColor
+    Write-Progress -Activity 'OSCMidi Windows Build' -Status "Stage $Stage/$stageCount - $Title" -PercentComplete $Percent
+    if ($buildLogWriter) { $buildLogWriter.WriteLine("`r`n=== Stage $Stage/$stageCount - $Title ($Percent%) ==="); $buildLogWriter.Flush() }
 }
 
 function Invoke-BuildCommand {
@@ -124,7 +154,7 @@ function Invoke-BuildCommand {
         & $Command @Arguments 2>&1 | ForEach-Object {
             $line = $_.ToString()
             Write-Host $line
-            if ($buildLogWriter) { $buildLogWriter.WriteLine((Remove-AnsiSequences $line)) }
+            if ($buildLogWriter) { $buildLogWriter.WriteLine((Remove-AnsiSequences $line)); $buildLogWriter.Flush() }
         }
         $commandExitCode = $global:LASTEXITCODE
     }
@@ -435,7 +465,10 @@ function Export-BuildArtifacts {
     }
     finally {
         if (Test-Path -LiteralPath $stagingDirectory) {
-            [System.IO.Directory]::Delete($stagingDirectory, $true)
+            $resolvedStaging = (Resolve-Path -LiteralPath $stagingDirectory).Path
+            $tempPrefix = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\oscmidi-artifacts-'
+            if (-not $resolvedStaging.StartsWith($tempPrefix, [StringComparison]::OrdinalIgnoreCase)) { throw 'Unsafe artifact staging cleanup path.' }
+            [System.IO.Directory]::Delete($resolvedStaging, $true)
         }
     }
 
@@ -449,6 +482,26 @@ function Export-BuildArtifacts {
         ForEach-Object {
             Write-BuildLog ("  portable\{0,-33} {1,8:N1} MiB" -f $_.Name, ($_.Length / 1MB)) Green
         }
+}
+
+function Export-DevBuildArtifacts {
+    $files = @(
+        @{ Source = Join-Path $cargoTargetDirectory 'debug\OSCMidi.exe'; Name = 'OSCMidi.exe'; Machine = 0x8664 }
+        @{ Source = Join-Path $repositoryRoot 'src-tauri\binaries\vst-host-worker-x64-x86_64-pc-windows-msvc.exe'; Name = 'vst-host-worker-x64.exe'; Machine = 0x8664 }
+        @{ Source = Join-Path $repositoryRoot 'src-tauri\binaries\vst-host-worker-x86-x86_64-pc-windows-msvc.exe'; Name = 'vst-host-worker-x86.exe'; Machine = 0x014C }
+    )
+    # Check every required binary before replacing the previous runnable Dev folder.
+    foreach ($file in $files) {
+        Assert-WindowsGuiExecutable $file.Source
+        Assert-PeMachine $file.Source $file.Machine
+    }
+    $destination = Join-Path $artifactDirectory 'dev'
+    Remove-GeneratedDirectory 'artifacts\dev'
+    New-Item -ItemType Directory -Force -Path $destination | Out-Null
+    foreach ($file in $files) {
+        Copy-Item -LiteralPath $file.Source -Destination (Join-Path $destination $file.Name) -Force
+    }
+    Write-BuildLog "Ready to test: $(Join-Path $destination 'OSCMidi.exe')" Green
 }
 
 function Save-BuildLog {
@@ -478,30 +531,29 @@ function Save-BuildLog {
 
 Set-Location $repositoryRoot
 $env:CARGO_TARGET_DIR = $cargoTargetDirectory
-$env:CARGO_INCREMENTAL = '0'
 if ($buildLogWriter) { $buildLogWriter.WriteLine("OSCMidi build started at $(Get-Date -Format 'u')") }
+if (-not $CleanOnly) {
+    Write-BuildLog "Build: $BuildMode | Checks: $ValidationMode | Cleanup after success: $CleanupMode" Cyan
+    if ($ValidationMode -eq 'None') { Write-BuildLog 'Optional checks and test execution are disabled for this build.' Yellow }
+}
 
-if ($CleanOnly) {
+try {
+  if ($CleanOnly) {
     Write-Host ''
     Write-Host 'OSCMidi - Workspace Cleanup' -ForegroundColor Cyan
-    Write-Host 'Cleaning compiled libraries, build targets and intermediate caches...' -ForegroundColor Gray
-    Clear-BuildCaches -IncludeNodeModules:$Clean -IncludeOutputs:$FullClean -BeforeClean {
+    $cleanupSelection = if ($FullClean) { 'Reset' } elseif ($CleanupMode -ne 'None') { $CleanupMode } elseif ($Clean) { 'Full' } else { 'Partial' }
+    Show-BuildStage 1 20 "$cleanupSelection workspace cleanup"
+    Invoke-SelectedCleanup -Mode $cleanupSelection -BeforeClean {
         Stop-WorkspaceNodeProcesses
         Stop-WorkspaceCargoProcesses
         Stop-WorkspaceAppProcesses
     }
     $cleanupMessage = if ($FullClean) { '[OK] Full workspace cleanup completed. Sources, Git, SDKs and developer environments are preserved.' } else { '[OK] Workspace cleanup completed successfully. Deliverables in artifacts\ are preserved.' }
     Write-Host $cleanupMessage -ForegroundColor Green
-    if ($buildLogWriter) {
-        $buildLogWriter.Dispose()
-        if ($temporaryLog -and (Test-Path -LiteralPath $temporaryLog)) {
-            Remove-Item -LiteralPath $temporaryLog -Force -ErrorAction SilentlyContinue
-        }
-    }
-    exit 0
-}
-
-try {
+    $cleanupCompleted = $true
+    $buildSucceeded = $true
+    $exitCode = 0
+  } else {
     Show-BuildStage 1 5 'Checking prerequisites'
     Import-VisualStudioEnvironment
     $npm = Find-Executable 'npm.cmd'
@@ -567,56 +619,81 @@ try {
         }
     }
 
-    Show-BuildStage 2 15 'Preparing frontend dependencies'
-    $npmVersion = (& $npm --version).Trim()
-    if ($LASTEXITCODE -ne 0) { throw 'Unable to read npm version.' }
-    Ensure-FrontendDependencies -Npm $npm -NodeVersion $nodeVersion.ToString() -NpmVersion $npmVersion -Force:$ReinstallDependencies -BeforeInstall { Stop-WorkspaceNodeProcesses } -CommandRunner { param($Executable, $CommandArguments) Invoke-BuildCommand $Executable $CommandArguments }
-
     $validationShell = (Get-Process -Id $PID).Path
-    Show-BuildStage 3 30 'Validating the frontend'
-    Invoke-BuildCommand $validationShell @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'validate.ps1'), '-Scope', 'Frontend')
-
-    Show-BuildStage 4 45 'Validating Rust, diagnostics and native audio'
-    Invoke-BuildCommand $validationShell @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'validate.ps1'), '-Scope', 'Rust')
-
-    # Keep compilation outputs but never accept an installer from an earlier run.
-    Remove-GeneratedDirectory '.cargo-target\release\bundle'
-    Remove-GeneratedDirectory '.cargo-target\release\wix'
-
-    Show-BuildStage 5 75 'Building the release and MSI installer'
-    $tauriBuildArgs = @('run', 'tauri:build', '--', '--bundles', 'msi', '--ci', '--', '--locked', '--timings')
-    if ($env:OSCMIDI_ENABLE_LATENCY_DIAGNOSTICS -eq '1') {
-        $tauriBuildArgs += @('--features', 'latency-diagnostics')
-        Write-BuildLog 'Building release and MSI installer with latency diagnostics enabled.' Yellow
+    $stageNumber = 1
+    foreach ($step in @($plan | Select-Object -Skip 1)) {
+        $stageNumber++
+        $percent = [int][Math]::Floor(95 * $stageNumber / $stageCount)
+        Show-BuildStage $stageNumber $percent $step.Title
+        switch ($step.Kind) {
+            'Dependencies' {
+                $npmVersion = (& $npm --version).Trim()
+                if ($LASTEXITCODE -ne 0) { throw 'Unable to read npm version.' }
+                Ensure-FrontendDependencies -Npm $npm -NodeVersion $nodeVersion.ToString() -NpmVersion $npmVersion -Force:$ReinstallDependencies -BeforeInstall { Stop-WorkspaceNodeProcesses } -CommandRunner { param($Executable, $CommandArguments) Invoke-BuildCommand $Executable $CommandArguments }
+            }
+            'ValidateQuick' {
+                Invoke-BuildCommand $validationShell @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'validate.ps1'), '-Scope', 'Quick')
+            }
+            'ValidateFrontend' {
+                Invoke-BuildCommand $validationShell @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'validate.ps1'), '-Scope', 'Frontend')
+            }
+            'ValidateRust' {
+                $env:CARGO_INCREMENTAL = '0'
+                Invoke-BuildCommand $validationShell @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'validate.ps1'), '-Scope', 'Rust')
+            }
+            'Frontend' {
+                Invoke-BuildCommand $npm @('run', 'build')
+                # Workers and frontend assets are prepared explicitly once per plan.
+                # A file avoids Windows native-argument quoting issues with inline JSON.
+                $temporaryBuildConfig = Join-Path ([IO.Path]::GetTempPath()) "oscmidi-build-$([guid]::NewGuid().ToString('N')).json"
+                [IO.File]::WriteAllText($temporaryBuildConfig, '{"build":{"beforeBuildCommand":null}}', [Text.UTF8Encoding]::new($false))
+            }
+            'Workers' {
+                $env:CARGO_INCREMENTAL = if ($step.Profile -eq 'debug') { '1' } else { '0' }
+                Stop-WorkspaceAppProcesses
+                Invoke-BuildCommand $validationShell @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'prepare-vst-worker.ps1'), '-Profile', $step.Profile)
+            }
+            'Desktop' {
+                if ($step.Profile -eq 'release') {
+                    # Never export an MSI left over from an earlier invocation.
+                    Remove-GeneratedDirectory '.cargo-target\release\bundle'
+                    Remove-GeneratedDirectory '.cargo-target\release\wix'
+                }
+                $arguments = @(Join-Path $repositoryRoot 'node_modules\@tauri-apps\cli\tauri.js')
+                $arguments += @(Get-DesktopBuildArguments -Profile $step.Profile -ConfigPath $temporaryBuildConfig -LatencyDiagnostics:($env:OSCMIDI_ENABLE_LATENCY_DIAGNOSTICS -eq '1'))
+                Invoke-BuildCommand $node $arguments
+            }
+            'Export' {
+                if ($step.Profile -eq 'debug') { Export-DevBuildArtifacts }
+                else { Export-BuildArtifacts }
+            }
+            'Cleanup' {
+                Write-BuildLog "$CleanupMode cleanup: exported Dev/Release files and build logs will be preserved." Yellow
+                Invoke-SelectedCleanup -Mode $CleanupMode -BeforeClean {
+                    Stop-WorkspaceNodeProcesses
+                    Stop-WorkspaceCargoProcesses
+                    Stop-WorkspaceAppProcesses
+                }
+                $cleanupCompleted = $true
+            }
+        }
     }
-    Invoke-BuildCommand $npm $tauriBuildArgs
-
-    Show-BuildStage 6 90 'Verifying and exporting artifacts'
-    Export-BuildArtifacts
     $buildSucceeded = $true
     $exitCode = 0
-
-    if ($CleanAfter) {
-        Show-BuildStage 6 95 'Cleaning up intermediate build caches'
-        Write-BuildLog 'Post-build cleanup requested (-CleanAfter); removing intermediate compiled libraries and build caches to free disk space.' Yellow
-        Clear-BuildCaches -BeforeClean {
-            Stop-WorkspaceNodeProcesses
-            Stop-WorkspaceCargoProcesses
-            Stop-WorkspaceAppProcesses
-        }
-        Write-BuildLog 'Intermediate compiled libraries and caches cleaned successfully. Release deliverables preserved in artifacts\.' Green
-    }
+  }
 }
 catch {
     Write-BuildLog "FAILED: $($_.Exception.Message)" Red
     $exitCode = 1
 }
 finally {
-    Show-BuildStage 7 96 'Finalizing build logs'
-    if ($CleanAfter) {
-        Write-BuildLog 'Intermediate compiled libraries cleaned up to save disk space; release deliverables preserved in artifacts\.' Green
+    Show-BuildStage $stageCount 98 'Finalizing'
+    if ($cleanupCompleted) {
+        Write-BuildLog 'Selected workspace cleanup completed.' Green
     }
-    else {
+    elseif ($CleanupMode -ne 'None') {
+        Write-BuildLog 'Post-build cleanup was not completed. Caches and available outputs are retained for troubleshooting.' Yellow
+    } else {
         Write-BuildLog 'Compilation caches and frontend dependencies preserved for the next build.' DarkGray
     }
 
@@ -633,13 +710,20 @@ finally {
     if ($temporaryLog -and (Test-Path -LiteralPath $temporaryLog)) {
         Remove-Item -LiteralPath $temporaryLog -Force
     }
+    if ($temporaryBuildConfig -and (Test-Path -LiteralPath $temporaryBuildConfig)) {
+        Remove-Item -LiteralPath $temporaryBuildConfig -Force
+    }
     Write-Progress -Activity 'OSCMidi Windows Build' -Completed
 }
 
 if ($exitCode -eq 0) {
     Write-Host ''
-    Write-Host '[##############################] 100%  BUILD COMPLETE' -ForegroundColor Green
-    Write-Host "Artifacts: $artifactDirectory" -ForegroundColor Cyan
+    $operation = if ($CleanOnly) { 'CLEANUP COMPLETE' } else { 'BUILD COMPLETE' }
+    Write-Host "[##############################] 100%  $operation" -ForegroundColor Green
+    if (-not $CleanOnly) {
+        if ($BuildMode -in 'Dev', 'Both') { Write-Host "Dev app: $(Join-Path $artifactDirectory 'dev\OSCMidi.exe')" -ForegroundColor Cyan }
+        if ($BuildMode -in 'Release', 'Both') { Write-Host "Release: $artifactDirectory" -ForegroundColor Cyan }
+    }
 }
 else {
     Write-Host ''
@@ -651,4 +735,8 @@ else {
     }
 }
 
+if ($Interactive -and -not [Console]::IsInputRedirected) {
+    Write-Host ''
+    [void](Read-Host 'Press Enter to close')
+}
 exit $exitCode

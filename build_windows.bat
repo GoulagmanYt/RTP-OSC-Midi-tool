@@ -1,50 +1,28 @@
 @echo off
 setlocal EnableExtensions DisableDelayedExpansion
-title OSCMidi - Build Windows
+title OSCMidi - Build Assistant
 cd /d "%~dp0"
 chcp 65001 >nul 2>nul
 
 set "NO_COLOR="
 set "FORCE_COLOR=1"
 set "CARGO_TERM_COLOR=always"
+rem Let the selected PowerShell edition rebuild its own module search path.
+set "PSModulePath="
 set "BUILD_SCRIPT=%~dp0scripts\build-windows.ps1"
-set "BUILD_EXIT_CODE=1"
-
-if defined OSCMIDI_BUILD_NO_LOG (
-  set "OSCMIDI_BUILD_SUBTITLE=Reusable build caches - no persistent build log"
-) else (
-  set "OSCMIDI_BUILD_SUBTITLE=Reusable build caches - detailed build log enabled"
-)
-
-for %%A in (%*) do (
-  if /i "%%~A"=="-CleanAfter" set "OSCMIDI_BUILD_SUBTITLE=Clean intermediate caches after export - detailed build log enabled"
-  if /i "%%~A"=="-Cleanup" set "OSCMIDI_BUILD_SUBTITLE=Clean intermediate caches after export - detailed build log enabled"
-  if /i "%%~A"=="cleanup" set "OSCMIDI_BUILD_SUBTITLE=Clean intermediate caches after export - detailed build log enabled"
-  if /i "%%~A"=="-CleanOnly" set "OSCMIDI_BUILD_SUBTITLE=Clean workspace - remove build caches and compiled libraries"
-  if /i "%%~A"=="cleanonly" set "OSCMIDI_BUILD_SUBTITLE=Clean workspace - remove build caches and compiled libraries"
-)
-
 set "POWERSHELL_EXE=pwsh.exe"
 where pwsh.exe >nul 2>nul || set "POWERSHELL_EXE=powershell.exe"
 
 if not exist "%BUILD_SCRIPT%" (
-  echo ERROR: build script not found:
-  echo   %BUILD_SCRIPT%
-  set "BUILD_EXIT_CODE=2"
-  goto :build_finished
+  echo [ERROR] Build script not found: "%BUILD_SCRIPT%"
+  endlocal & exit /b 2
 )
 
-"%POWERSHELL_EXE%" -NoLogo -NoProfile -Command "$line = '=' * 60; Write-Host ''; Write-Host $line -ForegroundColor DarkCyan; Write-Host '  OSCMidi - Windows Build' -ForegroundColor Cyan; Write-Host ('  ' + $env:OSCMIDI_BUILD_SUBTITLE) -ForegroundColor DarkGray; Write-Host $line -ForegroundColor DarkCyan; Write-Host ''"
-
-"%POWERSHELL_EXE%" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%BUILD_SCRIPT%" %*
-set "BUILD_EXIT_CODE=%ERRORLEVEL%"
-
-:build_finished
-echo.
-if "%BUILD_EXIT_CODE%"=="0" (
-  "%POWERSHELL_EXE%" -NoLogo -NoProfile -Command "Write-Host '[OK] Operation completed successfully.' -ForegroundColor Green; if (Test-Path -LiteralPath '%~dp0artifacts') { Write-Host '     Artifacts: %~dp0artifacts' -ForegroundColor Cyan }"
+rem Double-click opens the assistant. Explicit options remain automation-friendly.
+if "%~1"=="" (
+  "%POWERSHELL_EXE%" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%BUILD_SCRIPT%" -Interactive
 ) else (
-  "%POWERSHELL_EXE%" -NoLogo -NoProfile -Command "Write-Host '[FAIL] Build exited with code %BUILD_EXIT_CODE%.' -ForegroundColor Red; $log = Get-ChildItem -LiteralPath '%~dp0artifacts\logs' -Filter 'build-*.log' -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1; if ($env:OSCMIDI_BUILD_NO_LOG -eq '1') { Write-Host '       Persistent logging was disabled by build_windows_no_log.bat.' -ForegroundColor Yellow } elseif ($log) { Write-Host ('       Log: ' + $log.FullName) -ForegroundColor Yellow } else { Write-Host '       No log was created; check the PowerShell launch error above.' -ForegroundColor Yellow }"
+  "%POWERSHELL_EXE%" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%BUILD_SCRIPT%" %*
 )
-
+set "BUILD_EXIT_CODE=%ERRORLEVEL%"
 endlocal & exit /b %BUILD_EXIT_CODE%

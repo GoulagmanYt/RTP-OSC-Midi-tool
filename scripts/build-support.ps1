@@ -177,6 +177,7 @@ function Clear-BuildCaches {
     param(
         [switch]$IncludeNodeModules,
         [switch]$IncludeOutputs,
+        [switch]$PreserveArtifacts,
         [scriptblock]$BeforeClean = {}
     )
 
@@ -196,7 +197,6 @@ function Clear-BuildCaches {
     }
     if ($IncludeOutputs) {
         $targetDirs += @(
-            'artifacts',
             'reports',
             'build_logs',
             'src-tauri\gen\schemas',
@@ -210,10 +210,73 @@ function Clear-BuildCaches {
             'vendor\vst\target',
             'vendor\midi-types\target'
         )
+        if (-not $PreserveArtifacts) { $targetDirs += 'artifacts' }
     }
 
     foreach ($dir in $targetDirs) {
         Remove-GeneratedDirectory $dir
     }
+}
+
+function Invoke-SelectedCleanup {
+    param(
+        [ValidateSet('None', 'Light', 'Partial', 'Full', 'Reset')][string]$Mode,
+        [scriptblock]$BeforeClean = {}
+    )
+    if ($Mode -eq 'None') { return }
+    if ($Mode -eq 'Light') {
+        & $BeforeClean
+        foreach ($relative in @(
+            'dist', 'node_modules\.vite', '.cargo-target\cargo-timings',
+            '.cargo-target\debug\incremental', '.cargo-target\release\incremental',
+            '.cargo-target\dev-audio\incremental',
+            '.cargo-target\i686-pc-windows-msvc\debug\incremental',
+            '.cargo-target\i686-pc-windows-msvc\release\incremental'
+        )) { Remove-GeneratedDirectory $relative }
+        return
+    }
+    Clear-BuildCaches -IncludeNodeModules:($Mode -in 'Full', 'Reset') `
+        -IncludeOutputs:($Mode -in 'Full', 'Reset') -PreserveArtifacts:($Mode -ne 'Reset') -BeforeClean $BeforeClean
+}
+
+function Get-WindowsBuildPlan {
+    param(
+        [ValidateSet('Dev', 'Release', 'Both')][string]$BuildMode,
+        [ValidateSet('Auto', 'None', 'Quick', 'Full')][string]$ValidationMode = 'Auto',
+        [ValidateSet('None', 'Light', 'Partial', 'Full')][string]$CleanupMode = 'None'
+    )
+    if ($ValidationMode -eq 'Auto') { $ValidationMode = if ($BuildMode -eq 'Dev') { 'Quick' } else { 'Full' } }
+    @(
+        @{ Kind = 'Prerequisites'; Title = 'Checking prerequisites' }
+        @{ Kind = 'Dependencies'; Title = 'Preparing frontend dependencies' }
+        if ($ValidationMode -eq 'Full') {
+            @{ Kind = 'ValidateFrontend'; Title = 'Validating the frontend' }
+            @{ Kind = 'ValidateRust'; Title = 'Validating Rust, diagnostics and native audio' }
+        } elseif ($ValidationMode -eq 'Quick') {
+            @{ Kind = 'ValidateQuick'; Title = 'Quick checks: lint, TypeScript and Cargo (no tests)' }
+        }
+        @{ Kind = 'Frontend'; Title = 'Building shared frontend assets' }
+        foreach ($profile in @('debug', 'release')) {
+            if (($profile -eq 'debug' -and $BuildMode -eq 'Release') -or ($profile -eq 'release' -and $BuildMode -eq 'Dev')) { continue }
+            @{ Kind = 'Workers'; Title = "Building $profile VST workers (x64 + x86)"; Profile = $profile }
+            @{ Kind = 'Desktop'; Title = $(if ($profile -eq 'debug') { 'Building the standalone Dev application' } else { 'Building the optimized release and MSI' }); Profile = $profile }
+            @{ Kind = 'Export'; Title = "Verifying and exporting $profile artifacts"; Profile = $profile }
+        }
+        if ($CleanupMode -ne 'None') { @{ Kind = 'Cleanup'; Title = "$CleanupMode post-build cleanup" } }
+    )
+}
+
+function Get-DesktopBuildArguments {
+    param(
+        [ValidateSet('debug', 'release')][string]$Profile,
+        [Parameter(Mandatory)][string]$ConfigPath,
+        [switch]$LatencyDiagnostics
+    )
+    $arguments = @('build', '--ci', '--config', $ConfigPath)
+    if ($Profile -eq 'debug') { $arguments += @('--debug', '--no-bundle') }
+    else { $arguments += @('--bundles', 'msi') }
+    $arguments += @('--', '--locked', '--timings')
+    if ($LatencyDiagnostics) { $arguments += @('--features', 'latency-diagnostics') }
+    return $arguments
 }
 

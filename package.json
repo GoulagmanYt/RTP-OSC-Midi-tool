@@ -15,7 +15,7 @@
     "lint:typecheck": "node ./node_modules/typescript/bin/tsc --noEmit",
     "test": "node ./node_modules/vitest/vitest.mjs run",
     "clean": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/build-windows.ps1 -CleanOnly",
-    "clean:all": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/build-windows.ps1 -CleanOnly -Clean",
+    "clean:all": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/build-windows.ps1 -CleanOnly -CleanupMode Full",
     "build:clean": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/build-windows.ps1 -CleanAfter"
   },
   "dependencies": {

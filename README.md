@@ -182,28 +182,49 @@ Developer diagnostics are kept outside the packaged application:
 cargo build --manifest-path tools/diagnostics/Cargo.toml --target-dir tools/diagnostics/target
 ```
 
-## Windows release build
+## Windows build assistant
 
-Run the complete local build from the repository root:
+Double-click the single launcher, or run it from the repository root:
 
 ```bat
 build_windows.bat
 ```
 
-The script validates the toolchain, prepares frontend dependencies, runs the shared frontend, Rust, diagnostics, vendored VST/RTP-MIDI and native audio checks, builds both workers, the application and MSI, and exports the deliverables. It preserves dependency and compilation caches after success or failure. An unchanged dependency installation is reused only when its manifests, lockfile, local npm configuration and Node/npm versions match and `npm ls` reports a valid dependency tree. Progress and command output remain visible throughout the build.
+The English assistant asks for the build profile, checks/tests, persistent logs and cleanup level before starting. A summary lets you review or change the selection. Progress, command output and the final result stay visible; double-clicked sessions wait for Enter before closing.
+
+| Build | Result |
+| --- | --- |
+| Dev | Fast debug compilation, incremental caches, no installer; launch `artifacts\dev\OSCMidi.exe` |
+| Release | Optimized application, portable ZIP and MSI in `artifacts\` |
+| Both | Both outputs, with one dependency preparation and one frontend build |
+
+Every profile includes the matching x64 and x86 VST workers. Dev is a standalone application with embedded frontend assets; no Vite server is required. It is intended for testing, not production audio performance.
+
+Checks are independent of the build profile: **None** compiles without optional validation; **Quick** runs ESLint, TypeScript and `cargo check` without executing tests; **Full** runs the frontend tests, Rust/Clippy, diagnostics, vendored VST/RTP-MIDI and native audio checks. The menu defaults to Quick for Dev and Full for Release/Both. Compiler and packaging errors always fail the build, even with None selected.
+
+| Cleanup after success | Removed | Preserved |
+| --- | --- | --- |
+| None (default) | Nothing | All reusable caches |
+| Light | Frontend output, Vite cache, incremental Rust caches and Cargo timing reports | Compiled Rust libraries, dependencies, staged workers |
+| Partial | Build targets, compiled libraries, staged workers and frontend output | `node_modules` |
+| Full | Partial cleanup plus `node_modules`, vendored targets, generated schemas, Python caches and support reports | Source files, Git, SDKs, editor settings and developer environments |
+
+All four post-build choices preserve exported Dev/Release applications, packages and build logs. Cleanup starts only after **every selected build** has succeeded and been exported. Failures stop the pipeline and preserve remaining caches for troubleshooting. The **Clean** menu also provides cleanup without building. Its separate **Reset** option deletes exported artifacts and previous logs too, and requires typing `RESET`.
+
+Explicit arguments skip the menu for automation:
 
 ```bat
-build_windows.bat -Clean
-build_windows.bat -CleanAfter
-build_windows.bat -CleanOnly
+build_windows.bat -BuildMode Dev -Checks None -NoLog
+build_windows.bat -BuildMode Release -Checks Full -CleanupMode Partial
+build_windows.bat -BuildMode Both -Checks Quick -CleanupMode Full
+build_windows.bat -CleanOnly -CleanupMode Light
+build_windows.bat -FullClean
 build_windows.bat -ReinstallDependencies
-build_windows_no_log.bat
-clean_all.bat
 ```
 
-`-Clean` removes generated build directories before running the same complete validation and packaging pipeline. `-CleanAfter` (or `-Cleanup`) runs the full build and packaging pipeline, exports the deliverables to `artifacts\`, and then cleans up all intermediate compiled libraries and build targets (`.cargo-target`, `tools\*\target`, etc.) to free disk space (~30+ GB). `-CleanOnly` (or `clean.bat` / `npm run clean`) immediately removes workspace compilation caches and intermediate build outputs without rebuilding. `-ReinstallDependencies` forces `npm ci` while keeping Rust caches. The no-log launcher runs the same pipeline without writing a build log to disk. Normal builds keep their ten most recent logs; Cargo compilation timing reports are retained in `.cargo-target/cargo-timings/`. Release optimization settings are identical in every mode.
+`-Checks` is an alias for `-ValidationMode`; `Auto` selects Quick for Dev and Full for Release/Both. Command-line builds default to Release. `-NoLog` disables the detailed build log on disk while keeping live output; otherwise the latest ten logs are retained. Cargo timing reports are compiler output, independent of build logging. `-Clean` still requests a clean build, `-CleanAfter`/`-Cleanup` maps to Partial cleanup, and `-ReinstallDependencies` forces `npm ci` while keeping Rust caches. `-FullClean` is the explicit noninteractive equivalent of Reset and deletes `artifacts` too. Global npm/Rust caches outside this repository are untouched.
 
-`clean_all.bat` runs the guarded full cleanup without rebuilding. It removes repository build caches, `node_modules`, staged workers, `dist`, generated schemas, Python caches in the scripts and diagnostic/latency tools, vendored Cargo targets, `artifacts` (including logs and packages), `reports` and `build_logs`. It preserves source files, Git history, SDK checkouts, editor settings and developer-managed environments. Global npm/Rust caches outside this repository are untouched. Run `build_windows.bat` afterwards to reinstall dependencies and rebuild.
+Dependency installation is reused only when manifests, lockfiles, local npm configuration and Node/npm versions match and `npm ls` reports a valid dependency tree. Release optimization settings are identical in every validation/logging mode.
 
 On Windows, the frontend build still runs Vite on every invocation, then preserves file and directory timestamps only when every output path and SHA-256 content hash is identical. Any changed, added, removed or renamed asset keeps the rebuilt tree's new timestamps so Cargo regenerates its embedded asset map. CI release snapshots include `dist` for the same reason. Frontend tests are restricted to `src` so archived working copies in `artifacts` are not tested again.
 
@@ -211,6 +232,7 @@ Successful outputs are preserved in `artifacts\`:
 
 | Output | Description |
 | --- | --- |
+| `dev\` | Standalone debug application with matching x64/x86 workers |
 | `portable\` | Ready-to-run folder containing the application and both VST workers |
 | `OSCMidi_*_portable.zip` | Complete portable distribution |
 | `OSCMidi_*.msi` | Windows installer |

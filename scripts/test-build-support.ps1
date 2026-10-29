@@ -114,13 +114,53 @@ try {
     Clear-BuildCaches -IncludeNodeModules
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $repositoryRoot 'node_modules'))) 'Clear-BuildCaches -IncludeNodeModules must remove node_modules.'
 
+    # Every post-build cleanup level must retain runnable exports and the active log.
+    foreach ($mode in @('None', 'Light', 'Partial', 'Full')) {
+        $generated = @('.cargo-target/debug/incremental', '.cargo-target/debug/deps', 'node_modules/.vite', 'node_modules/dependency', 'dist', 'reports', 'vendor/rack/target')
+        $preserved = @('artifacts/dev', 'artifacts/portable', 'artifacts/logs')
+        foreach ($directory in $generated + $preserved) {
+            $path = Join-Path $repositoryRoot $directory
+            New-Item -ItemType Directory -Force -Path $path | Out-Null
+            Set-Content -LiteralPath (Join-Path $path 'fixture.txt') -Value 'keep or remove'
+        }
+        Invoke-SelectedCleanup -Mode $mode
+        foreach ($directory in $preserved) {
+            Assert-True (Test-Path -LiteralPath (Join-Path $repositoryRoot "$directory/fixture.txt")) "$mode cleanup must preserve $directory."
+        }
+        Assert-True ((Test-Path -LiteralPath (Join-Path $repositoryRoot '.cargo-target/debug/incremental')) -eq ($mode -eq 'None')) "$mode incremental cleanup is wrong."
+        Assert-True ((Test-Path -LiteralPath (Join-Path $repositoryRoot '.cargo-target/debug/deps')) -eq ($mode -in 'None', 'Light')) "$mode compiled-library cleanup is wrong."
+        Assert-True ((Test-Path -LiteralPath (Join-Path $repositoryRoot 'node_modules/dependency')) -eq ($mode -ne 'Full')) "$mode dependency cleanup is wrong."
+        Assert-True ((Test-Path -LiteralPath (Join-Path $repositoryRoot 'vendor/rack/target')) -eq ($mode -ne 'Full')) "$mode vendored-cache cleanup is wrong."
+        Invoke-SelectedCleanup -Mode Reset
+    }
+
     # Run the complete cleanup launcher only in a disposable repository.
     $cleanupRoot = Join-Path $fixtureRoot 'cleanup launcher with spaces'
     New-Item -ItemType Directory -Force -Path (Join-Path $cleanupRoot 'scripts') | Out-Null
     $actualRoot = Split-Path -Parent $PSScriptRoot
-    foreach ($file in @('clean_all.bat', 'build_windows.bat', 'scripts/build-windows.ps1', 'scripts/build-support.ps1')) {
+    foreach ($file in @('build_windows.bat', 'scripts/build-windows.ps1', 'scripts/build-support.ps1', 'scripts/build-menu.ps1')) {
         Copy-Item -LiteralPath (Join-Path $actualRoot $file) -Destination (Join-Path $cleanupRoot $file)
     }
+    # Exercise the no-argument launcher with redirected keyboard input.
+    $start = [Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = $env:ComSpec
+    $start.Arguments = '/d /c call "' + (Join-Path $cleanupRoot 'build_windows.bat') + '"'
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardInput = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $process = [Diagnostics.Process]::Start($start)
+    try {
+        $output = $process.StandardOutput.ReadToEndAsync()
+        $errors = $process.StandardError.ReadToEndAsync()
+        $process.StandardInput.WriteLine('0')
+        $process.StandardInput.Close()
+        if (-not $process.WaitForExit(15000)) { $process.Kill(); throw 'The interactive launcher did not exit after cancellation.' }
+        Assert-True ($process.ExitCode -eq 0) 'Cancellation through the real launcher must succeed.'
+        Assert-True ($output.Result -match 'WINDOWS BUILD ASSISTANT' -and $output.Result -match 'Cancelled') 'No-argument launch must show the English assistant and respect cancellation.'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $cleanupRoot 'artifacts'))) 'Cancelling must not create output/log directories.'
+    } finally { $process.Dispose() }
     Invoke-CheckedCommand git @('init', '--quiet', $cleanupRoot)
     $generatedDirectories = @('.cargo-target', 'src-tauri/target', 'node_modules', 'dist', 'artifacts/logs', 'reports', 'build_logs', 'src-tauri/gen/schemas', 'scripts/__pycache__', 'tools/latency_bench/__pycache__', 'tools/diagnostics/__pycache__', 'tools/diagnostics/tests/__pycache__', 'vendor/rack/target', 'vendor/rtpmidi/target', 'vendor/vst/target', 'vendor/midi-types/target')
     $keptDirectories = @('src', '.vscode', '.playwright-cli', '.venv', 'ASIOSDK', 'vendor/rack/rack-sys/external/vst3sdk')
@@ -130,7 +170,7 @@ try {
         Set-Content -LiteralPath (Join-Path $path 'fixture.txt') -Value $directory
     }
     Invoke-CheckedCommand git @('-C', $cleanupRoot, 'add', '--', 'src/fixture.txt')
-    Invoke-CheckedCommand $env:ComSpec @('/d', '/c', ('"' + (Join-Path $cleanupRoot 'clean_all.bat') + '"'))
+    Invoke-CheckedCommand $env:ComSpec @('/d', '/c', ('call "' + (Join-Path $cleanupRoot 'build_windows.bat') + '" -FullClean'))
     foreach ($directory in $generatedDirectories) {
         Assert-True (-not (Test-Path -LiteralPath (Join-Path $cleanupRoot $directory))) "Full cleanup must remove $directory."
     }
@@ -143,9 +183,34 @@ try {
     Set-Content -LiteralPath (Join-Path $cleanupRoot '.cargo-target/tracked.txt') -Value 'keep'
     Invoke-CheckedCommand git @('-C', $cleanupRoot, 'add', '--', '.cargo-target/tracked.txt')
     $failed = $false
-    try { Invoke-CheckedCommand $env:ComSpec @('/d', '/c', ('"' + (Join-Path $cleanupRoot 'clean_all.bat') + '"')) *> $null } catch { $failed = $true }
+    try { Invoke-CheckedCommand $env:ComSpec @('/d', '/c', ('call "' + (Join-Path $cleanupRoot 'build_windows.bat') + '" -FullClean')) *> $null } catch { $failed = $true }
     Assert-True $failed 'The cleanup launcher must propagate a refused cleanup exit code.'
     Assert-True (Test-Path -LiteralPath (Join-Path $cleanupRoot '.cargo-target/tracked.txt')) 'Refused full cleanup must preserve tracked files.'
+
+    # A failed build must skip the requested final cleanup, with or without logs.
+    foreach ($noLog in @($false, $true)) {
+        $failedRoot = Join-Path $fixtureRoot "failed build with spaces $noLog"
+        New-Item -ItemType Directory -Force -Path (Join-Path $failedRoot 'scripts') | Out-Null
+        foreach ($file in @('build_windows.bat', 'scripts/build-windows.ps1', 'scripts/build-support.ps1', 'scripts/build-menu.ps1')) {
+            Copy-Item -LiteralPath (Join-Path $actualRoot $file) -Destination (Join-Path $failedRoot $file)
+        }
+        foreach ($directory in @('.cargo-target', 'artifacts/dev')) {
+            New-Item -ItemType Directory -Force -Path (Join-Path $failedRoot $directory) | Out-Null
+            Set-Content -LiteralPath (Join-Path $failedRoot "$directory/keep.txt") -Value 'keep after failure'
+        }
+        # No package/lock files: dependency preparation must fail before any build.
+        $logOption = if ($noLog) { ' -NoLog' } else { '' }
+        $failed = $false
+        try {
+            Invoke-CheckedCommand $env:ComSpec @('/d', '/c', ('call "' + (Join-Path $failedRoot 'build_windows.bat') + '" -BuildMode Dev -Checks None -CleanupMode Full' + $logOption)) *> (Join-Path $fixtureRoot "build-failure-$noLog.txt")
+        } catch { $failed = $true }
+        Assert-True $failed 'The launcher must propagate a failed build exit code.'
+        Assert-True (Test-Path -LiteralPath (Join-Path $failedRoot '.cargo-target/keep.txt')) 'A failed build must skip post-build cleanup.'
+        Assert-True (Test-Path -LiteralPath (Join-Path $failedRoot 'artifacts/dev/keep.txt')) 'A failed build must retain previous exported apps.'
+        $logs = @(Get-ChildItem -LiteralPath (Join-Path $failedRoot 'artifacts/logs') -Filter '*-FAIL.log' -ErrorAction SilentlyContinue)
+        Assert-True ($logs.Count -eq $(if ($noLog) { 0 } else { 1 })) 'Persistent logs must follow the selected option even on failure.'
+        if ($noLog) { Assert-True (-not (Test-Path -LiteralPath (Join-Path $failedRoot 'artifacts/logs'))) 'NoLog must not create an empty log directory.' }
+    }
 
     $failed = $false
     try { Invoke-CheckedCommand $env:ComSpec @('/d', '/c', 'exit 7') } catch { $failed = $true }

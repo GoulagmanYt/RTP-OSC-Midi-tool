@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([ValidateSet('Frontend', 'Rust', 'Version', 'All')][string]$Scope = 'All')
+param([ValidateSet('Frontend', 'Rust', 'Version', 'Quick', 'All')][string]$Scope = 'All')
 
 $ErrorActionPreference = 'Stop'
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
@@ -7,9 +7,15 @@ $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $previousLocation = Get-Location
 $previousTauriConfig = $env:TAURI_CONFIG
 $previousTarget = $env:CARGO_TARGET_DIR
+$validationShell = (Get-Process -Id $PID).Path
 try {
     Set-Location $repositoryRoot
     $env:CARGO_TARGET_DIR = Join-Path $repositoryRoot '.cargo-target'
+    if ($Scope -eq 'Quick') {
+        Invoke-CheckedCommand npm @('run', 'lint')
+        $env:TAURI_CONFIG = '{"bundle":{"externalBin":[]}}'
+        Invoke-CheckedCommand cargo @('check', '--manifest-path', 'src-tauri/Cargo.toml', '--locked', '--bins', '--features', 'vst-worker-binary')
+    }
     if ($Scope -in 'Frontend', 'All') {
         Invoke-CheckedCommand npm @('run', 'lint')
         Invoke-CheckedCommand npm @('test')
@@ -59,9 +65,11 @@ try {
         Invoke-CheckedCommand cmake @('-S', 'vendor/rack/rack-sys', '-B', '.cargo-target/realtime-tests', '-DBUILD_REALTIME_TESTS=ON')
         Invoke-CheckedCommand cmake @('--build', '.cargo-target/realtime-tests', '--config', 'RelWithDebInfo', '--target', 'rack_realtime_audio_test', '--parallel', '4')
         Invoke-CheckedCommand ctest @('--test-dir', '.cargo-target/realtime-tests', '-C', 'RelWithDebInfo', '--output-on-failure')
-        Invoke-CheckedCommand powershell @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'scripts/test-build-support.ps1')
-        Invoke-CheckedCommand powershell @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'scripts/test-build-windows-processes.ps1')
-        Invoke-CheckedCommand powershell @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'scripts/test-prepare-vst-worker.ps1')
+        Invoke-CheckedCommand $validationShell @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'scripts/test-build-support.ps1')
+        Invoke-CheckedCommand $validationShell @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'scripts/test-build-menu.ps1')
+        Invoke-CheckedCommand $validationShell @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'scripts/test-build-artifacts.ps1')
+        Invoke-CheckedCommand $validationShell @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'scripts/test-build-windows-processes.ps1')
+        Invoke-CheckedCommand $validationShell @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'scripts/test-prepare-vst-worker.ps1')
     }
 }
 finally {
