@@ -301,6 +301,9 @@ impl AudioEngine {
             metrics.x86_bridge_overruns = t.x86_overruns.load(Ordering::Relaxed);
             metrics.x86_worker_alive = t.x86_alive.load(Ordering::Relaxed);
             metrics.callback_count = t.callback_count.load(Ordering::Relaxed);
+            let frames = t.block_size_frames.load(Ordering::Relaxed);
+            metrics.block_size_frames =
+                (metrics.callback_count > 0 && frames > 0).then_some(frames);
             metrics.callback_interval_max_us = t.callback_interval_max_us.load(Ordering::Relaxed);
             metrics.render_ahead_samples = t.render_ahead_samples.load(Ordering::Relaxed);
             metrics.render_queue_frames = t.render_queue_frames.load(Ordering::Relaxed);

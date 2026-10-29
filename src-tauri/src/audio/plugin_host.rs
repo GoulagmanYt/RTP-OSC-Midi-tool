@@ -132,7 +132,7 @@ pub(super) fn load_plugin_backend(
                 .map_err(AudioError::Message)?;
         let input_channels = remote.input_channels();
         let output_channels = remote.output_channels();
-        let latency_samples = remote.latency_samples().saturating_add(initial_block_size);
+        let latency_samples = remote.latency_samples();
         let parameter_cache = remote.parameters().to_vec();
         logger.info(format!(
             "VST x86 bridge '{}': {} inputs / {} outputs, bridge latency={} samples",

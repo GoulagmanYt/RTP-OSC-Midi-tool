@@ -1359,10 +1359,8 @@ async fn run_session(runtime: SessionRuntime) {
                         guard.maintenance_started.get_or_insert(now);
                     } else if guard.maintenance_started.take().is_some() { guard.callback_progress = Some(now); }
                     guard.snapshot.editor_open = metrics.editor_open;
-                    if let (Some(status), Some(enabled)) =
-                        (guard.snapshot.status.as_mut(), metrics.limiter_enabled)
-                    {
-                        status.limiter_enabled = enabled;
+                    if let Some(status) = guard.snapshot.status.as_mut() {
+                        update_audio_status(status, &metrics);
                     }
                     guard.snapshot.metrics = metrics;
                 }
@@ -1455,6 +1453,18 @@ async fn run_session(runtime: SessionRuntime) {
     }
 }
 
+fn update_audio_status(status: &mut WorkerAudioStatus, metrics: &WorkerMetrics) {
+    if let Some(enabled) = metrics.limiter_enabled {
+        status.limiter_enabled = enabled;
+    }
+    if let Some(frames) = metrics.block_size_frames.filter(|frames| *frames > 0) {
+        status.stream_buffer_size = frames;
+        if status.hosting_mode == "bridgedX86" {
+            status.bridge_latency_samples = frames;
+        }
+    }
+}
+
 fn terminate_child(child: &mut Child) {
     if child.try_wait().ok().flatten().is_none() {
         let _ = child.kill();
@@ -1472,6 +1482,53 @@ fn set_session_fault(inner: &Arc<SupervisorInner>, error: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn heartbeat_updates_negotiated_buffer_and_x86_latency_without_changing_plugin_delay() {
+        let mut status = WorkerAudioStatus {
+            backend: "ASIO".into(),
+            device: "test".into(),
+            device_id: None,
+            sample_rate: 48_000,
+            requested_buffer_size: 64,
+            stream_buffer_size: 512,
+            plugin_latency_samples: 10,
+            bridge_latency_samples: 512,
+            hosting_mode: "bridgedX86".into(),
+            vst_midi_compatible: true,
+            limiter_enabled: false,
+            mmcss_enabled: false,
+            power_throttling_disabled: false,
+            class_uid: None,
+        };
+        for frames in [128, 256] {
+            update_audio_status(
+                &mut status,
+                &WorkerMetrics {
+                    block_size_frames: Some(frames),
+                    ..Default::default()
+                },
+            );
+            assert_eq!(status.requested_buffer_size, 64);
+            assert_eq!(status.stream_buffer_size, frames);
+            assert_eq!(status.plugin_latency_samples, 10);
+            assert_eq!(status.bridge_latency_samples, frames);
+        }
+        update_audio_status(&mut status, &WorkerMetrics::default());
+        assert_eq!(status.stream_buffer_size, 256);
+        assert_eq!(status.bridge_latency_samples, 256);
+        status.hosting_mode = "directX64".into();
+        status.bridge_latency_samples = 0;
+        update_audio_status(
+            &mut status,
+            &WorkerMetrics {
+                block_size_frames: Some(128),
+                ..Default::default()
+            },
+        );
+        assert_eq!(status.stream_buffer_size, 128);
+        assert_eq!(status.bridge_latency_samples, 0);
+    }
 
     #[tokio::test]
     async fn command_started_during_stop_cannot_adopt_the_old_session() {

@@ -2,11 +2,42 @@ use std::{path::PathBuf, sync::atomic::Ordering, time::Duration};
 
 use super::{
     engine::{db_to_linear, AudioEngine},
-    runtime_state::{AudioError, AudioLifecycleState},
+    runtime_state::{AudioError, AudioLifecycleState, AudioRuntime},
 };
 
 use crate::config::VstEqSettings;
 use crate::logger::FrontendLogger;
+
+fn runtime_bridge_latency_samples(runtime: &AudioRuntime) -> u32 {
+    if runtime.is_x86_bridge {
+        runtime.telemetry.block_size_frames.load(Ordering::Relaxed)
+    } else {
+        0
+    }
+}
+
+fn pipeline_latency_ms(
+    sample_rate: u32,
+    backend_latency_us: u64,
+    buffer_frames: u32,
+    plugin_frames: u32,
+    bridge_frames: u32,
+    render_ahead_frames: u32,
+) -> Option<f32> {
+    if sample_rate == 0 {
+        return None;
+    }
+    let backend_ms = if backend_latency_us > 0 {
+        backend_latency_us as f32 / 1000.0
+    } else if buffer_frames > 0 {
+        buffer_frames as f32 / sample_rate as f32 * 1000.0
+    } else {
+        return None;
+    };
+    let pipeline_frames =
+        u64::from(plugin_frames) + u64::from(bridge_frames) + u64::from(render_ahead_frames);
+    Some(backend_ms + pipeline_frames as f32 / sample_rate as f32 * 1000.0)
+}
 
 #[cfg(target_os = "windows")]
 fn require_control_admission(admitted: bool) -> Result<(), AudioError> {
@@ -326,45 +357,25 @@ impl AudioEngine {
         if self.is_worker_enabled() {
             let snapshot = self.worker.snapshot();
             return snapshot.status.and_then(|status| {
-                if status.sample_rate == 0 {
-                    return None;
-                }
-                let backend_ms = if snapshot.metrics.backend_latency_us > 0 {
-                    snapshot.metrics.backend_latency_us as f32 / 1000.0
-                } else {
-                    status.stream_buffer_size as f32 / status.sample_rate as f32 * 1000.0
-                };
-                let plugin_ms = (status.bridge_latency_samples
-                    + status.plugin_latency_samples
-                    + snapshot.metrics.render_ahead_samples) as f32
-                    / status.sample_rate as f32
-                    * 1000.0;
-                Some(backend_ms + plugin_ms)
+                pipeline_latency_ms(
+                    status.sample_rate,
+                    snapshot.metrics.backend_latency_us,
+                    status.stream_buffer_size,
+                    status.plugin_latency_samples,
+                    status.bridge_latency_samples,
+                    snapshot.metrics.render_ahead_samples,
+                )
             });
         }
         self.runtime.lock().as_ref().and_then(|r| {
-            if r.sample_rate == 0 {
-                None
-            } else {
-                let measured_us = r.telemetry.backend_latency_us.load(Ordering::Relaxed);
-                let backend_ms = if measured_us > 0 {
-                    measured_us as f32 / 1000.0
-                } else {
-                    let frames = r.telemetry.block_size_frames.load(Ordering::Relaxed);
-                    if frames == 0 {
-                        return None;
-                    }
-                    frames as f32 / r.sample_rate as f32 * 1000.0
-                };
-                Some(
-                    backend_ms
-                        + (r.plugin_latency_samples
-                            + r.telemetry.render_ahead_samples.load(Ordering::Relaxed))
-                            as f32
-                            / r.sample_rate as f32
-                            * 1000.0,
-                )
-            }
+            pipeline_latency_ms(
+                r.sample_rate,
+                r.telemetry.backend_latency_us.load(Ordering::Relaxed),
+                r.telemetry.block_size_frames.load(Ordering::Relaxed),
+                r.plugin_latency_samples,
+                runtime_bridge_latency_samples(r),
+                r.telemetry.render_ahead_samples.load(Ordering::Relaxed),
+            )
         })
     }
 
@@ -411,15 +422,10 @@ impl AudioEngine {
                 .status
                 .map(|status| status.plugin_latency_samples);
         }
-        self.runtime.lock().as_ref().map(|runtime| {
-            #[cfg(all(target_os = "windows", target_pointer_width = "64"))]
-            if runtime.is_x86_bridge {
-                return runtime
-                    .plugin_latency_samples
-                    .saturating_sub(runtime.requested_buffer_size);
-            }
-            runtime.plugin_latency_samples
-        })
+        self.runtime
+            .lock()
+            .as_ref()
+            .map(|runtime| runtime.plugin_latency_samples)
     }
 
     pub fn bridge_latency_samples(&self) -> Option<u32> {
@@ -431,15 +437,10 @@ impl AudioEngine {
                 .status
                 .map(|status| status.bridge_latency_samples);
         }
-        self.runtime.lock().as_ref().map(|runtime| {
-            #[cfg(all(target_os = "windows", target_pointer_width = "64"))]
-            if runtime.is_x86_bridge {
-                return runtime.requested_buffer_size;
-            }
-            #[cfg(not(all(target_os = "windows", target_pointer_width = "64")))]
-            let _ = runtime;
-            0
-        })
+        self.runtime
+            .lock()
+            .as_ref()
+            .map(runtime_bridge_latency_samples)
     }
 
     pub fn vst_hosting_mode(&self) -> Option<String> {
@@ -772,6 +773,24 @@ impl AudioEngine {
 
 #[cfg(all(test, target_os = "windows"))]
 mod control_tests {
+    #[test]
+    fn latency_counts_the_negotiated_bridge_buffer_separately_from_native_delay() {
+        // 1 ms backend + (48 native + 128 bridge + 144 renderer) / 48 kHz.
+        let latency = super::pipeline_latency_ms(48_000, 1_000, 128, 48, 128, 144).unwrap();
+        assert!((latency - 7.666_666_5).abs() < 0.000_01);
+        let fallback = super::pipeline_latency_ms(48_000, 0, 256, 48, 256, 144).unwrap();
+        assert!((fallback - 14.666_667).abs() < 0.000_01);
+        let direct = super::pipeline_latency_ms(48_000, 1_000, 128, 48, 0, 144).unwrap();
+        assert_eq!(direct, 5.0);
+        assert!(super::pipeline_latency_ms(0, 1_000, 128, 48, 128, 144).is_none());
+        assert!(super::pipeline_latency_ms(48_000, 0, 0, 48, 128, 144).is_none());
+        assert!(
+            super::pipeline_latency_ms(48_000, 1_000, 128, u32::MAX, u32::MAX, u32::MAX)
+                .unwrap()
+                .is_finite()
+        );
+    }
+
     #[test]
     #[cfg(target_os = "windows")]
     fn dsp_stall_is_detected_even_when_driver_callbacks_continue() {

@@ -76,6 +76,9 @@ pub struct WorkerMetrics {
     pub midi_delivery_p99_us: u64,
     #[serde(default)]
     pub callback_count: u64,
+    /// Actual callback size; older workers omit it, preserving the Ready value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_size_frames: Option<u32>,
     #[serde(default)]
     pub callback_interval_max_us: u64,
     /// None until a callback publishes tuning, or when reading an older worker.
@@ -427,6 +430,25 @@ fn fallback_monotonic_ticks() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn callback_buffer_metrics_are_optional_for_older_workers() {
+        let mut legacy = serde_json::to_value(WorkerMetrics::default()).unwrap();
+        assert!(legacy.get("blockSizeFrames").is_none());
+        assert_eq!(
+            serde_json::from_value::<WorkerMetrics>(legacy.clone())
+                .unwrap()
+                .block_size_frames,
+            None
+        );
+        legacy["blockSizeFrames"] = serde_json::json!(128);
+        assert_eq!(
+            serde_json::from_value::<WorkerMetrics>(legacy)
+                .unwrap()
+                .block_size_frames,
+            Some(128)
+        );
+    }
 
     #[test]
     fn limiter_heartbeat_state_is_optional_for_older_workers() {
