@@ -161,8 +161,8 @@ pub fn default_trace_log_path() -> std::path::PathBuf {
         if local_artifacts.is_dir() {
             local_artifacts
         } else {
-            directories::ProjectDirs::from("com", "OSCMIDI", "OSCMIDI")
-                .map(|dirs| dirs.config_dir().join("logs"))
+            crate::app_paths::config_dir()
+                .map(|dir| dir.join("logs"))
                 .unwrap_or_else(|| {
                     std::env::current_exe()
                         .ok()

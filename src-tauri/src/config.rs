@@ -1,4 +1,3 @@
-use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -519,16 +518,14 @@ pub struct ConfigStore {
 
 impl ConfigStore {
     pub fn new() -> Self {
-        let cfg_dir = ProjectDirs::from("com", "OSCMIDI", "OSCMIDI")
-            .map(|dirs| dirs.config_dir().to_path_buf())
-            .unwrap_or_else(|| {
-                let fallback = std::env::temp_dir().join("OSCMidi").join("config");
-                log::warn!(
-                    "User configuration directory is unavailable; falling back to {:?}",
-                    fallback
-                );
+        let cfg_dir = crate::app_paths::config_dir().unwrap_or_else(|| {
+            let fallback = std::env::temp_dir().join("OSCMidi").join("config");
+            log::warn!(
+                "User configuration directory is unavailable; falling back to {:?}",
                 fallback
-            });
+            );
+            fallback
+        });
         if let Err(error) = fs::create_dir_all(&cfg_dir) {
             log::error!(
                 "Unable to create configuration directory {:?}: {error}",

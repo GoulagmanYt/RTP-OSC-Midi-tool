@@ -9,7 +9,6 @@ use std::{
 };
 
 use chrono::Local;
-use directories::ProjectDirs;
 use parking_lot::Mutex;
 use tauri::{Emitter, Manager, Window};
 
@@ -207,7 +206,7 @@ pub fn clear_log_file() -> Result<(), String> {
 }
 
 fn log_file_path() -> Option<PathBuf> {
-    ProjectDirs::from("com", "OSCMIDI", "OSCMIDI").map(|dirs| dirs.config_dir().join("app.log"))
+    crate::app_paths::config_dir().map(|dir| dir.join("app.log"))
 }
 
 fn append_file_log(level: &str, message: &str) {

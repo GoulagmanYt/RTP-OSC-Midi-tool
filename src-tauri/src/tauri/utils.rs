@@ -12,7 +12,6 @@ use std::{
 use std::os::windows::process::CommandExt;
 
 use crate::{config::Config, types::VstPluginEntry};
-use directories::ProjectDirs;
 use tauri::{AppHandle, Manager};
 
 use crate::tauri::state::AppState;
@@ -41,8 +40,7 @@ where
 }
 
 pub fn config_dir_path() -> Result<PathBuf, String> {
-    ProjectDirs::from("com", "OSCMIDI", "OSCMIDI")
-        .map(|dirs| dirs.config_dir().to_path_buf())
+    crate::app_paths::config_dir()
         .ok_or_else(|| "Impossible de determiner le dossier de configuration".to_string())
 }
 

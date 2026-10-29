@@ -7,7 +7,6 @@ use std::{
     time::UNIX_EPOCH,
 };
 
-use directories::ProjectDirs;
 use parking_lot::Mutex;
 use rack::PluginInstance as _;
 use vst::{host::PluginInstance, plugin::Plugin};
@@ -98,7 +97,7 @@ fn state_dir() -> Option<PathBuf> {
         let path = PathBuf::from(path);
         return path.is_absolute().then_some(path);
     }
-    ProjectDirs::from("com", "OSCMIDI", "OSCMIDI").map(|dirs| dirs.config_dir().join("vst_state"))
+    crate::app_paths::config_dir().map(|dir| dir.join("vst_state"))
 }
 
 fn legacy_state_path_for_plugin(vst_path: &Path) -> Option<PathBuf> {

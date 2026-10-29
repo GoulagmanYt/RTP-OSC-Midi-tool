@@ -37,9 +37,8 @@ pub struct AudioDeviceEntry {
 
 impl AppPaths {
     pub fn new() -> Result<Self, String> {
-        let dirs = directories::ProjectDirs::from("com", "OSCMIDI", "OSCMIDI")
+        let config_dir = crate::app_paths::config_dir()
             .ok_or("Impossible de determiner le dossier de configuration")?;
-        let config_dir = dirs.config_dir().to_path_buf();
         let log_dir = config_dir.clone();
         let log_file = log_dir.join("app.log");
 

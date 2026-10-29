@@ -1,5 +1,6 @@
 //! Reusable OSCMidi runtime modules and public integration types.
 
+pub mod app_paths;
 pub mod application;
 mod atomic_file;
 pub mod audio;

@@ -37,8 +37,8 @@ fn main() {
             .unwrap_or("unknown location".into());
         let err_msg = format!("PANIC: '{}' at {}", msg, location);
         eprintln!("{}", err_msg);
-        let panic_path = directories::ProjectDirs::from("com", "OSCMIDI", "OSCMIDI")
-            .map(|dirs| dirs.config_dir().join("panic.log"))
+        let panic_path = osc_midi_bridge::app_paths::config_dir()
+            .map(|dir| dir.join("panic.log"))
             .unwrap_or_else(|| std::path::PathBuf::from("panic.log"));
         if let Some(parent) = panic_path.parent() {
             let _ = std::fs::create_dir_all(parent);

@@ -32,7 +32,7 @@ if ($StateDirectory) {
     if (-not $stateItem.PSIsContainer) { throw 'StateDirectory must be an existing directory' }
     $env:OSCMIDI_VST_STATE_DIR = $stateItem.FullName
 }
-$stateDirectoryInUse = if ($env:OSCMIDI_VST_STATE_DIR) { $env:OSCMIDI_VST_STATE_DIR } else { Join-Path $env:APPDATA 'OSCMIDI/OSCMIDI/config/vst_state' }
+$stateDirectoryInUse = if ($env:OSCMIDI_VST_STATE_DIR) { $env:OSCMIDI_VST_STATE_DIR } else { Join-Path $env:APPDATA 'OSCMIDI/config/vst_state' }
 $stateFiles = @(Get-ChildItem -LiteralPath $stateDirectoryInUse -Filter '*.state' -ErrorAction SilentlyContinue | ForEach-Object {
     @{ name = $_.Name; sha256 = (Get-FileHash -LiteralPath $_.FullName).Hash }
 })

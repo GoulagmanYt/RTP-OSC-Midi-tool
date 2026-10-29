@@ -282,9 +282,13 @@ Configuration, logs and VST states are stored under the Windows roaming applicat
 
 | Data | Path |
 | --- | --- |
-| Configuration | `%APPDATA%\OSCMIDI\OSCMIDI\config\config.yaml` |
-| Application log | `%APPDATA%\OSCMIDI\OSCMIDI\config\app.log` |
-| VST state | `%APPDATA%\OSCMIDI\OSCMIDI\config\vst_state\` |
+| Configuration | `%APPDATA%\OSCMIDI\config\config.yaml` |
+| Application log | `%APPDATA%\OSCMIDI\config\app.log` |
+| VST state | `%APPDATA%\OSCMIDI\config\vst_state\` |
+
+On first launch, existing settings, logs, VST cache and plugin states are imported
+from the former `%APPDATA%\OSCMIDI\OSCMIDI\config\` directory. Files already present
+at the new location take precedence. The original files remain available as a backup.
 
 VST state files are keyed by the selected plug-in class and architecture. Native plug-in state is authoritative. For fingerprinted plug-ins whose native state path is unsafe, OSCMidi stores a sparse fallback containing only parameters actually edited; obsolete exhaustive zero-filled snapshots are preserved with an `.invalid-*` suffix and are not restored. State is autosaved after parameter changes and checkpointed when the editor, plug-in, or application closes.
 
