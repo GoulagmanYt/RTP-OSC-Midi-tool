@@ -1,4 +1,4 @@
-import { Suspense, lazy, useEffect } from "react";
+import { lazy, useEffect } from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { BridgeProvider, useBridge } from "./providers/BridgeProvider";
 import { Shell } from "./components/layout/Shell";
@@ -8,6 +8,7 @@ import { Button } from "./components/ui/Button";
 import { AppErrorBoundary } from "./components/AppErrorBoundary";
 import { useI18n } from "./providers/LanguageProvider";
 import { isDeveloperMode } from "./developer-mode";
+import { LoadingState } from "./components/ui/LoadingState";
 
 const Dashboard = lazy(() => import("./pages/Dashboard"));
 const AudioPage = lazy(() => import("./pages/AudioPage"));
@@ -16,19 +17,6 @@ const RoutingPage = lazy(() => import("./pages/RoutingPage"));
 const OscPage = lazy(() => import("./pages/OscPage"));
 const RtpPage = lazy(() => import("./pages/RtpPage"));
 const SettingsPage = lazy(() => import("./pages/SettingsPage"));
-
-function RouteFallback() {
-  const { t } = useI18n();
-  return (
-    <div
-      className="flex min-h-[40vh] items-center justify-center text-sm text-muted-foreground"
-      role="status"
-      aria-live="polite"
-    >
-      {t("common.loading")}
-    </div>
-  );
-}
 
 function RecoveryScreen({ message }: { message: string }) {
   const { t } = useI18n();
@@ -64,26 +52,24 @@ function AppContent() {
   }, [config]);
 
   if (isLoading) {
-    return <RouteFallback />;
+    return <LoadingState />;
   }
   if (initializationError || !config) {
     return <RecoveryScreen message={initializationError || t("ui.configurationUnavailable")} />;
   }
 
   return (
-    <Suspense fallback={<RouteFallback />}>
-      <Routes>
-        <Route element={<Shell />}>
-          <Route path="/" element={<Dashboard />} />
-          <Route path="/routing" element={<RoutingPage />} />
-          <Route path="/osc" element={<OscPage />} />
-          <Route path="/rtp" element={<RtpPage />} />
-          <Route path="/audio" element={<AudioPage />} />
-          <Route path="/logs" element={isDeveloperMode(config) ? <LogsPage /> : <Navigate to="/" replace />} />
-          <Route path="/settings" element={<SettingsPage />} />
-        </Route>
-      </Routes>
-    </Suspense>
+    <Routes>
+      <Route element={<Shell />}>
+        <Route path="/" element={<Dashboard />} />
+        <Route path="/routing" element={<RoutingPage />} />
+        <Route path="/osc" element={<OscPage />} />
+        <Route path="/rtp" element={<RtpPage />} />
+        <Route path="/audio" element={<AudioPage />} />
+        <Route path="/logs" element={isDeveloperMode(config) ? <LogsPage /> : <Navigate to="/" replace />} />
+        <Route path="/settings" element={<SettingsPage />} />
+      </Route>
+    </Routes>
   );
 }
 

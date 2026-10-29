@@ -104,6 +104,9 @@ summary { min-height: 1.75rem; padding-block: 0.25rem; }
   --preview-dark-card: 240 2.22% 26.47%;
   --page-padding: 32px;
   --sidebar-width: 14rem;
+  --motion-fast: 120ms;
+  --motion-standard: 180ms;
+  --motion-ease: cubic-bezier(0.2, 0.7, 0.2, 1);
 }
 
 @theme {
@@ -184,15 +187,20 @@ summary { min-height: 1.75rem; padding-block: 0.25rem; }
   .sidebar { width: var(--sidebar-width); flex-shrink: 0; }
   .page-body { padding: var(--page-padding); overscroll-behavior: contain; }
   .page-content { width: min(100%, 80rem); margin-inline: auto; container: workspace / inline-size; }
+  .page-transition { animation: page-appear var(--motion-standard) var(--motion-ease); }
+  .page-heading h1 { text-wrap: balance; }
+  .page-heading p { max-width: 65ch; text-wrap: pretty; }
+  .page-body:focus-visible { outline-offset: -3px; }
   .card-surface {
     min-width: 0;
     background-color: hsl(var(--card));
     border-color: hsl(var(--card-border));
     border-radius: calc(var(--radius) + 8px);
-    box-shadow: 0 2px 8px -4px hsl(var(--foreground) / 0.1), 0 0 1px hsl(var(--foreground) / 0.08);
+    box-shadow: 0 3px 12px -6px hsl(var(--foreground) / 0.12), 0 1px 2px hsl(var(--foreground) / 0.03);
   }
   .card-surface > * { min-width: 0; }
   .nav-item {
+    position: relative;
     display: flex;
     min-height: 2.5rem;
     align-items: center;
@@ -202,13 +210,23 @@ summary { min-height: 1.75rem; padding-block: 0.25rem; }
     color: hsl(var(--foreground));
     font-size: 0.875rem;
     font-weight: 500;
-    transition: background-color 150ms ease, color 150ms ease;
+    transition: background-color var(--motion-fast) ease, color var(--motion-fast) ease, box-shadow var(--motion-fast) ease;
   }
   .nav-item:hover { background: hsl(var(--muted)); color: hsl(var(--foreground)); }
   .nav-item[aria-current="page"] {
     background: hsl(var(--primary));
     color: hsl(var(--primary-foreground));
     box-shadow: 0 2px 5px -3px hsl(var(--primary) / 0.45);
+  }
+  .nav-item[aria-current="page"]::before {
+    content: "";
+    position: absolute;
+    inset-inline-start: -0.5rem;
+    width: 3px;
+    height: 1rem;
+    border-radius: 999px;
+    background: hsl(var(--primary));
+    animation: surface-appear var(--motion-standard) ease;
   }
   .window-action {
     display: grid;
@@ -265,10 +283,58 @@ summary { min-height: 1.75rem; padding-block: 0.25rem; }
   }
   .signal-junction::before { left: 0; }
   .signal-junction::after { right: 0; }
-  .reduce-motion *, .reduce-motion *::before, .reduce-motion *::after {
-    animation: none !important;
-    transition: none !important;
-    scroll-behavior: auto !important;
+}
+
+/* Keep feedback short and tied to an action; live telemetry never replays entries. */
+@keyframes page-appear {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes surface-appear {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes surface-disappear {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+@keyframes dialog-appear {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes dialog-disappear {
+  from { opacity: 1; transform: none; }
+  to { opacity: 0; transform: translateY(6px); }
+}
+
+@layer components {
+  .ui-button {
+    transition: background-color var(--motion-fast) ease, color var(--motion-fast) ease,
+      box-shadow var(--motion-fast) ease, transform var(--motion-fast) var(--motion-ease);
+  }
+  .ui-button:active:not(:disabled):not([aria-disabled="true"]) { transform: translateY(1px); }
+  .input-control, .select-trigger {
+    transition: border-color var(--motion-fast) ease, box-shadow var(--motion-fast) ease, background-color var(--motion-fast) ease;
+  }
+  .input-control:hover:not(:disabled):not(:read-only), .select-trigger:hover:not(:disabled) { border-color: hsl(var(--ring)); }
+  .input-control[aria-invalid="true"], .select-trigger[aria-invalid="true"] { border-color: hsl(var(--destructive)); }
+  .select-trigger > svg { transition: transform var(--motion-standard) var(--motion-ease); }
+  .select-trigger[data-state="open"] > svg { transform: rotate(180deg); }
+  .switch-control, .switch-control > span { transition-duration: var(--motion-standard); transition-timing-function: var(--motion-ease); }
+  .appearance-preview, .color-choice, .color-choice-swatch {
+    transition: background-color var(--motion-fast) ease, box-shadow var(--motion-fast) ease, outline-color var(--motion-fast) ease;
+  }
+  .appearance-choice:hover .appearance-preview { box-shadow: 0 2px 8px hsl(var(--foreground) / 0.1); }
+  .dialog-overlay[data-state="open"], .select-surface[data-state="open"] { animation: surface-appear var(--motion-standard) ease; }
+  .dialog-overlay[data-state="closed"], .select-surface[data-state="closed"] { animation: surface-disappear var(--motion-fast) ease; }
+  .dialog-surface[data-state="open"] { animation: dialog-appear var(--motion-standard) var(--motion-ease); }
+  .dialog-surface[data-state="closed"] { animation: dialog-disappear var(--motion-fast) ease; }
+  .dialog-surface { box-shadow: 0 24px 64px -16px hsl(var(--overlay) / 0.3), 0 4px 16px -4px hsl(var(--overlay) / 0.12); }
+  [cmdk-item] { transition: background-color var(--motion-fast) ease, color var(--motion-fast) ease; }
+  summary { border-radius: 0.375rem; transition: color var(--motion-fast) ease; }
+  summary:hover { color: hsl(var(--primary)); }
+  @media (hover: hover) {
+    .nav-item:not([aria-current="page"]):hover { box-shadow: inset 0 0 0 1px hsl(var(--border)); }
   }
 }
 
@@ -299,13 +365,20 @@ summary { min-height: 1.75rem; padding-block: 0.25rem; }
   .signal-junction::before, .signal-junction::after { display: none; }
   .signal-junction { margin-block: 0.5rem; border-block: 1px solid hsl(var(--border)); }
 }
+/* Outside layers so utilities and portal content also respect this preference. */
+.reduce-motion, .reduce-motion *, .reduce-motion *::before, .reduce-motion *::after {
+  animation: none !important;
+  transition: none !important;
+  scroll-behavior: auto !important;
+}
+.reduce-motion .ui-button:active { transform: none; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     scroll-behavior: auto !important;
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
+    animation: none !important;
+    transition: none !important;
   }
+  .ui-button:active { transform: none; }
 }
 @media (prefers-contrast: more) {
   :root { --border: var(--muted-foreground) !important; --card-border: var(--muted-foreground) !important; --input: var(--muted-foreground) !important; }
@@ -323,9 +396,10 @@ summary { min-height: 1.75rem; padding-block: 0.25rem; }
   }
   .toolbar-material {
     background: hsl(var(--background));
+    border-bottom: 1px solid hsl(var(--border) / 0.7);
   }
   .toolbar-icon, .bridge-action { border-radius: 999px; }
-  .bridge-action { min-inline-size: 12rem; min-block-size: 2.5rem; transition: background-color 150ms ease, box-shadow 150ms ease; }
+  .bridge-action { min-inline-size: 12rem; min-block-size: 2.5rem; }
   .bridge-action:active:not(:disabled) { box-shadow: inset 0 1px 3px hsl(var(--foreground) / 0.16); }
   .bridge-action[aria-busy="true"] { box-shadow: 0 0 0 3px hsl(var(--primary) / 0.16); }
   .bridge-action[aria-busy="true"]:disabled { pointer-events: auto; cursor: progress; }

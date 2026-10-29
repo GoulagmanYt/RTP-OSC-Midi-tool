@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { Link, MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
 import { Shell } from "./Shell";
 
@@ -28,6 +28,21 @@ it("lets keyboard users hide and restore the navigation without leaving the page
   fireEvent.click(toggle);
   expect(screen.getByRole("navigation")).toBeTruthy();
   expect(toggle.getAttribute("aria-expanded")).toBe("true");
+});
+
+it("starts the next page at the top and moves keyboard focus to its content", () => {
+  render(<MemoryRouter><Routes><Route element={<Shell />}>
+    <Route path="/" element={<Link to="/settings">Open settings</Link>} />
+    <Route path="/settings" element={<p>Settings content</p>} />
+  </Route></Routes></MemoryRouter>);
+  const main = screen.getByRole("main");
+  main.scrollTop = 480;
+  const link = screen.getByRole("link", { name: "Open settings" });
+  link.focus();
+  fireEvent.click(link);
+  expect(screen.getByText("Settings content")).toBeTruthy();
+  expect(main.scrollTop).toBe(0);
+  expect(document.activeElement).toBe(main);
 });
 
 it("opens an accessibly named command dialog from the keyboard and lets Escape close it", async () => {

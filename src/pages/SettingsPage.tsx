@@ -26,6 +26,7 @@ import { join } from "@tauri-apps/api/path";
 import { AppearanceColors } from "./settings/AppearanceColors";
 import { isDeveloperMode } from "../developer-mode";
 import { useConfirmAction } from "../components/ui/useConfirmAction";
+import { readMotionPreference, setMotionPreference } from "../motion-preference";
 
 type PaletteChoice = {
   id: "system" | "light" | "dark" | "contrast";
@@ -43,6 +44,7 @@ export default function SettingsPage() {
   const { config, updateConfig, saveConfig, clearLogs, reloadConfig, saveState } = useBridge();
   const [busy, setBusy] = useState(false);
   const [paths, setPaths] = useState<AppPaths | null>(null);
+  const [reduceMotion, setReduceMotion] = useState(readMotionPreference);
   const { t } = useI18n();
   const { confirmAction, confirmation } = useConfirmAction(t);
 
@@ -226,6 +228,16 @@ export default function SettingsPage() {
             </div>
           </fieldset>
           <AppearanceColors ui={config?.ui} disabled={busy || !config} onChange={ui => handleConfigUpdate({ ui })} />
+          <div className="flex items-center justify-between gap-4 border-t pt-5">
+            <div className="min-w-0 space-y-1">
+              <Label htmlFor="settings-reduce-motion">{t("ui.reduceMotion")}</Label>
+              <p id="settings-reduce-motion-hint" className="text-xs text-muted-foreground">{t("ui.reduceMotionHint")}</p>
+            </div>
+            <Switch id="settings-reduce-motion" aria-describedby="settings-reduce-motion-hint" checked={reduceMotion} onCheckedChange={(checked) => {
+              setMotionPreference(checked);
+              setReduceMotion(checked);
+            }} />
+          </div>
         </CardContent>
       </Card>
 

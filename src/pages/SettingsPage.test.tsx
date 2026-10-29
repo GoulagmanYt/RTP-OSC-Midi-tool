@@ -45,6 +45,22 @@ it("lets people follow the system appearance", async () => {
   }
 });
 
+it("reduces motion immediately and remembers the choice after reopening settings", async () => {
+  localStorage.clear();
+  document.documentElement.classList.remove("reduce-motion");
+  const view = render(<SettingsPage />);
+  await screen.findByDisplayValue("/home/user/config");
+  fireEvent.click(screen.getByRole("switch", { name: "ui.reduceMotion" }));
+  expect(document.documentElement.classList.contains("reduce-motion")).toBe(true);
+  view.unmount();
+  render(<SettingsPage />);
+  await screen.findByDisplayValue("/home/user/config");
+  const control = screen.getByRole("switch", { name: "ui.reduceMotion" });
+  expect(control.getAttribute("aria-checked")).toBe("true");
+  fireEvent.click(control);
+  expect(document.documentElement.classList.contains("reduce-motion")).toBe(false);
+});
+
 it.each([
   ["settings.theme.accent.purple", "accentColor", "purple"],
   ["settings.theme.background.white", "lightBackground", "white"],
@@ -73,7 +89,7 @@ it.each(["reset", "import"])("publishes the accepted %s snapshot directly instea
 it.each([true, false])("delegates the logging policy to shared normalization when leaving developer mode (enabled=%s)", async (enabled) => {
   mocks.config = { ui: { developerMode: true }, logging: { enabled }, osc: { logMessages: false } } as AppConfig;
   render(<SettingsPage />);
-  fireEvent.click(screen.getAllByRole("switch")[0]);
+  fireEvent.click(screen.getByRole("switch", { name: "settings.general.developerMode" }));
   await waitFor(() => expect(mocks.updateConfig).toHaveBeenCalled());
   const patch = mocks.updateConfig.mock.calls[0][0];
   expect(patch.ui.developerMode).toBe(false);

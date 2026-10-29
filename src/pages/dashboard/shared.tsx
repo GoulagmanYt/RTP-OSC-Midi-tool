@@ -19,7 +19,7 @@ export function MeterRow({ label, value, max, valueLabel, className }: MeterRowP
         <span className="font-medium text-foreground">{valueLabel ?? "--"}</span>
       </div>
       <div role="meter" aria-label={label} aria-valuemin={0} aria-valuemax={safeMax} aria-valuenow={safeValue} aria-valuetext={valueLabel ?? "--"} className="h-2 overflow-hidden rounded-full bg-muted/30">
-        <div className={cn("h-full transition-all duration-200", className)} style={{ width: `${pct * 100}%` }} />
+        <div className={cn("h-full transition-[width] duration-200", className)} style={{ width: `${pct * 100}%` }} />
       </div>
     </div>
   );

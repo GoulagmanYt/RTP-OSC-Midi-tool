@@ -1,10 +1,11 @@
-import { Suspense, lazy, useEffect, useRef, useState } from "react";
+import { Suspense, lazy, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import { Sidebar } from "./Sidebar";
 import { TopBar } from "./TopBar";
 import { useI18n } from "../../providers/LanguageProvider";
 import { useBridge } from "../../providers/BridgeProvider";
 import { pageKeys } from "./pageMeta";
+import { LoadingState } from "../ui/LoadingState";
 
 const CommandPalette = lazy(() => import("./CommandPalette"));
 
@@ -19,6 +20,17 @@ export function Shell() {
   const [open, setOpen] = useState(false);
   const [sidebarVisible, setSidebarVisible] = useState(true);
   const [commandPaletteRequested, setCommandPaletteRequested] = useState(false);
+  const mainRef = useRef<HTMLElement>(null);
+  const previousPath = useRef(location.pathname);
+
+  useLayoutEffect(() => {
+    if (previousPath.current === location.pathname) return;
+    previousPath.current = location.pathname;
+    if (mainRef.current) {
+      mainRef.current.scrollTop = 0;
+      mainRef.current.focus({ preventScroll: true });
+    }
+  }, [location.pathname]);
 
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
@@ -66,13 +78,15 @@ export function Shell() {
             setOpen(true);
           }}
         />
-        <main id="main-content" className={`page-body flex-1 overflow-auto ${location.pathname === "/" ? "dashboard-page" : ""}`} tabIndex={-1}>
-          <div className="page-content">
+        <main ref={mainRef} id="main-content" className={`page-body flex-1 overflow-auto ${location.pathname === "/" ? "dashboard-page" : ""}`} tabIndex={-1}>
+          <div key={location.pathname} className="page-content page-transition">
             <div className="page-heading mb-7 space-y-1.5">
               <h1 className="text-[1.75rem] font-semibold tracking-tight">{t(`topBar.${pageKey}`)}</h1>
               <p className="text-sm leading-relaxed text-muted-foreground">{t(`pageDescriptions.${pageKey}`)}</p>
             </div>
-            <Outlet />
+            <Suspense fallback={<LoadingState />}>
+              <Outlet />
+            </Suspense>
           </div>
         </main>
       </div>

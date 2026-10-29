@@ -124,11 +124,13 @@ async function mount(developerMode: boolean, path = "/", enabled = true) {
   render(<LanguageProvider><App /></LanguageProvider>);
   await screen.findByRole("navigation", { name: "Navigation" });
   await waitFor(() => expect(native.listeners.get("log:entry")?.size).toBe(1));
+  await waitFor(() => expect(screen.queryByText("Loading...")).toBeNull());
 }
 
 async function visit(label: string, title = label) {
   fireEvent.click(within(screen.getByRole("navigation")).getByRole("link", { name: label }));
   await screen.findByRole("heading", { level: 1, name: title });
+  await waitFor(() => expect(screen.queryByText("Loading...")).toBeNull());
 }
 
 async function emit(event: string, payload: LogEntry | RuntimeMetrics) {
