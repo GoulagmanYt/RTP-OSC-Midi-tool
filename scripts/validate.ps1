@@ -50,7 +50,9 @@ try {
         Invoke-CheckedCommand cargo @('check', '--manifest-path', 'vendor/rack/Cargo.toml', '--locked', '--lib', '--features', 'vst3')
         Invoke-CheckedCommand cargo @('test', '--manifest-path', 'vendor/rack/Cargo.toml', '--locked', '--lib', '--features', 'vst3', '--no-run')
         Invoke-CheckedCommand cargo @('test', '--manifest-path', 'vendor/rack/Cargo.toml', '--locked', '--lib', '--features', 'vst3', 'midi::tests')
-        Invoke-CheckedCommand cargo @('test', '--manifest-path', 'vendor/rack/Cargo.toml', '--locked', '--lib', '--features', 'vst3', 'vst3::scanner::tests')
+        # These integration tests load installed plug-ins whose DLL lifecycle
+        # callbacks share process-global state and cannot run concurrently.
+        Invoke-CheckedCommand cargo @('test', '--manifest-path', 'vendor/rack/Cargo.toml', '--locked', '--lib', '--features', 'vst3', 'vst3::scanner::tests', '--', '--test-threads=1')
         Invoke-CheckedCommand cargo @('fmt', '--manifest-path', 'vendor/vst/Cargo.toml', '--', '--check')
         Invoke-CheckedCommand cargo @('check', '--manifest-path', 'vendor/vst/Cargo.toml', '--all-targets', '--features', 'disable_deprecation_warning')
         Invoke-CheckedCommand cargo @('test', '--manifest-path', 'vendor/vst/Cargo.toml', '--all-targets', '--features', 'disable_deprecation_warning')
