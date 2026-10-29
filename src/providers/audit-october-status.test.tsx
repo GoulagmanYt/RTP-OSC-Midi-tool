@@ -31,6 +31,21 @@ beforeEach(() => {
   mocks.preflight.mockResolvedValue(null);
 });
 
+it("keeps the bridge stopped when starting and the recovery status query both fail", async () => {
+  mocks.getStatus.mockResolvedValueOnce({ running: false, audioRunning: false, vstWorkerState: "disabled" } as RuntimeStatus)
+    .mockRejectedValueOnce(new Error("status unavailable"));
+  mocks.preflight.mockResolvedValue({ midiInOk: true, midiOutOk: true, audioBackendOk: true, rtpPortOk: true });
+  mocks.start.mockRejectedValueOnce(new Error("MIDI device unavailable"));
+  const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const hook = renderHook(() => useBridge(), { wrapper: BridgeProvider });
+  await waitFor(() => expect(hook.result.current.isLoading).toBe(false));
+
+  await act(async () => { await hook.result.current.toggleBridge(); });
+
+  expect(hook.result.current.status).toMatchObject({ running: false });
+  errorLog.mockRestore();
+});
+
 it.each([false, true])("preserves a successful start if the following status query fails (autoStart=%s)", async (autoStart) => {
   mocks.getConfig.mockResolvedValue({ audio: {}, ui: { autoStart } } as AppConfig);
   mocks.getStatus.mockResolvedValueOnce({ running: false, audioRunning: false, vstWorkerState: "disabled" } as RuntimeStatus)

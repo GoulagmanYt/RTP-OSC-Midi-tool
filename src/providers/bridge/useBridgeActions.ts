@@ -132,7 +132,6 @@ export function useBridgeActions({
         return;
       }
 
-      setStatus((previous) => (previous ? { ...previous, running: true, lastError: null } : previous));
       const acceptStatus = beginStatusUpdate?.() ?? setStatus;
       acceptStatus(await api.startBridge(config));
       await refreshStatus();
