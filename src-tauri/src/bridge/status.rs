@@ -68,12 +68,21 @@ pub(super) fn build_initial_status(
 
 pub(super) fn refresh_runtime_status(
     runtime: &mut BridgeRuntime,
+    previous: &Config,
     config: &Config,
     rtp_active: bool,
     rtp_bound_port: Option<u16>,
 ) {
-    *runtime.actual_midi_in.lock() = super::midi_io::initial_connected_input(config);
-    *runtime.actual_midi_out.lock() = super::midi_io::initial_connected_output(config);
+    // Connection owners publish actual physical ports only when they reconnect.
+    // An unrelated save must not erase their still-valid connection status.
+    if previous.midi.input_device != config.midi.input_device
+        || previous.midi.hotplug != config.midi.hotplug
+    {
+        *runtime.actual_midi_in.lock() = super::midi_io::initial_connected_input(config);
+    }
+    if previous.midi.output_device != config.midi.output_device {
+        *runtime.actual_midi_out.lock() = super::midi_io::initial_connected_output(config);
+    }
     runtime.status.midi_input = runtime.actual_midi_in.lock().clone();
     runtime.status.midi_output = runtime.actual_midi_out.lock().clone();
     runtime.status.osc_target = format!("{}:{}", config.osc.target_ip, config.osc.target_port);
@@ -89,4 +98,71 @@ pub(super) fn refresh_runtime_status(
 pub(super) fn enrich_status_from_runtime(status: &mut BridgeStatus, runtime: &BridgeRuntime) {
     status.midi_input = runtime.actual_midi_in.lock().clone();
     status.midi_output = runtime.actual_midi_out.lock().clone();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use parking_lot::Mutex;
+    use std::sync::{atomic::AtomicBool, atomic::AtomicU64, Arc};
+
+    fn connected_runtime(config: &Config) -> BridgeRuntime {
+        BridgeRuntime {
+            status: BridgeStatus::from(config),
+            stop: Arc::new(AtomicBool::new(false)),
+            processing: None,
+            midi_watcher: None,
+            activity_emitter: None,
+            midi_event_emitter: None,
+            reliable_playback: None,
+            osc_input: None,
+            config: Arc::new(Mutex::new(config.clone())),
+            config_rev: Arc::new(AtomicU64::new(1)),
+            actual_midi_in: Arc::new(Mutex::new(config.midi.input_device.clone())),
+            actual_midi_out: Arc::new(Mutex::new(config.midi.output_device.clone())),
+        }
+    }
+
+    fn physical_config() -> Config {
+        let mut config = Config::default();
+        config.midi.input_device = Some("Keyboard".into());
+        config.midi.output_device = Some("Synth".into());
+        config
+    }
+
+    #[test]
+    fn unrelated_settings_preserve_actual_physical_connection_status() {
+        let previous = physical_config();
+        for connected in [true, false] {
+            let mut runtime = connected_runtime(&previous);
+            if !connected {
+                *runtime.actual_midi_in.lock() = None;
+                *runtime.actual_midi_out.lock() = None;
+            }
+            let mut next = previous.clone();
+            next.ui.corner_radius = 6.0;
+            *runtime.config.lock() = next.clone();
+            refresh_runtime_status(&mut runtime, &previous, &next, true, Some(5004));
+            assert_eq!(runtime.status.midi_input.is_some(), connected);
+            assert_eq!(runtime.status.midi_output.is_some(), connected);
+        }
+    }
+
+    #[test]
+    fn selecting_a_new_port_invalidates_only_its_own_connection_status() {
+        let previous = physical_config();
+        for change_input in [true, false] {
+            let mut runtime = connected_runtime(&previous);
+            let mut next = previous.clone();
+            if change_input {
+                next.midi.input_device = Some("Other keyboard".into());
+            } else {
+                next.midi.output_device = Some("Other synth".into());
+            }
+            *runtime.config.lock() = next.clone();
+            refresh_runtime_status(&mut runtime, &previous, &next, true, Some(5004));
+            assert_eq!(runtime.status.midi_input.is_some(), !change_input);
+            assert_eq!(runtime.status.midi_output.is_some(), change_input);
+        }
+    }
 }

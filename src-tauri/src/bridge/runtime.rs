@@ -253,6 +253,7 @@ impl BridgeHandle {
             *runtime.config.lock() = config.clone();
             refresh_runtime_status(
                 runtime,
+                &old_config,
                 &config,
                 self.rtp_server.lock().is_some(),
                 self.rtp_config.lock().as_ref().map(|cfg| cfg.bound_port),
