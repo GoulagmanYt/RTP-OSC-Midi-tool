@@ -1,5 +1,6 @@
 import { NavLink } from "react-router-dom";
-import { AudioLines, Cable, Globe2, LayoutDashboard, ListRestart, RadioTower, Settings, Waypoints } from "lucide-react";
+import { AudioLines, Cable, Globe2, LayoutDashboard, ListRestart, RadioTower, Settings } from "lucide-react";
+import appIcon from "../../../src-tauri/icons/icon.png";
 import { useBridge } from "../../providers/BridgeProvider";
 import { useI18n } from "../../providers/LanguageProvider";
 import { isDeveloperMode } from "../../developer-mode";
@@ -24,7 +25,7 @@ export function Sidebar() {
   return (
     <aside id="app-sidebar" className="sidebar navigation-material flex h-full flex-col border-r">
       <div className="sidebar-brand flex min-h-20 shrink-0 items-center gap-3 px-5" data-tauri-drag-region>
-        <span className="app-mark grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-primary text-primary-foreground" aria-hidden="true"><Waypoints className="h-5 w-5" strokeWidth={1.75} /></span>
+        <img src={appIcon} className="app-mark h-9 w-9 shrink-0" width={36} height={36} alt="" draggable={false} />
         <span className="sidebar-label text-lg font-semibold tracking-tight" data-tauri-drag-region>OSCMidi</span>
       </div>
       <nav className="flex-1 space-y-6 overflow-y-auto px-3 py-3" aria-label={t("sidebar.navigation")}>
