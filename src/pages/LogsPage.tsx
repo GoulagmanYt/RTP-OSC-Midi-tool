@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, Bug, Copy, Info, Pause, Play, Trash2, Download, XCircle } from "lucide-react";
 import { toast } from "sonner";
-import type { LogEntry } from "../api";
+import type { BufferedLogEntry } from "../api";
 import { useBridge } from "../providers/BridgeProvider";
 import { useI18n } from "../providers/LanguageProvider";
 import { Badge } from "../components/ui/Badge";
@@ -10,26 +10,19 @@ import { Input } from "../components/ui/Input";
 import { useConfirmAction } from "../components/ui/useConfirmAction";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "../components/ui/dialog";
 
-const ids = new WeakMap<LogEntry, number>();
-let nextId = 0;
-function idFor(entry: LogEntry) {
-  let id = ids.get(entry);
-  if (id === undefined) { id = ++nextId; ids.set(entry, id); }
-  return id;
-}
 const icons = { info: Info, warn: AlertTriangle, error: XCircle, debug: Bug };
-const format = (entries: LogEntry[]) => entries.map(entry => `${entry.timestamp} [${entry.level}] ${entry.message}`).join("\n");
+const format = (entries: BufferedLogEntry[]) => entries.map(entry => `${entry.timestamp} [${entry.level}] ${entry.message}`).join("\n");
 
 export default function LogsPage() {
   const { logs, clearLogs } = useBridge();
   const { t } = useI18n();
   const { confirmAction, confirmation } = useConfirmAction(t);
-  const [snapshot, setSnapshot] = useState<LogEntry[] | null>(null);
+  const [snapshot, setSnapshot] = useState<BufferedLogEntry[] | null>(null);
   const [follow, setFollow] = useState(true);
   const [query, setQuery] = useState("");
   const [level, setLevel] = useState("all");
-  const [selection, setSelection] = useState<Map<number, LogEntry>>(new Map());
-  const [detail, setDetail] = useState<LogEntry | null>(null);
+  const [selection, setSelection] = useState<Map<number, BufferedLogEntry>>(new Map());
+  const [detail, setDetail] = useState<BufferedLogEntry | null>(null);
   const [viewport, setViewport] = useState({ top: 0, height: 400, row: 48 });
   const viewportRef = useRef<HTMLDivElement>(null);
   const source = snapshot ?? logs;
@@ -64,10 +57,11 @@ export default function LogsPage() {
     setViewport(previous => ({ ...previous, top: 0 }));
   }, [level, query]);
 
-  const copy = async (entries: LogEntry[]) => {
+  const copy = async (entries: BufferedLogEntry[]) => {
     try { await navigator.clipboard.writeText(format(entries)); toast.success(t("ui.logs.copied")); }
     catch { toast.error(t("ui.copyFailed")); }
   };
+  const copySelection = () => copy(Array.from(selection.values()).sort((a, b) => a.sequence - b.sequence));
   const exportLogs = () => {
     try {
       const url = URL.createObjectURL(new Blob([format(filtered)], { type: "text/plain;charset=utf-8" }));
@@ -76,12 +70,12 @@ export default function LogsPage() {
       window.setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch { toast.error(t("ui.exportFailed")); }
   };
-  const toggleSelection = (entry: LogEntry) => {
+  const toggleSelection = (entry: BufferedLogEntry) => {
     // Freeze the displayed entries so selection never shifts under the pointer.
     if (snapshot === null) { setSnapshot(logs); setFollow(false); }
     setSelection(previous => {
       const next = new Map(previous);
-      const id = idFor(entry);
+      const id = entry.sequence;
       if (next.has(id)) next.delete(id); else next.set(id, entry);
       return next;
     });
@@ -119,7 +113,7 @@ export default function LogsPage() {
       </label>
     </div>
     <div className="flex flex-wrap gap-2">
-      <Button variant="outline" onClick={() => void copy(Array.from(selection.values()))} disabled={selection.size === 0}><Copy className="h-4 w-4" aria-hidden="true" />{t("ui.logs.copySelection")}</Button>
+      <Button variant="outline" onClick={() => void copySelection()} disabled={selection.size === 0}><Copy className="h-4 w-4" aria-hidden="true" />{t("ui.logs.copySelection")}</Button>
       <Button variant="outline" onClick={exportLogs} disabled={filtered.length === 0}><Download className="h-4 w-4" aria-hidden="true" />{t("ui.logs.export")}</Button>
       <Button variant="outline" onClick={() => confirmAction(t("ui.clearLogView"), () => {
         clearLogs(); setSnapshot(null); setSelection(new Map());
@@ -139,13 +133,13 @@ export default function LogsPage() {
       }}
       onKeyDown={event => {
         if (event.ctrlKey && event.key.toLowerCase() === "c" && selection.size > 0) {
-          event.preventDefault(); void copy(Array.from(selection.values()));
+          event.preventDefault(); void copySelection();
         }
       }}>
       {filtered.length === 0 ? <p className="p-6 text-center text-sm text-muted-foreground">{t(logs.length === 0 ? "logs.none" : "ui.logs.empty")}</p> :
         <div style={{ height: filtered.length * viewport.row }} className="relative min-w-0">
           {filtered.slice(start, end).map((entry, offset) => {
-            const id = idFor(entry);
+            const id = entry.sequence;
             const Icon = icons[entry.level];
             return <div key={id} data-log-row className="absolute inset-x-0 flex min-w-0 items-center gap-2 border-b border-border px-2" style={{ top: (start + offset) * viewport.row, height: viewport.row }}>
               <input type="checkbox" className="h-7 w-7 shrink-0 accent-primary" aria-label={t("ui.logs.selectLine", { number: id })} checked={selection.has(id)} onChange={() => toggleSelection(entry)} />

@@ -218,7 +218,7 @@ impl PendingVst3Midi {
         frames: usize,
         batch: &mut Vec<rack::prelude::MidiEvent>,
         send: impl FnOnce(&[rack::prelude::MidiEvent]) -> Result<(), rack::Error>,
-    ) -> Result<(), rack::Error> {
+    ) -> Result<std::collections::vec_deque::Drain<'_, BridgeMidiEvent>, rack::Error> {
         batch.clear();
         let count = self.events.len().min(available).min(batch.capacity());
         let mut offset = 0;
@@ -232,8 +232,16 @@ impl PendingVst3Midi {
         if !batch.is_empty() {
             send(batch)?;
         }
-        self.events.drain(..count);
-        Ok(())
+        // A slot may have been consumed several blocks before native MIDI
+        // capacity returns. Acknowledge only successful submission, preserving
+        // each event's original ingress/worker clocks across that wait.
+        if count != 0 {
+            let submitted_qpc = crate::vst_worker::protocol::monotonic_qpc();
+            for event in self.events.iter_mut().take(count) {
+                event.consumed_qpc = submitted_qpc;
+            }
+        }
+        Ok(self.events.drain(..count))
     }
 }
 
@@ -290,6 +298,8 @@ struct BridgeSlot {
     event_count: AtomicU32,
     parameter_change_count: AtomicU32,
     sequence: AtomicU64,
+    // Requested: incoming MIDI. Ready: delivery acknowledgements (VST3 may
+    // return events retained from earlier slots). The wire layout is unchanged.
     events: [BridgeMidiEvent; BRIDGE_MAX_MIDI],
     parameter_changes: [BridgeParameterChange; BRIDGE_MAX_PARAMETER_CHANGES],
     outputs: [f32; BRIDGE_MAX_FRAMES * BRIDGE_MAX_CHANNELS],
@@ -1920,7 +1930,7 @@ fn process_local_plugin(
                     .map_err(|error| error.to_string())?;
                 pending_vst3_midi.reset_needed = false;
             }
-            pending_vst3_midi
+            let delivered = pending_vst3_midi
                 .submit(
                     instance.remaining_midi_capacity(),
                     frames,
@@ -1928,6 +1938,12 @@ fn process_local_plugin(
                     |events| instance.send_midi(events),
                 )
                 .map_err(|error| error.to_string())?;
+            let delivered_count = delivered.len();
+            for (target, event) in slot.events.iter_mut().zip(delivered) {
+                *target = event;
+            }
+            slot.event_count
+                .store(delivered_count as u32, Ordering::Relaxed);
             let inputs: SmallVec<[&[f32]; BRIDGE_MAX_CHANNELS]> = (0..input_channels)
                 .map(|_| &input_silence[..frames])
                 .collect();
@@ -2019,6 +2035,67 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn retained_vst3_midi_delivery_includes_every_waited_block() {
+        use crate::vst_worker::protocol::monotonic_qpc;
+
+        let mut remote = test_remote();
+        let mut pending = PendingVst3Midi::new();
+        let mut batch = Vec::with_capacity(BRIDGE_MAX_MIDI);
+        let ingress = monotonic_qpc();
+        pending.append(&[BridgeMidiEvent {
+            ingress_qpc: ingress,
+            worker_qpc: ingress,
+            consumed_qpc: ingress,
+            data: [0x90, 60, 100],
+            len: 3,
+            ..Default::default()
+        }]);
+        // Three 48-frame blocks at 48 kHz, with no native MIDI capacity.
+        for _ in 0..3 {
+            let delivered = pending
+                .submit(0, 48, &mut batch, |_| panic!("no MIDI capacity"))
+                .unwrap();
+            assert_eq!(delivered.len(), 0);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let telemetry = super::super::runtime_state::AudioTelemetry::new();
+        assert_eq!(telemetry.midi_delivery_percentile(99), 0);
+        let slot = &mut remote.mapping.get_mut().slots[0];
+        let delivered = pending.submit(1, 48, &mut batch, |_| Ok(())).unwrap();
+        let count = delivered.len();
+        for (target, event) in slot.events.iter_mut().zip(delivered) {
+            *target = event;
+        }
+        slot.event_count.store(count as u32, Ordering::Relaxed);
+        slot.frames.store(48, Ordering::Relaxed);
+        slot.sequence.store(1, Ordering::Relaxed);
+        slot.state.store(SLOT_READY, Ordering::Release);
+        remote.next_sequence = 2;
+        let mut outputs = vec![vec![0.0; 48]; 2];
+        assert!(remote.process(
+            &mut VecDeque::new(),
+            &[],
+            &mut outputs,
+            48,
+            Some(&telemetry),
+            None,
+            None
+        ));
+        assert!(telemetry.midi_delivery_max_us.load(Ordering::Relaxed) >= 3_000);
+        assert!(telemetry.audio_wait_max_us.load(Ordering::Relaxed) >= 3_000);
+        assert!(telemetry.midi_delivery_percentile(99) >= 3_000);
+        assert_eq!(
+            telemetry
+                .midi_delivery_histogram
+                .iter()
+                .map(|bucket| bucket.load(Ordering::Relaxed))
+                .sum::<u64>(),
+            1
+        );
+    }
+
+    #[test]
     fn native_deferred_midi_retains_fresh_x86_slot_until_capacity_returns() {
         let mut pending = PendingVst3Midi::new();
         let events: [BridgeMidiEvent; BRIDGE_MAX_MIDI] =
@@ -2060,20 +2137,34 @@ mod tests {
 
     #[test]
     fn native_partial_capacity_and_failed_admission_preserve_fifo_order() {
+        use crate::vst_worker::protocol::monotonic_qpc;
+
         let mut pending = PendingVst3Midi::new();
         let events: [BridgeMidiEvent; 4] = std::array::from_fn(|index| BridgeMidiEvent {
+            ingress_qpc: 10 + index as u64,
+            worker_qpc: 20 + index as u64,
             data: [0x80, 60 + index as u8, 0],
             len: 3,
             ..Default::default()
         });
         pending.append(&events);
         let mut batch = Vec::with_capacity(BRIDGE_MAX_MIDI);
-        pending
-            .submit(1, 128, &mut batch, |events| {
-                assert_eq!(events.len(), 1);
-                Ok(())
-            })
-            .unwrap();
+        let submitted = Cell::new(monotonic_qpc());
+        let allocations = crate::test_alloc::count_allocations(|| {
+            let mut delivered = pending
+                .submit(1, 128, &mut batch, |events| {
+                    assert_eq!(events.len(), 1);
+                    submitted.set(monotonic_qpc());
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(delivered.len(), 1);
+            let event = delivered.next().unwrap();
+            assert_eq!(event.ingress_qpc, 10);
+            assert_eq!(event.worker_qpc, 20);
+            assert!(event.consumed_qpc >= submitted.get());
+        });
+        assert_eq!(allocations, 0);
         assert_eq!(pending.events.front().unwrap().data, [0x80, 61, 0]);
         assert!(pending
             .submit(2, 128, &mut batch, |_| {
@@ -2082,6 +2173,7 @@ mod tests {
             .is_err());
         assert_eq!(pending.events.len(), 3);
         assert_eq!(pending.events.front().unwrap().data, [0x80, 61, 0]);
+        assert_eq!(pending.events.front().unwrap().consumed_qpc, 0);
         pending
             .submit(2, 128, &mut batch, |events| {
                 assert_eq!(events.len(), 2);

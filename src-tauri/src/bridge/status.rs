@@ -98,6 +98,13 @@ pub(super) fn refresh_runtime_status(
 pub(super) fn enrich_status_from_runtime(status: &mut BridgeStatus, runtime: &BridgeRuntime) {
     status.midi_input = runtime.actual_midi_in.lock().clone();
     status.midi_output = runtime.actual_midi_out.lock().clone();
+    if let Some(error) = runtime
+        .osc_input
+        .as_ref()
+        .and_then(|server| server.last_error())
+    {
+        status.last_error = Some(error);
+    }
 }
 
 #[cfg(test)]

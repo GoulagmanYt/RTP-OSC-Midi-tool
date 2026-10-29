@@ -189,7 +189,7 @@ impl BridgeHandle {
         self.inject_frame(data, "Test MIDI".to_string())
     }
 
-    pub fn update_config(&self, config: Config, _logger: &FrontendLogger) -> Result<(), String> {
+    pub fn update_config(&self, config: Config, logger: &FrontendLogger) -> Result<(), String> {
         let mut guard = self.inner.lock();
         if let Some(runtime) = guard.as_mut() {
             let old = runtime.config.lock().osc.clone();
@@ -206,21 +206,31 @@ impl BridgeHandle {
                     if let Some(previous) = runtime.osc_input.take() {
                         previous.stop();
                     }
-                    match crate::osc_input::OscInputServer::start(&config.osc, sink.clone()) {
+                    match crate::osc_input::OscInputServer::start(
+                        &config.osc,
+                        sink.clone(),
+                        Some(logger.clone()),
+                    ) {
                         Ok(replacement) => {
                             runtime.osc_input = replacement;
                         }
                         Err(err) => {
-                            if let Ok(recovered) =
-                                crate::osc_input::OscInputServer::start(&old, sink)
-                            {
+                            if let Ok(recovered) = crate::osc_input::OscInputServer::start(
+                                &old,
+                                sink,
+                                Some(logger.clone()),
+                            ) {
                                 runtime.osc_input = recovered;
                             }
                             return Err(err);
                         }
                     }
                 } else {
-                    let replacement = crate::osc_input::OscInputServer::start(&config.osc, sink)?;
+                    let replacement = crate::osc_input::OscInputServer::start(
+                        &config.osc,
+                        sink,
+                        Some(logger.clone()),
+                    )?;
                     if let Some(previous) = runtime.osc_input.take() {
                         previous.stop();
                     }

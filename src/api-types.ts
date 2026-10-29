@@ -329,6 +329,11 @@ export type LogEntry = {
   timestamp: string;
 };
 
+// Arrival identity belongs to the frontend buffer, not the backend event payload.
+export type BufferedLogEntry = LogEntry & {
+  readonly sequence: number;
+};
+
 export type StressTestMode = "audio-vst" | "bridge";
 
 export interface SegmentMetrics {

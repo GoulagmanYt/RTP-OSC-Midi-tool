@@ -146,7 +146,11 @@ pub(super) fn start_runtime(
     status.midi_input = actual_midi_in.lock().clone();
     status.midi_output = actual_midi_out.lock().clone();
 
-    let osc_input = crate::osc_input::OscInputServer::start(&config.osc, midi_tx.clone())?;
+    let osc_input = crate::osc_input::OscInputServer::start(
+        &config.osc,
+        midi_tx.clone(),
+        Some(logger.clone()),
+    )?;
     rtp_sink.store(Some(Arc::new(midi_tx.clone())));
     if let Err(error) = sync_rtp(
         rtp_server,

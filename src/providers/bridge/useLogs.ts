@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { LogEntry } from "../../api";
+import type { BufferedLogEntry, LogEntry } from "../../api";
 
 const LOG_BUFFER_SIZE = 1000;
 
 export function useLogs() {
-  const [logs, setLogs] = useState<LogEntry[]>([]);
-  const logBufferRef = useRef<LogEntry[]>([]);
+  const [logs, setLogs] = useState<BufferedLogEntry[]>([]);
+  const logBufferRef = useRef<BufferedLogEntry[]>([]);
   const logIndexRef = useRef(0);
+  const sequenceRef = useRef(0);
   const rafIdRef = useRef<number | null>(null);
 
   const flushLogs = useCallback(() => {
@@ -15,7 +16,7 @@ export function useLogs() {
       rafIdRef.current = null;
     }
     const buffer = logBufferRef.current;
-    const nextLogs: LogEntry[] = [];
+    const nextLogs: BufferedLogEntry[] = [];
     const size = Math.min(buffer.length, LOG_BUFFER_SIZE);
     for (let i = 0; i < size; i += 1) {
       const index = (logIndexRef.current - 1 - i + LOG_BUFFER_SIZE) % LOG_BUFFER_SIZE;
@@ -29,7 +30,7 @@ export function useLogs() {
   const appendLog = useCallback(
     (entry: LogEntry) => {
       const buffer = logBufferRef.current;
-      buffer[logIndexRef.current] = entry;
+      buffer[logIndexRef.current] = { ...entry, sequence: ++sequenceRef.current };
       logIndexRef.current = (logIndexRef.current + 1) % LOG_BUFFER_SIZE;
 
       if (typeof requestAnimationFrame === "undefined") {
