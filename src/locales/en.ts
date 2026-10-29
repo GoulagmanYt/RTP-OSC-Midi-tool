@@ -115,6 +115,8 @@ const en: TranslationTree = {
       avatar: "Avatar",
       openCommandPalette: "Open command palette",
       toggleTheme: "Toggle color theme",
+      bridgeRunning: "Bridge running",
+      bridgeStopped: "Bridge stopped",
     },
     window: {
       controls: "Window controls",
@@ -134,6 +136,8 @@ const en: TranslationTree = {
     actions: {
       startBridge: "Start Bridge",
       stopBridge: "Stop Bridge",
+      startingBridge: "Starting…",
+      stoppingBridge: "Stopping…",
       restartRtp: "Restart RTP",
       openVstUi: "Open VST UI",
       resetConfig: "Reset Config",
@@ -581,7 +585,7 @@ const en: TranslationTree = {
         title: "General settings",
         description: "Configure how the app runs and logs events.",
         developerMode: "Developer Mode",
-        developerModeHint: "Enables diagnostics, testing tools, and full logging access",
+        developerModeHint: "Enables diagnostics, testing tools, and detailed logging settings. Basic logs remain active in normal mode.",
         verbose: "Verbose mode",
         verboseHint: "More detailed console logs",
         oscLogs: "OSC logs",
@@ -591,7 +595,7 @@ const en: TranslationTree = {
         logAllToFile: "Log everything to file",
         logAllToFileHint: "Also write info/debug events to app.log",
         disableLogs: "Disable all logs",
-        disableLogsHint: "No console, UI, or file logs will be emitted",
+        disableLogsHint: "No console, UI, or file logs will be emitted in developer mode. Basic logs resume when you leave it.",
         resetConfirmation: "Reset every setting to its default value? This cannot be undone.",
       },
       files: {

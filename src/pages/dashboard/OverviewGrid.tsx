@@ -64,7 +64,7 @@ export function OverviewGrid({ audioDevice, config, limiterEnabled, logs, rtpPor
           {logPreview.length === 0 ? <p className="overview-events-empty text-sm text-muted-foreground">{t("dashboard.noRecentLogs")}</p> : (
             <ul className="overview-events-list divide-y" tabIndex={0} aria-labelledby="recent-events-title">
               {logPreview.map((log, idx) => {
-                const message = developerMode ? log.message : t(log.level === "error" ? "dashboard.eventsError" : "dashboard.eventsWarning");
+                const message = log.message;
                 return (
                   <li key={idx} className="flex flex-wrap items-start gap-x-3 gap-y-1 py-2 text-sm">
                     <span className="font-mono text-xs leading-6 text-muted-foreground">{log.timestamp}</span>

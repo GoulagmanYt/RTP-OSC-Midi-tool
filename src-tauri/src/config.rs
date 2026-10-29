@@ -351,9 +351,10 @@ impl AppConfig {
     pub const CURRENT_VERSION: u32 = 4;
 
     /// Diagnostic logging is a developer capability, regardless of config source.
-    /// Keep the user's global logging preference when disabling diagnostics.
+    /// Normal mode always keeps basic logging active when disabling diagnostics.
     pub(crate) fn normalize_developer_mode(&mut self) {
         if !self.ui.developer_mode {
+            self.logging.enabled = true;
             self.logging.verbose = false;
             self.logging.log_all_to_file = false;
             self.osc.log_messages = false;
@@ -442,9 +443,9 @@ mod developer_mode_tests {
         cfg
     }
 
-    fn assert_normal_logging(cfg: &AppConfig, enabled: bool) {
+    fn assert_normal_logging(cfg: &AppConfig) {
         assert!(!cfg.ui.developer_mode);
-        assert_eq!(cfg.logging.enabled, enabled);
+        assert!(cfg.logging.enabled);
         assert!(!cfg.logging.verbose);
         assert!(!cfg.logging.log_all_to_file);
         assert!(!cfg.osc.log_messages);
@@ -453,7 +454,7 @@ mod developer_mode_tests {
 
     #[test]
     fn normal_mode_defaults_do_not_request_diagnostic_logging() {
-        assert_normal_logging(&AppConfig::default(), true);
+        assert_normal_logging(&AppConfig::default());
     }
 
     #[test]
@@ -462,16 +463,13 @@ mod developer_mode_tests {
             let requested = with_diagnostic_logging(false, enabled);
             let raw = serde_yaml::to_string(&requested).unwrap();
             let parsed = AppConfig::parse_yaml(&raw).unwrap();
-            assert_normal_logging(&parsed, enabled);
+            assert_normal_logging(&parsed);
             assert_eq!(parsed.audio, requested.audio);
             assert_eq!(parsed.osc.target_port, requested.osc.target_port);
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("config.yaml");
             fs::write(&path, &raw).unwrap();
-            assert_normal_logging(
-                &ConfigStore::with_path(path).load_checked().unwrap(),
-                enabled,
-            );
+            assert_normal_logging(&ConfigStore::with_path(path).load_checked().unwrap());
         }
     }
 
@@ -492,9 +490,21 @@ mod developer_mode_tests {
                     requested
                 );
             } else {
-                assert_normal_logging(&persisted, false);
+                assert_normal_logging(&persisted);
             }
         }
+    }
+
+    #[test]
+    fn normal_mode_restores_basic_logging_without_diagnostic_flags() {
+        let mut cfg = AppConfig::default();
+        cfg.logging.enabled = false;
+        cfg.normalize_developer_mode();
+        assert_normal_logging(&cfg);
+        cfg.ui.developer_mode = true;
+        cfg.logging.enabled = false;
+        cfg.normalize_developer_mode();
+        assert!(!cfg.logging.enabled);
     }
 }
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import { toast } from "sonner";
 import * as api from "../../api";
@@ -32,6 +32,7 @@ export function useBridgeActions({
   refreshAudioDevices,
   t,
 }: BridgeActionsOptions) {
+  const [bridgeTransition, setBridgeTransition] = useState<"starting" | "stopping" | null>(null);
   const toggleInProgress = useRef(false);
   const mounted = useRef(true);
   const preflightRequestId = useRef(0);
@@ -115,6 +116,7 @@ export function useBridgeActions({
       return;
     }
     toggleInProgress.current = true;
+    setBridgeTransition(status.running ? "stopping" : "starting");
     try {
       if (status.running) {
         await api.stopBridge();
@@ -142,6 +144,7 @@ export function useBridgeActions({
       await refreshStatus();
     } finally {
       toggleInProgress.current = false;
+      if (mounted.current) setBridgeTransition(null);
     }
   }, [beginStatusUpdate, config, refreshStatus, runPreflight, setMetrics, setStatus, status, t]);
 
@@ -151,5 +154,6 @@ export function useBridgeActions({
     runPreflight,
     saveConfig,
     toggleBridge,
+    bridgeTransition,
   };
 }

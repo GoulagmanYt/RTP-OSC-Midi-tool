@@ -39,7 +39,7 @@ export default function CommandPalette({ open, onOpenChange }: CommandPalettePro
   const navigate = useNavigate();
   const pageCommands = useMemo(() => open ? collectPageCommands() : [], [open]);
   const inDialog = useMemo(() => open && Boolean(document.querySelector('[role="dialog"]:not([aria-hidden="true"]):not([data-state="closed"])')), [open]);
-  const { toggleBridge, status, reloadConfig, refreshStatus, config } = useBridge();
+  const { toggleBridge, status, bridgeTransition, isLoading, reloadConfig, refreshStatus, config } = useBridge();
   const { t } = useI18n();
   const { confirmAction, confirmation } = useConfirmAction(t);
 
@@ -101,9 +101,9 @@ export default function CommandPalette({ open, onOpenChange }: CommandPalettePro
         </CommandGroup>
         <CommandSeparator />
         {!inDialog && <CommandGroup heading={t("command.actions")}>
-          <CommandItem onSelect={() => runCommand(() => toggleBridge())}>
+          <CommandItem disabled={isLoading || Boolean(bridgeTransition) || !config || !status} onSelect={() => runCommand(() => toggleBridge())}>
             <Power className="mr-2 h-4 w-4" />
-            <span>{status?.running ? t("actions.stopBridge") : t("actions.startBridge")}</span><CommandShortcut>Ctrl+Enter</CommandShortcut>
+            <span>{bridgeTransition ? t(`actions.${bridgeTransition}Bridge`) : status?.running ? t("actions.stopBridge") : t("actions.startBridge")}</span><CommandShortcut>Ctrl+Enter</CommandShortcut>
           </CommandItem>
           <CommandItem
             onSelect={() =>

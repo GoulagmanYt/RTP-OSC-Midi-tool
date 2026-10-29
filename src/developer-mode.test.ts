@@ -21,10 +21,10 @@ describe("developer capability policy", () => {
     expect(isDeveloperMode(configuration(true))).toBe(true);
   });
 
-  it.each([true, false])("normalizes imported diagnostics and preserves global logging=%s", (enabled) => {
+  it.each([true, false])("enables basic logs and normalizes imported diagnostics (previous logging=%s)", (enabled) => {
     const original = configuration(false, enabled);
     const result = normalizeDeveloperConfig(original);
-    expect(result.logging).toEqual({ enabled, verbose: false, logAllToFile: false });
+    expect(result.logging).toEqual({ enabled: true, verbose: false, logAllToFile: false });
     expect(result.osc).toEqual({ ...original.osc, logMessages: false });
     expect(result.rtp).toEqual({ ...original.rtp, logMessages: false });
     expect(result.audio).toBe(original.audio);
@@ -32,19 +32,31 @@ describe("developer capability policy", () => {
     expect(normalizeDeveloperConfig(result)).toBe(result);
   });
 
-  it("preserves developer diagnostics", () => {
-    const original = configuration(true);
+  it.each([true, false])("preserves developer logging preferences (enabled=%s)", (enabled) => {
+    const original = configuration(true, enabled);
     expect(normalizeDeveloperConfig(original)).toBe(original);
   });
 
   it("disables all advanced logging together on mode changes and blocks later normal-mode edits", () => {
     const normal = mergeConfig(configuration(true, false), { ui: { developerMode: false } });
     const attempted = mergeConfig(normal, { logging: { verbose: true }, osc: { logMessages: true } });
-    expect(attempted.logging).toEqual({ enabled: false, verbose: false, logAllToFile: false });
+    expect(attempted.logging).toEqual({ enabled: true, verbose: false, logAllToFile: false });
     expect(attempted.osc.logMessages).toBe(false);
     expect(attempted.rtp.logMessages).toBe(false);
-    const developer = mergeConfig(normal, { ui: { developerMode: true }, logging: { verbose: true } });
+    const developer = mergeConfig(normal, { ui: { developerMode: true }, logging: { enabled: false, verbose: true } });
     expect(developer.logging.verbose).toBe(true);
     expect(developer.logging.enabled).toBe(false);
+  });
+
+  it("restores basic logging even when all diagnostic flags are already off", () => {
+    const config = configuration(false, false);
+    config.logging.verbose = false;
+    config.logging.logAllToFile = false;
+    config.osc.logMessages = false;
+    config.rtp.logMessages = false;
+    const normalized = normalizeDeveloperConfig(config);
+    expect(normalized.logging.enabled).toBe(true);
+    expect(config.logging.enabled).toBe(false);
+    expect(mergeConfig(normalized, { logging: { enabled: false } }).logging.enabled).toBe(true);
   });
 });

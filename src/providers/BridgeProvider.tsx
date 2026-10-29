@@ -134,7 +134,7 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
     t,
   });
 
-  const { updateConfig, saveConfig, toggleBridge, runPreflight, reloadConfig } = useBridgeActions({
+  const { updateConfig, saveConfig, toggleBridge, bridgeTransition, runPreflight, reloadConfig } = useBridgeActions({
     config,
     status,
     setConfig,
@@ -180,6 +180,7 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
         midiInputs,
         midiOutputs,
         isLoading,
+        bridgeTransition,
         saveState,
         initializationError,
         preflight,

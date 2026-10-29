@@ -139,14 +139,61 @@ async function emit(event: string, payload: LogEntry | RuntimeMetrics) {
   });
 }
 
-function assertNormalLogging(config: AppConfig, enabled: boolean) {
+function assertNormalLogging(config: AppConfig) {
   expect(config.ui.developerMode).toBe(false);
-  expect(config.logging).toEqual({ enabled, verbose: false, logAllToFile: false });
+  expect(config.logging).toEqual({ enabled: true, verbose: false, logAllToFile: false });
   expect(config.osc.logMessages).toBe(false);
   expect(config.rtp.logMessages).toBe(false);
 }
 
 describe("developer mode across the real application", () => {
+  it("shows accessible start and stop feedback until native operations finish", async () => {
+    const invoke = native.invoke.getMockImplementation()!;
+    let snapshot = { ...runtime, running: false };
+    let finishStart!: (status: RuntimeStatus) => void;
+    let finishStop!: () => void;
+    const start = new Promise<RuntimeStatus>((resolve) => { finishStart = resolve; });
+    const stop = new Promise<void>((resolve) => { finishStop = resolve; });
+    native.invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === "get_status") return structuredClone(snapshot);
+      if (command === "start_bridge") {
+        snapshot = await start;
+        return structuredClone(snapshot);
+      }
+      if (command === "stop_bridge") {
+        await stop;
+        snapshot = { ...snapshot, running: false, audioRunning: false };
+        return;
+      }
+      return invoke(command, args);
+    });
+    await mount(false);
+    const startButton = await screen.findByRole("button", { name: "Start Bridge" });
+    await waitFor(() => expect((startButton as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(startButton);
+    const starting = await screen.findByRole("button", { name: "Starting…" });
+    expect(starting.getAttribute("aria-busy")).toBe("true");
+    expect((starting as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByRole("status").textContent).toBe("Starting…");
+    expect((screen.getByRole("button", { name: "Open command palette" }) as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(starting);
+    await waitFor(() => expect(native.invoke.mock.calls.filter(([command]) => command === "start_bridge")).toHaveLength(1));
+
+    await act(async () => { finishStart(runtime); });
+    const stopButton = await screen.findByRole("button", { name: "Stop Bridge" });
+    expect(stopButton.getAttribute("aria-busy")).toBe("false");
+    expect((stopButton as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.getByRole("status").textContent).toBe("Bridge running");
+    fireEvent.click(stopButton);
+    const stopping = await screen.findByRole("button", { name: "Stopping…" });
+    expect(stopping.getAttribute("aria-busy")).toBe("true");
+    expect((stopping as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByRole("status").textContent).toBe("Stopping…");
+    await act(async () => { finishStop(); });
+    expect((await screen.findByRole("button", { name: "Start Bridge" }) as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.getByRole("status").textContent).toBe("Bridge stopped");
+  });
+
   it.each([false, true])("keeps routes, navigation and essential controls coherent (developer=%s)", async (developerMode) => {
     await mount(developerMode);
     await screen.findByRole("heading", { level: 1, name: "Dashboard" });
@@ -187,7 +234,7 @@ describe("developer mode across the real application", () => {
     expect(window.location.pathname).toBe(developerMode ? "/logs" : "/");
   });
 
-  it.each([true, false])("hides retained and late debug entries while preserving history and logging.enabled=%s", async (enabled) => {
+  it.each([true, false])("restores basic logs after leaving developer mode (previous logging=%s)", async (enabled) => {
     await mount(true, "/", enabled);
     const previous: LogEntry = { level: "debug", timestamp: "12:00", message: "private worker diagnostic before switch" };
     const late: LogEntry = { level: "debug", timestamp: "12:01", message: "private IPC diagnostic after switch" };
@@ -195,11 +242,15 @@ describe("developer mode across the real application", () => {
     expect(screen.getByText(previous.message)).toBeTruthy();
     await visit("Settings");
     fireEvent.click(screen.getByRole("switch", { name: "Developer Mode" }));
-    await waitFor(() => assertNormalLogging(persisted, enabled));
+    await waitFor(() => assertNormalLogging(persisted));
     await visit("Dashboard");
     await emit("log:entry", late);
     expect(screen.queryByText(previous.message)).toBeNull();
     expect(screen.queryByText(late.message)).toBeNull();
+    for (const level of ["info", "warn", "error"] as const) {
+      await emit("log:entry", { level, timestamp: "12:02", message: `Basic ${level} message` });
+      expect(screen.getByText(`Basic ${level} message`)).toBeTruthy();
+    }
     await emit("runtime:metrics", metrics);
     await emit("runtime:metrics", { ...metrics, audioLockMisses: 1 });
     expect(native.toastError).toHaveBeenLastCalledWith("Audio playback was interrupted. Increase the safety margin in audio settings if it happens again.");
@@ -210,7 +261,7 @@ describe("developer mode across the real application", () => {
     await visit("Logs", "System Logs");
     expect(screen.getByText(previous.message)).toBeTruthy();
     expect(screen.getByText(late.message)).toBeTruthy();
-    expect(persisted.logging.enabled).toBe(enabled);
+    expect(persisted.logging.enabled).toBe(true);
   });
 
   it("normalizes a normal-mode import before publishing it and preserves the imported functional settings", async () => {
@@ -231,7 +282,7 @@ describe("developer mode across the real application", () => {
     expect((document.querySelector("#audio-master-gain") as HTMLInputElement).value).toBe("-9");
     await visit("Settings");
     expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
-    await waitFor(() => assertNormalLogging(persisted, false));
+    await waitFor(() => assertNormalLogging(persisted));
     expect(persisted.audio.gainDb).toBe(-9);
     expect(persisted.audio.vstPluginId).toBe(instrument.id);
   });

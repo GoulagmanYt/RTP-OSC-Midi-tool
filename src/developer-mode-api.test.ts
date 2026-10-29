@@ -22,7 +22,7 @@ it("persists normalized imported logging before publishing the replacement", asy
 });
 
 function expectNormal(config: AppConfig) {
-  expect(config.logging).toEqual({ enabled: false, verbose: false, logAllToFile: false });
+  expect(config.logging).toEqual({ enabled: true, verbose: false, logAllToFile: false });
   expect(config.osc.logMessages).toBe(false);
   expect(config.rtp.logMessages).toBe(false);
 }

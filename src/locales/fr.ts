@@ -115,6 +115,8 @@ const fr: TranslationTree = {
       avatar: "Avatar",
       openCommandPalette: "Ouvrir la palette de commandes",
       toggleTheme: "Changer le thème de couleurs",
+      bridgeRunning: "Bridge en marche",
+      bridgeStopped: "Bridge arrêté",
     },
     window: {
       controls: "Commandes de la fenêtre",
@@ -134,6 +136,8 @@ const fr: TranslationTree = {
     actions: {
       startBridge: "Démarrer le bridge",
       stopBridge: "Arrêter le bridge",
+      startingBridge: "Démarrage…",
+      stoppingBridge: "Arrêt…",
       restartRtp: "Redémarrer RTP",
       openVstUi: "Ouvrir l'interface VST",
       resetConfig: "Réinitialiser la config",
@@ -581,7 +585,7 @@ const fr: TranslationTree = {
         title: "Paramètres généraux",
         description: "Configurez le fonctionnement et la journalisation.",
         developerMode: "Mode Développeur",
-        developerModeHint: "Active les outils de diagnostic, les tests et l'accès aux logs complets",
+        developerModeHint: "Active les outils de diagnostic, les tests et les réglages des journaux détaillés. Les journaux de base restent actifs en mode normal.",
         verbose: "Mode verbose",
         verboseHint: "Journaux console plus détaillés",
         oscLogs: "Journaux OSC",
@@ -591,7 +595,7 @@ const fr: TranslationTree = {
         logAllToFile: "Tout journaliser en fichier",
         logAllToFileHint: "Écrit aussi les événements info/debug dans app.log",
         disableLogs: "Désactiver tous les journaux",
-        disableLogsHint: "Aucun journal console, interface ou fichier ne sera émis",
+        disableLogsHint: "Aucun journal console, interface ou fichier ne sera émis en mode développeur. Les journaux de base reprennent à sa désactivation.",
         resetConfirmation: "Réinitialiser tous les paramètres ? Cette action est irréversible.",
       },
       files: {

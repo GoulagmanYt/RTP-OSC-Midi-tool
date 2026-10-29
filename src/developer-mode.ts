@@ -5,16 +5,16 @@ export function isDeveloperMode(config: Pick<AppConfig, "ui"> | null | undefined
   return config?.ui?.developerMode === true;
 }
 
-/** Normal mode never carries diagnostic logging flags, including imported drafts. */
+/** Normal mode always keeps basic logs active and disables diagnostic logging. */
 export function normalizeDeveloperConfig(config: AppConfig): AppConfig {
   if (isDeveloperMode(config)) return config;
-  const loggingChanged = config.logging?.verbose || config.logging?.logAllToFile;
+  const loggingChanged = config.logging?.enabled === false || config.logging?.verbose || config.logging?.logAllToFile;
   const oscChanged = config.osc?.logMessages;
   const rtpChanged = config.rtp?.logMessages;
   if (!loggingChanged && !oscChanged && !rtpChanged) return config;
   return {
     ...config,
-    logging: loggingChanged ? { ...config.logging, verbose: false, logAllToFile: false } : config.logging,
+    logging: loggingChanged ? { ...config.logging, enabled: true, verbose: false, logAllToFile: false } : config.logging,
     osc: oscChanged ? { ...config.osc, logMessages: false } : config.osc,
     rtp: rtpChanged ? { ...config.rtp, logMessages: false } : config.rtp,
   };

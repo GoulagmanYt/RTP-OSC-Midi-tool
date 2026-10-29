@@ -70,7 +70,7 @@ it.each(["reset", "import"])("publishes the accepted %s snapshot directly instea
   await waitFor(() => expect(mocks.reloadConfig).toHaveBeenCalledWith(accepted));
 });
 
-it.each([true, false])("preserves logging.enabled=%s when leaving developer mode", async (enabled) => {
+it.each([true, false])("delegates the logging policy to shared normalization when leaving developer mode (enabled=%s)", async (enabled) => {
   mocks.config = { ui: { developerMode: true }, logging: { enabled }, osc: { logMessages: false } } as AppConfig;
   render(<SettingsPage />);
   fireEvent.click(screen.getAllByRole("switch")[0]);
