@@ -53,7 +53,7 @@ export function RoutingStatusCard({ t, config, status, activity, displayPortName
           ) : (
             <div className="space-y-2">
               {activity.map((item) => {
-                const isActive = typeof item.lastSeenMs === "number" && Date.now() - item.lastSeenMs < 1200;
+                const isActive = Boolean(status?.running) && typeof item.lastSeenMs === "number" && Date.now() - item.lastSeenMs < 1200;
                 const level = Math.min(item.messagesPerSec ?? 0, 60);
                 return (
                   <div
