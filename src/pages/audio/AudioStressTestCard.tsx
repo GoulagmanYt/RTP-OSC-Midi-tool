@@ -26,14 +26,15 @@ const TEST_MODES = [
 
 export function AudioStressTestCard({ bridgeRunning, audioRunning, t }: Props) {
   const [running, setRunning] = useState(false);
-  const [result, setResult] = useState<StressTestResult | null>(null);
+  const [completedTest, setCompletedTest] = useState<{ mode: StressTestMode; result: StressTestResult } | null>(null);
+  const result = completedTest?.result ?? null;
   const [error, setError] = useState<string | null>(null);
   const [mode, setMode] = useState<StressTestMode>("bridge");
   const requiresBridge = mode !== "audio-vst";
 
   const handleRunTest = async () => {
     setRunning(true);
-    setResult(null);
+    setCompletedTest(null);
     setError(null);
     try {
       const res = await runAutomatedStressTest(
@@ -41,7 +42,7 @@ export function AudioStressTestCard({ bridgeRunning, audioRunning, t }: Props) {
         STRESS_DURATION_SECONDS,
         mode
       );
-      setResult(res);
+      setCompletedTest({ mode, result: res });
     } catch (err: unknown) {
       setError(getErrorMessage(err) || t("stress.runFailed"));
     } finally {
@@ -114,7 +115,7 @@ export function AudioStressTestCard({ bridgeRunning, audioRunning, t }: Props) {
             <div className="flex items-center justify-between">
               <h4 className="font-medium text-foreground">{t("stress.results", { duration: result.elapsedMs })}</h4>
               <span className="text-xs text-muted-foreground">
-                {t("stress.modeLabel")}: {t(TEST_MODES.find((item) => item.value === mode)?.labelKey ?? "")}
+                {t("stress.modeLabel")}: {t(TEST_MODES.find((item) => item.value === completedTest?.mode)?.labelKey ?? "")}
               </span>
             </div>
 
