@@ -17,6 +17,7 @@ artifacts/
 src-tauri/binaries/*.exe
 .vscode/
 /.agents/
+AGENTS.md
 *.code-workspace
 __pycache__/
 *.pyc
