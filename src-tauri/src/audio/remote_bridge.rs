@@ -136,6 +136,107 @@ struct BridgeMidiEvent {
     sample_offset: u32,
 }
 
+struct PendingVst3Midi {
+    events: VecDeque<BridgeMidiEvent>,
+    reset_needed: bool,
+    dropped: u32,
+}
+
+impl PendingVst3Midi {
+    fn new() -> Self {
+        Self {
+            events: VecDeque::with_capacity(super::runtime_state::MAX_PENDING_MIDI),
+            reset_needed: false,
+            dropped: 0,
+        }
+    }
+
+    fn append(&mut self, events: &[BridgeMidiEvent]) {
+        let panic_count = 16 * super::runtime_state::RESET_CONTROLLERS.len();
+        let panic_prefix = events.len() >= panic_count
+            && events[..panic_count]
+                .iter()
+                .enumerate()
+                .all(|(index, event)| {
+                    let controllers = super::runtime_state::RESET_CONTROLLERS;
+                    event.ingress_qpc == 0
+                        && event.worker_qpc == 0
+                        && event.len == 3
+                        && event.data
+                            == [
+                                0xB0 | (index / controllers.len()) as u8,
+                                controllers[index % controllers.len()],
+                                0,
+                            ]
+                });
+        let events = if panic_prefix {
+            // Native panic owns these controls. Invalidate MIDI retained before
+            // the parent reset, then keep any post-panic retriggers in order.
+            self.events.clear();
+            self.reset_needed = true;
+            &events[panic_count..]
+        } else {
+            events
+        };
+        let capacity = super::runtime_state::MAX_PENDING_MIDI;
+        let reserve = crate::realtime::reserve(capacity);
+        for event in events {
+            if midi_to_rack_event(event.data).is_none() {
+                continue;
+            }
+            let critical = crate::midi::is_critical_release_message(&event.data);
+            if !critical && self.events.len() >= capacity - reserve {
+                self.dropped = self.dropped.saturating_add(1);
+                continue;
+            }
+            if self.events.len() == capacity {
+                let disposable = self
+                    .events
+                    .iter()
+                    .position(|event| event.data[0] & 0xF0 == 0x90 && event.data[2] != 0)
+                    .or_else(|| {
+                        self.events.iter().position(|event| {
+                            !crate::midi::is_critical_release_message(&event.data)
+                        })
+                    });
+                if let Some(index) = disposable {
+                    self.events.remove(index);
+                    self.dropped = self.dropped.saturating_add(1);
+                } else {
+                    self.dropped = self.dropped.saturating_add(self.events.len() as u32);
+                    self.events.clear();
+                    self.reset_needed = true;
+                }
+            }
+            self.events.push_back(*event);
+        }
+    }
+
+    fn submit(
+        &mut self,
+        available: usize,
+        frames: usize,
+        batch: &mut Vec<rack::prelude::MidiEvent>,
+        send: impl FnOnce(&[rack::prelude::MidiEvent]) -> Result<(), rack::Error>,
+    ) -> Result<(), rack::Error> {
+        batch.clear();
+        let count = self.events.len().min(available).min(batch.capacity());
+        let mut offset = 0;
+        for event in self.events.iter().take(count) {
+            if let Some(mut converted) = midi_to_rack_event(event.data) {
+                offset = offset.max(event.sample_offset.min(frames.saturating_sub(1) as u32));
+                converted.sample_offset = offset;
+                batch.push(converted);
+            }
+        }
+        if !batch.is_empty() {
+            send(batch)?;
+        }
+        self.events.drain(..count);
+        Ok(())
+    }
+}
+
 fn write_panic_events(events: &mut [BridgeMidiEvent; BRIDGE_MAX_MIDI]) -> usize {
     let mut event_count = 0;
     for channel in 0..16u8 {
@@ -1399,6 +1500,7 @@ fn run_dsp_server(args: DspArgs, logger: FrontendLogger) -> Result<(), String> {
         events: [std::ptr::null_mut(); MIDI_EVENT_BATCH_CAPACITY],
     };
     let mut rack_events = Vec::with_capacity(BRIDGE_MAX_MIDI);
+    let mut pending_vst3_midi = PendingVst3Midi::new();
     let mut editor = None;
 
     let _dsp_priority = super::windows_tuning::prioritize_dsp_thread();
@@ -1497,6 +1599,7 @@ fn run_dsp_server(args: DspArgs, logger: FrontendLogger) -> Result<(), String> {
                     &mut vst2_events,
                     &mut vst2_batch,
                     &mut rack_events,
+                    &mut pending_vst3_midi,
                 );
                 #[cfg(feature = "audio-diagnostics")]
                 if crate::audio_trace::enabled() {
@@ -1524,6 +1627,11 @@ fn run_dsp_server(args: DspArgs, logger: FrontendLogger) -> Result<(), String> {
                 result
             },
             || save_vst_state_checked(&plugin, &selected_probe),
+        );
+        // Report bounded MIDI overflow with the existing bridge overrun counter.
+        mapping.get().overruns.fetch_add(
+            std::mem::take(&mut pending_vst3_midi.dropped),
+            Ordering::Relaxed,
         );
         if let Err(error) = serviced {
             background_log("error", format!("x86 DSP bridge process failed: {error}"));
@@ -1711,6 +1819,7 @@ fn process_local_plugin(
     vst2_events: &mut Vec<vst::api::MidiEvent>,
     vst2_batch: &mut Vst2EventBatch,
     rack_events: &mut Vec<rack::prelude::MidiEvent>,
+    pending_vst3_midi: &mut PendingVst3Midi,
 ) -> Result<(), String> {
     let consumed = crate::vst_worker::protocol::monotonic_qpc();
     for event in slot.events.iter_mut().take(event_count) {
@@ -1804,18 +1913,21 @@ fn process_local_plugin(
         }
         PluginBackend::Vst3 { instance, .. } => {
             use rack::PluginInstance as _;
-            rack_events.clear();
-            for event in slot.events.iter().take(event_count) {
-                if let Some(mut converted) = midi_to_rack_event(event.data) {
-                    converted.sample_offset = event.sample_offset;
-                    rack_events.push(converted);
-                }
-            }
-            if !rack_events.is_empty() {
+            pending_vst3_midi.append(&slot.events[..event_count]);
+            if pending_vst3_midi.reset_needed {
                 instance
-                    .send_midi(rack_events)
+                    .request_midi_reset()
                     .map_err(|error| error.to_string())?;
+                pending_vst3_midi.reset_needed = false;
             }
+            pending_vst3_midi
+                .submit(
+                    instance.remaining_midi_capacity(),
+                    frames,
+                    rack_events,
+                    |events| instance.send_midi(events),
+                )
+                .map_err(|error| error.to_string())?;
             let inputs: SmallVec<[&[f32]; BRIDGE_MAX_CHANNELS]> = (0..input_channels)
                 .map(|_| &input_silence[..frames])
                 .collect();
@@ -1905,6 +2017,150 @@ fn stable_token(value: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_deferred_midi_retains_fresh_x86_slot_until_capacity_returns() {
+        let mut pending = PendingVst3Midi::new();
+        let events: [BridgeMidiEvent; BRIDGE_MAX_MIDI] =
+            std::array::from_fn(|index| BridgeMidiEvent {
+                data: [0x80, (index % 128) as u8, (index / 128) as u8],
+                len: 3,
+                sample_offset: 127,
+                ..Default::default()
+            });
+        let mut batch = Vec::with_capacity(BRIDGE_MAX_MIDI);
+        pending.append(&events);
+        pending
+            .submit(0, 128, &mut batch, |_| {
+                Err(rack::Error::Other(
+                    "native deferred MIDI owns the block".into(),
+                ))
+            })
+            .expect("a native pedal tail must not fault the x86 worker");
+        assert_eq!(pending.events.len(), BRIDGE_MAX_MIDI);
+        pending
+            .submit(BRIDGE_MAX_MIDI, 64, &mut batch, |events| {
+                assert_eq!(events.len(), BRIDGE_MAX_MIDI);
+                for (index, event) in events.iter().enumerate() {
+                    assert_eq!(event.sample_offset, 63);
+                    assert_eq!(
+                        event.kind,
+                        rack::prelude::MidiEventKind::NoteOff {
+                            note: (index % 128) as u8,
+                            velocity: (index / 128) as u8,
+                            channel: 0,
+                        }
+                    );
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert!(pending.events.is_empty());
+    }
+
+    #[test]
+    fn native_partial_capacity_and_failed_admission_preserve_fifo_order() {
+        let mut pending = PendingVst3Midi::new();
+        let events: [BridgeMidiEvent; 4] = std::array::from_fn(|index| BridgeMidiEvent {
+            data: [0x80, 60 + index as u8, 0],
+            len: 3,
+            ..Default::default()
+        });
+        pending.append(&events);
+        let mut batch = Vec::with_capacity(BRIDGE_MAX_MIDI);
+        pending
+            .submit(1, 128, &mut batch, |events| {
+                assert_eq!(events.len(), 1);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(pending.events.front().unwrap().data, [0x80, 61, 0]);
+        assert!(pending
+            .submit(2, 128, &mut batch, |_| {
+                Err(rack::Error::Other("admission failed".into()))
+            })
+            .is_err());
+        assert_eq!(pending.events.len(), 3);
+        assert_eq!(pending.events.front().unwrap().data, [0x80, 61, 0]);
+        pending
+            .submit(2, 128, &mut batch, |events| {
+                assert_eq!(events.len(), 2);
+                for (event, note) in events.iter().zip([61, 62]) {
+                    assert!(matches!(event.kind,
+                        rack::prelude::MidiEventKind::NoteOff { note: actual, .. } if actual == note));
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(pending.events.len(), 1);
+        assert_eq!(pending.events.front().unwrap().data, [0x80, 63, 0]);
+    }
+
+    #[test]
+    fn parent_panic_invalidates_native_backlog_before_retaining_retriggers() {
+        let mut pending = PendingVst3Midi::new();
+        pending.append(&[BridgeMidiEvent {
+            data: [0x90, 60, 100],
+            len: 3,
+            ..Default::default()
+        }]);
+        let mut events = [BridgeMidiEvent::default(); BRIDGE_MAX_MIDI];
+        let panic_count = write_panic_events(&mut events);
+        events[panic_count] = BridgeMidiEvent {
+            data: [0x90, 62, 100],
+            len: 3,
+            ingress_qpc: 123,
+            worker_qpc: 456,
+            ..Default::default()
+        };
+        pending.append(&events[..panic_count + 1]);
+        assert!(pending.reset_needed);
+        assert_eq!(pending.events.len(), 1);
+        assert_eq!(pending.events.front().unwrap().data, [0x90, 62, 100]);
+    }
+
+    #[test]
+    fn native_backlog_overflow_is_bounded_and_recovers_lost_releases_without_allocating() {
+        let mut pending = PendingVst3Midi::new();
+        let release = BridgeMidiEvent {
+            data: [0x80, 60, 0],
+            len: 3,
+            ..Default::default()
+        };
+        let batch = [release; BRIDGE_MAX_MIDI];
+        let capacity = super::super::runtime_state::MAX_PENDING_MIDI;
+        let allocations = crate::test_alloc::count_allocations(|| {
+            for _ in 0..capacity / BRIDGE_MAX_MIDI {
+                pending.append(&batch);
+            }
+            assert_eq!(pending.events.len(), capacity);
+            pending.append(&[release]);
+        });
+        assert_eq!(allocations, 0);
+        assert!(pending.reset_needed);
+        assert_eq!(pending.events.len(), 1);
+        assert_eq!(pending.dropped, capacity as u32);
+
+        let mut pending = PendingVst3Midi::new();
+        let note_on = BridgeMidiEvent {
+            data: [0x90, 60, 100],
+            len: 3,
+            ..Default::default()
+        };
+        for _ in 0..capacity / BRIDGE_MAX_MIDI {
+            pending.append(&[note_on; BRIDGE_MAX_MIDI]);
+        }
+        let reserve = crate::realtime::reserve(capacity);
+        assert_eq!(pending.events.len(), capacity - reserve);
+        for _ in 0..reserve {
+            pending.append(&[release]);
+        }
+        assert_eq!(pending.events.len(), capacity);
+        pending.append(&[release]);
+        assert_eq!(pending.events.len(), capacity);
+        assert!(!pending.reset_needed);
+        assert_eq!(pending.events.back().unwrap().data, release.data);
+    }
 
     #[test]
     #[cfg(target_pointer_width = "64")]
