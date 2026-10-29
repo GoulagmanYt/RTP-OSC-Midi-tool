@@ -82,7 +82,7 @@ pub fn record(stage: Stage, bytes: &[u8], ingress_qpc: u64, at_qpc: u64) {
     });
 }
 
-pub fn record_rtp(bytes: &[u8], ingress_qpc: u64, planned_wait_us: u64) {
+pub fn record_rtp(bytes: &[u8], ingress_qpc: u64, received_qpc: u64, planned_wait_us: u64) {
     if !ENABLED.load(Ordering::Relaxed)
         || bytes.len() != 3
         || !matches!(bytes[0] & 0xf0, 0x80 | 0x90)
@@ -93,7 +93,7 @@ pub fn record_rtp(bytes: &[u8], ingress_qpc: u64, planned_wait_us: u64) {
         stage: Stage::RtpReceived,
         data: [bytes[0], bytes[1], bytes[2]],
         ingress_qpc,
-        at_qpc: ingress_qpc,
+        at_qpc: received_qpc,
         planned_wait_us: Some(planned_wait_us),
         sample_offset_frames: None,
     });

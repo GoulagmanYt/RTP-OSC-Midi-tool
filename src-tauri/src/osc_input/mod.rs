@@ -75,6 +75,17 @@ impl Drop for OscInputServer {
     }
 }
 
+fn scheduled_frame(event: &ScheduledMidi, source: Arc<str>) -> MidiFrame {
+    MidiFrame {
+        generation: event.generation,
+        // Project the due time at dispatch, after it has passed. Receipt time
+        // would collapse distinct deadlines when a delayed batch reaches audio.
+        ingress_qpc: crate::vst_worker::protocol::qpc_at(event.deadline),
+        data: smallvec::SmallVec::from_slice(&event.data[..usize::from(event.len)]),
+        source,
+    }
+}
+
 async fn receive(
     socket: UdpSocket,
     sink: Sender<MidiFrame>,
@@ -109,12 +120,7 @@ async fn receive(
             if event.generation != midi_reset_generation() {
                 continue;
             }
-            let frame = MidiFrame {
-                generation: event.generation,
-                ingress_qpc: event.ingress_qpc,
-                data: smallvec::SmallVec::from_slice(&event.data[..usize::from(event.len)]),
-                source: source.clone(),
-            };
+            let frame = scheduled_frame(&event, source.clone());
             let _ = try_enqueue_midi_frame(&sink, frame);
             if event.generation != midi_reset_generation() {
                 pending.clear();
@@ -132,7 +138,7 @@ async fn receive(
                     if pending.peek().is_none_or(|event| event.0.deadline > now) { break; }
                     let event = pending.pop().unwrap().0;
                     if event.generation != midi_reset_generation() { continue; }
-                    let frame = MidiFrame { generation: event.generation, ingress_qpc: event.ingress_qpc, data: smallvec::SmallVec::from_slice(&event.data[..usize::from(event.len)]), source: source.clone() };
+                    let frame = scheduled_frame(&event, source.clone());
                     let _ = try_enqueue_midi_frame(&sink, frame);
                     // Admission already recovers a lost effective release. Observe its epoch;
                     // raw CC64 may have been remapped to a noncritical controller.
@@ -152,7 +158,6 @@ async fn receive(
                 };
                 errors = 0;
                 let now = Instant::now();
-                let ingress_qpc = crate::vst_worker::protocol::monotonic_qpc();
                 let received_generation = midi_reset_generation();
                 if generation != received_generation { pending.clear(); generation = received_generation; }
                 if packet::decode(&buffer[..size], SystemTime::now(), now, generation, &mut staging).is_err() {
@@ -160,8 +165,7 @@ async fn receive(
                     continue;
                 }
                 for (index, mut event) in staging.drain(..).enumerate() {
-                    event.ingress_qpc = ingress_qpc;
-                    let candidate = MidiFrame { generation: event.generation, ingress_qpc: event.ingress_qpc, data: smallvec::SmallVec::from_slice(&event.data[..usize::from(event.len)]), source: source.clone() };
+                    let candidate = MidiFrame { generation: event.generation, ingress_qpc: 0, data: smallvec::SmallVec::from_slice(&event.data[..usize::from(event.len)]), source: source.clone() };
                     let critical = classify_input_frame(&sink, &candidate);
                     let limit = if critical { PENDING_CAPACITY } else { PENDING_CAPACITY - crate::realtime::reserve(PENDING_CAPACITY) };
                     if pending.len() >= limit {
@@ -172,7 +176,7 @@ async fn receive(
 
                     // Direct zero-latency fast-path for immediate events:
                     if pending.is_empty() && event.deadline <= now {
-                        let _ = try_enqueue_midi_frame(&sink, candidate);
+                        let _ = try_enqueue_midi_frame(&sink, scheduled_frame(&event, source.clone()));
                         if event.generation != midi_reset_generation() {
                             pending.clear();
                             break;
@@ -200,6 +204,68 @@ mod tests {
             args: vec![OscType::Int(1)],
         })
     }
+    #[test]
+    fn delayed_bundle_admission_preserves_the_scheduled_note_duration() {
+        let _guard = crate::bridge::pipeline::TEST_PIPELINE_LOCK.lock().unwrap();
+        let probe = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let addr = probe.local_addr().unwrap();
+        drop(probe);
+        let (tx, rx) = crate::midi_queue::bounded(32);
+        tx.set_preparation(|frame: &mut MidiFrame| {
+            if frame.data[0] == 0x90 {
+                // Hold the scheduler until the note-off is overdue too.
+                std::thread::sleep(Duration::from_millis(120));
+            }
+            true
+        });
+        let server = OscInputServer::start(
+            &OscConfig {
+                input_enabled: true,
+                listen_port: addr.port(),
+                ..OscConfig::default()
+            },
+            tx,
+        )
+        .unwrap()
+        .unwrap();
+        let timetag = |time: SystemTime| {
+            let unix = time.duration_since(UNIX_EPOCH).unwrap();
+            (
+                unix.as_secs().wrapping_add(2_208_988_800) as u32,
+                ((u128::from(unix.subsec_nanos()) << 32) / 1_000_000_000) as u32,
+            )
+                .into()
+        };
+        let start = SystemTime::now() + Duration::from_millis(30);
+        let bundle = OscPacket::Bundle(OscBundle {
+            timetag: timetag(start),
+            content: vec![
+                note(1),
+                OscPacket::Bundle(OscBundle {
+                    timetag: timetag(start + Duration::from_millis(60)),
+                    content: vec![OscPacket::Message(OscMessage {
+                        addr: "/avatar/parameters/1".into(),
+                        args: vec![OscType::Int(0)],
+                    })],
+                }),
+            ],
+        });
+        UdpSocket::bind("127.0.0.1:0")
+            .unwrap()
+            .send_to(&rosc::encoder::encode(&bundle).unwrap(), addr)
+            .unwrap();
+        let on = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let off = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        server.stop();
+        assert_eq!(on.data.as_slice(), [0x90, 21, 127]);
+        assert_eq!(off.data.as_slice(), [0x80, 21, 0]);
+        let duration = crate::vst_worker::protocol::qpc_elapsed_us(on.ingress_qpc, off.ingress_qpc);
+        assert!(
+            (59_000..=61_000).contains(&duration),
+            "duration: {duration} us"
+        );
+    }
+
     #[test]
     fn future_bundle_drains_all_due_batches_without_a_followup_datagram() {
         let _guard = crate::bridge::pipeline::TEST_PIPELINE_LOCK.lock().unwrap();

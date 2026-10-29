@@ -10,7 +10,6 @@ pub(super) struct ScheduledMidi {
     pub data: [u8; 3],
     pub len: u8,
     pub generation: u64,
-    pub ingress_qpc: u64,
 }
 
 fn take<'a>(bytes: &mut &'a [u8], size: usize) -> Result<&'a [u8], &'static str> {
@@ -226,7 +225,6 @@ fn packet(
             return Err("too many OSC messages");
         }
         out.push(ScheduledMidi {
-            ingress_qpc: crate::vst_worker::protocol::qpc_at(now),
             deadline: parent,
             order: out.len() as u64,
             data,

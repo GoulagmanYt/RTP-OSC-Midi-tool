@@ -344,16 +344,6 @@ impl RtpServer {
                         order: 0,
                     };
                     let mut timed = timed;
-                    #[cfg(feature = "latency-diagnostics")]
-                    crate::latency_trace::record_rtp(
-                        timed.frame.data.as_slice(),
-                        timed.frame.ingress_qpc,
-                        event
-                            .deadline
-                            .saturating_duration_since(event.received_at)
-                            .as_micros()
-                            .min(u64::MAX as u128) as u64,
-                    );
                     timed.critical = midi_sink
                         .load()
                         .as_ref()
@@ -732,10 +722,22 @@ async fn run_rtp_scheduler_core(
             if pending.peek().is_none_or(|event| event.deadline > now) {
                 break;
             }
-            let event = pending.pop().expect("peeked scheduled frame");
+            let mut event = pending.pop().expect("peeked scheduled frame");
             if event.generation != midi_reset_generation() {
                 continue;
             }
+            // One packet can carry several delta-timed commands. Preserve each
+            // deadline through worker catch-up, rather than their shared receipt.
+            #[cfg(feature = "latency-diagnostics")]
+            let received_qpc = event.frame.ingress_qpc;
+            event.frame.ingress_qpc = crate::vst_worker::protocol::qpc_at(event.deadline);
+            #[cfg(feature = "latency-diagnostics")]
+            crate::latency_trace::record_rtp(
+                event.frame.data.as_slice(),
+                event.frame.ingress_qpc,
+                received_qpc,
+                crate::vst_worker::protocol::qpc_elapsed_us(received_qpc, event.frame.ingress_qpc),
+            );
             dispatch_scheduled_frame(&sink, event.frame);
         }
         let wake = pending
@@ -832,6 +834,93 @@ impl crate::midi_queue::Priority for TimedRtpFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overdue_packet_events_retain_their_distinct_scheduled_timestamps() {
+        let _guard = crate::bridge::pipeline::TEST_PIPELINE_LOCK.lock().unwrap();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                #[cfg(feature = "latency-diagnostics")]
+                crate::latency_trace::start();
+                let (tx, receiver) = crate::midi_queue::async_channel(16);
+                let (output, notes) = crate::midi_queue::bounded(16);
+                let sink = Arc::new(arc_swap::ArcSwapOption::from(Some(Arc::new(output))));
+                let now = Instant::now();
+                let received =
+                    crate::vst_worker::protocol::qpc_at(now - Duration::from_millis(200));
+                // Commands in one RTP packet share receipt time, but carry deltas.
+                for (status, delay) in [(0x90, 100), (0x80, 50)] {
+                    let mut frame = MidiFrame::copy_realtime(
+                        &[status, 60, 100],
+                        Arc::from("RTP:test#ssrc_00000001"),
+                    )
+                    .unwrap();
+                    frame.ingress_qpc = received;
+                    tx.try_send(TimedRtpFrame {
+                        source_epoch: 0,
+                        critical: status == 0x80,
+                        generation: frame.generation,
+                        frame,
+                        deadline: now - Duration::from_millis(delay),
+                        order: 0,
+                    })
+                    .unwrap_or_else(|_| panic!("test queue full"));
+                }
+                let scheduler = tokio::spawn(run_rtp_scheduler_core(
+                    receiver,
+                    sink,
+                    Arc::new(SourceRecovery::default()),
+                ));
+                let frames = tokio::task::spawn_blocking(move || {
+                    (
+                        notes.recv_timeout(Duration::from_secs(2)).unwrap(),
+                        notes.recv_timeout(Duration::from_secs(2)).unwrap(),
+                    )
+                })
+                .await
+                .unwrap();
+                scheduler.abort();
+                let _ = scheduler.await;
+                assert_eq!(frames.0.data[0], 0x90);
+                assert_eq!(frames.1.data[0], 0x80);
+                let duration = crate::vst_worker::protocol::qpc_elapsed_us(
+                    frames.0.ingress_qpc,
+                    frames.1.ingress_qpc,
+                );
+                assert!(
+                    (49_000..=51_000).contains(&duration),
+                    "duration: {duration} us"
+                );
+                #[cfg(feature = "latency-diagnostics")]
+                {
+                    let trace = crate::latency_trace::drain();
+                    for frame in [&frames.0, &frames.1] {
+                        let received_trace = trace
+                            .iter()
+                            .find(|record| {
+                                record.stage == crate::latency_trace::Stage::RtpReceived
+                                    && record.ingress_qpc == frame.ingress_qpc
+                            })
+                            .expect("receipt and dispatch must share the scheduled identity");
+                        assert_eq!(received_trace.at_qpc, received);
+                        assert_eq!(
+                            received_trace.planned_wait_us,
+                            Some(crate::vst_worker::protocol::qpc_elapsed_us(
+                                received,
+                                frame.ingress_qpc
+                            ))
+                        );
+                        assert!(trace.iter().any(|record| {
+                            record.stage == crate::latency_trace::Stage::RtpDispatched
+                                && record.ingress_qpc == frame.ingress_qpc
+                        }));
+                    }
+                }
+            });
+    }
 
     #[test]
     fn scheduler_shutdown_delivers_peer_releases_queued_by_session_termination() {
